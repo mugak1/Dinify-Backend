@@ -4,7 +4,6 @@ the models for the Users app
 import uuid
 from django.db import models
 from django.contrib.auth.models import AbstractUser
-from dinify_backend.configs import ROLES
 
 
 # Create your models here.
@@ -27,10 +26,10 @@ class User(AbstractUser):
     # contact/auth information
     # either of these will be used for login
     # but primarily the phone number shall be considered
-    email = models.EmailField(max_length=255, unique=True)
-    phone_number = models.CharField(max_length=255, null=True, blank=True)
+    email = models.EmailField(max_length=255, db_index=True, null=True, blank=True)
+    phone_number = models.CharField(max_length=255, unique=True, db_index=True)
 
-    roles = models.JSONField(null=True, blank=True)
+    roles = models.JSONField(default=list)
     prompt_password_change = models.BooleanField(default=False)
 
     # track if profile is
