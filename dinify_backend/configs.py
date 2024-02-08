@@ -17,4 +17,21 @@ ROLES = {
     'DINER': 'diner'
 }
 
-# ROLES = ConfigDictionary(roles)
+REQUIRED_INFORMATION = {
+    'new_user': [
+        {'key': 'first_name', 'label': 'First Name', 'type': 'char', 'min_length': 2},
+        {'key': 'last_name', 'label': 'Last Name', 'type': 'char', 'min_length': 2},
+        {'key': 'email', 'label': 'Email', 'type': 'char', 'min_length': 5},
+        {'key': 'phone_number', 'label': 'Phone Number', 'type': 'char', 'min_length': 5},
+        {'key': 'password', 'label': 'Password', 'type': 'char', 'min_length': 4},
+        {'key': 'country', 'label': 'Country', 'type': 'char', 'min_length': 2},
+    ]
+}
+
+# the various messages sent out
+MESSAGES = {
+    # user registration messages
+    'PHONE_NUMBER_EXISTS': 'Sorry, a user with this phone number already exists!',
+    'EMAIL_EXISTS': 'Sorry, a user with this email address already exists!',
+    'OK_SELF_REGISTER': 'Your account has been successfully created on Dinify!'
+}
