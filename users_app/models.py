@@ -19,7 +19,7 @@ class User(AbstractUser):
     )
 
     # personal information
-    country_of_origin = models.CharField(max_length=255, null=True, blank=True)
+    country = models.CharField(max_length=255, null=True, blank=True)
     first_name = models.CharField(max_length=255, null=True, blank=True)
     last_name = models.CharField(max_length=255, null=True, blank=True)
     other_names = models.CharField(max_length=255, null=True, blank=True)
