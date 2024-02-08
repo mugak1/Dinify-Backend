@@ -2,7 +2,11 @@ from django.test import TestCase
 from dinify_backend.configs import MESSAGES
 from users_app.controllers.self_register import self_register
 from users_app.controllers.login import login
+from users_app.controllers.change_password import change_password
 from users_app.models import User
+
+TEST_PHONE = '1234567890'
+TEST_EMAIL = 'test@user.com'
 
 
 def seed_user():
@@ -12,9 +16,9 @@ def seed_user():
     User.objects.create_user(
         first_name='Test',
         last_name='User',
-        email='test@user.com',
-        phone_number='123456789',
-        username='123456789',
+        email=TEST_EMAIL,
+        phone_number=TEST_PHONE,
+        username=TEST_PHONE,
         country='Uganda',
         password='password'
     )
@@ -79,13 +83,13 @@ class UsersAppTestFunctions(TestCase):
         """
         def test_success():
             """ when the login is successful """
-            response = login('123456789', 'password')
+            response = login('1234567890', 'password')
             self.assertEqual(response.get('status'), 200)
             self.assertEqual(response.get('message'), MESSAGES.get('OK_LOGIN'))
 
         def test_wrong_password():
             """ when the password is wrong """
-            response = login('123456789', 'wrong_password')
+            response = login('1234567890', 'wrong_password')
             self.assertEqual(response.get('status'), 401)
             self.assertEqual(response.get('message'), MESSAGES.get('WRONG_PASSWORD'))
 
@@ -98,3 +102,24 @@ class UsersAppTestFunctions(TestCase):
         test_success()
         test_wrong_password()
         test_no_username()
+    
+    def test_change_password(self):
+        """
+        test change_password
+        """
+        user = User.objects.get(phone_number=TEST_PHONE)
+
+        def test_success():
+            """ when the password change is successful """
+            response = change_password(str(user.id), 'password', 'new_password')
+            self.assertEqual(response.get('status'), 200)
+            self.assertEqual(response.get('message'), MESSAGES.get('OK_PASSWORD_CHANGE'))
+
+        def test_wrong_password():
+            """ when the old password is wrong """
+            response = change_password(str(user.id), 'wrong_password', 'new_password')
+            self.assertEqual(response.get('status'), 400)
+            self.assertEqual(response.get('message'), MESSAGES.get('WRONG_PASSWORD'))
+
+        test_success()
+        test_wrong_password()
