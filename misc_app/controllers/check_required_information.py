@@ -15,7 +15,7 @@ def check_required_information(
     for attribute in required_information:
         key = attribute.get('key')
         label = attribute.get('label')
-        minimum_length = attribute.get('minimum_length')
+        minimum_length = attribute.get('min_length')
         if key not in provided_information.keys():
             return {
                 "status": False,

@@ -15,12 +15,12 @@ class MiscAppTestFunctions(TestCase):
             {
                 "key": "key1",
                 "label": "Key 1",
-                "minimum_length": 5
+                "min_length": 5
             },
             {
                 "key": "key2",
                 "label": "Key 2",
-                "minimum_length": 5
+                "min_length": 5
             }
         ]
 
