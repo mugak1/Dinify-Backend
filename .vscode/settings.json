@@ -1,0 +1,10 @@
+{
+    "flake8.args": [
+        "--max-line-length=100",
+        "--exclude=venv,build,dist",
+    ],
+    "pylint.args": [
+        "disable=W0178",
+        "--max-line-length=100"
+    ],
+}
