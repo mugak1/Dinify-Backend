@@ -40,3 +40,42 @@ class User(AbstractUser):
         """
         db_table = 'users'
         ordering = ['username']
+
+
+class BaseModel(models.Model):
+    """
+    The base model for the models in the application
+    """
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False
+    )
+
+    time_created = models.DateTimeField(auto_now_add=True)
+    time_last_updated = models.DateTimeField(auto_now=True)
+    time_deleted = models.DateTimeField(null=True, blank=True)
+
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='%(class)s_created_by'
+    )
+
+    deleted = models.BooleanField(default=False)
+    deletion_reason = models.CharField(max_length=255, null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='%(class)s_deleted_by'
+    )
+
+    class Meta:
+        """
+        the metadata for the BaseModel model
+        """
+        abstract = True
