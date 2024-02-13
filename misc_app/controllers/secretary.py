@@ -99,7 +99,7 @@ class Secretary:
                     'message': error_message
                 }
 
-    def read_records(self):
+    def read(self):
         """
         reads records from the database
         """
@@ -143,3 +143,38 @@ class Secretary:
                 'pagination': pagination_response.get('pagination')
             }
         }
+
+    def update(self):
+        """
+        update the record
+        """
+        with transaction.atomic():
+            data = self.args.get('data')
+
+            # get the current record
+            record = self.args.get('serializer').Meta.model.objects.get(
+                id=data.get('id')
+            )
+
+            # formulate the new data to consider
+            new_data = {}
+            edit_considerations = self.args.get('edit_considerations')
+            for item in edit_considerations:
+                try:
+                    key = item.get('key')
+                    new_data[key] = data.get(key)
+                except KeyError:
+                    pass
+
+            # attempt to format the new details accordingly.
+            for info in edit_considerations:
+                try:
+                    if info.get('type') == 'char':
+                        if info.get('text_presentation') is not None:
+                            new_data[info.get('key')] = info[
+                                'text_presentation'
+                            ](
+                                new_data[info['key']]
+                            )
+                except KeyError:
+                    pass

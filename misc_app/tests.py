@@ -76,7 +76,7 @@ class MiscAppTestFunctions(TestCase):
         """
         user = User.objects.get(username=TEST_PHONE)
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-            
+    
         def test_create():
             """
             testing secretary create
@@ -126,7 +126,7 @@ class MiscAppTestFunctions(TestCase):
                 'success_message': 'Successfully retrieved the restaurant employees.',
                 'error_message': 'Error while retrieving the list of restaurant employees.'
             }
-            result = Secretary(data).read_records()
+            result = Secretary(data).read()
             self.assertEqual(result.get('status'), 200)
             data = result.get('data')
             self.assertEqual(data.get('pagination').get('page_size'), str(10))
