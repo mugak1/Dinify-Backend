@@ -1,13 +1,16 @@
 from django.test import TestCase, RequestFactory
 from misc_app.controllers.check_required_information import check_required_information
 from misc_app.controllers.secretary import Secretary
-from restaurants_app.serializers import SerializerPutRestaurantEmployee
+from restaurants_app.serializers import SerializerPutRestaurantEmployee, SerializerPutRestaurant
 from restaurants_app.tests import seed_restaurant, TEST_RESTAURANT_NAME
 from restaurants_app.models import Restaurant
-from dinify_backend.configs import REQUIRED_INFORMATION, ROLES
+from dinify_backend.configs import (
+    REQUIRED_INFORMATION,
+    ROLES,
+    EDIT_INFORMATION
+)
 from users_app.tests import seed_user, TEST_PHONE
 from users_app.models import User
-
 
 
 # Create your tests here.
@@ -70,13 +73,13 @@ class MiscAppTestFunctions(TestCase):
         )
         self.assertEqual(result['status'], False)
 
-    def test_secretary_create(self):
+    def test_secretary(self):
         """
         test the Secretary
         """
         user = User.objects.get(username=TEST_PHONE)
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-    
+
         def test_create():
             """
             testing secretary create
@@ -102,19 +105,21 @@ class MiscAppTestFunctions(TestCase):
             """
             testing secretary read
             """
+            # test without pagination
             data = {
                 'request': None,
                 'serializer': SerializerPutRestaurantEmployee,
                 'filter': {'deleted': False},
                 'paginate': False,
-                'user_id': TEST_PHONE,
+                'user_id': str(user.id),
                 'username': TEST_PHONE,
                 'success_message': 'Successfully retrieved the restaurant employees.',
                 'error_message': 'Error while retrieving the list of restaurant employees.'
             }
-            result = Secretary(data).read_records()
+            result = Secretary(data).read()
             self.assertEqual(result['status'], 200)
 
+            # test with pagination
             request = RequestFactory().get('/?page=1&page_size=10')
             data = {
                 'request': request,
@@ -131,5 +136,28 @@ class MiscAppTestFunctions(TestCase):
             data = result.get('data')
             self.assertEqual(data.get('pagination').get('page_size'), str(10))
 
+        def test_update():
+            """
+            test record update
+            """
+            data = {
+                'request': None,
+                'serializer': SerializerPutRestaurant,
+                'data': {
+                    'id': str(restaurant.id),
+                    'name': 'new Restaurant name',
+                },
+                'edit_considerations': EDIT_INFORMATION.get('restaurant_registration'),
+                'user_id': str(user.id),
+                'username': TEST_PHONE,
+                'success_message': 'The details of the restaurant have been updated successfully.',
+                'error_message': 'An error occurred while updating the details of the restaurant.'
+            }
+            result = Secretary(data).update()
+            self.assertEqual(result.get('status'), 200)
+            restaurant.refresh_from_db()
+            self.assertEqual(restaurant.name, 'New Restaurant Name')
+
         test_create()
         test_read()
+        test_update()

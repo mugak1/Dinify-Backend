@@ -2,6 +2,7 @@
 implementation for crud functions to the database
 """
 from django.db import transaction
+from django.utils import timezone
 from dataclasses import dataclass
 from dinify_backend.configs import IGNORE_LOG_FIELDS, STRINGIFY_LOG_FIELDS
 from misc_app.controllers.check_required_information import check_required_information
@@ -162,7 +163,8 @@ class Secretary:
             for item in edit_considerations:
                 try:
                     key = item.get('key')
-                    new_data[key] = data.get(key)
+                    if data.get(key) is not None:
+                        new_data[key] = data.get(key)
                 except KeyError:
                     pass
 
@@ -170,6 +172,7 @@ class Secretary:
             for info in edit_considerations:
                 try:
                     if info.get('type') == 'char':
+                        # check if the key has been included in the new data
                         if info.get('text_presentation') is not None:
                             new_data[info.get('key')] = info[
                                 'text_presentation'
@@ -178,3 +181,28 @@ class Secretary:
                             )
                 except KeyError:
                     pass
+
+            # TODO determine the changes that have been made
+
+            # update the record
+            new_data['time_last_updated'] = timezone.now()
+            record = self.args.get('serializer')(
+                record,
+                data=new_data,
+                partial=True
+            )
+            if record.is_valid():
+                record.save()
+                return {
+                    'status': 200,
+                    'message': self.args.get('success_message')
+                }
+            else:
+                print(f"SecretaryError-Update:{record.errors}")
+                error_message = ""
+                for _, value in record.errors.items():
+                    error_message += f"{', '.join(value)}\n"
+                return {
+                    'status': 400,
+                    'message': error_message
+                }
