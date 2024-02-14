@@ -4,7 +4,7 @@ implementation for crud functions to the database
 from django.db import transaction
 from django.utils import timezone
 from dataclasses import dataclass
-from dinify_backend.configs import IGNORE_LOG_FIELDS, STRINGIFY_LOG_FIELDS
+from dinify_backend.configs import IGNORE_LOG_FIELDS, STRINGIFY_LOG_FIELDS, MESSAGES
 from misc_app.controllers.check_required_information import check_required_information
 from misc_app.controllers.paginator import DinifyPaginator
 
@@ -206,3 +206,56 @@ class Secretary:
                     'status': 400,
                     'message': error_message
                 }
+
+    def delete(self):
+        """
+        flags a record as deleted
+        """
+        # check if the user has provided the reason for deleting the record
+        deletion_reason = self.args.get('data').get('deletion_reason')
+        if deletion_reason is None:
+            return {
+                'status': 400,
+                'message': MESSAGES.get('NO_DELETION_REASON')
+            }
+
+        serializer = self.args.get('serializer')
+
+        # get the record and check that it has not been deleted before
+        record = serializer.Meta.model.objects.get(
+            id=self.args.get('data').get('id')
+        )
+        if record.deleted:
+            return {
+                'status': 400,
+                'message': MESSAGES.get('ALREADY_DELETED')
+            }
+
+        # flag the record as deleted
+        update_information = {
+            'deleted': True,
+            'time_deleted': timezone.now(),
+            'deletion_reason': deletion_reason,
+            'deleted_by': self.args.get('user_id')
+        }
+        record = serializer(
+            record,
+            data=update_information,
+            partial=True
+        )
+
+        if record.is_valid():
+            record.save()
+            return {
+                'status': 200,
+                'message': MESSAGES.get('OK_DELETION')
+            }
+        else:
+            print(f"SecretaryError-Delete:{record.errors}")
+            error_message = ""
+            for _, value in record.errors.items():
+                error_message += f"{', '.join(value)}\n"
+            return {
+                'status': 400,
+                'message': error_message
+            }

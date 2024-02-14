@@ -74,5 +74,10 @@ MESSAGES = {
 
     # create restaurant
     'DUPLICATE_RESTAURANT_NAME': 'You already have a restaurant with this name',
-    'OK_CREATE_RESTAURANT': 'The restaurant has been created succesfully.'
+    'OK_CREATE_RESTAURANT': 'The restaurant has been created succesfully.',
+
+    # deletion
+    'NO_DELETION_REASON': 'Please provide a reason for the deleting the record',
+    'ALREADY_DELETED': 'The record has already been deleted',
+    'OK_DELETION': 'The record has been deleted successfully',
 }

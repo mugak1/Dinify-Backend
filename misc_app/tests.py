@@ -158,6 +158,25 @@ class MiscAppTestFunctions(TestCase):
             restaurant.refresh_from_db()
             self.assertEqual(restaurant.name, 'New Restaurant Name')
 
+        def test_delete():
+            """
+            test record deletion
+            """
+            data = {
+                'request': None,
+                'serializer': SerializerPutRestaurant,
+                'data': {
+                    'id': str(restaurant.id),
+                    'deletion_reason': 'Test deletion'
+                },
+                'user_id': str(user.id),
+                'username': TEST_PHONE,
+            }
+            result = Secretary(data).delete()
+            self.assertEqual(result.get('status'), 200)
+            restaurant.refresh_from_db()
+            self.assertEqual(restaurant.deleted, True)
+
         test_create()
         test_read()
         test_update()
