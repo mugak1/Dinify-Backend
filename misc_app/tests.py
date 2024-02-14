@@ -1,6 +1,7 @@
 from django.test import TestCase, RequestFactory
 from misc_app.controllers.check_required_information import check_required_information
 from misc_app.controllers.secretary import Secretary
+from misc_app.controllers.determine_changes import determine_changes
 from restaurants_app.serializers import SerializerPutRestaurantEmployee, SerializerPutRestaurant
 from restaurants_app.tests import seed_restaurant, TEST_RESTAURANT_NAME
 from restaurants_app.models import Restaurant
@@ -24,7 +25,6 @@ class MiscAppTestFunctions(TestCase):
         """
         seed_user()
         seed_restaurant(seed_owner=False)
-
 
     def test_check_required_information(self):
         """
@@ -180,3 +180,24 @@ class MiscAppTestFunctions(TestCase):
         test_create()
         test_read()
         test_update()
+        test_delete()
+
+    def test_determine_changes(self):
+        """
+        test the function to determine changes
+        """
+        old_data = {
+            'name': 'old name',
+            'location': 'old location',
+        }
+        new_data = {
+            'name': 'new name',
+            'location': 'old location',
+        }
+        consider = ['name', 'location']
+        result = determine_changes({
+            'old_info': old_data,
+            'new_info': new_data,
+            'consider': consider
+        })
+        self.assertEqual(len(result), 1)
