@@ -30,15 +30,15 @@ def make_detailed_time() -> dict:
 
 
 def save_action(
-    affected_model: str | None,
-    affected_record: str | None,
+    affected_model: str,
+    affected_record: str,
     action: str,
     narration: str,
     result: str,
     user_id: str,
     username: str,
-    submitted_data: dict | None,
-    changes: list | None,
+    submitted_data: dict,
+    changes,
  ) -> bool:
     """
     - Saves an action that a user has performed

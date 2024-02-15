@@ -8,6 +8,7 @@ from dinify_backend.configs import IGNORE_LOG_FIELDS, STRINGIFY_LOG_FIELDS, MESS
 from misc_app.controllers.check_required_information import check_required_information
 from misc_app.controllers.paginator import DinifyPaginator
 from misc_app.controllers.determine_changes import determine_changes
+from misc_app.controllers.save_action_log import save_action
 
 
 @dataclass
@@ -16,6 +17,18 @@ class Secretary:
     Class which handles general db crud operations
     """
     args: dict
+
+    def __post_init__(self):
+        """
+        initialise the global variables for consideration
+        """
+        self.serializer = self.args.get('serializer')
+        self.ok_message = self.args.get('success_message')
+        self.fail_message = self.args.get('error_message')
+        self.user_id = self.args.get('user_id')
+        self.username = self.args.get('username')
+        self.data = self.args.get('data')
+        self.required_information = self.args.get('required_information')
 
     def formulate_log_data(self) -> dict:
         """
@@ -54,40 +67,60 @@ class Secretary:
         }`
         """
         with transaction.atomic():
+            model_name = self.serializer.Meta.model.__name__
+            log_data = self.formulate_log_data()
+
             # check if the required information is present
             info_check = check_required_information(
-                self.args['required_information'],
-                self.args['data']
+                self.required_information,
+                self.data
             )
             if not info_check['status']:
                 # TODO saved the attempted action to the logs
-                action = {
-                    
-                }
+                save_action(
+                    affected_model=model_name,
+                    affected_record=None,
+                    action='create',
+                    narration=info_check['message'],
+                    result=ACTION_LOG_STATUSES.get('failed'),
+                    user_id=self.user_id,
+                    username=self.username,
+                    submitted_data=log_data,
+                    changes=None
+                )
                 return {
                     'status': 400,
                     'message': info_check['message']
                 }
 
             # clean up the character details accordingly
-            for info in self.args['required_information']:
+            for info in self.required_information:
                 if info['type'] == 'char':
                     if info['text_presentation'] is not None:
                         self.args['data'][info['key']] = info['text_presentation'](
                             self.args['data'][info['key']]
                         )
 
-            affected_model = self.args['serializer'].Meta.model.__name__
-
-            self.args['data']['created_by'] = self.args['user_id']
-            record = self.args['serializer'](data=self.args['data'])
+            self.args['data']['created_by'] = self.user_id
+            record = self.serializer(data=self.data)
 
             if record.is_valid():
                 record.save()
                 # TODO save the attempted action to the logs
+                save_action(
+                    affected_model=model_name,
+                    affected_record=str(record.data.get('id')),
+                    action='create',
+                    narration='Successfully create a new record.',
+                    result=ACTION_LOG_STATUSES.get('success'),
+                    user_id=self.user_id,
+                    username=self.username,
+                    submitted_data=log_data,
+                    changes=None
+                )
                 return {
                     'status': 200,
-                    'message': self.args['success_message'],
+                    'message': self.ok_message,
                     'data': record.data
                 }
 
@@ -98,6 +131,17 @@ class Secretary:
                     error_message += f"{', '.join(value)}\n"
 
                 # TODO save the attempted action to the logs
+                save_action(
+                    affected_model=model_name,
+                    affected_record=None,
+                    action='create',
+                    narration=error_message,
+                    result=ACTION_LOG_STATUSES.get('failed'),
+                    user_id=self.user_id,
+                    username=self.username,
+                    submitted_data=log_data,
+                    changes=None
+                )
 
                 return {
                     'status': 400,
@@ -108,7 +152,7 @@ class Secretary:
         """
         reads records from the database
         """
-        records = self.args.get('serializer').Meta.model.objects.filter(
+        records = self.serializer.Meta.model.objects.filter(
             **self.args.get('filter')
         )
 
@@ -117,7 +161,7 @@ class Secretary:
                 'status': 200,
                 'message': self.args.get('success_message'),
                 'data': {
-                    'records': self.args.get('serializer')(
+                    'records': self.serializer(
                         records,
                         many=True
                     ).data,
@@ -134,7 +178,7 @@ class Secretary:
             'records': records
         }).paginate()
 
-        serialized_records = self.args.get('serializer')(
+        serialized_records = self.serializer(
             pagination_response.get('records'),
             many=True
         ).data
@@ -142,7 +186,7 @@ class Secretary:
         # return response
         return {
             'status': 200,
-            'message': self.args.get('success_message'),
+            'message': self.ok_message,
             'data': {
                 'records': serialized_records,
                 'pagination': pagination_response.get('pagination')
@@ -155,10 +199,10 @@ class Secretary:
         """
         with transaction.atomic():
             data = self.args.get('data')
-            serializer = self.args.get('serializer')
+            serializer = self.serializer
 
             # get the current record
-            record = self.args.get('serializer').Meta.model.objects.get(
+            record = self.serializer.Meta.model.objects.get(
                 id=data.get('id')
             )
 
@@ -188,10 +232,11 @@ class Secretary:
                     pass
 
             # TODO determine the changes that have been made
+            consider = [info.get('key') for info in edit_considerations]
             changes = determine_changes({
                 'old_info': serializer(record, many=False).data,
                 'new_info': new_data,
-                'consider': self.args.get('edit_fields')
+                'consider': consider
             })
             if len(changes) < 1:
                 return {
@@ -211,7 +256,7 @@ class Secretary:
                 # save to the log 
                 return {
                     'status': 200,
-                    'message': self.args.get('success_message')
+                    'message': self.ok_message
                 }
             else:
                 print(f"SecretaryError-Update:{record.errors}")
@@ -235,7 +280,7 @@ class Secretary:
                 'message': MESSAGES.get('NO_DELETION_REASON')
             }
 
-        serializer = self.args.get('serializer')
+        serializer = self.serializer
 
         # get the record and check that it has not been deleted before
         record = serializer.Meta.model.objects.get(
