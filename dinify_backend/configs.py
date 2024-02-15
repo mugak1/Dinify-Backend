@@ -2,6 +2,12 @@
 configurations or definitions of various values on the syste
 """
 
+ACTION_LOG_STATUSES = {
+    'success': 'success',
+    'failed': 'failed',
+    'unauthorised': 'unauthorised',
+}
+
 # the roles that can be granted on the system
 ROLES = {
     'DINIFY_ADMIN': 'dinify_admin',

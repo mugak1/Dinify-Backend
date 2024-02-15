@@ -30,11 +30,37 @@ def make_detailed_time() -> dict:
 
 
 def save_action(
-        action_data: dict
+    affected_model: str | None,
+    affected_record: str | None,
+    action: str,
+    narration: str,
+    result: str,
+    user_id: str,
+    username: str,
+    submitted_data: dict | None,
+    changes: list | None,
  ) -> bool:
     """
     - Saves an action that a user has performed
     """
+    # if the action is edit and result is success, 
+    # then ensure that the changes are provided
+
+    # make the action data to consider
+    action_data = {
+        'model': affected_model,
+        'record': affected_record,
+        'action': action,
+        'narration': narration,
+        'result': result,
+        'user': {
+            'id': user_id,
+            'username': username
+        },
+        'submitted_data': submitted_data,
+        'changes': changes
+    }
+
     # create an object to save to mongodb
     # include the time details
     time_detail = make_detailed_time()

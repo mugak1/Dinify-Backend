@@ -4,9 +4,10 @@ implementation for crud functions to the database
 from django.db import transaction
 from django.utils import timezone
 from dataclasses import dataclass
-from dinify_backend.configs import IGNORE_LOG_FIELDS, STRINGIFY_LOG_FIELDS, MESSAGES
+from dinify_backend.configs import IGNORE_LOG_FIELDS, STRINGIFY_LOG_FIELDS, MESSAGES, ACTION_LOG_STATUSES
 from misc_app.controllers.check_required_information import check_required_information
 from misc_app.controllers.paginator import DinifyPaginator
+from misc_app.controllers.determine_changes import determine_changes
 
 
 @dataclass
@@ -60,6 +61,9 @@ class Secretary:
             )
             if not info_check['status']:
                 # TODO saved the attempted action to the logs
+                action = {
+                    
+                }
                 return {
                     'status': 400,
                     'message': info_check['message']
@@ -151,6 +155,7 @@ class Secretary:
         """
         with transaction.atomic():
             data = self.args.get('data')
+            serializer = self.args.get('serializer')
 
             # get the current record
             record = self.args.get('serializer').Meta.model.objects.get(
@@ -183,16 +188,27 @@ class Secretary:
                     pass
 
             # TODO determine the changes that have been made
+            changes = determine_changes({
+                'old_info': serializer(record, many=False).data,
+                'new_info': new_data,
+                'consider': self.args.get('edit_fields')
+            })
+            if len(changes) < 1:
+                return {
+                    'status': 400,
+                    'message': 'No changes detected'
+                }
 
             # update the record
             new_data['time_last_updated'] = timezone.now()
-            record = self.args.get('serializer')(
+            record = serializer(
                 record,
                 data=new_data,
                 partial=True
             )
             if record.is_valid():
                 record.save()
+                # save to the log 
                 return {
                     'status': 200,
                     'message': self.args.get('success_message')
