@@ -22,7 +22,7 @@ REQUIRED_INFORMATION = {
     'new_user': [
         {'key': 'first_name', 'label': 'First Name', 'type': 'char', 'min_length': 2, 'text_presentation': str.title},  # noqa
         {'key': 'last_name', 'label': 'Last Name', 'type': 'char', 'min_length': 2, 'text_presentation': str.title},  # noqa
-        {'key': 'email', 'label': 'Email', 'type': 'char', 'min_length': 5, 'text_presentation': str.lower},  # noqa
+        # {'key': 'email', 'label': 'Email', 'type': 'char', 'min_length': 5, 'text_presentation': str.lower},  # noqa
         {'key': 'phone_number', 'label': 'Phone Number', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'password', 'label': 'Password', 'type': 'char', 'min_length': 4, 'text_presentation': None},  # noqa
         {'key': 'country', 'label': 'Country', 'type': 'char', 'min_length': 2, 'text_presentation': None},  # noqa

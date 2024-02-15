@@ -37,10 +37,13 @@ def self_register(data: dict) -> dict:
         }
 
     # create the user
+    email = data.get('email')
+    if email is not None:
+        email = email.strip().lower()
     User.objects.create_user(
         first_name=data.get('first_name').strip().title(),
         last_name=data.get('last_name').strip().title(),
-        email=data.get('email').strip().lower(),
+        email=email,
         phone_number=data.get('phone_number'),
         username=data.get('phone_number'),
         country=data.get('country').strip().upper(),
