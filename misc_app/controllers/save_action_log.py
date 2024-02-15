@@ -38,7 +38,8 @@ def save_action(
     user_id: str,
     username: str,
     submitted_data: dict,
-    changes,
+    changes=None,
+    filter_information=None
  ) -> bool:
     """
     - Saves an action that a user has performed
@@ -58,7 +59,8 @@ def save_action(
             'username': username
         },
         'submitted_data': submitted_data,
-        'changes': changes
+        'changes': changes,
+        'filter_information': filter_information
     }
 
     # create an object to save to mongodb

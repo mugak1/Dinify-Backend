@@ -23,6 +23,7 @@ class Secretary:
         initialise the global variables for consideration
         """
         self.serializer = self.args.get('serializer')
+        self.model_name = self.serializer.Meta.model.__name__
         self.ok_message = self.args.get('success_message')
         self.fail_message = self.args.get('error_message')
         self.user_id = self.args.get('user_id')
@@ -67,7 +68,6 @@ class Secretary:
         }`
         """
         with transaction.atomic():
-            model_name = self.serializer.Meta.model.__name__
             log_data = self.formulate_log_data()
 
             # check if the required information is present
@@ -76,9 +76,9 @@ class Secretary:
                 self.data
             )
             if not info_check['status']:
-                # TODO saved the attempted action to the logs
+                # saved the attempted action to the logs
                 save_action(
-                    affected_model=model_name,
+                    affected_model=self.model_name,
                     affected_record=None,
                     action='create',
                     narration=info_check['message'],
@@ -106,9 +106,9 @@ class Secretary:
 
             if record.is_valid():
                 record.save()
-                # TODO save the attempted action to the logs
+                # save the attempted action to the logs
                 save_action(
-                    affected_model=model_name,
+                    affected_model=self.model_name,
                     affected_record=str(record.data.get('id')),
                     action='create',
                     narration='Successfully create a new record.',
@@ -130,9 +130,9 @@ class Secretary:
                 for _, value in record.errors.items():
                     error_message += f"{', '.join(value)}\n"
 
-                # TODO save the attempted action to the logs
+                # save the attempted action to the logs
                 save_action(
-                    affected_model=model_name,
+                    affected_model=self.model_name,
                     affected_record=None,
                     action='create',
                     narration=error_message,
@@ -154,6 +154,20 @@ class Secretary:
         """
         records = self.serializer.Meta.model.objects.filter(
             **self.args.get('filter')
+        )
+
+        # save the action performed
+        save_action(
+            affected_model=self.model_name,
+            affected_record=None,
+            action='read',
+            narration='Successfully read records',
+            result=ACTION_LOG_STATUSES.get('success'),
+            user_id=self.user_id,
+            username=self.username,
+            submitted_data={},
+            changes=None,
+            filter_information=self.args.get('filter')
         )
 
         if not self.args.get('paginate'):
