@@ -44,7 +44,7 @@ def save_action(
     """
     - Saves an action that a user has performed
     """
-    # if the action is edit and result is success, 
+    # if the action is edit and result is success,
     # then ensure that the changes are provided
 
     # make the action data to consider

@@ -251,6 +251,7 @@ class Secretary:
             })
             if len(changes) < 1:
                 # save the action performed
+                # the log also contains the edits
                 save_action(
                     affected_model=self.model_name,
                     affected_record=self.data.get('id'),
