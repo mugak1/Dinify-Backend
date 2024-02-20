@@ -14,6 +14,7 @@ def check_required_information(
     provided_information = dict(provided_information)
     for attribute in required_information:
         key = attribute.get('key')
+        attribute_type = attribute.get('type')
         label = attribute.get('label')
         minimum_length = attribute.get('min_length')
         if key not in provided_information.keys():
@@ -22,11 +23,12 @@ def check_required_information(
                 "message": f"{label} is required"
             }
 
-        if len(provided_information[key].strip()) < minimum_length:
-            return {
-                "status": False,
-                "message": f"{label} must be at least {minimum_length} characters long"
-            }
+        if attribute_type not in ['list']:
+            if len(provided_information[key].strip()) < minimum_length:
+                return {
+                    "status": False,
+                    "message": f"{label} must be at least {minimum_length} characters long"
+                }
 
     return {
         "status": True,
