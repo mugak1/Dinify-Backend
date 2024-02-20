@@ -42,3 +42,23 @@ class SerializerPutRestaurantEmployee(ModelSerializer):
     class Meta:
         model = RestaurantEmployee
         fields = '__all__'
+
+
+class SerializerGetRestaurantEmployee(ModelSerializer):
+    """
+    serializer for getting restaurant employees
+    """
+    name = SerializerMethodField()
+
+    class Meta:
+        model = RestaurantEmployee
+        fields = (
+            "id", "time_created", "time_last_updated",
+            "name", "roles", "active"
+        )
+
+    def get_name(self, employee):
+        """
+        returns the name of the employee
+        """
+        return f"{employee.user.first_name} {employee.user.last_name}"

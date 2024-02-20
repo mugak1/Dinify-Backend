@@ -9,7 +9,8 @@ from misc_app.controllers.decode_auth_token import decode_jwt_token
 from misc_app.controllers.define_filter_params import define_filter_params
 from misc_app.controllers.secretary import Secretary
 from restaurants_app.serializers import (
-    SerializerPutRestaurant, SerializerPublicGetRestaurant, SerializerEmployeeGetRestaurant, SerializerPutRestaurantEmployee,
+    SerializerPutRestaurant, SerializerPublicGetRestaurant,
+    SerializerPutRestaurantEmployee, SerializerGetRestaurantEmployee
 )
 from dinify_backend.configs import EDIT_INFORMATION, REQUIRED_INFORMATION
 
@@ -74,6 +75,20 @@ class RestaurantSetupEndpoint(APIView):
                 'username': auth['username'],
                 'success_message': "Successfully retrieved the restaurants",
                 'error_message': "Error while retrieving restaurants"
+            }
+
+            response = Secretary(secretary_args).read()
+
+        if config_detail == 'employees':
+            secretary_args = {
+                'request': request,
+                'serializer': SerializerGetRestaurantEmployee,
+                'filter': orm_filter,
+                'paginate': True,
+                'user_id': auth['id'],
+                'username': auth['username'],
+                'success_message': "Successfully retrieved the employees",
+                'error_message': "Error while retrieving employees"
             }
 
             response = Secretary(secretary_args).read()
