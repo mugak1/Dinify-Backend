@@ -9,9 +9,9 @@ from misc_app.controllers.decode_auth_token import decode_jwt_token
 from misc_app.controllers.define_filter_params import define_filter_params
 from misc_app.controllers.secretary import Secretary
 from restaurants_app.serializers import (
-    SerializerPutRestaurant, SerializerPublicGetRestaurant, SerializerEmployeeGetRestaurant,
+    SerializerPutRestaurant, SerializerPublicGetRestaurant, SerializerEmployeeGetRestaurant, SerializerPutRestaurantEmployee,
 )
-from dinify_backend.configs import EDIT_INFORMATION
+from dinify_backend.configs import EDIT_INFORMATION, REQUIRED_INFORMATION
 
 
 class RestaurantSetupEndpoint(APIView):
@@ -35,6 +35,18 @@ class RestaurantSetupEndpoint(APIView):
                 data,
                 auth
             )
+
+        if config_detail == 'employees':
+            secretary_args = {
+                'serializer': SerializerPutRestaurantEmployee,
+                'data': request.data,
+                'required_information': REQUIRED_INFORMATION.get('restaurant_employee'),
+                'user_id': auth['id'],
+                'username': auth['username'],
+                'success_message': 'The employee has been added successfully.',
+                'error_message': 'An error occurred while adding the employee.'
+            }
+            response = Secretary(secretary_args).create()
 
         return Response(
             response,
