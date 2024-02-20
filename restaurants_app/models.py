@@ -48,6 +48,7 @@ class Restaurant(BaseModel):
         """
         db_table = 'restaurants'
         ordering = ['name']
+        unique_together = ['name', 'location', 'owner']
 
 
 class RestaurantEmployee(BaseModel):
