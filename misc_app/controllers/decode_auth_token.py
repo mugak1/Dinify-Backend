@@ -14,5 +14,6 @@ def decode_jwt_token(request):
     user = auth[0]
     return {
         'id': str(user.id),
+        'user_id': str(user.id),
         'username': str(user.username),
     }
