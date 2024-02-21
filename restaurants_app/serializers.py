@@ -79,4 +79,29 @@ class SerializerPublicGetMenuSection(ModelSerializer):
     """
     class Meta:
         model = MenuSection
+        fields = (
+            'id', 'name', 'description', 'section_banner_image',
+            'available'
+        )
+
+
+class SerializerPutMenuItem(ModelSerializer):
+    """
+    serializer for adding menu Item
+    """
+    class Meta:
+        model = MenuItem
         fields = '__all__'
+
+
+class SerializerPublicGetMenuItem(ModelSerializer):
+    """
+    serializer for getting the menu Item
+    """
+    class Meta:
+        model = MenuItem
+        fields = (
+            'id', 'name', 'description', 'primary_price',
+            'discounted_price', 'running_discount', 'image',
+            'available'
+        )

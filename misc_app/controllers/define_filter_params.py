@@ -21,11 +21,18 @@ MENU_SECTIION_FILTERS = {
     'name': 'name__icontains',
 }
 
+MENU_ITEM_FILTERS = {
+    'section': 'section',
+    'name': 'name__icontains',
+    'running_discount': 'running_discount',
+    'description': 'description__icontains',
+}
+
 FILTER_DEFINITIONS = {
     'restaurants': RESTAURANT_FILTERS,
     'employees': EMPLOYEE_FILTERS,
     'menusections': MENU_SECTIION_FILTERS,
-
+    'menuitems': MENU_ITEM_FILTERS,
 }
 
 

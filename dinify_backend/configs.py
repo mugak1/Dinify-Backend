@@ -42,7 +42,7 @@ REQUIRED_INFORMATION = {
     ],
     'menu_item': [
         {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
-        {'key': 'primary_price', 'label': 'price', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'primary_price', 'label': 'price', 'type': 'float', 'min_length': 3, 'text_presentation': None},  # noqa
         {'key': 'section', 'label': 'section', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
     ],
     'table': [
