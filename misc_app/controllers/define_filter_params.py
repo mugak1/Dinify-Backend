@@ -28,11 +28,17 @@ MENU_ITEM_FILTERS = {
     'description': 'description__icontains',
 }
 
+TABLE_FILTERS = {
+    'restaurant': 'restaurant',
+    'number': 'number',
+}
+
 FILTER_DEFINITIONS = {
     'restaurants': RESTAURANT_FILTERS,
     'employees': EMPLOYEE_FILTERS,
     'menusections': MENU_SECTIION_FILTERS,
     'menuitems': MENU_ITEM_FILTERS,
+    'tables': TABLE_FILTERS,
 }
 
 
