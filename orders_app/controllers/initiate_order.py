@@ -132,6 +132,7 @@ def initiate_order(data):
             'discounted_cost': discounted_cost,
             'savings': savings,
             'actual_cost': actual_cost,
+            'prepayment_required': table.prepayment_required,
 
             'order_status': 'initiated',
             'payment_status': order_payment_status,
@@ -173,6 +174,7 @@ def initiate_order(data):
                 'discounted_cost': discounted_cost,
                 'savings': savings,
                 'actual_cost': actual_cost,
+                'prepayment_required': table.prepayment_required,
 
                 'no_items': len(order_items),
                 'no_unavailable_items': len(unavailable_items),

@@ -17,6 +17,7 @@ class Order(BaseModel):
     discounted_cost = models.FloatField()  # the total cost of the order using discounted prices
     savings = models.FloatField()  # the total savings from the order i.e. discounted cost  - total cost
     actual_cost = models.FloatField()  # the actual cost that is payable by the customer
+    prepayment_required = models.BooleanField(default=False)
 
     payment_status = models.CharField(max_length=50, default='pending')
     order_status = models.CharField(max_length=50, default='initiated')
