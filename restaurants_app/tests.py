@@ -14,7 +14,7 @@ TEST_MENU_ITEM2_NAME = 'Seed Test Menu Item2'
 TEST_MENU_ITEM3_NAME = 'Seed Test Menu Item3'
 TEST_MENU_ITEM4_NAME = 'Seed Test Menu Item4'
 TEST_MENU_ITEM5_NAME = 'Seed Test Menu Item5'
-TEST_MENU_ITEM6_NAME = 'Seed Test Menu Item6'
+TEST_UNAVAILABLE_MENU_ITEM_NAME = 'Seed Unavailable Test Menu Item'
 TEST_DISCOUNTED_MENU_ITEM_NAME = 'Seed Test Discounted Menu Item'
 TEST_TABLE_NUMBER1 = 1
 TEST_TABLE_NUMBER2 = 2
@@ -62,7 +62,7 @@ def seed_menu_items():
         MenuItem(name=TEST_MENU_ITEM3_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False),  # noqa
         MenuItem(name=TEST_MENU_ITEM4_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False),  # noqa
         MenuItem(name=TEST_MENU_ITEM5_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False),  # noqa
-        MenuItem(name=TEST_MENU_ITEM6_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False),  # noqa
+        MenuItem(name=TEST_UNAVAILABLE_MENU_ITEM_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False, available=False),  # noqa
         MenuItem(name=TEST_DISCOUNTED_MENU_ITEM_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=True),  # noqa
     ]
     MenuItem.objects.bulk_create(menu_items)

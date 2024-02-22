@@ -7,7 +7,7 @@ from restaurants_app.tests import (
     TEST_RESTAURANT_NAME, TEST_MENU_SECTION_NAME,
     TEST_MENU_ITEM1_NAME, TEST_MENU_ITEM2_NAME,
     TEST_MENU_ITEM3_NAME, TEST_MENU_ITEM4_NAME,
-    TEST_MENU_ITEM5_NAME, TEST_MENU_ITEM6_NAME,
+    TEST_MENU_ITEM5_NAME, TEST_UNAVAILABLE_MENU_ITEM_NAME,
     TEST_DISCOUNTED_MENU_ITEM_NAME, TEST_TABLE_NUMBER1, TEST_TABLE_NUMBER2
 )
 from restaurants_app.models import Restaurant, Table, MenuItem
@@ -47,10 +47,19 @@ class TestOrderFunctions(TestCase):
                     {
                         'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME).pk),
                         'quantity': 1
-                    }
+                    },
+                    {
+                        'item': str(MenuItem.objects.get(name=TEST_DISCOUNTED_MENU_ITEM_NAME).pk),
+                        'quantity': 3
+                    },
+                    {
+                        'item': str(MenuItem.objects.get(name=TEST_UNAVAILABLE_MENU_ITEM_NAME).pk),
+                        'quantity': 1
+                    },
+
                 ]
             }
             result = Order(data).initiate_order()
-            print(result)
+            print("\n===\n", result, "\n===")
 
         test_post_paid_initiate()

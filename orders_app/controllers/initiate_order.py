@@ -113,6 +113,8 @@ def initiate_order(data):
                 'id': 'dummy_order_id',
                 'table': '',
                 'no_items': len(order_items),
+                'no_unavailable_items': len(unavailable_items),
+                'no_available_items': len(available_items),
                 'total': order_total,
                 'discount': order_discount,
                 'cost_payable': order_cost_payable,
