@@ -10,17 +10,18 @@ class Order(BaseModel):
     """
     restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name='restaurant')
     table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='table')
-    customer = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user')
+    customer = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='user')
+    customer_match_attempted = models.BooleanField(default=False)
 
-    total_cost = models.FloatField()
-    discounted_cost = models.FloatField()
-    savings = models.FloatField()
-    actual_cost = models.FloatField()
+    total_cost = models.FloatField()  # the total cost of the order using primary prices
+    discounted_cost = models.FloatField()  # the total cost of the order using discounted prices
+    savings = models.FloatField()  # the total savings from the order i.e. discounted cost  - total cost
+    actual_cost = models.FloatField()  # the actual cost that is payable by the customer
+    prepayment_required = models.BooleanField(default=False)
 
     payment_status = models.CharField(max_length=50, default='pending')
     order_status = models.CharField(max_length=50, default='initiated')
-
-    last_updated_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='last_updated_by')  # noqa
+    last_updated_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='last_updated_by')  # noqa
 
     class Meta:
         db_table = 'orders'
@@ -49,6 +50,7 @@ class OrderItem(BaseModel):
     actual_cost = models.FloatField()
 
     status = models.CharField(max_length=50, default='initiated')
+    last_updated_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='order_item_last_updated_by')  # noqa
 
     class Meta:
         db_table = 'order_items'

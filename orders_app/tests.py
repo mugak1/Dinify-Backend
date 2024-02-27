@@ -33,7 +33,6 @@ class TestOrderFunctions(TestCase):
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         table1 = Table.objects.get(number=TEST_TABLE_NUMBER1)
         table2 = Table.objects.get(number=TEST_TABLE_NUMBER2)
-        user = User.objects.get(username=TEST_PHONE)
 
         def test_post_paid_initiate():
             data = {
@@ -60,6 +59,35 @@ class TestOrderFunctions(TestCase):
                 ]
             }
             result = Order(data).initiate_order()
-            print("\n===\n", result, "\n===")
+            self.assertEqual(result['status'], 200)
+            self.assertEqual(len(result['data']['unavailable_items']), 1)
+            self.assertEqual(len(result['data']['available_items']), 3)
+            self.assertEqual(result['data']['order_details']['prepayment_required'], False)
+
+        def test_pre_paid_initiate():
+            data = {
+                'restaurant': str(restaurant.pk),
+                'table': str(table2.pk),
+                'items': [
+                    {
+                        'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk),
+                        'quantity': 2
+                    },
+                    {
+                        'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME).pk),
+                        'quantity': 1
+                    },
+                    {
+                        'item': str(MenuItem.objects.get(name=TEST_DISCOUNTED_MENU_ITEM_NAME).pk),
+                        'quantity': 3
+                    }
+                ]
+            }
+            result = Order(data).initiate_order()
+            self.assertEqual(result['status'], 200)
+            self.assertEqual(len(result['data']['unavailable_items']), 0)
+            self.assertEqual(len(result['data']['available_items']), 3)
+            self.assertEqual(result['data']['order_details']['prepayment_required'], True)
 
         test_post_paid_initiate()
+        test_pre_paid_initiate()

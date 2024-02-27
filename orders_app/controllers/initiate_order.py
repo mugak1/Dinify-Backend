@@ -1,6 +1,8 @@
+from django.db import transaction
 from restaurants_app.models import Restaurant, MenuItem, Table
 from django.core.exceptions import ObjectDoesNotExist
 from dinify_backend.configs import MESSAGES
+from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
 
 
 def any_present_ongoing_order(table):
@@ -56,9 +58,10 @@ def initiate_order(data):
     unavailable_items = []
     available_items = []
 
-    order_total = 0
-    order_discount = 0
-    order_cost_payable = 0
+    total_cost = 0
+    discounted_cost = 0
+    savings = 0
+    actual_cost = 0
 
     for item in data['items']:
         try:
@@ -67,23 +70,40 @@ def initiate_order(data):
             unit_price = menu_item.primary_price
             effective_unit_price = unit_price
             if menu_item.running_discount:
-                effective_unit_price = menu_item.discounted_price
-            savings = (unit_price - effective_unit_price) * item['quantity']
+                if menu_item.discounted_price is not None:
+                    effective_unit_price = menu_item.discounted_price
+
+            total_cost = unit_price * item['quantity']
+            discounted_cost = effective_unit_price * item['quantity']
+            savings = total_cost - discounted_cost
+            actual_cost = discounted_cost
+
             item = {
-                'id': menu_item.id,
-                'item': menu_item.name,
+                'item': str(menu_item.id),
+                'item_name': menu_item.name,
                 'quantity': item['quantity'],
+
                 'unit_price': unit_price,
+                'discounted_price': effective_unit_price,
                 'discounted': menu_item.running_discount,
-                'discounted_price': menu_item.discounted_price,
-                'total_price': effective_unit_price * item['quantity'],
+
+                'total_cost': total_cost,
+                'discounted_cost': discounted_cost,
                 'savings': savings,
+                'actual_cost': actual_cost,
+
+                'available': menu_item.available,
+                'status': 'initiated'
             }
 
             if not menu_item.available:
                 item['quantity'] = 0
-                item['total_price'] = 0
-                item['discounted_price'] = 0
+                item['total_cost'] = 0
+                item['discounted_cost'] = 0
+                item['savings'] = 0
+                item['actual_cost'] = 0
+                item['available'] = False
+                item['status'] = 'unavailable'
                 unavailable_items.append(item)
             else:
                 available_items.append(item)
@@ -96,31 +116,74 @@ def initiate_order(data):
                 'message': MESSAGES.get('GENERAL_ERROR')
             }
 
-    # make the order total from the available items
-    order_total = sum([item['total_price'] for item in available_items])
-    # get the discount
-    order_discount = sum([item['savings'] for item in available_items])
-    # the cost payable
-    order_cost_payable = sum([item['total_price'] for item in available_items])
+    total_cost = sum([item['total_cost'] for item in available_items])
+    discounted_cost = sum([item['discounted_cost'] for item in available_items])
+    savings = sum([item['savings'] for item in available_items])
+    actual_cost = sum([item['actual_cost'] for item in available_items])
 
     # TODO save the order with status as initiated
+    with transaction.atomic():
+        # save the order
+        order_data = {
+            'restaurant': data['restaurant'],
+            'table': data['table'],
+
+            'total_cost': total_cost,
+            'discounted_cost': discounted_cost,
+            'savings': savings,
+            'actual_cost': actual_cost,
+            'prepayment_required': table.prepayment_required,
+
+            'order_status': 'initiated',
+            'payment_status': order_payment_status,
+        }
+        order_record = SerializerPutOrder(data=order_data)
+        if not order_record.is_valid():
+            error_message = ""
+            print(order_record.errors)
+            for _, value in order_record.errors.items():
+                error_message += f"{', '.join(value)}\n"
+            return {
+                'status': 400,
+                'message': error_message
+            }
+
+        order_record.save()
+        order_id = str(order_record.data['id'])
+        # save the order items
+        for item in order_items:
+            item['order'] = order_id
+            # save the order item
+            item_record = SerializerPutOrderItem(data=item)
+            if not item_record.is_valid():
+                raise Exception(item_record.errors)
+            item_record.save()
 
     return {
         'status': 200,
         'message': MESSAGES.get('ORDER_INITIATED'),
         'data': {
             'order_details': {
-                'id': 'dummy_order_id',
-                'table': '',
+                'id': order_id,
+
+                'restaurant': data['restaurant'],
+                'table': data['table'],
+                'table_number': table.number,
+
+                'total_cost': total_cost,
+                'discounted_cost': discounted_cost,
+                'savings': savings,
+                'actual_cost': actual_cost,
+                'prepayment_required': table.prepayment_required,
+
                 'no_items': len(order_items),
                 'no_unavailable_items': len(unavailable_items),
                 'no_available_items': len(available_items),
-                'total': order_total,
-                'discount': order_discount,
-                'cost_payable': order_cost_payable,
+
                 'order_status': 'initiated',
                 'payment_status': order_payment_status,
             },
+            'order_items': order_items,
             'unavailable_items': unavailable_items,
             'available_items': available_items
         }
