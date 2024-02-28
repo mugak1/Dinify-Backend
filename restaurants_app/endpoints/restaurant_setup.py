@@ -1,8 +1,7 @@
 """
 endpoints for restaurant configurations
 """
-from calendar import c
-from logging import config
+import ast
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from restaurants_app.controllers.create_restaurant import create_restaurant
@@ -17,6 +16,7 @@ from restaurants_app.serializers import (
     SerializerPutMenuItem, SerializerPublicGetMenuItem,
     SerializerPutTable, SerializerPublicGetTable
 )
+from restaurants_app.models import MenuSection, SectionGroup
 from dinify_backend.configs import EDIT_INFORMATION, REQUIRED_INFORMATION
 
 
@@ -96,6 +96,38 @@ class RestaurantSetupEndpoint(APIView):
             'error_message': error_message
         }
         response = Secretary(secretary_args).create()
+
+        # if the config_detail is menusections,
+        # check if the groups were posted so as to create them
+        if config_detail == 'menusections':
+            if response['status'] == 200:
+                return Response(
+                    response,
+                    status=response['status']
+                )
+
+            try:
+                # check if the groups were posted
+                section_groups = post_data.get('groups')
+                if section_groups is None:
+                    return Response(
+                        response,
+                        status=response['status']
+                    )
+                section = MenuSection.objects.get(id=response['data']['id'])
+                section_groups = ast.literal_eval(section_groups)
+                group_records = []
+                for record in section_groups:
+                    group_records.append(
+                        SectionGroup(
+                            name=record,
+                            section=section
+                        )
+                    )
+                SectionGroup.objects.bulk_create(group_records)
+            except Exception as error:
+                print(f"BulkCreateSectionGroupsError: {error}")
+                response['message'] = f"{response['message']}. However, an error while defining the section groups." # noqa
 
         return Response(
             response,
