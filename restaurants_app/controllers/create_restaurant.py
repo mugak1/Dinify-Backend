@@ -6,6 +6,8 @@ from restaurants_app.models import Restaurant
 from dinify_backend.configs import MESSAGES, REQUIRED_INFORMATION, ROLES
 from restaurants_app.serializers import SerializerPutRestaurant, SerializerPutRestaurantEmployee
 from misc_app.controllers.check_required_information import check_required_information
+from dinify_backend.configs import AccountType_Restaurant
+from finance_app.serializers import SerializerPutAccount
 
 
 def create_restaurant(data: dict, auth_info: dict) -> dict:
@@ -45,22 +47,32 @@ def create_restaurant(data: dict, auth_info: dict) -> dict:
         with transaction.atomic():
             record.save()
 
-            # save the restaurant-employee mapping
-            employee = {
-                'user': record.data['owner'],
-                'restaurant': record.data['id'],
-                'roles': [ROLES.get('RESTAURANT_OWNER')],
-                'created_by': auth_info['user_id']
+            # create the restaurant account
+            account_data = {
+                'account_type': AccountType_Restaurant,
+                'restaurant': record.data['id']
             }
-            employee_record = SerializerPutRestaurantEmployee(data=employee)
-            if employee_record.is_valid():
-                employee_record.save()
+            account_record = SerializerPutAccount(data=account_data)
+            if account_record.is_valid():
+                account_record.save()
 
-                return {
-                    'status': 200,
-                    'message': MESSAGES.get('OK_CREATE_RESTAURANT'),
-                    'data': record.data
+                # save the restaurant-employee mapping
+                employee = {
+                    'user': record.data['owner'],
+                    'restaurant': record.data['id'],
+                    'roles': [ROLES.get('RESTAURANT_OWNER')],
+                    'created_by': auth_info['user_id']
                 }
+
+                employee_record = SerializerPutRestaurantEmployee(data=employee)
+                if employee_record.is_valid():
+                    employee_record.save()
+
+                    return {
+                        'status': 200,
+                        'message': MESSAGES.get('OK_CREATE_RESTAURANT'),
+                        'data': record.data
+                    }
 
             raise Exception('Failed to create restaurant employee')
     else:
