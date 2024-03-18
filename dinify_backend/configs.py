@@ -8,7 +8,6 @@ configurations or definitions of various values on the syste
 AccountType_Restaurant = 'restaurant'
 AccountType_DinifyRevenue = 'dinify_revenue'
 
-
 # payment modes
 PaymentMode_Cash = 'cash'
 PaymentMode_MobileMoney = 'momo'
@@ -33,6 +32,10 @@ TransactionStatus_Pending = 'pending'
 
 # transaction platforms
 TransactionPlatform_Web = 'web'
+
+# telecoms
+AirtelUg = 'airtelug'
+MtnUg = 'mtnug'
 
 
 ACTION_LOG_STATUSES = {
