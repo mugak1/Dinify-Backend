@@ -111,7 +111,7 @@ REQUIRED_INFORMATION = {
 
 
 EDIT_INFORMATION = {
-    'restaurant_registration': [
+    'restaurants': [
         {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
         {'key': 'location', 'label': 'location', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
         {'key': 'logo', 'label': 'logo', 'type': 'file', 'min_length': 5, 'text_presentation': None},  # noqa

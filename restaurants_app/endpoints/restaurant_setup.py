@@ -215,7 +215,7 @@ class RestaurantSetupEndpoint(APIView):
         }
 
         edit_information = {
-            'restaurants': EDIT_INFORMATION.get('restaurant'),
+            'restaurants': EDIT_INFORMATION.get('restaurants'),
             'employees': EDIT_INFORMATION.get('restaurant_employee'),
             'menusections': EDIT_INFORMATION.get('menu_section'),
             'menuitems': EDIT_INFORMATION.get('menu_item'),
