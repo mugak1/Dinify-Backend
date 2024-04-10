@@ -3,7 +3,7 @@ from django.core.exceptions import ValidationError
 from users_app.models import BaseModel
 from restaurants_app.models import Restaurant
 from orders_app.models import Order
-from dinify_backend.configs import (
+from dinify_backend.configss.string_definitions import (
     AccountType_Restaurant, AccountType_DinifyRevenue,
     PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card,
     AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked,

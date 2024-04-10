@@ -17,7 +17,8 @@ from restaurants_app.serializers import (
     SerializerPutTable, SerializerPublicGetTable
 )
 from restaurants_app.models import MenuSection, SectionGroup
-from dinify_backend.configs import EDIT_INFORMATION, REQUIRED_INFORMATION
+from dinify_backend.configss.required_information import REQUIRED_INFORMATION
+from dinify_backend.configss.edit_information import EDIT_INFORMATION
 
 
 class RestaurantSetupEndpoint(APIView):

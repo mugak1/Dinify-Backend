@@ -5,10 +5,8 @@ from misc_app.controllers.determine_changes import determine_changes
 from restaurants_app.serializers import SerializerPutRestaurantEmployee, SerializerPutRestaurant
 from restaurants_app.tests import seed_restaurant, TEST_RESTAURANT_NAME
 from restaurants_app.models import Restaurant
-from dinify_backend.configs import (
-    ROLES,
-    EDIT_INFORMATION
-)
+from dinify_backend.configs import ROLES
+from dinify_backend.configss.edit_information import EDIT_INFORMATION
 from users_app.tests import seed_user, TEST_PHONE
 from users_app.models import User
 
@@ -146,7 +144,7 @@ class MiscAppTestFunctions(TestCase):
                     'id': str(restaurant.id),
                     'name': 'new Restaurant name',
                 },
-                'edit_considerations': EDIT_INFORMATION.get('restaurant_registration'),
+                'edit_considerations': EDIT_INFORMATION.get('restaurants'),
                 'user_id': str(user.id),
                 'username': TEST_PHONE,
                 'success_message': 'The details of the restaurant have been updated successfully.',

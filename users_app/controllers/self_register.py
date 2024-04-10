@@ -2,7 +2,8 @@
 create a user on dinify
 """
 from misc_app.controllers.check_required_information import check_required_information
-from dinify_backend.configs import REQUIRED_INFORMATION, MESSAGES
+from dinify_backend.configss.messages import MESSAGES
+from dinify_backend.configss.required_information import REQUIRED_INFORMATION
 from users_app.models import User
 
 

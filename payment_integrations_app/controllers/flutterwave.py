@@ -4,7 +4,7 @@ from typing import Optional
 from decouple import config
 from dataclasses import dataclass
 from misc_app.controllers.determine_telecom import determine_telecom
-from dinify_backend.configs import PaymentMode_Card, PaymentMode_MobileMoney
+from dinify_backend.configss.string_definitions import PaymentMode_Card, PaymentMode_MobileMoney
 
 
 @dataclass

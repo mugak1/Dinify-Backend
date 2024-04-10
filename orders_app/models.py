@@ -1,7 +1,10 @@
 from django.db import models
 from users_app.models import User, BaseModel
 from restaurants_app.models import Restaurant, MenuItem, Table
-from dinify_backend.configs import PaymentStatus_Pending, OrderStatus_Initiated, OrderItemStatus_Initiated
+from dinify_backend.configss.string_definitions import (
+    PaymentStatus_Pending, OrderStatus_Initiated,
+    OrderItemStatus_Initiated
+)
 
 
 # Create your models here.

@@ -6,7 +6,8 @@ from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 from users_app.models import User
 from users_app.serializers import SerGetUserProfile
-from dinify_backend.configs import MESSAGES, ACTION_LOG_STATUSES
+from dinify_backend.configs import ACTION_LOG_STATUSES
+from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.save_action_log import save_action
 
 

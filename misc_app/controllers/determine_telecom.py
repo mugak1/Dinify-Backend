@@ -1,5 +1,5 @@
 from typing import Optional
-from dinify_backend.configs import AirtelUg, MtnUg
+from dinify_backend.configss.string_definitions import AirtelUg, MtnUg
 
 
 def determine_telecom(msisdn: str) -> Optional[str]:

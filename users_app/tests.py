@@ -1,5 +1,5 @@
 from django.test import TestCase
-from dinify_backend.configs import MESSAGES
+from dinify_backend.configss.messages import MESSAGES
 from users_app.controllers.self_register import self_register
 from users_app.controllers.login import login
 from users_app.controllers.change_password import change_password

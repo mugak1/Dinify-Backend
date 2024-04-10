@@ -3,7 +3,7 @@ from orders_app.models import Order
 from finance_app.models import DinifyAccount, DinifyTransaction
 from users_app.models import User
 from django.db.models import Sum
-from dinify_backend.configs import (
+from dinify_backend.configss.string_definitions import (
     TransactionType_OrderRefund, TransactionStatus_Initiated,
     TransactionPlatform_Web, PaymentMode_MobileMoney
 )

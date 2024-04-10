@@ -3,7 +3,7 @@ from users_app.models import User
 from users_app.tests import TEST_PHONE, seed_user
 from finance_app.models import DinifyAccount
 from restaurants_app.models import Restaurant, Table
-from dinify_backend.configs import AccountType_Restaurant
+from dinify_backend.configss.string_definitions import AccountType_Restaurant
 from orders_app.tests import seed_order
 from orders_app.models import Order
 from restaurants_app.tests import (
@@ -13,8 +13,8 @@ from restaurants_app.tests import (
 from finance_app.controllers.initiate_order_payment import initiate_order_payment
 from finance_app.controllers.initiate_refund import initiate_refund
 from finance_app.controllers.process_payment_feedback import process_payment_feedback
-from dinify_backend.configs import PaymentMode_MobileMoney
-from dinify_backend.string_messages import OK_ORDER_PAYMENT_INITIATED, OK_ORDER_PAYMENT_PROCESSED
+from dinify_backend.configss.string_definitions import PaymentMode_MobileMoney
+from dinify_backend.configss.messages import OK_ORDER_PAYMENT_PROCESSED
 
 
 def seed_account():
@@ -31,7 +31,7 @@ def seed_account():
 
 
 def simulate_aggregator_feedback(
-    desired_aggregator: str,    
+    desired_aggregator: str,
     desired_aggregator_status: str,
     desired_status: str
 ) -> dict:

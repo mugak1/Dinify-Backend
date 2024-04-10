@@ -3,10 +3,12 @@ a user creating a restaurant on their own
 """
 from django.db import transaction
 from restaurants_app.models import Restaurant
-from dinify_backend.configs import MESSAGES, REQUIRED_INFORMATION, ROLES
+from dinify_backend.configs import ROLES
+from dinify_backend.configss.messages import MESSAGES
+from dinify_backend.configss.required_information import REQUIRED_INFORMATION
 from restaurants_app.serializers import SerializerPutRestaurant, SerializerPutRestaurantEmployee
 from misc_app.controllers.check_required_information import check_required_information
-from dinify_backend.configs import AccountType_Restaurant
+from dinify_backend.configss.string_definitions import AccountType_Restaurant
 from finance_app.serializers import SerializerPutAccount
 
 

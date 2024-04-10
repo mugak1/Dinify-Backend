@@ -3,12 +3,15 @@ from decimal import Decimal
 from orders_app.models import Order
 from finance_app.models import DinifyAccount, DinifyTransaction
 from misc_app.controllers.clean_amount import clean_amount
-from dinify_backend.configs import (
+from dinify_backend.configss.string_definitions import (
     TransactionStatus_Initiated, TransactionType_OrderPayment,
     TransactionPlatform_Web, PaymentMode_Cash, PaymentMode_Card,
     PaymentMode_MobileMoney
 )
-from dinify_backend.string_messages import OK_ORDER_PAYMENT_INITIATED, ERR_ORDER_PAYMENT_INITIATION
+from dinify_backend.configss.messages import (
+    OK_ORDER_PAYMENT_INITIATED,
+    ERR_ORDER_PAYMENT_INITIATION
+)
 from payment_integrations_app.controllers.flutterwave import Flutterwave
 
 

@@ -5,9 +5,10 @@ from django.db import transaction
 from django.utils import timezone
 from dataclasses import dataclass
 from dinify_backend.configs import (
-    IGNORE_LOG_FIELDS, STRINGIFY_LOG_FIELDS, MESSAGES,
+    IGNORE_LOG_FIELDS, STRINGIFY_LOG_FIELDS,
     ACTION_LOG_STATUSES
 )
+from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.check_required_information import check_required_information
 from misc_app.controllers.paginator import DinifyPaginator
 from misc_app.controllers.determine_changes import determine_changes

@@ -1,6 +1,7 @@
 from django.db import transaction
 from django.test import TestCase
-from dinify_backend.configs import MESSAGES, ROLES
+from dinify_backend.configs import ROLES
+from dinify_backend.configss.messages import MESSAGES
 from users_app.tests import TEST_PHONE, seed_user
 from users_app.models import User
 from restaurants_app.controllers.create_restaurant import create_restaurant

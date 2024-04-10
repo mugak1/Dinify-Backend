@@ -1,12 +1,12 @@
 from django.db import transaction
 from finance_app.models import DinifyTransaction
 from orders_app.models import Order
-from dinify_backend.configs import (
+from dinify_backend.configss.string_definitions import (
     TransactionType_OrderPayment,
     TransactionStatus_Success,
     PaymentStatus_Paid,
 )
-from dinify_backend.string_messages import OK_ORDER_PAYMENT_PROCESSED
+from dinify_backend.configss.messages import OK_ORDER_PAYMENT_PROCESSED
 
 
 def process_payment_feedback(

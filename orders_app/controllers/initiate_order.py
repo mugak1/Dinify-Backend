@@ -1,7 +1,7 @@
 from django.db import transaction
 from restaurants_app.models import Restaurant, MenuItem, Table
 from django.core.exceptions import ObjectDoesNotExist
-from dinify_backend.configs import MESSAGES
+from dinify_backend.configss.messages import MESSAGES
 from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
 
 
