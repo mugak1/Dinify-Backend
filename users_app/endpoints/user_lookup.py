@@ -6,11 +6,18 @@ from users_app.models import User
 class UserLookupEndpoint(APIView):
     def get(self, request):
         try:
-            # TODO internationalise the phone number
-            phone_number = request.GET.get('phone')
-            user = User.objects.values('id', 'phone_number').get(
-                phone_number=phone_number
-            )
+            # check if the identity includes @
+            contact = request.GET.get('contact')
+
+            if '@' in contact:
+                user = User.objects.values('id', 'phone_number', 'email').get(
+                    email=contact
+                )
+            else:
+                # TODO internationalise the phone number
+                user = User.objects.values('id', 'phone_number', 'email').get(
+                    phone_number=contact
+                )
             response = {
                 'status': 200,
                 'message': 'User found',
