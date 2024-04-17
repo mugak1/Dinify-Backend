@@ -12,6 +12,7 @@ EDIT_INFORMATION = {
         {'key': 'preferred_subscription_method', 'label': 'preferred subscription method', 'type': 'char', 'min_length': 5, 'text_presentation': str.lower},  # noqa
         {'key': 'order_surcharge_percentage', 'label': 'order surcharge percentage', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'flat_fee', 'label': 'flat fee', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'branding_configuration', 'label': 'flat fee', 'type': 'dict', 'min_length': 5, 'text_presentation': None},  # noqa
     ],
     'restaurant_employee': [
         {'key': 'roles', 'label': 'Roles', 'type': 'list', 'min_length': 5, 'text_presentation': None},  # noqa
