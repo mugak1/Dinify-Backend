@@ -137,6 +137,9 @@ def initiate_order(data):
 
             'order_status': 'initiated',
             'payment_status': order_payment_status,
+
+            'customer': data.get('customer'),
+            'created_by': data.get('created_by')
         }
         order_record = SerializerPutOrder(data=order_data)
         if not order_record.is_valid():

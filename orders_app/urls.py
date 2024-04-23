@@ -1,6 +1,6 @@
-# from django.urls import path
-# from orders_app.endpoints.
+from django.urls import path
+from orders_app.endpoints.orders import OrdersEndpoint
 
-# urlpatterns = [
-#     path('<str:config_detail>/', RestaurantSetupEndpoint.as_view()),
-# ]
+urlpatterns = [
+    path('<str:action>/', OrdersEndpoint.as_view()),
+]

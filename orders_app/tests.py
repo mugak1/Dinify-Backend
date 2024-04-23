@@ -59,6 +59,8 @@ class TestOrderFunctions(TestCase):
 
         def test_post_paid_initiate():
             data = {
+                'customer': None,
+                'created_by': None, 
                 'restaurant': str(restaurant.pk),
                 'table': str(table1.pk),
                 'items': [
