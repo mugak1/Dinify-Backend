@@ -18,17 +18,22 @@ class OrdersEndpoint(APIView):
         if action == 'initiate':
             data = request.data
             source = data.get('source')
+            user = request.user.pk
 
             if source == 'admin':
+                if user is None:
+                    response = {
+                        'status': 401,
+                        'message': 'Please log in'
+                    }
+                    return Response(response, status=200)
                 data['customer'] = None
-                data['created_by'] = str(request.user.pk)
+                data['created_by'] = str(user)
             else:
-                user = request.user.pk
-                print(user, request.user)
-
+                if user is not None:
+                    user = str(user)
                 data['customer'] = user
                 data['created_by'] = None
 
-            # response = initiate_order(data)
-            response = {}
+            response = initiate_order(data)
             return Response(response, status=200)
