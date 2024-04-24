@@ -4,7 +4,8 @@ the serializers for the restaurant app
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from orders_app.models import Order
 from restaurants_app.models import (
-    Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table
+    Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table,
+    SectionGroup
 )
 from dinify_backend.configss.string_definitions import (
     OrderItemStatus_Initiated, OrderItemStatus_Preparing, OrderStatus_Pending
@@ -94,6 +95,23 @@ class SerializerPublicGetMenuSection(ModelSerializer):
 
     def get_item_count(self, menu_section):
         return MenuItem.objects.filter(section=menu_section).count()
+
+
+class SerializerPutSectionGroup(ModelSerializer):
+    class Meta:
+        model = SectionGroup
+        fields = '__all__'
+
+
+class SerializerPublicGetSectionGroup(ModelSerializer):
+    item_count = SerializerMethodField()
+
+    class Meta:
+        model = SectionGroup
+        fields = ('id', 'name', 'item_count')
+
+    def get_item_count(self, group):
+        return MenuItem.objects.filter(section_group=group).count()
 
 
 class SerializerPutMenuItem(ModelSerializer):

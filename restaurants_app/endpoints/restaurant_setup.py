@@ -15,11 +15,21 @@ from restaurants_app.serializers import (
     SerializerPutMenuSection, SerializerPublicGetMenuSection,
     SerializerPutMenuItem, SerializerPublicGetMenuItem,
     SerializerPutTable, SerializerPublicGetTable,
+
+    SerializerPutSectionGroup, SerializerPublicGetSectionGroup
 )
 from restaurants_app.models import MenuSection, SectionGroup
-from dinify_backend.configss.required_information import REQUIRED_INFORMATION
+from dinify_backend.configss.required_information import (
+    REQUIRED_INFORMATION,
+    RI_RESTAURANT_EMPLOYEES,
+    RI_SECTION_GROUP
+)
 from dinify_backend.configss.edit_information import EDIT_INFORMATION
-from dinify_backend.configss.messages import OK_GET_RECORD_DETAIL, ERR_GENERAL, ERR_UNSPECIFIED_RECORD_DETAILS
+from dinify_backend.configss.messages import (
+    OK_GET_RECORD_DETAIL, ERR_GENERAL,
+    ERR_UNSPECIFIED_RECORD_DETAILS, OK_ADDED_SECTION_GROUP
+
+)
 
 
 class RestaurantSetupEndpoint(APIView):
@@ -62,8 +72,9 @@ class RestaurantSetupEndpoint(APIView):
         }
 
         required_information = {
-            'employees': REQUIRED_INFORMATION.get('restaurant_employee'),
+            'employees': RI_RESTAURANT_EMPLOYEES,
             'menusections': REQUIRED_INFORMATION.get('menu_section'),
+            'groups': RI_SECTION_GROUP,
             'menuitems': REQUIRED_INFORMATION.get('menu_item'),
             'tables': REQUIRED_INFORMATION.get('table')
         }
@@ -71,6 +82,7 @@ class RestaurantSetupEndpoint(APIView):
         success_messages = {
             'employees': 'The employee has been added successfully.',
             'menusections': 'The menu section has been added successfully.',
+            'groups': OK_ADDED_SECTION_GROUP,
             'menuitems': 'The menu item has been added successfully.',
             'tables': 'The table has been added successfully'
         }
@@ -108,7 +120,7 @@ class RestaurantSetupEndpoint(APIView):
         # if the config_detail is menusections,
         # check if the groups were posted so as to create them
         if config_detail == 'menusections':
-            if response['status'] == 200:
+            if response['status'] != 200:
                 return Response(
                     response,
                     status=response['status']

@@ -55,3 +55,5 @@ ERR_ORDER_UPDATED = 'Sorry, an error occurred while updating the order.'
 
 
 OK_SCANNED_TABLE = 'The table details have been retrieved successfully.'
+
+OK_ADDED_SECTION_GROUP = 'The section group has been added successfully.'

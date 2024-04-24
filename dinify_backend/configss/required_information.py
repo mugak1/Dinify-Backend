@@ -11,11 +11,7 @@ REQUIRED_INFORMATION = {
         {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
         {'key': 'location', 'label': 'location', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
     ],
-    'restaurant_employee': [
-        {'key': 'user', 'label': 'User', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
-        {'key': 'restaurant', 'label': 'Restaurant', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
-        {'key': 'roles', 'label': 'Roles', 'type': 'list', 'min_length': 5, 'text_presentation': None},  # noqa    
-    ],
+    # 'restaurant_employee': ,
     'menu_section': [
         {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
         {'key': 'restaurant', 'label': 'description', 'type': 'char', 'min_length': 10, 'text_presentation': None},  # noqa
@@ -30,3 +26,14 @@ REQUIRED_INFORMATION = {
         {'key': 'restaurant', 'label': 'description', 'type': 'char', 'min_length': 10, 'text_presentation': None},  # noqa
     ],
 }
+
+RI_RESTAURANT_EMPLOYEES = [
+    {'key': 'user', 'label': 'User', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
+    {'key': 'restaurant', 'label': 'Restaurant', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
+    {'key': 'roles', 'label': 'Roles', 'type': 'list', 'min_length': 5, 'text_presentation': None},  # noqa    
+]
+
+RI_SECTION_GROUP = [
+    {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 3, 'text_presentation': str.title},  # noqa
+    {'key': 'section', 'label': 'section', 'type': 'char', 'min_length': 3, 'text_presentation': None}  # noqa
+]
