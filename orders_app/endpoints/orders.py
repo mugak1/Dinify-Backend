@@ -46,7 +46,7 @@ class OrdersEndpoint(APIView):
             return Response(response, status=200)
 
     def put(self, request, action):
-        if action in ['submit', 'prepare', 'serve']:
+        if action in ['submit', 'prepare', 'cancel']:
             data = request.data
             source = data.get('source')
 
@@ -64,10 +64,10 @@ class OrdersEndpoint(APIView):
             order_statuses = {
                 'submit': OrderStatus_Pending,
                 'prepare': OrderItemStatus_Preparing,
-                'serve': OrderStatus_Served
+                'cancel': OrderStatus_Cancelled
             }
             new_status = order_statuses.get(action)
-            order = Order.objects.get(id=request.data.get('id'))
+            order = Order.objects.get(id=request.data.get('order'))
             response = update_order_status(
                 order=order,
                 new_status=new_status,

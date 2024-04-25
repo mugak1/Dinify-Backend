@@ -43,7 +43,7 @@ PaymentStatus_Pending = 'pending'
 # order statuses
 OrderStatus_Initiated = 'initiated'
 OrderStatus_Pending = 'pending'
-OrderStatus_Served = 'paid'
+OrderStatus_Served = 'served'
 OrderStatus_Cancelled = 'cancelled'
 OrderItemStatus_Initiated = 'initiated'
 OrderItemStatus_Preparing = 'preparing'
