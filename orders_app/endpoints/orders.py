@@ -8,6 +8,7 @@ from orders_app.models import Order
 from orders_app.controllers.initiate_order import initiate_order
 from orders_app.controllers.manage_order import update_order_status
 from dinify_backend.configss.string_definitions import (
+    OrderItemStatus_Initiated,
     OrderStatus_Pending,
     OrderItemStatus_Preparing, OrderItemStatus_Served,
     OrderStatus_Cancelled,
@@ -48,7 +49,7 @@ class OrdersEndpoint(APIView):
     def put(self, request, action):
         if action in ['submit', 'prepare', 'cancel']:
             data = request.data
-            source = data.get('source')
+            # source = data.get('source')
 
             user = request.user.pk
             if user is None:
@@ -67,7 +68,8 @@ class OrdersEndpoint(APIView):
                 'cancel': OrderStatus_Cancelled
             }
             new_status = order_statuses.get(action)
-            order = Order.objects.get(id=request.data.get('order'))
+            order = Order.objects.get(id=data.get('order'))
+
             response = update_order_status(
                 order=order,
                 new_status=new_status,
@@ -75,3 +77,7 @@ class OrdersEndpoint(APIView):
             )
 
             return Response(response, status=400)
+
+    # def get(self, request, action):
+
+

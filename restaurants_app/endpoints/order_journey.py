@@ -21,6 +21,7 @@ class OrderJourneyEndpoint(APIView):
             response = handle_show_menu(
                 restaurant_id=request.GET.get('restaurant')
             )
+        
         else:
             response = {
                 'status': 400,

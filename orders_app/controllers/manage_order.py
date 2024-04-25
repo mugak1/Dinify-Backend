@@ -8,6 +8,13 @@ from orders_app.models import Order
 from dinify_backend.configss.messages import (
     OK_ORDER_UPDATED, ERR_ORDER_UPDATED
 )
+from dinify_backend.configss.string_definitions import (
+    OrderItemStatus_Initiated,
+    OrderStatus_Pending,
+    OrderItemStatus_Preparing, OrderItemStatus_Served,
+    OrderStatus_Cancelled,
+    OrderStatus_Served
+)
 
 
 def update_order_status(
@@ -19,6 +26,17 @@ def update_order_status(
     update an order
     """
     try:
+        # if the status is submitted
+        # check if the order requires prepayment before updating
+
+        # if the new status is to submit,
+        # check that the current status is initiated
+        if new_status == OrderStatus_Pending:
+            if order.order_status != OrderItemStatus_Initiated:
+                return {
+                    'status': 400,
+                    'message': 'This order cannot be submitted.'
+                }
         order.order_status = new_status
         if user is None:
             order.last_updated_by = user

@@ -18,6 +18,7 @@ from restaurants_app.serializers import (
 
     SerializerPutSectionGroup, SerializerPublicGetSectionGroup
 )
+from orders_app.serializers import SerializerListGetOrder
 from restaurants_app.models import MenuSection, SectionGroup
 from dinify_backend.configss.required_information import (
     REQUIRED_INFORMATION,
@@ -176,6 +177,7 @@ class RestaurantSetupEndpoint(APIView):
             'sectiongroups': SerializerPublicGetSectionGroup,
             'menuitems': SerializerPublicGetMenuItem,
             'tables': SerializerPublicGetTable,
+            'orders': SerializerListGetOrder
         }
 
         success_messages = {
@@ -184,7 +186,8 @@ class RestaurantSetupEndpoint(APIView):
             'menusections': 'Successfully retrieved the menu sections',
             'sectiongroups': OK_RETRIEVED_SECTION_GROUP,
             'menuitems': 'Successfully retrieved the menu items',
-            'tables': 'Successfully retrieved the tables'
+            'tables': 'Successfully retrieved the tables',
+            'orders': 'Successfully retrived the orders'
         }
 
         error_messages = {
@@ -193,7 +196,8 @@ class RestaurantSetupEndpoint(APIView):
             'menusections': 'Error while retrieving menu sections',
             'sectiongroups': ERR_RETRIEVED_SECTION_GROUP,
             'menuitems': 'Error while retrieving menu items',
-            'tables': 'Error while retrieving the tables'
+            'tables': 'Error while retrieving the tables',
+            'orders': 'Error while retrieving the orders'
         }
 
         serializer = serializers.get(config_detail)

@@ -39,6 +39,17 @@ GROUP_FILTERS = {
     'section': 'section'
 }
 
+ORDER_FILTERS = {
+    'restaurant': 'restaurant',
+    'table': 'table',
+    'customer_phone': 'customer_phone__icontains',
+    'customer_email': 'customer_email__icontains',
+    'min_actual_cost': 'actual_cost__gte',
+    'max_actual_cost': 'actual_cost__lte',
+    'order_status': 'order_status',
+    'payment_status': 'payment_status'
+}
+
 FILTER_DEFINITIONS = {
     'restaurants': RESTAURANT_FILTERS,
     'employees': EMPLOYEE_FILTERS,
@@ -46,6 +57,7 @@ FILTER_DEFINITIONS = {
     'sectiongroups': GROUP_FILTERS,
     'menuitems': MENU_ITEM_FILTERS,
     'tables': TABLE_FILTERS,
+    'orders': ORDER_FILTERS
 }
 
 
