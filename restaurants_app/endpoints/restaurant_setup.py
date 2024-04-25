@@ -27,7 +27,8 @@ from dinify_backend.configss.required_information import (
 from dinify_backend.configss.edit_information import EDIT_INFORMATION
 from dinify_backend.configss.messages import (
     OK_GET_RECORD_DETAIL, ERR_GENERAL,
-    ERR_UNSPECIFIED_RECORD_DETAILS, OK_ADDED_SECTION_GROUP
+    ERR_UNSPECIFIED_RECORD_DETAILS, 
+    OK_ADDED_SECTION_GROUP, ERR_ADDED_SECTION_GROUP
 
 )
 
@@ -67,6 +68,7 @@ class RestaurantSetupEndpoint(APIView):
         serializers = {
             'employees': SerializerPutRestaurantEmployee,
             'menusections': SerializerPutMenuSection,
+            'sectiongroups': SerializerPutSectionGroup,
             'menuitems': SerializerPutMenuItem,
             'tables': SerializerPutTable
         }
@@ -74,7 +76,7 @@ class RestaurantSetupEndpoint(APIView):
         required_information = {
             'employees': RI_RESTAURANT_EMPLOYEES,
             'menusections': REQUIRED_INFORMATION.get('menu_section'),
-            'groups': RI_SECTION_GROUP,
+            'sectiongroups': RI_SECTION_GROUP,
             'menuitems': REQUIRED_INFORMATION.get('menu_item'),
             'tables': REQUIRED_INFORMATION.get('table')
         }
@@ -82,7 +84,7 @@ class RestaurantSetupEndpoint(APIView):
         success_messages = {
             'employees': 'The employee has been added successfully.',
             'menusections': 'The menu section has been added successfully.',
-            'groups': OK_ADDED_SECTION_GROUP,
+            'sectiongroups': OK_ADDED_SECTION_GROUP,
             'menuitems': 'The menu item has been added successfully.',
             'tables': 'The table has been added successfully'
         }
@@ -90,6 +92,7 @@ class RestaurantSetupEndpoint(APIView):
         error_messages = {
             'employees': 'An error occurred while adding the employee.',
             'menusections': 'An error occurred while adding the menu section.',
+            'sectiongroups': ERR_ADDED_SECTION_GROUP,
             'menuitems': 'An error occurred while adding the menu item.',
             'tables': 'An error occurred while adding the table'
         }
