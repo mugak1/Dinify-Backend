@@ -42,6 +42,7 @@ class SerializerListOrderItem(ModelSerializer):
 
 class SerializerListGetOrder(ModelSerializer):
     items = SerializerMethodField()
+    table_details = SerializerMethodField()
 
     class Meta:
         model = Order
@@ -50,9 +51,15 @@ class SerializerListGetOrder(ModelSerializer):
             'total_cost', 'discounted_cost', 'savings',
             'actual_cost', 'prepayment_required',
             'payment_status', 'order_status',
-            'items'
+            'items', 'order_number', 'time_created', 'table_details'
         )
 
     def get_items(self, order):
         items = OrderItem.objects.filter(order=order)
         return SerializerListOrderItem(items, many=True).data
+
+    def get_table_details(self, order):
+        return {
+            'table_number': order.table.number,
+            'table_room_name': order.table.room_name
+        }
