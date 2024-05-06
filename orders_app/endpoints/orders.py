@@ -76,7 +76,7 @@ class OrdersEndpoint(APIView):
                 user=user
             )
 
-            return Response(response, status=400)
+            return Response(response, status=200)
 
     # def get(self, request, action):
 

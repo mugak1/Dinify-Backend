@@ -1,10 +1,11 @@
 from typing import Optional
 from decimal import Decimal
+from users_app.models import User
 from orders_app.models import Order
 from finance_app.models import DinifyAccount, DinifyTransaction
 from misc_app.controllers.clean_amount import clean_amount
 from dinify_backend.configss.string_definitions import (
-    TransactionStatus_Initiated, TransactionType_OrderPayment,
+    AccountType_Restaurant, TransactionStatus_Initiated, TransactionType_OrderPayment,
     TransactionPlatform_Web, PaymentMode_Cash, PaymentMode_Card,
     PaymentMode_MobileMoney, PaymentForm_Split, PaymentForm_Full
 )
@@ -21,13 +22,21 @@ def initiate_order_payment(
     transaction_platform=TransactionPlatform_Web,
     payment_form=PaymentForm_Full,
     msisdn: Optional[str] = None,
-    amount: Optional[int] = None
+    amount: Optional[int] = None,
+    user: Optional[User] = None
 ) -> dict:
     """
     Initiates the payment process for an order
     """
     # get the account to consider for the transaction
-    account = DinifyAccount.objects.get(restaurant=order.restaurant)
+    # if the restaurant doesnot have an account, then create one for it
+    try:
+        account = DinifyAccount.objects.get(restaurant=order.restaurant)
+    except DinifyAccount.DoesNotExist:
+        account = DinifyAccount.objects.create(
+            account_type=AccountType_Restaurant,
+            restaurant=order.restaurant
+        )
 
     transaction_amount = clean_amount(Decimal(order.actual_cost))
 
@@ -52,7 +61,8 @@ def initiate_order_payment(
         transaction_collected_amount=amount_collectable,
         msisdn=msisdn,
         payment_mode=payment_mode,
-        payment_form=payment_form
+        payment_form=payment_form,
+        created_by=user
     )
 
     # once created, send out a payment prompt
