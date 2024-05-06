@@ -9,6 +9,9 @@ PaymentMode_Cash = 'cash'
 PaymentMode_MobileMoney = 'momo'
 PaymentMode_Card = 'card'
 
+PaymentForm_Split = 'split'
+PaymentForm_Full = 'full'
+
 # account status
 AccountStatus_Active = 'active'
 AccountStatus_Inactive = 'inactive'

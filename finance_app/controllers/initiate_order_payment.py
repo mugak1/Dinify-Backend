@@ -6,7 +6,7 @@ from misc_app.controllers.clean_amount import clean_amount
 from dinify_backend.configss.string_definitions import (
     TransactionStatus_Initiated, TransactionType_OrderPayment,
     TransactionPlatform_Web, PaymentMode_Cash, PaymentMode_Card,
-    PaymentMode_MobileMoney
+    PaymentMode_MobileMoney, PaymentForm_Split, PaymentForm_Full
 )
 from dinify_backend.configss.messages import (
     OK_ORDER_PAYMENT_INITIATED,
@@ -19,7 +19,9 @@ def initiate_order_payment(
     order: Order,
     payment_mode: str,
     transaction_platform=TransactionPlatform_Web,
+    payment_form=PaymentForm_Full,
     msisdn: Optional[str] = None,
+    amount: Optional[int] = None
 ) -> dict:
     """
     Initiates the payment process for an order
@@ -27,12 +29,16 @@ def initiate_order_payment(
     # get the account to consider for the transaction
     account = DinifyAccount.objects.get(restaurant=order.restaurant)
 
-    amount = clean_amount(Decimal(order.actual_cost))
+    transaction_amount = clean_amount(Decimal(order.actual_cost))
+
+    if payment_form is PaymentForm_Split:
+        if amount is not None:
+            transaction_amount = clean_amount(Decimal(amount))
 
     # determine the amount to collect based on the aggregator charges
-    amount_collectable = amount
+    amount_collectable = transaction_amount
     if payment_mode is PaymentMode_MobileMoney:
-        amount_collectable = amount
+        amount_collectable = transaction_amount
 
     # make a transaction record for the payment
     order_payment = DinifyTransaction.objects.create(
@@ -42,10 +48,11 @@ def initiate_order_payment(
         transaction_type=TransactionType_OrderPayment,
         transaction_status=TransactionStatus_Initiated,
         transaction_platform=transaction_platform,
-        transaction_amount=amount,
+        transaction_amount=transaction_amount,
         transaction_collected_amount=amount_collectable,
         msisdn=msisdn,
-        payment_mode=payment_mode
+        payment_mode=payment_mode,
+        payment_form=payment_form
     )
 
     # once created, send out a payment prompt

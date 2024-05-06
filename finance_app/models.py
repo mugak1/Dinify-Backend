@@ -9,7 +9,8 @@ from dinify_backend.configss.string_definitions import (
     AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked,
     TransactionType_OrderPayment, TransactionType_OrderRefund, TransactionType_OrderCharge, TransactionType_Disbursement, TransactionType_Subscription,  # noqa
     TransactionStatus_Success, TransactionStatus_Failed, TransactionStatus_Pending, TransactionStatus_Initiated,  # noqa
-    TransactionPlatform_Web, ProcessingStatus_Pending
+    TransactionPlatform_Web, ProcessingStatus_Pending,
+    PaymentForm_Full
 )
 
 ACCOUNT_TYPES = [AccountType_Restaurant, AccountType_DinifyRevenue]
@@ -121,6 +122,7 @@ class DinifyTransaction(BaseModel):
     transaction_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     transaction_collected_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     msisdn = models.CharField(max_length=255, null=True, blank=True)
+    payment_form = models.CharField(max_length=20, default=PaymentForm_Full)
 
     # aggregator details
     aggregator = models.CharField(max_length=255, null=True, blank=True)

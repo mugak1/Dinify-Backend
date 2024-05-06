@@ -110,7 +110,6 @@ class TestOrderFunctions(TestCase):
                 ]
             }
             result = initiate_order(data)
-            print(result)
             self.assertEqual(result['status'], 200)
             self.assertEqual(len(result['data']['unavailable_items']), 0)
             self.assertEqual(len(result['data']['available_items']), 3)
