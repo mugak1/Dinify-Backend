@@ -12,7 +12,7 @@ from dinify_backend.configss.messages import (
     OK_UPDATED_ITEM_STATUS, ERR_ORDER_ITEM_NOT_AVAILABLE
 )
 from dinify_backend.configss.string_definitions import (
-    OrderItemStatus_Initiated,
+    OrderItemStatus_Initiated, OrderItemStatus_Unavailable,
     OrderStatus_Pending,
     OrderItemStatus_Preparing, OrderItemStatus_Served,
     OrderStatus_Cancelled,
@@ -90,20 +90,22 @@ def update_item_status(
         item.save()
 
         # check if to set the order status to served
-        if new_status == OrderItemStatus_Served:
+        if new_status in [OrderItemStatus_Preparing, OrderItemStatus_Served]:
             order = Order.objects.select_for_update().get(
                 id=item.order.pk
             )
             available_order_items = OrderItem.objects.filter(
                 order=order,
                 available=True
+            ).exclude(
+                status=OrderItemStatus_Unavailable
             )
 
-            served_items = available_order_items.filter(
+            updated_items = available_order_items.filter(
                 status=new_status
             )
 
-            if available_order_items.count() == served_items.count():
+            if available_order_items.count() == updated_items.count():
                 order.order_status = OrderStatus_Served
                 order.last_updated_by = user
                 order.time_last_updated = time_now

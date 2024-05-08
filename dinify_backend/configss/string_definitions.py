@@ -50,6 +50,7 @@ OrderStatus_Served = 'served'
 OrderStatus_Cancelled = 'cancelled'
 OrderItemStatus_Initiated = 'initiated'
 OrderItemStatus_Preparing = 'preparing'
+OrderItemStatus_Unavailable = 'unavailable'
 OrderItemStatus_Served = 'served'
 
 # processing status
