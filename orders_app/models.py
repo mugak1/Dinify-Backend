@@ -11,11 +11,6 @@ from dinify_backend.configss.string_definitions import (
 )
 
 
-# tusker lite
-# tusker lite
-# 
-
-
 # Create your models here.
 class Order(BaseModel):
     """
@@ -36,6 +31,9 @@ class Order(BaseModel):
     savings = models.FloatField()  # the total savings from the order i.e. discounted cost  - total cost  # noqa
     actual_cost = models.FloatField()  # the actual cost that is payable by the customer
     prepayment_required = models.BooleanField(default=False)
+
+    total_paid = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
+    balance_payable = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
 
     payment_status = models.CharField(max_length=50, default=PaymentStatus_Pending)
     order_status = models.CharField(max_length=50, default=OrderStatus_Initiated)

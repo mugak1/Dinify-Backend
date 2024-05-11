@@ -54,7 +54,8 @@ class SerializerListGetOrder(ModelSerializer):
             'actual_cost', 'prepayment_required',
             'payment_status', 'order_status',
             'items', 'order_number', 'time_created', 'table_details',
-            'order_remarks', 'count_items_served'
+            'order_remarks', 'count_items_served',
+            'total_paid', 'balance_payable', 'payment_status'
         )
 
     def get_items(self, order):
@@ -72,3 +73,23 @@ class SerializerListGetOrder(ModelSerializer):
             order=order,
             status=OrderItemStatus_Served
         ).count()
+
+
+class SerializerPublicOrderDetails(ModelSerializer):
+    items = SerializerMethodField()
+
+    class Meta:
+        model = Order
+        fields = (
+            'id', 'table',
+            'total_cost', 'discounted_cost', 'savings',
+            'actual_cost', 'prepayment_required',
+            'payment_status', 'order_status',
+            'items', 'order_number',
+            'order_remarks',
+            'total_paid', 'balance_payable', 'payment_status'
+        )
+
+    def get_items(self, order):
+        items = OrderItem.objects.filter(order=order)
+        return SerializerListOrderItem(items, many=True).data

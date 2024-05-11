@@ -5,7 +5,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from restaurants_app.models import Restaurant, Table
-from restaurants_app.controllers.handle_diner_journey import handle_table_scan, handle_show_menu
+from restaurants_app.controllers.handle_diner_journey import (
+    handle_table_scan, handle_show_menu,
+    handle_show_order_details
+)
+from orders_app.serializers import SerializerPublicOrderDetails
 
 
 class OrderJourneyEndpoint(APIView):
@@ -21,7 +25,10 @@ class OrderJourneyEndpoint(APIView):
             response = handle_show_menu(
                 restaurant_id=request.GET.get('restaurant')
             )
-        
+        elif stage == 'order-details':
+            response = handle_show_order_details(
+                order_id=request.GET.get('order')
+            )        
         else:
             response = {
                 'status': 400,
