@@ -75,11 +75,12 @@ class OrderItem(BaseModel):
 
 @receiver(pre_save, sender=Order)
 def create_order_number(sender, instance, **kwargs):
-    with transaction.atomic():
-        # get the count of today's order for the restaurant
-        date_today = datetime.now().date()
-        count = Order.objects.select_for_update().filter(
-            restaurant=instance.restaurant,
-            time_created__date=date_today
-        ).count()
-        instance.order_number = count+1
+    if instance.order_number is None:
+        with transaction.atomic():
+            # get the count of today's order for the restaurant
+            date_today = datetime.now().date()
+            count = Order.objects.select_for_update().filter(
+                restaurant=instance.restaurant,
+                time_created__date=date_today
+            ).count()
+            instance.order_number = count+1
