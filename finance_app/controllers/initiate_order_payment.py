@@ -23,7 +23,9 @@ def initiate_order_payment(
     payment_form=PaymentForm_Full,
     msisdn: Optional[str] = None,
     amount: Optional[int] = None,
-    user: Optional[User] = None
+    user: Optional[User] = None,
+    manual_payment: Optional[bool] = False,
+    manual_payment_details: Optional[dict] = None
 ) -> dict:
     """
     Initiates the payment process for an order
@@ -62,11 +64,13 @@ def initiate_order_payment(
         msisdn=msisdn,
         payment_mode=payment_mode,
         payment_form=payment_form,
-        created_by=user
+        created_by=user,
+        manual_payment=manual_payment,
+        manual_payment_details=manual_payment_details
     )
 
     # once created, send out a payment prompt
-    if payment_mode == PaymentMode_MobileMoney:
+    if payment_mode == PaymentMode_MobileMoney and not manual_payment:
         # send a mobile money prompt
         flutterwave_response = Flutterwave(
             payment_channel=payment_mode,
@@ -96,10 +100,12 @@ def initiate_order_payment(
                     "redirect_url": flutterwave_response.get('meta').get('authorization').get('redirect')  # noqa
                 }
             }
-
+    message = OK_ORDER_PAYMENT_INITIATED
+    if manual_payment:
+        message = 'The transaction will be reflected shortly.'
     return {
         'status': 200,
-        'message': OK_ORDER_PAYMENT_INITIATED,
+        'message': message,
         'data': {
             "transaction_id": str(order_payment.id)
         }

@@ -135,6 +135,7 @@ class DinifyTransaction(BaseModel):
 
     # for manual payments
     manual_payment = models.BooleanField(default=False)
+    manual_payment_details = models.JSONField(null=True)
     gross_amount_paid = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     customer_balance = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
 
