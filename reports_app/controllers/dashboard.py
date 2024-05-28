@@ -1,11 +1,27 @@
-from django.db.models import Count, Sum, Avg, F
+from django.db.models import Count, Sum, Avg, F  # noqa
 from orders_app.models import Order, OrderItem
 from dinify_backend.configss.string_definitions import (
     PaymentStatus_Paid, OrderStatus_Cancelled,
     OrderStatus_Refunded
 )
 
-def generate_restaurant_dashboard_details(restaurant_id: str):
+
+# Total number of sales
+# Paid orders (number and percentage)
+# Cancelled orders (number and percentage)
+# Refunded orders (number and percentage)
+# Gross sales amount
+# New diners
+# Repeat diners
+# Most ordered item
+# Least ordered item
+# Most liked item i.e. based on the ratings
+# Least liked item i.e. based on the ratings
+# Most active diner
+# Peak hour
+
+
+def generate_restaurant_dashboard_details(restaurant_id: str) -> dict:
     orders = Order.objects.filter(restaurant=restaurant_id)
     order_items = OrderItem.objects.filter(
         order__restaurant=restaurant_id
@@ -30,16 +46,16 @@ def generate_restaurant_dashboard_details(restaurant_id: str):
     sales_amount = paid_orders.aggregate(total_cost=Sum('total_cost'))['total_cost']
 
     new_diners = orders.values('customer').distinct().count()
-    repeat_diners = orders.values('customer').annotate(order_count=Count('id')).filter(order_count__gt=1).count()
-    most_active_diner = orders.values('customer__first_name').annotate(order_count=Count('id')).order_by('-order_count').first()
+    repeat_diners = orders.values('customer').annotate(order_count=Count('id')).filter(order_count__gt=1).count()  # noqa
+    most_active_diner = orders.values('customer__first_name').annotate(order_count=Count('id')).order_by('-order_count').first()  # noqa
 
-    most_ordered_item = order_items.values('item__name').annotate(total_quantity=Sum('quantity')).order_by('-total_quantity').first()
-    least_ordered_item = order_items.values('item__name').annotate(total_quantity=Sum('quantity')).order_by('total_quantity').first()
+    most_ordered_item = order_items.values('item__name').annotate(total_quantity=Sum('quantity')).order_by('-total_quantity').first()  # noqa
+    least_ordered_item = order_items.values('item__name').annotate(total_quantity=Sum('quantity')).order_by('total_quantity').first()  # noqa
 
     most_liked_item = None
     least_liked_item = None
 
-    peak_hour = orders.annotate(hour=F('time_created__hour')).values('hour').annotate(order_count=Count('id')).order_by('-order_count').first()
+    peak_hour = orders.annotate(hour=F('time_created__hour')).values('hour').annotate(order_count=Count('id')).order_by('-order_count').first()  # noqa
 
     stats = {
         "num_sales": num_sales,
@@ -71,17 +87,3 @@ def generate_restaurant_dashboard_details(restaurant_id: str):
         'message': 'Successfully retrieved the restaurant dashboard',
         'data': stats
     }
-
-# Total number of sales
-# Paid orders (number and percentage)
-# Cancelled orders (number and percentage)
-# Refunded orders (number and percentage)
-# Gross sales amount
-# New diners
-# Repeat diners
-# Most ordered item
-# Least ordered item
-# Most liked item i.e. based on the ratings
-# Least liked item i.e. based on the ratings
-# Most active diner
-# Peak hour

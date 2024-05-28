@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from reports_app.controllers.dashboard import generate_restaurant_dashboard_details
+from reports_app.controllers.sales import generate_restaurant_sales_summary
 
 
 class RestaurantReportsEndpoint(APIView):
@@ -16,6 +17,10 @@ class RestaurantReportsEndpoint(APIView):
     def get(self, request, report_name):
         if report_name == 'dashboard':
             response = generate_restaurant_dashboard_details(
+                restaurant_id=request.GET.get('restaurant', None)
+            )
+        if report_name == 'sales-summary':
+            response = generate_restaurant_sales_summary(
                 restaurant_id=request.GET.get('restaurant', None)
             )
         return Response(response, status=200)
