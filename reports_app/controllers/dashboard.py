@@ -1,3 +1,4 @@
+from misc_app.controllers.clean_dates import clean_dates
 from django.db.models import Count, Sum, Avg, F  # noqa
 from orders_app.models import Order, OrderItem
 from dinify_backend.configss.string_definitions import (
@@ -21,10 +22,26 @@ from dinify_backend.configss.string_definitions import (
 # Peak hour
 
 
-def generate_restaurant_dashboard_details(restaurant_id: str) -> dict:
-    orders = Order.objects.filter(restaurant=restaurant_id)
+def generate_restaurant_dashboard_details(
+    restaurant_id: str,
+    date_from: str,
+    date_to: str
+) -> dict:
+    dates = clean_dates(date_from=date_from, date_to=date_to)
+    if dates.get('status') != 200:
+        return dates
+    date_from = dates.get('date_from')
+    date_to = dates.get('date_to')
+
+    orders = Order.objects.filter(
+        restaurant=restaurant_id,
+        time_created__gte=date_from,
+        time_created__lte=date_to
+    )
     order_items = OrderItem.objects.filter(
-        order__restaurant=restaurant_id
+        order__restaurant=restaurant_id,
+        order__time_created__gte=date_from,
+        order__time_created__lte=date_to
     )
 
     num_sales = orders.count()

@@ -1,5 +1,5 @@
 from django.urls import path
-from reports_app.endpoints.restuaurant_reports import RestaurantReportsEndpoint
+from reports_app.endpoints.restaurant_reports import RestaurantReportsEndpoint
 
 
 urlpatterns = [
