@@ -2,7 +2,8 @@ from datetime import timedelta
 from misc_app.controllers.clean_dates import clean_dates
 from misc_app.controllers.report_support_functions import (
     make_graph_series_data,
-    make_month_range
+    make_month_range,
+    make_quarter_range
 )
 from django.db.models import Count, Sum, Avg, Max, Min
 from orders_app.models import Order
@@ -166,6 +167,18 @@ def generate_restaurant_sales_trends(
             date_to=date_to,
             trend_result=trend_result
         )
+    if trend_category == 'quarterly':
+        if (date_to - date_from).days > 731:
+            return {
+                'status': 400,
+                'message': 'Date range should not be greater than 2 years.'
+            }
+        return get_quarterly_trends(
+            restaurant_id=restaurant_id,
+            date_from=date_from,
+            date_to=date_to,
+            trend_result=trend_result
+        )
 
 
 def get_daily_trends(
@@ -239,19 +252,14 @@ def get_monthly_trends(
     date_to: str,
     trend_result: str
 ) -> dict:
-    x_categories = []
-    days = []
     trend_table = []
     trend_graph = []
-
-    # do not allow more than 2 years
-
     month_range = make_month_range(
         start=date_from,
         end=date_to
     )
 
-    def get_tabular_trend_data(days: list):
+    def get_tabular_trend_data():
         for month in month_range:
             summary = generate_restaurant_sales_summary(
                 restaurant_id=restaurant_id,
@@ -263,7 +271,7 @@ def get_monthly_trends(
             summary['month'] = f"{name}-{year}"
             trend_table.append(summary)
 
-    def get_graph_trend_data(days: list):
+    def get_graph_trend_data():
         for month in month_range:
             summary = generate_restaurant_sales_summary(
                 restaurant_id=restaurant_id,
@@ -282,14 +290,14 @@ def get_monthly_trends(
             trend_graph.append(summary)
 
     if trend_result == 'table':
-        get_tabular_trend_data(days)
+        get_tabular_trend_data()
         return {
             'status': 200,
             'message': 'Successfully retrieved the monthly trend data in tabular format.',
             'data': trend_table
         }
     if trend_result == 'graph':
-        get_graph_trend_data(days)
+        get_graph_trend_data()
         data = make_graph_series_data(
             x_title='Months',
             y_values=trend_graph,
@@ -298,5 +306,67 @@ def get_monthly_trends(
         return {
             'status': 200,
             'message': 'Successfully retrieved the monthly trend data in graph series.',
+            'data': data
+        }
+
+
+def get_quarterly_trends(
+    restaurant_id: str,
+    date_from: str,
+    date_to: str,
+    trend_result: str
+) -> dict:
+    trend_table = []
+    trend_graph = []
+    quarter_range = make_quarter_range(
+        start=date_from.year,
+        end=date_to.year
+    )
+
+    def get_tabular_trend_data():
+        for quarter in quarter_range:
+            summary = generate_restaurant_sales_summary(
+                restaurant_id=restaurant_id,
+                date_from=quarter['start'],
+                date_to=quarter['end']
+            ).get('data')
+            summary['quarter'] = quarter['quarter']
+            trend_table.append(summary)
+
+    def get_graph_trend_data():
+        for quarter in quarter_range:
+            summary = generate_restaurant_sales_summary(
+                restaurant_id=restaurant_id,
+                date_from=quarter['start'],
+                date_to=quarter['end']
+            ).get('data')
+            summary['quarter'] = quarter['quarter']
+
+            for key, value in summary.get('sales_by_payment_channel').items():
+                summary[f'NoSales_{key.title()}'] = value
+            for key, value in summary.get('sales_amount_by_payment_channel').items():
+                summary[f'SalesAmount_{key.title()}'] = value
+            del summary['sales_by_payment_channel']
+            del summary['sales_amount_by_payment_channel']
+            trend_graph.append(summary)
+
+    if trend_result == 'table':
+        get_tabular_trend_data()
+        return {
+            'status': 200,
+            'message': 'Successfully retrieved the quarterly trend data in tabular format.',
+            'data': trend_table
+        }
+
+    if trend_result == 'graph':
+        get_graph_trend_data()
+        data = make_graph_series_data(
+            x_title='Quarters',
+            y_values=trend_graph,
+            x_detail='quarter'
+        )
+        return {
+            'status': 200,
+            'message': 'Successfully retrieved the quarterly trend data in graph series.',
             'data': data
         }

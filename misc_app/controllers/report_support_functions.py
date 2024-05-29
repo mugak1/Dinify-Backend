@@ -1,6 +1,6 @@
 # functions that support the generation of reports
 import calendar
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 
 def make_graph_series_data(
@@ -34,10 +34,7 @@ def make_graph_series_data(
     }
 
 
-def make_month_range(
-    start: date,
-    end: date
-):
+def make_month_range(start: date, end: date):
     """
     - Generates the month range to consider
     """
@@ -101,5 +98,49 @@ def make_month_range(
         current_track_month = current_track_month + timedelta(
             days=1
         )
-
     return months
+
+
+def make_quarter_range(start: int, end: int):
+    """
+    - Generates the quarters to consider
+    """
+    # list quarters in the format (
+    # start date,
+    # start month,
+    # end date,
+    # end month,
+    # quarter number
+    # )
+    quarters = [
+        (1, 1, 31, 3, "Q1"),
+        (1, 4, 30, 6, "Q2"),
+        (1, 7, 30, 9, "Q3"),
+        (1, 10, 31, 12, "Q4")
+    ]
+    quarter_dates = []
+
+    present_year = start
+    today_date = datetime.now().date()
+    while present_year <= end:
+        for quarter in quarters:
+            q_start_date = date(
+                present_year,
+                quarter[1],
+                quarter[0]
+            )
+            if q_start_date < today_date:
+                quarter_dates.append(
+                    {
+                        "start": q_start_date,
+                        "end": date(
+                            present_year,
+                            quarter[3],
+                            quarter[2]
+                        ),
+                        "quarter": f"{quarter[4]}-{str(present_year)}"
+                    }
+                )
+        present_year += 1
+
+    return quarter_dates
