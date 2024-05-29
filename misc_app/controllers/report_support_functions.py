@@ -34,7 +34,7 @@ def make_graph_series_data(
     }
 
 
-def make_month_range(start: date, end: date):
+def make_month_range(start: date, end: date) -> dict:
     """
     - Generates the month range to consider
     """
@@ -101,7 +101,7 @@ def make_month_range(start: date, end: date):
     return months
 
 
-def make_quarter_range(start: int, end: int):
+def make_quarter_range(start: int, end: int) -> dict:
     """
     - Generates the quarters to consider
     """
@@ -144,3 +144,23 @@ def make_quarter_range(start: int, end: int):
         present_year += 1
 
     return quarter_dates
+
+
+def make_annual_range(start: int, end: int) -> dict:
+    """
+    - Generates the date ranges to consider
+    """
+    annual_dates = []
+    present_year = start
+
+    while present_year <= end:
+        annual_dates.append(
+            {
+                "start": date(present_year, 1, 1),
+                "end": date(present_year, 12, 31),
+                "year": f"{str(present_year)}"
+            }
+        )
+        present_year += 1
+
+    return annual_dates

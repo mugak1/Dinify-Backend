@@ -3,7 +3,8 @@ from misc_app.controllers.clean_dates import clean_dates
 from misc_app.controllers.report_support_functions import (
     make_graph_series_data,
     make_month_range,
-    make_quarter_range
+    make_quarter_range,
+    make_annual_range
 )
 from django.db.models import Count, Sum, Avg, Max, Min
 from orders_app.models import Order
@@ -174,6 +175,20 @@ def generate_restaurant_sales_trends(
                 'message': 'Date range should not be greater than 2 years.'
             }
         return get_quarterly_trends(
+            restaurant_id=restaurant_id,
+            date_from=date_from,
+            date_to=date_to,
+            trend_result=trend_result
+        )
+
+    if trend_category == 'annual':
+        print((date_to - date_from).days)
+        if (date_to - date_from).days > 1850:
+            return {
+                'status': 400,
+                'message': 'Date range should not be greater than 5 years.'
+            }
+        return get_annual_trends(
             restaurant_id=restaurant_id,
             date_from=date_from,
             date_to=date_to,
@@ -368,5 +383,67 @@ def get_quarterly_trends(
         return {
             'status': 200,
             'message': 'Successfully retrieved the quarterly trend data in graph series.',
+            'data': data
+        }
+
+
+def get_annual_trends(
+    restaurant_id: str,
+    date_from: str,
+    date_to: str,
+    trend_result: str
+) -> dict:
+    trend_table = []
+    trend_graph = []
+    annual_range = make_annual_range(
+        start=date_from.year,
+        end=date_to.year
+    )
+
+    def get_tabular_trend_data():
+        for year in annual_range:
+            summary = generate_restaurant_sales_summary(
+                restaurant_id=restaurant_id,
+                date_from=year['start'],
+                date_to=year['end']
+            ).get('data')
+            summary['year'] = year['year']
+            trend_table.append(summary)
+
+    def get_graph_trend_data():
+        for year in annual_range:
+            summary = generate_restaurant_sales_summary(
+                restaurant_id=restaurant_id,
+                date_from=year['start'],
+                date_to=year['end']
+            ).get('data')
+            summary['year'] = year['year']
+
+            for key, value in summary.get('sales_by_payment_channel').items():
+                summary[f'NoSales_{key.title()}'] = value
+            for key, value in summary.get('sales_amount_by_payment_channel').items():
+                summary[f'SalesAmount_{key.title()}'] = value
+            del summary['sales_by_payment_channel']
+            del summary['sales_amount_by_payment_channel']
+            trend_graph.append(summary)
+
+    if trend_result == 'table':
+        get_tabular_trend_data()
+        return {
+            'status': 200,
+            'message': 'Successfully retrieved the annual trend data in tabular format.',
+            'data': trend_table
+        }
+
+    if trend_result == 'graph':
+        get_graph_trend_data()
+        data = make_graph_series_data(
+            x_title='Years',
+            y_values=trend_graph,
+            x_detail='year'
+        )
+        return {
+            'status': 200,
+            'message': 'Successfully retrieved the annual trend data in graph series.',
             'data': data
         }
