@@ -1,5 +1,9 @@
 from datetime import timedelta
 from misc_app.controllers.clean_dates import clean_dates
+from misc_app.controllers.report_support_functions import (
+    make_graph_series_data,
+    make_month_range
+)
 from django.db.models import Count, Sum, Avg, Max, Min
 from orders_app.models import Order
 from finance_app.models import DinifyTransaction
@@ -142,7 +146,7 @@ def generate_restaurant_sales_trends(
         if (date_to - date_from).days > 31:
             return {
                 'status': 400,
-                'message': 'Date range cannot be greater than 31 days.'
+                'message': 'Date range should not be greater than 31 days.'
             }
         return get_daily_trends(
             restaurant_id=restaurant_id,
@@ -150,33 +154,18 @@ def generate_restaurant_sales_trends(
             date_to=date_to,
             trend_result=trend_result
         )
-
-
-def make_graph_series_data(x_title: str, y_values: list, x_detail: str) -> dict:
-    graph_series = {}
-    x_values = []
-    for item in y_values:
-        for key, value in item.items():
-            if key not in graph_series and key != x_detail:
-                graph_series[key] = []
-            if key != x_detail:
-                graph_series[key].append(value)
-            else:
-                x_values.append(value)
-    series = [
-        {
-            "name": key.replace('_', ' ').title(),
-            "data": values
-        } for key, values in graph_series.items()
-    ]
-
-    return {
-        'series': series,
-        'xaxis': {
-            'categories': x_values,
-            'title': {'text': x_title}
-        }
-    }
+    if trend_category == 'monthly':
+        if (date_to - date_from).days > 731:
+            return {
+                'status': 400,
+                'message': 'Date range should not be greater than 2 years.'
+            }
+        return get_monthly_trends(
+            restaurant_id=restaurant_id,
+            date_from=date_from,
+            date_to=date_to,
+            trend_result=trend_result
+        )
 
 
 def get_daily_trends(
@@ -197,7 +186,7 @@ def get_daily_trends(
         x_categories.append(str(day0))
         day0 += timedelta(days=1)
 
-    def get_daily_tabular_trend_data(days: list):
+    def get_tabular_trend_data(days: list):
         for day in days:
             summary = generate_restaurant_sales_summary(
                 restaurant_id=restaurant_id,
@@ -207,7 +196,7 @@ def get_daily_trends(
             summary['date'] = str(day)
             trend_table.append(summary)
 
-    def get_daily_graph_trend_data(days: list):
+    def get_graph_trend_data(days: list):
         for day in days:
             summary = generate_restaurant_sales_summary(
                 restaurant_id=restaurant_id,
@@ -224,14 +213,14 @@ def get_daily_trends(
             trend_graph.append(summary)
 
     if trend_result == 'table':
-        get_daily_tabular_trend_data(days)
+        get_tabular_trend_data(days)
         return {
             'status': 200,
-            'message': 'Successfully retrieved the trend data in tabular format.',
+            'message': 'Successfully retrieved the daily trend data in tabular format.',
             'data': trend_table
         }
     if trend_result == 'graph':
-        get_daily_graph_trend_data(days)
+        get_graph_trend_data(days)
         data = make_graph_series_data(
             x_title='Days',
             y_values=trend_graph,
@@ -239,6 +228,75 @@ def get_daily_trends(
         )
         return {
             'status': 200,
-            'message': 'Successfully retrieved the trend data in graph series.',
+            'message': 'Successfully retrieved the daily trend data in graph series.',
+            'data': data
+        }
+
+
+def get_monthly_trends(
+    restaurant_id: str,
+    date_from: str,
+    date_to: str,
+    trend_result: str
+) -> dict:
+    x_categories = []
+    days = []
+    trend_table = []
+    trend_graph = []
+
+    # do not allow more than 2 years
+
+    month_range = make_month_range(
+        start=date_from,
+        end=date_to
+    )
+
+    def get_tabular_trend_data(days: list):
+        for month in month_range:
+            summary = generate_restaurant_sales_summary(
+                restaurant_id=restaurant_id,
+                date_from=month['sd'],
+                date_to=month['ed']
+            ).get('data')
+            name = month['month_name'][:3]
+            year = str(month['year'])[2:]
+            summary['month'] = f"{name}-{year}"
+            trend_table.append(summary)
+
+    def get_graph_trend_data(days: list):
+        for month in month_range:
+            summary = generate_restaurant_sales_summary(
+                restaurant_id=restaurant_id,
+                date_from=month['sd'],
+                date_to=month['ed']
+            ).get('data')
+            name = month['month_name'][:3]
+            year = str(month['year'])[2:]
+            summary['month'] = f"{name}-{year}"
+            for key, value in summary.get('sales_by_payment_channel').items():
+                summary[f'NoSales_{key.title()}'] = value
+            for key, value in summary.get('sales_amount_by_payment_channel').items():
+                summary[f'SalesAmount_{key.title()}'] = value
+            del summary['sales_by_payment_channel']
+            del summary['sales_amount_by_payment_channel']
+            trend_graph.append(summary)
+
+    if trend_result == 'table':
+        get_tabular_trend_data(days)
+        return {
+            'status': 200,
+            'message': 'Successfully retrieved the monthly trend data in tabular format.',
+            'data': trend_table
+        }
+    if trend_result == 'graph':
+        get_graph_trend_data(days)
+        data = make_graph_series_data(
+            x_title='Months',
+            y_values=trend_graph,
+            x_detail='month'
+        )
+        return {
+            'status': 200,
+            'message': 'Successfully retrieved the monthly trend data in graph series.',
             'data': data
         }
