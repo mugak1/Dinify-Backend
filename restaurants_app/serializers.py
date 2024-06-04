@@ -96,6 +96,7 @@ class SerializerPublicGetMenuSection(ModelSerializer):
 
     def get_item_count(self, menu_section):
         return MenuItem.objects.filter(section=menu_section).count()
+
     def get_has_groups(self, menu_section):
         return SectionGroup.objects.filter(section=menu_section).count() > 0
 
