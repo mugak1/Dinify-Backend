@@ -85,16 +85,19 @@ class SerializerPublicGetMenuSection(ModelSerializer):
     serializer for getting the menu section
     """
     item_count = SerializerMethodField()
+    has_groups = SerializerMethodField()
 
     class Meta:
         model = MenuSection
         fields = (
             'id', 'name', 'description', 'section_banner_image',
-            'available', 'item_count'
+            'available', 'item_count', 'has_groups'
         )
 
     def get_item_count(self, menu_section):
         return MenuItem.objects.filter(section=menu_section).count()
+    def get_has_groups(self, menu_section):
+        return SectionGroup.objects.filter(section=menu_section).count() > 0
 
 
 class SerializerPutSectionGroup(ModelSerializer):
