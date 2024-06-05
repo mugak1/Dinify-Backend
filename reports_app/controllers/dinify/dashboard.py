@@ -7,7 +7,7 @@ from dinify_backend.configss.string_definitions import TransactionType_Subscript
 from misc_app.controllers.report_support_functions import make_graph_series_data
 
 
-def generate_dinify_dashboard():
+def generate_dinify_dashboard() -> dict:
     restaurants = Restaurant.objects.all()
     orders = Order.objects.all()
     dinify_revenue = DinifyTransaction.objects.filter(
@@ -44,7 +44,7 @@ def generate_dinify_dashboard():
     }
 
 
-def generate_dinify_dashboard_trend():
+def generate_dinify_dashboard_trend() -> dict:
     # get the last 7 days
     date_today = datetime.now().date()
     date_from = date_today - timedelta(days=7)
