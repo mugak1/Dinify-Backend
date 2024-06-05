@@ -3,8 +3,10 @@ from restaurants_app.models import Restaurant
 from finance_app.models import DinifyTransaction
 from orders_app.models import Order
 from django.db.models import Sum
-from dinify_backend.configss.string_definitions import TransactionType_Subscription, TransactionType_OrderCharge
-from misc_app.controllers.report_support_functions import make_graph_series_data
+from dinify_backend.configss.string_definitions import (
+    TransactionType_Subscription,
+    TransactionType_OrderCharge
+)
 
 
 def generate_dinify_dashboard() -> dict:

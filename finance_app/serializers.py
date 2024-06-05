@@ -39,3 +39,17 @@ class SerializerGetRestaurantTransactionListing(ModelSerializer):
         if record.transaction_type not in [TransactionType_OrderPayment]:
             return record.transaction_amount
         return 0
+
+
+class SerializerGetDinifyTransactionListing(ModelSerializer):
+
+    class Meta:
+        model = DinifyTransaction
+        fields = (
+            'id', 'time_created', 'time_last_updated', 'transaction_type',
+            'account', 'transaction_amount', 'transaction_status',
+            'transaction_status', 'transaction_platform',
+            'manual_payment', 'manual_payment_details',
+            'payment_mode', 'aggregator', 'aggregator_reference',
+            'account_balances'
+        )

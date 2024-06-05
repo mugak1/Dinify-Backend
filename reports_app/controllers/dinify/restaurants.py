@@ -1,16 +1,3 @@
-# This report shows the list of restaurants using Dinify. The report listing shows:
-# Restaurant name
-# Cumulative number of orders
-# Cumulative Diners
-# Cumulative revenue earned from the restaurant
-# Contact Person
-# Cumulative order amount
-# Current Restaurant Actual Balance
-# Current Restaurant Available Balance
-
-# Clicking on the restaurant should open the detailed reports specific to that restaurant, similar to the Sales and Transactions reports.
-
-# This report allows for filters based on attributes such as the name and registration date.
 from typing import Optional
 from restaurants_app.models import Restaurant
 from finance_app.models import DinifyAccount
