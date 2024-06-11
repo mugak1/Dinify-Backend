@@ -39,6 +39,9 @@ class Order(BaseModel):
     order_status = models.CharField(max_length=50, default=OrderStatus_Initiated)
     last_updated_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='last_updated_by')  # noqa
 
+    rating = models.IntegerField(null=True, blank=True)
+    review = models.TextField(null=True, blank=True)
+
     class Meta:
         db_table = 'orders'
         ordering = ['-time_created']
@@ -64,6 +67,9 @@ class OrderItem(BaseModel):
     savings = models.FloatField()
     cost_of_options = models.FloatField(default=0.0)
     actual_cost = models.FloatField()
+
+    rating = models.IntegerField(null=True, blank=True)
+    review = models.TextField(null=True, blank=True)
 
     status = models.CharField(max_length=50, default=OrderItemStatus_Initiated)
     last_updated_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='order_item_last_updated_by')  # noqa
