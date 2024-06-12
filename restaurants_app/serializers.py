@@ -2,7 +2,7 @@
 the serializers for the restaurant app
 """
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
-from orders_app.models import Order
+from orders_app.models import Order, OrderItem
 from restaurants_app.models import (
     Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table,
     SectionGroup
@@ -10,6 +10,7 @@ from restaurants_app.models import (
 from dinify_backend.configss.string_definitions import (
     OrderItemStatus_Initiated, OrderItemStatus_Preparing, OrderStatus_Pending
 )
+
 
 
 class SerializerPutRestaurant(ModelSerializer):
@@ -261,3 +262,21 @@ class SerializerGetFullMenu(ModelSerializer):
 
     def get_item_count(self, section):
         return MenuItem.objects.filter(section=section).count()
+
+
+class SerializerAdminGetOrderReview(ModelSerializer):
+    class Meta:
+        model = Order
+        fields = (
+            'id', 'rating', 'review',
+            'block_review'
+        )
+
+
+class SerializerAdminGetOrderItemReview(ModelSerializer):
+    class Meta:
+        model = OrderItem
+        fields = (
+            'id', 'order', 'rating', 'review',
+            'block_review'
+        )

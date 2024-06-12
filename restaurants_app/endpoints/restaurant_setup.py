@@ -16,7 +16,8 @@ from restaurants_app.serializers import (
     SerializerPutMenuItem, SerializerPublicGetMenuItem,
     SerializerPutTable, SerializerPublicGetTable,
 
-    SerializerPutSectionGroup, SerializerPublicGetSectionGroup
+    SerializerPutSectionGroup, SerializerPublicGetSectionGroup,
+    SerializerAdminGetOrderReview, SerializerAdminGetOrderItemReview
 )
 from orders_app.serializers import SerializerListGetOrder
 from restaurants_app.models import MenuSection, SectionGroup
@@ -177,7 +178,9 @@ class RestaurantSetupEndpoint(APIView):
             'sectiongroups': SerializerPublicGetSectionGroup,
             'menuitems': SerializerPublicGetMenuItem,
             'tables': SerializerPublicGetTable,
-            'orders': SerializerListGetOrder
+            'orders': SerializerListGetOrder,
+            'orderreviews': SerializerAdminGetOrderReview,
+            'orderitemreviews': SerializerAdminGetOrderItemReview
         }
 
         success_messages = {
@@ -187,7 +190,9 @@ class RestaurantSetupEndpoint(APIView):
             'sectiongroups': OK_RETRIEVED_SECTION_GROUP,
             'menuitems': 'Successfully retrieved the menu items',
             'tables': 'Successfully retrieved the tables',
-            'orders': 'Successfully retrived the orders'
+            'orders': 'Successfully retrived the orders',
+            'orderreviews': 'Successfully retrieved the order reviews',
+            'orderitemreviews': 'Successfully retrieved the order item reviews'
         }
 
         error_messages = {
@@ -197,7 +202,9 @@ class RestaurantSetupEndpoint(APIView):
             'sectiongroups': ERR_RETRIEVED_SECTION_GROUP,
             'menuitems': 'Error while retrieving menu items',
             'tables': 'Error while retrieving the tables',
-            'orders': 'Error while retrieving the orders'
+            'orders': 'Error while retrieving the orders',
+            'orderreviews': 'Error while retrieving the order reviews',
+            'orderitemreviews': 'Error while retrieving the order item reviews'
         }
 
         serializer = serializers.get(config_detail)

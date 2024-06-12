@@ -50,6 +50,20 @@ ORDER_FILTERS = {
     'payment_status': 'payment_status'
 }
 
+ORDERREVIEWS_FILTERS = {
+    'restaurant': 'restaurant',
+    'from': 'time_created__gte',
+    'to': 'time_created__lte',
+}
+
+ORDERITEMREVIEWS_FILTERS = {
+    'restaurant': 'order__restaurant',
+    'order': 'order',
+    'item': 'item',
+    'from': 'time_created__gte',
+    'to': 'time_created__lte',
+}
+
 FILTER_DEFINITIONS = {
     'restaurants': RESTAURANT_FILTERS,
     'employees': EMPLOYEE_FILTERS,
@@ -57,7 +71,9 @@ FILTER_DEFINITIONS = {
     'sectiongroups': GROUP_FILTERS,
     'menuitems': MENU_ITEM_FILTERS,
     'tables': TABLE_FILTERS,
-    'orders': ORDER_FILTERS
+    'orders': ORDER_FILTERS,
+    'orderreviews': ORDERREVIEWS_FILTERS,
+    'orderitemreviews': ORDERITEMREVIEWS_FILTERS,
 }
 
 
@@ -78,5 +94,7 @@ def define_filter_params(get_params, model) -> dict:
             filter_params[
                 filter_considerations[key.lower()]
             ] = value
-
+    # for reviews, exclude where the details are not available
+    if model in ['orderreviews', 'orderitemreviews']:
+        filter_params['review__isnull'] = False
     return filter_params
