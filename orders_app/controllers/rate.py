@@ -1,5 +1,6 @@
 from typing import Optional
 from orders_app.models import Order, OrderItem
+from users_app.models import User
 
 
 def rate_and_review(
@@ -35,4 +36,35 @@ def rate_and_review(
         return {
             'status': 200,
             'message': 'Your review has been submitted successfully.'
+        }
+
+
+def block_review(
+    user: User,
+    order: Optional[str] = None,
+    order_item: Optional[str] = None,
+    block_reason: Optional[str] = None,
+) -> dict:
+    if order is not None:
+        order = Order.objects.get(id=order)
+        order.block_review = True
+        if block_reason is not None:
+            order.block_review_reason = block_reason
+        order.review_blocked_by = user
+        order.save()
+        return {
+            'status': 200,
+            'message': 'Reviewing has been blocked for this order.'
+        }
+    if order_item is not None:
+        order_item = OrderItem.objects.get(id=order_item)
+        order_item.block_review = True
+        if block_reason is not None:
+            order_item.block_review_reason = block_reason
+        order_item.review_blocked_by = user
+
+        order_item.save()
+        return {
+            'status': 200,
+            'message': 'Reviewing has been blocked for this item.'
         }

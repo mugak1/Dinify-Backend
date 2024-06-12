@@ -42,6 +42,8 @@ class Order(BaseModel):
     rating = models.IntegerField(null=True, blank=True)
     review = models.TextField(null=True, blank=True)
     block_review = models.BooleanField(default=False)
+    block_review_reason = models.TextField(null=True, blank=True)
+    review_blocked_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='order_review_blocked_by')  # noqa
 
     class Meta:
         db_table = 'orders'
@@ -72,6 +74,8 @@ class OrderItem(BaseModel):
     rating = models.IntegerField(null=True, blank=True)
     review = models.TextField(null=True, blank=True)
     block_review = models.BooleanField(default=False)
+    block_review_reason = models.TextField(null=True, blank=True)
+    review_blocked_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='order_item_review_blocked_by')  # noqa
 
     status = models.CharField(max_length=50, default=OrderItemStatus_Initiated)
     last_updated_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='order_item_last_updated_by')  # noqa
