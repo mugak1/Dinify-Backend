@@ -58,7 +58,7 @@ class Command(BaseCommand):
             username=username,
             country=restaurant_country
         )
-        user.set_password(random.randint(100000, 999999))
+        user.set_password(str(random.randint(100000, 999999)))
         user.save()
         return user
 
@@ -93,6 +93,6 @@ class Command(BaseCommand):
                 )
                 if customer is not None:
                     order.customer = customer
-                    # order.customer_match_attempted = True
-                    # order.save()
+                order.customer_match_attempted = True
+                order.save()
             print(orders.count())
