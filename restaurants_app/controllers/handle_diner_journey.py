@@ -11,6 +11,12 @@ def handle_table_scan(table_id: str) -> dict:
     table_data = SerializerPublicGetTableDetails(
         table, many=False
     ).data
+    # check if the table is reserved
+    if table.reserved:
+        return {
+            'status': 400,
+            'message': 'This table is reserved. Please contact the restaurant staff for assistance.', # noqa
+        }
     return {
         'status': 200,
         'message': OK_SCANNED_TABLE,
