@@ -29,6 +29,7 @@ EDIT_INFORMATION = {
         {'key': 'primary_price', 'label': 'price', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'discounted_price', 'label': 'discounted price', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'running_discount', 'label': 'running discount', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'consider_discount_object', 'label': 'consider discount object', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'description', 'label': 'description', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'image', 'label': 'image', 'type': 'file', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'available', 'label': 'available', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa

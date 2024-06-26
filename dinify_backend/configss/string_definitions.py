@@ -1,5 +1,11 @@
 # string definitions in the application
 
+# restaurant status
+RestaurantStatus_Pending = 'pending'
+RestaurantStatus_Active = 'active'
+RestaurantStatus_Inactive = 'inactive'
+RestaurantStatus_Blocked = 'blocked'
+
 # account types
 AccountType_Restaurant = 'restaurant'
 AccountType_DinifyRevenue = 'dinify_revenue'
@@ -46,6 +52,7 @@ PaymentStatus_Pending = 'pending'
 # order statuses
 OrderStatus_Initiated = 'initiated'
 OrderStatus_Pending = 'pending'
+OrderStatus_Preparing = 'preparing'
 OrderStatus_Served = 'served'
 OrderStatus_Refunded = 'refunded'
 OrderStatus_Cancelled = 'cancelled'

@@ -126,10 +126,11 @@ class MenuItem(BaseModel):
 
     discounted_price = models.FloatField(null=True, blank=True)
     running_discount = models.BooleanField(default=False)
+    consider_discount_object = models.BooleanField(default=False)
     discount_description = models.TextField(null=True, blank=True)
     discount_details = models.JSONField(default=dict)
     # e.g. {
-    #     recurring_days: [],
+    #     recurring_days: [1-7] monday is 1, sunday is 7,
     #     start_date: '',
     #     end_date: '',
     #     start_time: '',

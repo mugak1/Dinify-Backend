@@ -150,7 +150,7 @@ class SerializerPublicGetMenuItem(ModelSerializer):
         if menu_item.section_group is None:
             return None
         return {
-            'id': str(menu_item.group.pk),
+            'id': str(menu_item.section_group.pk),
             'name': menu_item.group.name
         }
 
