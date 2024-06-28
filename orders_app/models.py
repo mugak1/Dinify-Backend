@@ -63,6 +63,14 @@ class OrderItem(BaseModel):
     option_choice = models.CharField(max_length=50, null=True)
     option_cost = models.FloatField(null=True)
 
+    # for extras
+    parent_item = models.ForeignKey(
+        'self',
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name='parent_order_item'
+    )  # noqa
+
     quantity = models.IntegerField()
     unit_price = models.FloatField()
     discounted_price = models.FloatField()

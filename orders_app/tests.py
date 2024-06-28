@@ -28,7 +28,7 @@ from dinify_backend.configss.string_definitions import (
 )
 from orders_app.controllers.v2_initiate_order import (
     determine_effective_unit_price,
-    process_order_item
+    add_order_item
 )
 
 
@@ -55,6 +55,7 @@ def seed_order():
 
 # Create your tests here.
 class TestOrderFunctions(TestCase):
+    print("\n===TESTING ORDERS===\n")
     """
     test cases for the order functions
     """
@@ -187,7 +188,7 @@ class TestOrderFunctions(TestCase):
         effective_unit_price = determine_effective_unit_price(menu_item=menu_item)
         self.assertEqual(effective_unit_price['status'], 200)
         self.assertEqual(effective_unit_price['price'], 800)
-    
+
     def test_options_item(self):
         menu_item = MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME)
         effective_unit_price = determine_effective_unit_price(
@@ -203,32 +204,52 @@ class TestOrderFunctions(TestCase):
         )
         self.assertEqual(effective_unit_price['status'], 400)
 
-    def test_process_order_item(self):
+    def test_add_order_item(self):
         order_id = str(Order.objects.get(
             table=Table.objects.get(number=TEST_TABLE_NUMBER1)
         ).pk)
-        
+
+        menu_item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+        menu_item2 = MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME)
+
+        print('\n...testing order item | no discount, no options, no extras...\n')
         item = {
-            'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk),
+            'item': str(menu_item1.pk),
             'quantity': 2
         }
-        result = process_order_item(item=item, order_id=order_id)
+        result = add_order_item(item=item, order_id=order_id)
         self.assertEqual(result['status'], 200)
 
+        print('\n...testing order item | comprehensive discount consideration...\n')
         item = {
             'item': str(MenuItem.objects.get(name=TEST_EXTRA_DISCOUNTED_MENU_ITEM_NAME).pk),
             'quantity': 1
         }
-        result = process_order_item(item=item, order_id=order_id)
+        result = add_order_item(item=item, order_id=order_id)
         self.assertEqual(result['status'], 200)
 
+        print('\n...testing order item | options\n')
         item = {
             'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
             'quantity': 1,
             'option': 0,
             'choice': 1
         }
-        result = process_order_item(item=item, order_id=order_id)
+        result = add_order_item(item=item, order_id=order_id)
         self.assertEqual(result['status'], 200)
 
-
+        print('\n testing order item | options,choices,extras')
+        item = {
+            'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
+            'quantity': 1,
+            'option': 0,
+            'choice': 1,
+            'extras': [str(menu_item1.pk), str(menu_item2.pk)]
+        }
+        result = add_order_item(item=item, order_id=order_id)
+        self.assertEqual(result['status'], 200)
+        # check that the order has items with parent items
+        order_items = OrderItem.objects.filter(
+            order=order_id
+        )
+        self.assertGreater(order_items.count(), 0)

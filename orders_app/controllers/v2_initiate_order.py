@@ -108,7 +108,7 @@ def determine_effective_unit_price(
     }
 
 
-def process_order_item(
+def add_order_item(
     item: dict,
     order_id: str
 ) -> dict:
@@ -142,7 +142,7 @@ def process_order_item(
     savings = total_cost - discounted_cost
     actual_cost = discounted_cost
 
-    item = {
+    item_data = {
         'order': order_id,
         'item': str(menu_item.id),
         'item_name': menu_item.name,
@@ -166,21 +166,92 @@ def process_order_item(
     }
 
     if not menu_item.available:
-        item['quantity'] = 0
-        item['total_cost'] = 0
-        item['discounted_cost'] = 0
-        item['savings'] = 0
-        item['actual_cost'] = 0
-        item['available'] = False
-        item['status'] = 'unavailable'
+        item_data['quantity'] = 0
+        item_data['total_cost'] = 0
+        item_data['discounted_cost'] = 0
+        item_data['savings'] = 0
+        item_data['actual_cost'] = 0
+        item_data['available'] = False
+        item_data['status'] = 'unavailable'
 
     # save the item to the menu items
-    item_record = SerializerPutOrderItem(data=item)
+    item_record = SerializerPutOrderItem(data=item_data)
     if not item_record.is_valid():
         raise Exception(item_record.errors)
     item_record.save()
 
+    # process the item extras
+    process_item_extras(
+        item=item,
+        order_id=order_id,
+        order_item_id=str(item_record.data['id'])
+    )
 
     return {
         'status': 200,
+        'message': 'Order item has been processed successfully.'
     }
+
+
+def process_item_extras(
+    item: dict,
+    order_id: str,
+    order_item_id: str
+) -> dict:
+    extras = item.get('extras', None)
+
+    print(extras)
+    if extras is None:
+        return
+
+
+    for extra in extras:
+        extra_item = MenuItem.objects.get(pk=extra)
+        unit_price = extra_item.primary_price
+        quantity = 1  # extra['quantity']
+
+        price_selection = determine_effective_unit_price(menu_item=extra_item)
+        if price_selection.get('status') != 200:
+            return price_selection
+
+        effective_unit_price = price_selection.get('price')
+        total_cost = unit_price * quantity 
+        discounted_cost = effective_unit_price * quantity
+        savings = total_cost - discounted_cost
+        actual_cost = discounted_cost
+
+        extra = {
+            'order': order_id,
+            'parent_item': order_item_id,
+            'item': str(extra_item.id),
+            'item_name': extra_item.name,
+            'quantity': quantity,
+
+            'unit_price': unit_price,
+            'discounted_price': effective_unit_price,
+            'actual_price': effective_unit_price,
+            'discounted': extra_item.running_discount,
+
+            'total_cost': total_cost,
+            'discounted_cost': discounted_cost,
+            'savings': savings,
+            'actual_cost': actual_cost,
+
+            'available': extra_item.available,
+            'status': 'initiated'
+        }
+
+        if not extra_item.available:
+            extra['quantity'] = 0
+            extra['total_cost'] = 0
+            extra['discounted_cost'] = 0
+            extra['savings'] = 0
+            extra['actual_cost'] = 0
+            extra['available'] = False
+            extra['status'] = 'unavailable'
+
+        # save the item to the menu items
+        extra_record = SerializerPutOrderItem(data=extra)
+        if not extra_record.is_valid():
+            raise Exception(extra_record.errors)
+        extra_record.save()
