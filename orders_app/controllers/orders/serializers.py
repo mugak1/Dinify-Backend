@@ -5,6 +5,7 @@ from rest_framework.serializers import ModelSerializer, SerializerMethodField
 def serialize_order_details(order: Order) -> dict:
     all_order_items = OrderItem.objects.filter(order=order)
     non_extra_items = all_order_items.filter(parent_item__isnull=True)
+    extra_items = all_order_items.filter(parent_item__isnull=False)
     parent_items = all_order_items.filter(
         parent_item__isnull=True,
         available=True
@@ -49,16 +50,35 @@ def serialize_order_details(order: Order) -> dict:
     order_items = [serialize_order_item_details(item=item) for item in non_extra_items]
     available_items = [serialize_order_item_details(item=item) for item in unavailable_parent_items]
     unavailable_items = [serialize_order_item_details(item=item) for item in unavailable_parent_items]  # noqa
+    extras = [serialize_order_item_details(item=item) for item in extra_items]
+    available_extras = [serialize_order_item_details(item=item) for item in available_extras_selected]  # noqa
+    unavailable_extras = [serialize_order_item_details(item=item) for item in unavailable_extras_selected]  # noqa
 
     return {
         'order': order,
         'order_items': order_items,
         'available_items': available_items,
-        'unavailable_items': unavailable_items
+        'unavailable_items': unavailable_items,
+        'extras': extras,
+        'available_extras': available_extras,
+        'unavailable_extras': unavailable_extras
     }
 
 
 def serialize_order_item_details(item: OrderItem) -> dict:
+    extras = OrderItem.objects.filter(
+        parent_item=item
+    )
+    extras_list = [
+        {
+            'item_name': item.item.name,
+            'quantity': item.quantity,
+            'actual_cost': item.actual_cost,
+            'available': item.available,
+            'status': item.status
+        }
+        for item in extras
+    ]
     return {
         'item': str(item.item.id),
         'item_name': item.item.name,
@@ -74,5 +94,9 @@ def serialize_order_item_details(item: OrderItem) -> dict:
         'actual_cost': item.actual_cost,
 
         'available': item.available,
-        'status': item.status
+        'status': item.status,
+
+        'is_extra': False if item.parent_item is None else True,
+        'no_extras': extras.count(),
+        'extras': extras_list
     }

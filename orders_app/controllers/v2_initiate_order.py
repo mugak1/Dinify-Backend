@@ -402,6 +402,9 @@ def v2_initiate_order(
             'order_details': order_details.get('order'),
             'order_items': order_details.get('order_items'),
             'available_items': order_details.get('available_items'),
-            'unavailable_items': order_details.get('unavailable_items')
+            'unavailable_items': order_details.get('unavailable_items'),
+            'extras': order_details.get('extras'),
+            'available_extras': order_details.get('available_extras'),
+            'unavailable_extras': order_details.get('unavailable_extras')
         }
     }
