@@ -58,6 +58,11 @@ class OrderItem(BaseModel):
     item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name='item')
     available = models.BooleanField(default=True)
 
+    # tracking options and choices
+    option = models.CharField(max_length=50, null=True)
+    option_choice = models.CharField(max_length=50, null=True)
+    option_cost = models.FloatField(null=True)
+
     quantity = models.IntegerField()
     unit_price = models.FloatField()
     discounted_price = models.FloatField()
