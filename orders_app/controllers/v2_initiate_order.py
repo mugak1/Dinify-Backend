@@ -10,7 +10,11 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Preparing
 )
 from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
-from orders_app.models import Order
+from orders_app.models import Order, OrderItem
+from orders_app.controllers.initiate_order import any_present_ongoing_order
+from users_app.models import User
+from orders_app.controllers.orders.serializers import serialize_order_details
+
 
 
 def determine_effective_unit_price(
@@ -187,6 +191,8 @@ def add_order_item(
         order_item_id=str(item_record.data['id'])
     )
 
+    update_order_amounts(order=Order.objects.get(pk=order_id))
+
     return {
         'status': 200,
         'message': 'Order item has been processed successfully.'
@@ -200,10 +206,8 @@ def process_item_extras(
 ) -> dict:
     extras = item.get('extras', None)
 
-    print(extras)
     if extras is None:
         return
-
 
     for extra in extras:
         extra_item = MenuItem.objects.get(pk=extra)
@@ -255,3 +259,149 @@ def process_item_extras(
         if not extra_record.is_valid():
             raise Exception(extra_record.errors)
         extra_record.save()
+
+
+def update_order_amounts(order: Order) -> dict:
+    # get the order items
+    order_items = OrderItem.objects.select_for_update().filter(order=order)
+    total_cost = sum([item.total_cost for item in order_items])
+    discounted_cost = sum([item.discounted_cost for item in order_items])
+    savings = total_cost - discounted_cost
+    actual_cost = discounted_cost
+    total_paid = 0
+    balance_payable = 0
+
+    order.total_cost = total_cost
+    order.discounted_cost = discounted_cost
+    order.savings = savings
+    order.actual_cost = actual_cost
+    order.total_paid = total_paid
+    order.balance_payable = balance_payable
+
+    order.save()
+
+
+    # determine the following amounts for the orders
+    # total_cost = models.FloatField()  # the total cost of the order using primary prices
+    # discounted_cost = models.FloatField()  # the total cost of the order using discounted prices
+    # savings = models.FloatField()  # the total savings from the order i.e. discounted cost  - total cost  # noqa
+    # actual_cost = models.FloatField()  # the actual cost that is payable by the customer
+    # prepayment_required = models.BooleanField(default=False)
+
+    # total_paid = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
+    # balance_payable = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
+
+
+def v2_initiate_order(
+    restaurant_id: str,
+    table_id: str,
+    items: list,
+    order_remarks: Optional[str] = None,
+    customer: Union[User, None] = None,
+    created_by: Union[User, None] = None
+) -> dict:
+    """
+    - check that the restaurant is not blocked
+    - check that the order items have been provided
+    - check that the table does not have any ongoing order
+    - determine if a prepayment is required
+    - initiate the order record
+    - add the order items
+    - update the order amount
+    - construct and return the response
+    """
+    # check that the restaurant is not blocked
+    try:
+        restaurant = Restaurant.objects.get(pk=restaurant_id)
+    except ObjectDoesNotExist:
+        return {
+            'status': 400,
+            'message': MESSAGES.get('RESTAURANT_NOT_FOUND')
+        }
+    except Exception as error:
+        print(f"InitiateOrder-Error: {error}")
+        return {
+            'status': 400,
+            'message': MESSAGES.get('GENERAL_ERROR')
+        }
+
+    # check that order items are provided
+    if items is None:
+        return {
+            'status': 400,
+            'message': MESSAGES.get('NO_ORDER_ITEMS')
+        }
+    if len(items) < 1:
+        return {
+            'status': 400,
+            'message': MESSAGES.get('NO_ORDER_ITEMS')
+        }
+
+    # check that the table does not have any other ongoing order
+    table = Table.objects.get(pk=table_id)
+    ongoing_orders = any_present_ongoing_order(table=table)
+    if ongoing_orders.get('present'):
+        return {
+            'status': 400,
+            'message': 'The table has an ongoing order',
+            'data': {
+                'order_id': ongoing_orders.get('order_id'),
+            }
+        }
+
+    # initiate the order object
+    order_data = {
+        'restaurant': restaurant_id,
+        'table': table_id,
+        'order_remarks': order_remarks,
+
+        'total_cost': 0,
+        'discounted_cost': 0,
+        'savings': 0,
+        'actual_cost': 0,
+        'prepayment_required': table.prepayment_required,
+
+        'order_status': 'initiated',
+        'payment_status': 'pending',
+
+        'customer': customer,
+        'created_by': created_by
+    }
+
+    order_record = SerializerPutOrder(data=order_data)
+    if not order_record.is_valid():
+        error_message = ""
+        print(order_record.errors)
+        for _, value in order_record.errors.items():
+            error_message += f"{', '.join(value)}\n"
+        return {
+            'status': 400,
+            'message': error_message
+        }
+
+    # create the order record
+    # process the order items
+    # update the order amounts
+    order_rec = None
+    with transaction.atomic():
+        order_record.save()
+        order_id = order_record.data['id']
+
+        for item in items:
+            add_order_item(item=item, order_id=order_id)
+        order_rec = Order.objects.select_for_update().get(id=order_id)
+        update_order_amounts(order=order_rec)
+
+    order_rec.refresh_from_db()
+
+    order_details = serialize_order_details(order=order_rec)
+    return {
+        'status': 200,
+        'message': MESSAGES.get('ORDER_INITIATED'),
+        'data': {
+            'order_details': order_details.get('order'),
+            'order_items': order_details.get('order_items'),
+            'available_items': order_details.get('available_items'),
+            'unavailable_items': order_details.get('unavailable_items')
+        }
+    }

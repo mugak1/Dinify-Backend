@@ -12,7 +12,7 @@ from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
 from orders_app.models import Order
 
 
-def any_present_ongoing_order(table) -> dict:
+def any_present_ongoing_order(table: Table) -> dict:
     """
     determines if a table has an ongoing order
     """
@@ -226,4 +226,3 @@ def initiate_order(data):
             'available_items': available_items
         }
     }
-

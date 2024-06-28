@@ -21,6 +21,8 @@ TEST_EXTRA_DISCOUNTED_MENU_ITEM_NAME = 'Seed Test Extra Discounted Menu Item'
 TEST_OPTION_MENU_ITEM_NAME = 'Seed Test Options Menu Item'
 TEST_TABLE_NUMBER1 = 1
 TEST_TABLE_NUMBER2 = 2
+TEST_TABLE_NUMBER3 = 3
+TEST_TABLE_NUMBER4 = 4
 
 
 def seed_restaurant(seed_owner=True):
@@ -119,6 +121,16 @@ def seed_tables():
     )
     Table.objects.create(
         number=TEST_TABLE_NUMBER2,
+        restaurant=restaurant,
+        prepayment_required=True
+    )
+    Table.objects.create(
+        number=TEST_TABLE_NUMBER3,
+        restaurant=restaurant,
+        prepayment_required=True
+    )
+    Table.objects.create(
+        number=TEST_TABLE_NUMBER4,
         restaurant=restaurant,
         prepayment_required=True
     )

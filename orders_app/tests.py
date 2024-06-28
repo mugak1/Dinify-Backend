@@ -15,6 +15,8 @@ from restaurants_app.tests import (
     TEST_DISCOUNTED_MENU_ITEM_NAME,
     TEST_TABLE_NUMBER1,
     TEST_TABLE_NUMBER2,
+    TEST_TABLE_NUMBER3,
+    TEST_TABLE_NUMBER4,
     TEST_EXTRA_DISCOUNTED_MENU_ITEM_NAME,
     TEST_OPTION_MENU_ITEM_NAME
 )
@@ -28,7 +30,9 @@ from dinify_backend.configss.string_definitions import (
 )
 from orders_app.controllers.v2_initiate_order import (
     determine_effective_unit_price,
-    add_order_item
+    add_order_item,
+    update_order_amounts,
+    v2_initiate_order
 )
 
 
@@ -38,6 +42,7 @@ def seed_order():
     """
     restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
     table = Table.objects.get(number=TEST_TABLE_NUMBER1)
+    table3 = Table.objects.get(number=TEST_TABLE_NUMBER3)
     user = User.objects.get(username=TEST_PHONE)
     Order.objects.create(
         restaurant=restaurant,
@@ -47,6 +52,20 @@ def seed_order():
         discounted_cost=9000,
         savings=1000,
         actual_cost=9000,
+        prepayment_required=True,
+        payment_status='paid',
+        order_status='completed'
+    )
+
+    # order for table 3
+    Order.objects.create(
+        restaurant=restaurant,
+        table=table3,
+        customer=user,
+        total_cost=0,
+        discounted_cost=0,
+        savings=0,
+        actual_cost=0,
         prepayment_required=True,
         payment_status='paid',
         order_status='completed'
@@ -205,9 +224,10 @@ class TestOrderFunctions(TestCase):
         self.assertEqual(effective_unit_price['status'], 400)
 
     def test_add_order_item(self):
-        order_id = str(Order.objects.get(
-            table=Table.objects.get(number=TEST_TABLE_NUMBER1)
-        ).pk)
+        order_record = Order.objects.get(
+            table=Table.objects.get(number=TEST_TABLE_NUMBER3)
+        )
+        order_id = str(order_record.pk)
 
         menu_item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
         menu_item2 = MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME)
@@ -248,8 +268,43 @@ class TestOrderFunctions(TestCase):
         }
         result = add_order_item(item=item, order_id=order_id)
         self.assertEqual(result['status'], 200)
+
         # check that the order has items with parent items
         order_items = OrderItem.objects.filter(
             order=order_id
         )
         self.assertGreater(order_items.count(), 0)
+
+        print('...testing order amount update...')
+        update_order_amounts(order=order_record)
+
+        order_record.refresh_from_db()
+        print(order_record.total_cost, order_record.discounted_cost, order_record.savings)
+
+    def test_v2_initiate_order(self):
+        menu_item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+        menu_item2 = MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME)
+        table = Table.objects.get(number=TEST_TABLE_NUMBER4)
+        restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+    
+
+        items = [
+            {
+                'item': str(menu_item1.pk),
+                'quantity': 2
+            },
+            {
+                'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
+                'quantity': 1,
+                'option': 0,
+                'choice': 1,
+                'extras': [str(menu_item1.pk), str(menu_item2.pk)]
+            }
+        ]
+        response = v2_initiate_order(
+            restaurant_id=str(restaurant.pk),
+            table_id=str(table.pk),
+            items=items
+        )
+        print(response)
+        self.assertEqual(response['status'], 200)

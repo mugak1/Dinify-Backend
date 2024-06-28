@@ -9,7 +9,7 @@ from django.contrib.auth.models import AbstractUser
 # Create your models here.
 class User(AbstractUser):
     """
-    the user/auth model for
+    the user/auth model for dinify
     """
     id = models.UUIDField(
         primary_key=True,
