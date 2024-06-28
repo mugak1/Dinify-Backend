@@ -12,7 +12,11 @@ from restaurants_app.tests import (
     TEST_MENU_ITEM1_NAME, TEST_MENU_ITEM2_NAME,
     TEST_MENU_ITEM3_NAME, TEST_MENU_ITEM4_NAME,
     TEST_MENU_ITEM5_NAME, TEST_UNAVAILABLE_MENU_ITEM_NAME,
-    TEST_DISCOUNTED_MENU_ITEM_NAME, TEST_TABLE_NUMBER1, TEST_TABLE_NUMBER2
+    TEST_DISCOUNTED_MENU_ITEM_NAME,
+    TEST_TABLE_NUMBER1,
+    TEST_TABLE_NUMBER2,
+    TEST_EXTRA_DISCOUNTED_MENU_ITEM_NAME,
+    TEST_OPTION_MENU_ITEM_NAME
 )
 from restaurants_app.models import Restaurant, Table, MenuItem
 from dinify_backend.configss.string_definitions import (
@@ -21,6 +25,10 @@ from dinify_backend.configss.string_definitions import (
     OrderItemStatus_Preparing, OrderItemStatus_Served,
     OrderStatus_Cancelled,
     OrderStatus_Served
+)
+from orders_app.controllers.v2_initiate_order import (
+    determine_effective_unit_price,
+    process_order_item
 )
 
 
@@ -173,3 +181,54 @@ class TestOrderFunctions(TestCase):
         test_post_paid_initiate()
         test_pre_paid_initiate()
         test_order_item_status_update()
+
+    def test_extra_discounted_item(self):
+        menu_item = MenuItem.objects.get(name=TEST_EXTRA_DISCOUNTED_MENU_ITEM_NAME)
+        effective_unit_price = determine_effective_unit_price(menu_item=menu_item)
+        self.assertEqual(effective_unit_price['status'], 200)
+        self.assertEqual(effective_unit_price['price'], 800)
+    
+    def test_options_item(self):
+        menu_item = MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME)
+        effective_unit_price = determine_effective_unit_price(
+            menu_item=menu_item,
+            option=0
+        )
+        self.assertEqual(effective_unit_price['status'], 200)
+        self.assertEqual(effective_unit_price['price'], 1100)
+
+        effective_unit_price = determine_effective_unit_price(
+            menu_item=menu_item,
+            option=1
+        )
+        self.assertEqual(effective_unit_price['status'], 400)
+
+    def test_process_order_item(self):
+        order_id = str(Order.objects.get(
+            table=Table.objects.get(number=TEST_TABLE_NUMBER1)
+        ).pk)
+        
+        item = {
+            'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk),
+            'quantity': 2
+        }
+        result = process_order_item(item=item, order_id=order_id)
+        self.assertEqual(result['status'], 200)
+
+        item = {
+            'item': str(MenuItem.objects.get(name=TEST_EXTRA_DISCOUNTED_MENU_ITEM_NAME).pk),
+            'quantity': 1
+        }
+        result = process_order_item(item=item, order_id=order_id)
+        self.assertEqual(result['status'], 200)
+
+        item = {
+            'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
+            'quantity': 1,
+            'option': 0,
+            'choice': 1
+        }
+        result = process_order_item(item=item, order_id=order_id)
+        self.assertEqual(result['status'], 200)
+
+

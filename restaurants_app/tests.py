@@ -17,6 +17,8 @@ TEST_MENU_ITEM4_NAME = 'Seed Test Menu Item4'
 TEST_MENU_ITEM5_NAME = 'Seed Test Menu Item5'
 TEST_UNAVAILABLE_MENU_ITEM_NAME = 'Seed Unavailable Test Menu Item'
 TEST_DISCOUNTED_MENU_ITEM_NAME = 'Seed Test Discounted Menu Item'
+TEST_EXTRA_DISCOUNTED_MENU_ITEM_NAME = 'Seed Test Extra Discounted Menu Item'
+TEST_OPTION_MENU_ITEM_NAME = 'Seed Test Options Menu Item'
 TEST_TABLE_NUMBER1 = 1
 TEST_TABLE_NUMBER2 = 2
 
@@ -65,6 +67,42 @@ def seed_menu_items():
         MenuItem(name=TEST_MENU_ITEM5_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False),  # noqa
         MenuItem(name=TEST_UNAVAILABLE_MENU_ITEM_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False, available=False),  # noqa
         MenuItem(name=TEST_DISCOUNTED_MENU_ITEM_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=True),  # noqa
+        MenuItem(
+            name=TEST_EXTRA_DISCOUNTED_MENU_ITEM_NAME,
+            section=menu_section,
+            primary_price=1000.0,
+            discounted_price=900.0,
+            running_discount=True,
+            consider_discount_object=True,
+            discount_details={
+                'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+                'start_date': '2021-01-01',
+                'end_date': '2030-12-31',
+                'start_time': '00:00',
+                'end_time': '23:59',
+                'discount_percentage': 20.0,
+                'discount_amount': 0.0
+            }
+        ),  # noqa
+        MenuItem(
+            name=TEST_OPTION_MENU_ITEM_NAME,
+            section=menu_section,
+            primary_price=1000.0,
+            discounted_price=900.0,
+            running_discount=True,
+            options={
+                'min_selections': 1,
+                'max_selections': 3,
+                'options': [
+                    {
+                        'name': 'Option 1',
+                        'selectable': True,
+                        'choices': ['oo1', 'oo2', 'oo3'],
+                        'cost': 1100
+                    }
+                ]
+            }
+        ),
     ]
     MenuItem.objects.bulk_create(menu_items)
 

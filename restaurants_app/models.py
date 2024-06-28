@@ -150,7 +150,7 @@ class MenuItem(BaseModel):
     # options : [{
     #   name: '',
     #   selectable: boolean, i.e. does it have options to select from
-    #   options: [Spicy, Not spicy, Extra spicy],
+    #   choices: [Spicy, Not spicy, Extra spicy],
     #   cost: 0
     # }, {...}, {...}]
     extras_applicable = models.JSONField(default=list)
