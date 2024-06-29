@@ -286,7 +286,6 @@ class TestOrderFunctions(TestCase):
         menu_item2 = MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME)
         table = Table.objects.get(number=TEST_TABLE_NUMBER4)
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-    
 
         items = [
             {
@@ -306,5 +305,4 @@ class TestOrderFunctions(TestCase):
             table_id=str(table.pk),
             items=items
         )
-        print(response)
         self.assertEqual(response['status'], 200)

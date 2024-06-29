@@ -133,6 +133,7 @@ class SerializerPublicGetMenuItem(ModelSerializer):
     """
     has_options = SerializerMethodField()
     group = SerializerMethodField()
+    extras = SerializerMethodField()
 
     class Meta:
         model = MenuItem
@@ -140,7 +141,7 @@ class SerializerPublicGetMenuItem(ModelSerializer):
             'id', 'name', 'description', 'primary_price',
             'discounted_price', 'running_discount', 'image',
             'available',
-            'has_options', 'options', 'group'
+            'has_options', 'options', 'group', 'extras'
         )
 
     def get_has_options(self, menu_item):
@@ -153,6 +154,16 @@ class SerializerPublicGetMenuItem(ModelSerializer):
             'id': str(menu_item.section_group.pk),
             'name': menu_item.section_group.name
         }
+
+    def get_extras(self, menu_item):
+        applicable_extras = menu_item.extras_applicable
+        extras = []
+        for extra in applicable_extras:
+            record = MenuItem.objects.values(
+                'id', 'name', 'primary_price'
+            ).get(id=extra)
+            extras.append(record)
+        return extras
 
 
 class SerializerPutTable(ModelSerializer):

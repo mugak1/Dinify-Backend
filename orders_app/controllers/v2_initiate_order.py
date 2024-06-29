@@ -277,19 +277,7 @@ def update_order_amounts(order: Order) -> dict:
     order.actual_cost = actual_cost
     order.total_paid = total_paid
     order.balance_payable = balance_payable
-
     order.save()
-
-
-    # determine the following amounts for the orders
-    # total_cost = models.FloatField()  # the total cost of the order using primary prices
-    # discounted_cost = models.FloatField()  # the total cost of the order using discounted prices
-    # savings = models.FloatField()  # the total savings from the order i.e. discounted cost  - total cost  # noqa
-    # actual_cost = models.FloatField()  # the actual cost that is payable by the customer
-    # prepayment_required = models.BooleanField(default=False)
-
-    # total_paid = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    # balance_payable = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
 
 
 def v2_initiate_order(
@@ -313,6 +301,11 @@ def v2_initiate_order(
     # check that the restaurant is not blocked
     try:
         restaurant = Restaurant.objects.get(pk=restaurant_id)
+        if restaurant.status in ['blocked']:
+            return {
+                'status': 400,
+                'message': MESSAGES.get('BLOCKED_RESTAURANT')
+            }
     except ObjectDoesNotExist:
         return {
             'status': 400,

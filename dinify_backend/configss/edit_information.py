@@ -33,6 +33,12 @@ EDIT_INFORMATION = {
         {'key': 'description', 'label': 'description', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'image', 'label': 'image', 'type': 'file', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'available', 'label': 'available', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'section', 'label': 'section', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'section_group', 'label': 'group', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'discount_description', 'label': 'discount description', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'discount_details', 'label': 'discount details', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'options', 'label': 'options', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'extras_applicable', 'label': 'extras_applicable', 'type': 'list', 'min_length': 5, 'text_presentation': None},  # noqa
     ],
     'table': [
         {'key': 'number', 'label': 'number', 'type': 'int', 'min_length': 5, 'text_presentation': None},  # noqa

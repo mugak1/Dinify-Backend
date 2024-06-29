@@ -282,9 +282,28 @@ class RestaurantSetupEndpoint(APIView):
         success_message = success_messages.get(config_detail)
         error_message = error_messages.get(config_detail)
 
+        put_data = request.data
+
+        # if editing a menu item,
+        # convert the options and extras_applicable to a list
+        if config_detail == 'menuitems':
+            try:
+                put_data = put_data.dict()
+            except Exception as error:
+                print(f"Error: {error}")
+
+            options = put_data.get('options')
+            if options is not None:
+                # conver the options to dict
+                put_data['options'] = ast.literal_eval(options)
+
+            extras_applicable = put_data.get('extras_applicable')
+            if extras_applicable is not None:
+                put_data['extras_applicable'] = ast.literal_eval(extras_applicable)
+
         secretary_args = {
             'serializer': serializer,
-            'data': request.data,
+            'data': put_data,
             'edit_considerations': edit_information,
             'user_id': auth['id'],
             'username': auth['username'],
