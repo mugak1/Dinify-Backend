@@ -1,11 +1,13 @@
 """
 endpoints to handle order
 """
+import requests
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from orders_app.models import Order
 from orders_app.controllers.initiate_order import initiate_order
+from orders_app.controllers.v2_initiate_order import v2_initiate_order
 from orders_app.controllers.rate import rate_and_review
 from orders_app.controllers.manage_order import update_order_status, update_item_status
 from orders_app.controllers.rate import block_review
@@ -144,3 +146,49 @@ class OrdersEndpoint(APIView):
             return Response(response, status=200)
 
 
+class V2OrdersEndpoint(APIView):
+    """
+    The V2 endpoint for handling orders
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, action):
+        if action == 'initiate':
+            data = request.data
+            source = data.get('source')
+            user = request.user.pk
+            customer = None
+            created_by = None
+
+            if source == 'admin':
+                if user is None:
+                    response = {
+                        'status': 401,
+                        'message': 'Please log in'
+                    }
+                    return Response(response, status=200)
+                created_by = request.user
+            else:
+                if user is not None:
+                    user = str(user)
+                    customer = request.user
+
+            restaurant_id = data.get('restaurant')
+            table_id = data.get('table')
+            items = data.get('items')
+            order_remarks = data.get('order_remarks')
+            if restaurant_id is None or table_id is None:
+                response = {
+                    'status': 400,
+                    'message': 'Please provide the restaurant and table ID'
+                }
+                return Response(response, status=200)
+            response = v2_initiate_order(
+                restaurant_id=restaurant_id,
+                table_id=table_id,
+                items=items,
+                order_remarks=order_remarks,
+                customer=customer,
+                created_by=created_by,
+            )
+            return Response(response, status=200)

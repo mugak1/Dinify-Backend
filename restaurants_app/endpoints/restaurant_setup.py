@@ -294,7 +294,7 @@ class RestaurantSetupEndpoint(APIView):
 
             options = put_data.get('options')
             if options is not None:
-                # conver the options to dict
+                # convert the options to dict
                 put_data['options'] = ast.literal_eval(options)
 
             extras_applicable = put_data.get('extras_applicable')

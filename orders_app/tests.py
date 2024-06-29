@@ -24,7 +24,8 @@ from restaurants_app.models import Restaurant, Table, MenuItem
 from dinify_backend.configss.string_definitions import (
     OrderItemStatus_Initiated,
     OrderStatus_Pending,
-    OrderItemStatus_Preparing, OrderItemStatus_Served,
+    OrderItemStatus_Preparing,
+    OrderItemStatus_Served,
     OrderStatus_Cancelled,
     OrderStatus_Served
 )
@@ -197,7 +198,7 @@ class TestOrderFunctions(TestCase):
             order = order_item1.order
             order.refresh_from_db()
             self.assertEqual(order.order_status, OrderStatus_Served)
-        
+
         test_post_paid_initiate()
         test_pre_paid_initiate()
         test_order_item_status_update()

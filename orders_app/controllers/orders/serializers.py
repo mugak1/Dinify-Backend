@@ -48,7 +48,7 @@ def serialize_order_details(order: Order) -> dict:
     }
 
     order_items = [serialize_order_item_details(item=item) for item in non_extra_items]
-    available_items = [serialize_order_item_details(item=item) for item in unavailable_parent_items]
+    available_items = [serialize_order_item_details(item=item) for item in parent_items]
     unavailable_items = [serialize_order_item_details(item=item) for item in unavailable_parent_items]  # noqa
     extras = [serialize_order_item_details(item=item) for item in extra_items]
     available_extras = [serialize_order_item_details(item=item) for item in available_extras_selected]  # noqa
