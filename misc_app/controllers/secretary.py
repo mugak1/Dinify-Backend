@@ -267,18 +267,21 @@ class Secretary:
                 if not file_fields_present:
                     # save the action performed
                     # the log also contains the edits
-                    save_action(
-                        affected_model=self.model_name,
-                        affected_record=self.data.get('id'),
-                        action='update',
-                        narration='No changes detected.',
-                        result=ACTION_LOG_STATUSES.get('failed'),
-                        user_id=self.user_id,
-                        username=self.username,
-                        submitted_data=log_data,
-                        changes=None,
-                        filter_information=None
-                    )
+                    try:
+                        save_action(
+                            affected_model=self.model_name,
+                            affected_record=self.data.get('id'),
+                            action='update',
+                            narration='No changes detected.',
+                            result=ACTION_LOG_STATUSES.get('failed'),
+                            user_id=self.user_id,
+                            username=self.username,
+                            submitted_data=log_data,
+                            changes=None,
+                            filter_information=None
+                        )
+                    except Exception as error:
+                        print(f'SecretaryError-Update:{error}')
                     return {
                         'status': 400,
                         'message': 'No changes detected'
@@ -320,17 +323,20 @@ class Secretary:
                 for _, value in record.errors.items():
                     error_message += f"{', '.join(value)}\n"
 
-                save_action(
-                    affected_model=self.model_name,
-                    affected_record=self.data.get('id'),
-                    action='update',
-                    narration=error_message,
-                    result=ACTION_LOG_STATUSES.get('failed'),
-                    user_id=self.user_id,
-                    username=self.username,
-                    submitted_data=new_data,
-                    changes=changes,
-                )
+                try:
+                    save_action(
+                        affected_model=self.model_name,
+                        affected_record=self.data.get('id'),
+                        action='update',
+                        narration=error_message,
+                        result=ACTION_LOG_STATUSES.get('failed'),
+                        user_id=self.user_id,
+                        username=self.username,
+                        submitted_data=new_data,
+                        changes=changes,
+                    )
+                except Exception as error:
+                    print(f'SecretaryError-Update:{error}')
                 return {
                     'status': 400,
                     'message': error_message
