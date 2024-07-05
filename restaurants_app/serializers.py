@@ -28,9 +28,23 @@ class SerializerPublicGetRestaurant(ModelSerializer):
     """
     serializer for getting public restaurant details
     """
+    owner = SerializerMethodField()
+
     class Meta:
         model = Restaurant
-        fields = ("id", "name", "location", "logo", "cover_photo", "status")
+        fields = (
+            "id", "name", "location",
+            "logo", "cover_photo", "status", "owner"
+        )
+
+    def get_owner(self, restaurant):
+        return {
+            'id': str(restaurant.owner.pk),
+            'first_name': restaurant.owner.first_name,
+            'last_name': restaurant.owner.last_name,
+            'email': restaurant.owner.email,
+            'phone': restaurant.owner.phone_number
+        }
 
 
 class SerializerEmployeeGetRestaurant(ModelSerializer):
