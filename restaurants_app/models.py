@@ -41,6 +41,8 @@ class Restaurant(BaseModel):
     )
     order_surcharge_percentage = models.FloatField(default=1.0)
     flat_fee = models.FloatField(default=0.0)
+    order_surcharge_min_amount = models.FloatField(default=0.0)
+    order_surcharge_cap_amount = models.FloatField(default=0.0)
 
     branding_configuration = models.JSONField(default=dict)
     country = models.CharField(max_length=5, default="UG")

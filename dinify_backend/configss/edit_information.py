@@ -11,6 +11,8 @@ EDIT_INFORMATION = {
         {'key': 'allow_pickups', 'label': 'allow pickups', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'preferred_subscription_method', 'label': 'preferred subscription method', 'type': 'char', 'min_length': 5, 'text_presentation': str.lower},  # noqa
         {'key': 'order_surcharge_percentage', 'label': 'order surcharge percentage', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'order_surcharge_min_amount', 'label': 'min order surcharge amount', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'order_surcharge_cap_amount', 'label': 'max order surcharge amount', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'flat_fee', 'label': 'flat fee', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'branding_configuration', 'label': 'branding configuration', 'type': 'dict', 'min_length': 5, 'text_presentation': None},  # noqa
     ],
