@@ -41,6 +41,7 @@ EDIT_INFORMATION = {
         {'key': 'discount_details', 'label': 'discount details', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'options', 'label': 'options', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'extras_applicable', 'label': 'extras_applicable', 'type': 'list', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'is_extra', 'label': 'is extra', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
     ],
     'table': [
         {'key': 'number', 'label': 'number', 'type': 'int', 'min_length': 5, 'text_presentation': None},  # noqa
