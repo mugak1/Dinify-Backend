@@ -14,6 +14,7 @@ from dinify_backend.configss.messages import (
     ERR_ORDER_PAYMENT_INITIATION
 )
 from payment_integrations_app.controllers.flutterwave import Flutterwave
+from payment_integrations_app.controllers.dpo import DpoIntegration
 
 
 def initiate_order_payment(
@@ -72,34 +73,61 @@ def initiate_order_payment(
     # once created, send out a payment prompt
     if payment_mode == PaymentMode_MobileMoney and not manual_payment:
         # send a mobile money prompt
-        flutterwave_response = Flutterwave(
-            payment_channel=payment_mode,
-            amount=int(amount_collectable),
-            email=order.customer.email if order.customer else None,
-            transaction_id=str(order_payment.id),
-            msisdn=msisdn,
-            restaurant_country=order.restaurant.country,
-            currency=account.account_currency
-        ).collect()
+        # flutterwave_response = Flutterwave(
+        #     payment_channel=payment_mode,
+        #     amount=int(amount_collectable),
+        #     email=order.customer.email if order.customer else None,
+        #     transaction_id=str(order_payment.id),
+        #     msisdn=msisdn,
+        #     restaurant_country=order.restaurant.country,
+        #     currency=account.account_currency
+        # ).collect()
 
-        if flutterwave_response.get('status') == 'error':
-            print(f"Order initiation payment error: {flutterwave_response.get('message')}")
+        # if flutterwave_response.get('status') == 'error':
+        #     print(f"Order initiation payment error: {flutterwave_response.get('message')}")
+        #     return {
+        #         'status': 400,
+        #         'message': ERR_ORDER_PAYMENT_INITIATION,
+        #         'data': {
+        #             "transaction_id": str(order_payment.id)
+        #         }
+        #     }
+        # else:
+        #     return {
+        #         'status': 200,
+        #         'message': OK_ORDER_PAYMENT_INITIATED,
+        #         'data': {
+        #             "transaction_id": str(order_payment.id),
+        #             "redirect_url": flutterwave_response.get('meta').get('authorization').get('redirect')  # noqa
+        #         }
+        #     }
+        dpo_token = DpoIntegration(
+            amount=int(amount_collectable),
+            currency=account.account_currency,
+            msisdn=msisdn,
+            transaction_reference=str(order_payment.id),
+            timestamp=str(order_payment.time_created)
+        ).create_token()
+
+        if dpo_token is not None:
             return {
-                'status': 400,
-                'message': ERR_ORDER_PAYMENT_INITIATION,
+                'status': 200,
+                'message': 'The payment has been initiated successfully.',
                 'data': {
-                    "transaction_id": str(order_payment.id)
+                    "transaction_id": str(order_payment.id),
+                    "dpo_token": dpo_token,
+                    "redirect_url": dpo_token
                 }
             }
         else:
             return {
-                'status': 200,
-                'message': OK_ORDER_PAYMENT_INITIATED,
+                'status': 400,
+                'message': 'Sorry, an error occurred while initiating the payment. Please try again.',  # noqa
                 'data': {
-                    "transaction_id": str(order_payment.id),
-                    "redirect_url": flutterwave_response.get('meta').get('authorization').get('redirect')  # noqa
+                    "transaction_id": str(order_payment.id)
                 }
             }
+
     message = OK_ORDER_PAYMENT_INITIATED
     if manual_payment:
         message = 'The transaction will be reflected shortly.'

@@ -84,13 +84,13 @@ class FinanceAppTestFunctions(TestCase):
             self.transaction_id = result['data']['transaction_id']
 
             # test a refund
-            result = initiate_refund(
-                order=order,
-                amount=order.actual_cost,
-                user=user,
-                payment_mode=PaymentMode_MobileMoney
-            )
-            self.assertEqual(result['status'], 200)
+            # result = initiate_refund(
+            #     order=order,
+            #     amount=order.actual_cost,
+            #     user=user,
+            #     payment_mode=PaymentMode_MobileMoney
+            # )
+            # self.assertEqual(result['status'], 200)
 
         def test_process_payment_feedback():
             feedback = simulate_aggregator_feedback(

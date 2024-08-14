@@ -115,6 +115,7 @@ class DinifyTransaction(BaseModel):
     # for direct subscriptions
     restaurant = models.ForeignKey(Restaurant, on_delete=models.SET_NULL, null=True, blank=True)
     order = models.ForeignKey(Order, on_delete=models.SET_NULL, null=True, blank=True)
+    
     transaction_type = models.CharField(validators=[validate_transaction_type], max_length=255, db_index=True)  # noqa
     transaction_status = models.CharField(validators=[validate_transaction_status], max_length=255, db_index=True, default=TransactionStatus_Initiated)  # noqa
     transaction_platform = models.CharField(validators=[validate_transaction_platform], max_length=255, db_index=True)  # noqa
@@ -129,6 +130,7 @@ class DinifyTransaction(BaseModel):
     aggregator_reference = models.CharField(max_length=255, null=True, blank=True)
     payment_mode = models.CharField(validators=[validate_payment_mode], max_length=255, null=True, blank=True)  # noqa
     aggregator_status = models.CharField(max_length=255, null=True, blank=True)
+    aggregator_misc_details = models.JSONField(default=dict)
 
     # the account balances/amounts will be tracked using a json
     account_balances = models.JSONField(default=dict)
