@@ -41,8 +41,9 @@ def update_order_status(
                     'message': 'This order cannot be submitted.'
                 }
         order.order_status = new_status
+        print(f'The submitted user is {user}')
         if user is not None:
-            order.last_updated_by = user
+            order.last_updated_by = User.objects.get(pk=user)
         order.time_last_updated = datetime.now()
         order.save()
         return {

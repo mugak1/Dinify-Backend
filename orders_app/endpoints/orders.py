@@ -100,7 +100,7 @@ class OrdersEndpoint(APIView):
             data = request.data
             # source = data.get('source')
 
-            user = request.user.pk
+            user = request.user
             if user is None:
                 if action not in ['submit']:
                     response = {
