@@ -36,3 +36,6 @@ def process_order_payment(
             'status': 200,
             'message': OK_ORDER_PAYMENT_PROCESSED
         }
+
+    # TODO check if a tip is included and add it to the waiter's account.
+

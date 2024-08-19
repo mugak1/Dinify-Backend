@@ -1,8 +1,18 @@
-import requests, datetime
+import requests
+import datetime
 import xml.etree.ElementTree as ET
 from decouple import config
 from finance_app.models import DinifyTransaction
 from dataclasses import dataclass
+from dinify_backend.configss.string_definitions import (
+    TransactionStatus_Failed,
+    TransactionStatus_Success,
+    TransactionStatus_Pending,
+    Aggregator_DPO
+)
+from dinify_backend.mongo_db import COL_DPO_TOKENS, COL_DPO_TOKEN_VERIFICATION
+from misc_app.controllers.save_to_mongo import save_to_mongodb
+from finance_app.controllers.process_payment_feedback import process_payment_feedback
 
 
 @dataclass
@@ -84,29 +94,27 @@ class DpoIntegration:
         dpo_transaction_token = response_xml_object.find('TransToken')
         dpo_transaction_ref = response_xml_object.find('TransRef')
 
-        print(
-            dpo_transaction_result.text,
-            dpo_transaction_result_explanation.text,
-            dpo_transaction_token.text,
-            dpo_transaction_ref.text
-        )
-
-        # return None
-
         # update the transaction to have the new details
-        txs = DinifyTransaction.objects.get(id=self.transaction_reference)
-        txs.aggregator = 'DPO'
-        txs.aggregator_misc_details = {
+        dpo_response = {
+            'transaction_result': dpo_transaction_result.text,
+            'transaction_result_explanation': dpo_transaction_result_explanation.text,
             'transaction_token': dpo_transaction_token.text,
-            'transaction_reference': dpo_transaction_ref.text,
-            'result': dpo_transaction_result.text,
-            'result_explanation': dpo_transaction_result_explanation.text
+            'transaction_ref': dpo_transaction_ref.text
         }
+        txs = DinifyTransaction.objects.get(id=self.transaction_reference)
+        txs.aggregator = Aggregator_DPO
+        txs.aggregator_misc_details = dpo_response
+
         if dpo_transaction_result.text == '000':
             txs.aggregator_reference = dpo_transaction_ref.text
         else:
-            txs.transaction_status = 'Failed'
+            txs.transaction_status = TransactionStatus_Failed
         txs.save()
+
+        save_to_mongodb(
+            collection=COL_DPO_TOKENS,
+            data=dpo_response
+        )
 
         # return only the token
         if dpo_transaction_result.text == '000':
@@ -140,9 +148,8 @@ class DpoIntegration:
             data=post_data,
             headers=REQUEST_HEADERS
         )
-        print(dpo_response)
+        # print(dpo_response.text)
         response_xml_object = ET.fromstring(dpo_response.text)
-        print('the string response from dpo is ', str(response_xml_object))
 
         # <?xml version="1.0" encoding="utf-8"?>
         # <API3G>
@@ -178,8 +185,8 @@ class DpoIntegration:
         dpo_fraud_explanation = response_xml_object.find('FraudExplnation')
         dpo_transaction_net_amount = response_xml_object.find('TransactionNetAmount')
         dpo_transaction_settlement_date = response_xml_object.find('TransactionSettlementDate')
-        dpo_transaction_rolling_reserve_amount = response_xml_object.find('TransactionRollingReserveAmount')
-        dpo_transaction_rolling_reserve_date = response_xml_object.find('TransactionRollingReserveDate')
+        dpo_transaction_rolling_reserve_amount = response_xml_object.find('TransactionRollingReserveAmount')  # noqa
+        dpo_transaction_rolling_reserve_date = response_xml_object.find('TransactionRollingReserveDate')  # noqa
         dpo_customer_phone = response_xml_object.find('CustomerPhone')
         dpo_customer_country = response_xml_object.find('CustomerCountry')
         dpo_customer_address = response_xml_object.find('CustomerAddress')
@@ -189,31 +196,70 @@ class DpoIntegration:
         dpo_acc_ref = response_xml_object.find('AccRef')
         misc_details = {
             'dpo_transaction_token': self.dpo_transaction_token,
-            'transaction_result': dpo_transaction_result.text if dpo_transaction_result is not None else None,
-            'transaction_result_explanation': dpo_transaction_result_explanation.text if dpo_transaction_result_explanation is not None else None,
-            'customer_name': dpo_transaction_customer_name.text if dpo_transaction_customer_name is not None else None,
-            'customer_credit': dpo_customer_credit.text if dpo_customer_credit is not None else None,
-            'transaction_approval': dpo_transaction_approval.text if dpo_transaction_approval is not None else None,
-            'transaction_currency': dpo_transaction_currency.text if dpo_transaction_currency is not None else None,
-            'transaction_amount': dpo_transaction_amount.text if dpo_transaction_amount is not None else None,
-            'fraud_alert': dpo_fraud_alert.text if dpo_fraud_alert is not None else None,
-            'fraud_explanation': dpo_fraud_explanation.text if dpo_fraud_explanation is not None else None,
-            'transaction_net_amount': dpo_transaction_net_amount.text if dpo_transaction_net_amount is not None else None,
-            'transaction_settlement_date': dpo_transaction_settlement_date.text if dpo_transaction_settlement_date is not None else None,
-            'transaction_rolling_reserve_amount': dpo_transaction_rolling_reserve_amount.text if dpo_transaction_rolling_reserve_amount is not None else None,
-            'transaction_rolling_reserve_date': dpo_transaction_rolling_reserve_date.text if dpo_transaction_rolling_reserve_date is not None else None,
-            'customer_phone': dpo_customer_phone.text if dpo_customer_phone is not None else None,
-            'customer_country': dpo_customer_country.text if dpo_customer_country is not None else None,
-            'customer_address': dpo_customer_address.text if dpo_customer_address is not None else None,
-            'customer_city': dpo_customer_city.text if dpo_customer_city is not None else None,
-            'customer_zip': dpo_customer_zip.text if dpo_customer_zip is not None else None,
-            'mobile_payment_request': dpo_mobile_payment_request.text if dpo_mobile_payment_request is not None else None,
+            'transaction_result': dpo_transaction_result.text if dpo_transaction_result is not None else None,  # noqa
+            'transaction_result_explanation': dpo_transaction_result_explanation.text if dpo_transaction_result_explanation is not None else None,  # noqa
+            'customer_name': dpo_transaction_customer_name.text if dpo_transaction_customer_name is not None else None,  # noqa
+            'customer_credit': dpo_customer_credit.text if dpo_customer_credit is not None else None,  # noqa
+            'transaction_approval': dpo_transaction_approval.text if dpo_transaction_approval is not None else None,  # noqa
+            'transaction_currency': dpo_transaction_currency.text if dpo_transaction_currency is not None else None,  # noqa
+            'transaction_amount': dpo_transaction_amount.text if dpo_transaction_amount is not None else None,  # noqa
+            'fraud_alert': dpo_fraud_alert.text if dpo_fraud_alert is not None else None,  # noqa
+            'fraud_explanation': dpo_fraud_explanation.text if dpo_fraud_explanation is not None else None,  # noqa
+            'transaction_net_amount': dpo_transaction_net_amount.text if dpo_transaction_net_amount is not None else None,  # noqa
+            'transaction_settlement_date': dpo_transaction_settlement_date.text if dpo_transaction_settlement_date is not None else None,  # noqa
+            'transaction_rolling_reserve_amount': dpo_transaction_rolling_reserve_amount.text if dpo_transaction_rolling_reserve_amount is not None else None,  # noqa
+            'transaction_rolling_reserve_date': dpo_transaction_rolling_reserve_date.text if dpo_transaction_rolling_reserve_date is not None else None,  # noqa
+            'customer_phone': dpo_customer_phone.text if dpo_customer_phone is not None else None,  # noqa
+            'customer_country': dpo_customer_country.text if dpo_customer_country is not None else None,  # noqa
+            'customer_address': dpo_customer_address.text if dpo_customer_address is not None else None,  # noqa
+            'customer_city': dpo_customer_city.text if dpo_customer_city is not None else None,  # noqa
+            'customer_zip': dpo_customer_zip.text if dpo_customer_zip is not None else None,  # noqa
+            'mobile_payment_request': dpo_mobile_payment_request.text if dpo_mobile_payment_request is not None else None,  # noqa
             'acc_ref': dpo_acc_ref.text if dpo_acc_ref is not None else None
         }
 
-        print(misc_details)
+        save_to_mongodb(
+            collection=COL_DPO_TOKEN_VERIFICATION,
+            data=misc_details
+        )
+
+        transaction_status = TransactionStatus_Pending
+        if dpo_transaction_result.text in ['000']:
+            transaction_status = TransactionStatus_Success
+        elif dpo_transaction_result.text in ['901', '902', '903', '904', '950']:
+            transaction_status = TransactionStatus_Failed
+
+        if transaction_status in [
+            TransactionStatus_Success,
+            TransactionStatus_Failed
+        ]:
+            process_payment_feedback(
+                transaction_id=self.transaction_reference,
+                aggregator=Aggregator_DPO,
+                aggregator_reference=dpo_transaction_approval.text,
+                aggregator_status=dpo_transaction_result.text,
+                status=transaction_status
+            )
 
         return {
             'status': 200,
             'message': 'Token verified',
         }
+
+
+# 000	Transaction Paid
+# 001	Authorized
+# 002	Transaction overpaid/underpaid
+# 003	Pending Bank
+# 005	Queued Authorization
+# 007	Pending Split Payment (Part Payment Transactions not fully paid)
+# 801	Request missing company token
+# 802	Company token does not exist
+# 803	No request or error in Request type name
+# 804	Error in XML
+# 900	Transaction not paid yet
+# 901	Transaction declined
+# 902	Data mismatch in one of the fields - field (explanation)
+# 903	The transaction passed the Payment Time Limit
+# 904	Transaction cancelled
+# 950	Request missing transaction level mandatory fields – field (explanation)

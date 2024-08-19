@@ -65,3 +65,7 @@ OrderItemStatus_Served = 'served'
 ProcessingStatus_Pending = 'pending'
 ProcessingStatus_PendingRevenueAcknowledgement = 'pending_revenue_acknowledgement'
 ProcessingStatus_Done = 'done'
+
+
+# aggregators
+Aggregator_DPO = 'dpo'
