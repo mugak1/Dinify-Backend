@@ -115,12 +115,13 @@ class DinifyTransaction(BaseModel):
     # for direct subscriptions
     restaurant = models.ForeignKey(Restaurant, on_delete=models.SET_NULL, null=True, blank=True)
     order = models.ForeignKey(Order, on_delete=models.SET_NULL, null=True, blank=True)
-    
+
     transaction_type = models.CharField(validators=[validate_transaction_type], max_length=255, db_index=True)  # noqa
     transaction_status = models.CharField(validators=[validate_transaction_status], max_length=255, db_index=True, default=TransactionStatus_Initiated)  # noqa
     transaction_platform = models.CharField(validators=[validate_transaction_platform], max_length=255, db_index=True)  # noqa
 
     transaction_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
+    tip_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     transaction_collected_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     msisdn = models.CharField(max_length=255, null=True, blank=True)
     payment_form = models.CharField(max_length=20, default=PaymentForm_Full)

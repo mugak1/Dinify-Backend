@@ -19,6 +19,7 @@ from payment_integrations_app.controllers.dpo import DpoIntegration
 
 def initiate_order_payment(
     order: Order,
+    tip_amount: int,
     payment_mode: str,
     transaction_platform=TransactionPlatform_Web,
     payment_form=PaymentForm_Full,
@@ -42,13 +43,14 @@ def initiate_order_payment(
         )
 
     transaction_amount = clean_amount(Decimal(order.actual_cost))
+    tip_amount = clean_amount(Decimal(tip_amount))
 
     if payment_form is PaymentForm_Split:
         if amount is not None:
             transaction_amount = clean_amount(Decimal(amount))
 
     # determine the amount to collect based on the aggregator charges
-    amount_collectable = transaction_amount
+    amount_collectable = transaction_amount + tip_amount
     if payment_mode is PaymentMode_MobileMoney:
         amount_collectable = transaction_amount
 
@@ -61,6 +63,7 @@ def initiate_order_payment(
         transaction_status=TransactionStatus_Initiated,
         transaction_platform=transaction_platform,
         transaction_amount=transaction_amount,
+        tip_amount=tip_amount,
         transaction_collected_amount=amount_collectable,
         msisdn=msisdn,
         payment_mode=payment_mode,
