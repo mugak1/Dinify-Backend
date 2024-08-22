@@ -1,11 +1,13 @@
 from decimal import Decimal
 from finance_app.models import DinifyTransaction
+from users_app.models import User
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
     TransactionType_OrderPayment,
     TransactionStatus_Success,
     PaymentStatus_Paid,
-    OrderItemStatus_Served
+    OrderItemStatus_Served,
+
 )
 from misc_app.controllers.clean_amount import clean_amount
 from dinify_backend.configss.messages import OK_ORDER_PAYMENT_PROCESSED
@@ -14,7 +16,7 @@ from dinify_backend.configss.messages import OK_ORDER_PAYMENT_PROCESSED
 def process_order_payment(
     transaction_record: DinifyTransaction,
     transaction_status: str
-) -> dict:
+) -> bool:
     """
     Process the status of the order payment
     """
@@ -32,10 +34,16 @@ def process_order_payment(
             if order.order_status == OrderItemStatus_Served:
                 order.order_status = "Paid"
         order.save()
-        return {
-            'status': 200,
-            'message': OK_ORDER_PAYMENT_PROCESSED
-        }
+        return True
 
     # TODO check if a tip is included and add it to the waiter's account.
 
+
+def collect_tip(
+    waiter: User,
+    amount: Decimal,
+) -> bool:
+    # check if the waiter already has a wallet
+    # if not create a wallet for the waiter
+    # add the tip to the waiter's wallet
+    pass

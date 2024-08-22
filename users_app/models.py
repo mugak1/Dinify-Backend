@@ -2,9 +2,11 @@
 the models for the Users app
 """
 import uuid
+import datetime
 from django.db import models
 from django.contrib.auth.models import AbstractUser
-
+from django.db.models.signals import pre_save
+from django.dispatch import receiver
 
 # Create your models here.
 class User(AbstractUser):
@@ -82,3 +84,8 @@ class BaseModel(models.Model):
         the metadata for the BaseModel model
         """
         abstract = True
+
+
+@receiver(pre_save, sender=BaseModel)
+def add_time_last_updated(sender, instance, **kwargs):
+    instance.time_last_updated = datetime.datetime.now()

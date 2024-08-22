@@ -105,8 +105,7 @@ class FinanceAppTestFunctions(TestCase):
                 aggregator_status=feedback['aggregator_status'],
                 status=feedback['status']
             )
-            self.assertEqual(result['status'], 200)
-            self.assertEqual(result['message'], OK_ORDER_PAYMENT_PROCESSED)
+            self.assertEqual(result, True)
 
         test_initiate()
         test_process_payment_feedback()

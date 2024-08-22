@@ -16,6 +16,12 @@ class Order(BaseModel):
     """
     the orders that have been placed
     """
+    waiter = models.ForeignKey(
+        User,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name='waiter'
+    )
     restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name='restaurant')
     table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='table')
     order_number = models.IntegerField(null=True)

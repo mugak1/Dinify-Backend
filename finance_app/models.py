@@ -1,6 +1,6 @@
 from django.db import models
 from django.core.exceptions import ValidationError
-from users_app.models import BaseModel
+from users_app.models import BaseModel, User
 from restaurants_app.models import Restaurant
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
@@ -58,6 +58,11 @@ class DinifyAccount(BaseModel):
     """
     restaurant = models.ForeignKey(
         Restaurant,
+        on_delete=models.CASCADE,
+        null=True
+    )
+    user = models.ForeignKey(
+        User,
         on_delete=models.CASCADE,
         null=True
     )

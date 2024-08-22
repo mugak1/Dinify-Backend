@@ -4,7 +4,8 @@ from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
     TransactionType_OrderPayment,
     Aggregator_DPO,
-    TransactionStatus_Pending
+    TransactionStatus_Pending,
+    TransactionStatus_Initiated
 )
 from payment_integrations_app.controllers.dpo import DpoIntegration
 
@@ -18,7 +19,10 @@ class Command(BaseCommand):
         print('\n=== Verifying DPO tokens ===\n')
         pending_transactions = DinifyTransaction.objects.filter(
             transaction_type=TransactionType_OrderPayment,
-            transaction_status=TransactionStatus_Pending,
+            transaction_status__in=[
+                TransactionStatus_Pending,
+                TransactionStatus_Initiated
+            ],
             aggregator=Aggregator_DPO
         )
 

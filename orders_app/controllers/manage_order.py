@@ -15,7 +15,7 @@ from dinify_backend.configss.string_definitions import (
     OrderItemStatus_Initiated, OrderItemStatus_Unavailable,
     OrderStatus_Pending,
     OrderItemStatus_Preparing, OrderItemStatus_Served,
-    OrderStatus_Cancelled,
+    OrderStatus_Cancelled, OrderStatus_Preparing,
     OrderStatus_Served
 )
 
@@ -43,7 +43,16 @@ def update_order_status(
         order.order_status = new_status
         print(f'The submitted user is {user}')
         if user is not None:
-            order.last_updated_by = User.objects.get(pk=user)
+            # order.last_updated_by = User.objects.get(pk=user)
+            order.last_updated_by = user
+        if new_status == OrderStatus_Preparing:
+            order.waiter = user
+            # set all oder items
+            order_items = OrderItem.objects.filter(order=order)
+            for item in order_items:
+                item.status = OrderItemStatus_Preparing
+                item.last_updated_by = user
+                item.save()
         order.time_last_updated = datetime.now()
         order.save()
         return {
