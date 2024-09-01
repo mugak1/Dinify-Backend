@@ -5,6 +5,7 @@ from users_app.models import User
 from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.save_action_log import save_action
+from misc_app.controllers.notifications.notification import Notification
 
 
 def change_password(user_id, old_password, new_password):
@@ -67,6 +68,11 @@ def change_password(user_id, old_password, new_password):
     )
 
     # TODO send an email
+    Notification(msg_data={
+        'msg_type': 'password-change',
+        'first_name': user.first_name,
+        'to': user.email
+    }).create_notification()
 
     return {
         'status': 200,

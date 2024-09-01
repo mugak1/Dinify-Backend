@@ -5,6 +5,7 @@ from users_app.models import User
 from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.save_action_log import save_action
+from misc_app.controllers.notifications.notification import Notification
 
 
 def reset_password(username):
@@ -52,6 +53,12 @@ def reset_password(username):
     )
 
     #  TODO send out the email with the new password
+    Notification(msg_data={
+        'msg_type': 'forgot-password',
+        'first_name': user.first_name,
+        'password': password,
+        'to': user.email
+    }).create_notification()
 
     return {
         'status': 200,

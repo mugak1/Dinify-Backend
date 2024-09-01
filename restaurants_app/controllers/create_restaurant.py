@@ -12,6 +12,7 @@ from misc_app.controllers.check_required_information import check_required_infor
 from dinify_backend.configss.string_definitions import AccountType_Restaurant
 from finance_app.serializers import SerializerPutAccount
 from users_app.controllers.self_register import self_register
+from misc_app.controllers.notifications.notification import Notification
 
 
 def create_restaurant(data: dict, auth_info: dict) -> dict:
@@ -50,6 +51,14 @@ def create_restaurant(data: dict, auth_info: dict) -> dict:
     if record.is_valid():
         with transaction.atomic():
             record.save()
+
+            # create the notification for the restaurant
+            Notification(msg_data={
+                'msg_type': 'new-restaurant',
+                'first_name': auth_info['first_name'],
+                'restaurant_name': record.data['name'],
+                'recipient_email': auth_info['email']
+            }).create_notification()
 
             # create the restaurant account
             account_data = {
@@ -159,6 +168,14 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
     if record.is_valid():
         with transaction.atomic():
             record.save()
+
+            # create the notification for the restaurant
+            Notification(msg_data={
+                'msg_type': 'admin-new-restaurant',
+                'first_name': data['first_name'],
+                'restaurant_name': data['name'],
+                'recipient_email': data['email']
+            }).create_notification()
 
             # create the restaurant account
             account_data = {

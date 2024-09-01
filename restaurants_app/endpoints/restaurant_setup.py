@@ -62,7 +62,14 @@ class RestaurantSetupEndpoint(APIView):
             data['owner'] = auth['user_id']
             response = create_restaurant(
                 data,
-                auth
+                # auth,
+                {
+                    'id': str(request.user.id),
+                    'user_id': str(request.user.id),
+                    'username': request.user.username,
+                    'first_name': request.user.first_name,
+                    'email': request.user.email
+                }
             )
             return Response(
                 response,
@@ -78,7 +85,13 @@ class RestaurantSetupEndpoint(APIView):
             data = post_data.copy()
             response = admin_register_restaurant(
                 data=data,
-                auth_info=auth
+                auth_info={
+                    'id': str(request.user.id),
+                    'user_id': str(request.user.id),
+                    'username': request.user.username,
+                    'first_name': request.user.first_name,
+                    'email': request.user.email
+                }
             )
             return Response(response, status=response['status'])
 

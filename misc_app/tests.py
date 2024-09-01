@@ -9,6 +9,7 @@ from dinify_backend.configs import ROLES
 from dinify_backend.configss.edit_information import EDIT_INFORMATION
 from users_app.tests import seed_user, TEST_PHONE
 from users_app.models import User
+from misc_app.controllers.notifications.notification import Notification
 
 
 # Create your tests here.
@@ -198,3 +199,16 @@ class MiscAppTestFunctions(TestCase):
             'consider': consider
         })
         self.assertEqual(len(result), 1)
+
+    def test_notification(self):
+        """
+        test the notification class
+        """
+        data = {
+            'msg_type': 'new-restaurant',
+            'first_name': 'John',
+            'restaurant_name': 'Test Restaurant'
+        }
+        notification = Notification(msg_data=data)
+        notification.create_notification()
+        self.assertIsNotNone(notification)
