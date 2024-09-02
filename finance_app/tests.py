@@ -109,3 +109,6 @@ class FinanceAppTestFunctions(TestCase):
 
         test_initiate()
         test_process_payment_feedback()
+
+    def test_update_wallet_balance(self):
+        pass

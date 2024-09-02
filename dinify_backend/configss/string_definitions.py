@@ -9,6 +9,7 @@ RestaurantStatus_Blocked = 'blocked'
 # account types
 AccountType_Restaurant = 'restaurant'
 AccountType_DinifyRevenue = 'dinify_revenue'
+AccountType_User = 'user'
 
 # payment modes
 PaymentMode_Cash = 'cash'
@@ -29,6 +30,7 @@ TransactionType_OrderRefund = 'order_refund'
 TransactionType_OrderCharge = 'order_charge'
 TransactionType_Disbursement = 'disbursement'
 TransactionType_Subscription = 'subscription'
+TransactionType_Tip = 'tip'
 
 # transaction statuses
 TransactionStatus_Success = 'success'

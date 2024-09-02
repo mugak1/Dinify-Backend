@@ -1,6 +1,6 @@
 from decimal import Decimal
 from typing import Optional
-from finance_app.models import Wallet
+from finance_app.models import DinifyAccount
 from misc_app.controllers.clean_amount import clean_amount
 from dinify_backend.configss.string_definitions import (
     PaymentMode_Card,
@@ -22,7 +22,7 @@ def update_wallet_balance(
     - Should be called in an atomic transaction
     - Updates the wallet balance and cumulative amounts for the wallet.
     """
-    wallet = Wallet.objects.select_for_update().get(id=id)
+    wallet = DinifyAccount.objects.select_for_update().get(id=id)
 
     old_balances = {
         'momo_actual_balance': wallet.momo_actual_balance,

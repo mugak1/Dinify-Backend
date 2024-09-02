@@ -4,7 +4,7 @@ from users_app.models import BaseModel, User
 from restaurants_app.models import Restaurant
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
-    AccountType_Restaurant, AccountType_DinifyRevenue,
+    AccountType_Restaurant, AccountType_DinifyRevenue, AccountType_User,
     PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card,
     AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked,
     TransactionType_OrderPayment, TransactionType_OrderRefund, TransactionType_OrderCharge, TransactionType_Disbursement, TransactionType_Subscription,  # noqa
@@ -13,7 +13,7 @@ from dinify_backend.configss.string_definitions import (
     PaymentForm_Full
 )
 
-ACCOUNT_TYPES = [AccountType_Restaurant, AccountType_DinifyRevenue]
+ACCOUNT_TYPES = [AccountType_Restaurant, AccountType_DinifyRevenue, AccountType_User]
 PAYMENT_MODES = [PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card]
 ACCOUNT_STATUSES = [AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked]
 TRANSACTION_TYPES = [TransactionType_OrderPayment, TransactionType_OrderRefund, TransactionType_OrderCharge, TransactionType_Disbursement, TransactionType_Subscription]  # noqa
@@ -65,7 +65,7 @@ class DinifyAccount(BaseModel):
         User,
         on_delete=models.CASCADE,
         null=True
-    )
+    )  # to facilitate waiter tips
 
     account_currency = models.CharField(default="UGX", max_length=10, db_index=True)
     account_type = models.CharField(validators=[validate_account_type], max_length=255, db_index=True)  # noqa
@@ -130,6 +130,12 @@ class DinifyTransaction(BaseModel):
     transaction_collected_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     msisdn = models.CharField(max_length=255, null=True, blank=True)
     payment_form = models.CharField(max_length=20, default=PaymentForm_Full)
+    source_order_payment = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='ref_source_order_payment'
+    )
 
     # aggregator details
     aggregator = models.CharField(max_length=255, null=True, blank=True)
@@ -152,7 +158,12 @@ class DinifyTransaction(BaseModel):
 
     # for restaurants where Dinify has surcharge
     revenue_collected = models.BooleanField(default=False)  # i.e. revenue collected from the transaction  # noqa
-    revenue_initiation_transaction = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True)  # noqa
+    revenue_initiation_transaction = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='ref_revenue_initiation_transaction'
+    )
     revenue_collection_timestamp = models.DateTimeField(null=True, blank=True)
 
     class Meta:
