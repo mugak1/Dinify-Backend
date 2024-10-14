@@ -3,12 +3,17 @@ the serializers for the restaurant app
 """
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from orders_app.models import Order, OrderItem
+from django.db.models import Q
 from restaurants_app.models import (
     Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table,
     SectionGroup
 )
 from dinify_backend.configss.string_definitions import (
-    OrderItemStatus_Initiated, OrderItemStatus_Preparing, OrderStatus_Pending
+    OrderItemStatus_Initiated,
+    OrderItemStatus_Preparing,
+    OrderStatus_Pending,
+    OrderStatus_Served,
+    PaymentStatus_Paid
 )
 
 
@@ -228,8 +233,11 @@ class SerializerPublicGetTableDetails(ModelSerializer):
             order_status__in=[
                 OrderItemStatus_Initiated,
                 OrderStatus_Pending,
-                OrderItemStatus_Preparing
+                OrderItemStatus_Preparing,
+                OrderStatus_Served
             ]
+        ).exclude(
+            payment_status=PaymentStatus_Paid
         ).order_by('-time_created')
 
         present = orders.count() > 0
