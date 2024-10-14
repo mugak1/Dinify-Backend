@@ -204,3 +204,15 @@ class V2OrdersEndpoint(APIView):
                 items=items
             )
             return Response(response, status=200)
+
+    def delete(self, request, action):
+        if action == 'add-items':
+            data = request.data
+            order_id = data.get('order')
+            item_id = data.get('item')
+            response = handle_add_order_items(
+                order_id=order_id,
+                item_id=item_id,
+                user=request.user
+            )
+            return Response(response, status=200)

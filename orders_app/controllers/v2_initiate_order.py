@@ -17,7 +17,6 @@ from users_app.models import User
 from orders_app.controllers.orders.serializers import serialize_order_details
 
 
-
 def determine_effective_unit_price(
     menu_item: MenuItem,
     option: Optional[int] = None
@@ -264,7 +263,10 @@ def process_item_extras(
 
 def update_order_amounts(order: Order) -> dict:
     # get the order items
-    order_items = OrderItem.objects.select_for_update().filter(order=order)
+    order_items = OrderItem.objects.select_for_update().filter(
+        deleted=False,
+        order=order
+    )
     total_cost = sum([item.total_cost for item in order_items])
     discounted_cost = sum([item.discounted_cost for item in order_items])
     savings = total_cost - discounted_cost
@@ -464,3 +466,23 @@ def handle_add_order_items(
                 'unavailable_extras': order_details.get('unavailable_extras')
             }
         }
+
+
+def handle_delete_items(
+    order_item: str,
+    reason: str,
+    user: User
+) -> dict:
+    with transaction.atomic():
+        order_item = OrderItem.objects.select_for_update().get(pk=order_item)
+        order_item.delete = True
+        order_item.deletion_reason = reason
+        order_item.deleted_by = user
+        order_item.save()
+
+        update_order_amounts(order=order_item.order)
+
+    return {
+        'status': 200,
+        'message': 'The order item has been updated successfully.'
+    }
