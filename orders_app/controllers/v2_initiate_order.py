@@ -475,7 +475,7 @@ def handle_delete_items(
 ) -> dict:
     with transaction.atomic():
         order_item = OrderItem.objects.select_for_update().get(pk=order_item)
-        order_item.delete = True
+        order_item.deleted = True
         order_item.deletion_reason = reason
         order_item.deleted_by = user
         order_item.save()
