@@ -31,7 +31,8 @@ class SerializerListOrderItem(ModelSerializer):
             'quantity', 'unit_price',
             'discounted_price', 'savings',
             'options', 'cost_of_options',
-            'actual_cost', 'status', 'deleted'
+            'actual_cost', 'status',
+            'deleted', 'deletion_reason'
         )
 
     def get_item(self, item):
