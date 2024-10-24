@@ -1,19 +1,23 @@
 from datetime import datetime
 from typing import Optional, Union
 from django.db import transaction
+from django.db.models import Sum
 from restaurants_app.models import Restaurant, MenuItem, Table
 from django.core.exceptions import ObjectDoesNotExist
 from dinify_backend.configss.messages import MESSAGES
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated,
     OrderStatus_Pending,
-    OrderStatus_Preparing
+    OrderStatus_Preparing,
+    TransactionStatus_Success
 )
 from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
 from orders_app.models import Order, OrderItem
 from orders_app.controllers.initiate_order import any_present_ongoing_order
 from users_app.models import User
 from orders_app.controllers.orders.serializers import serialize_order_details
+from finance_app.models import DinifyTransaction
+
 
 
 def determine_effective_unit_price(
@@ -270,11 +274,17 @@ def update_order_amounts(order: Order) -> dict:
     discounted_cost = sum([item.discounted_cost for item in order_items])
     savings = total_cost - discounted_cost
     actual_cost = discounted_cost
-    total_paid = 0
-    balance_payable = 0
 
     # get the total payments done on the order
+    order_payments = DinifyTransaction.objects.filter(
+        order=order,
+        transaction_status=TransactionStatus_Success
+    )
+    total_paid = order_payments.aggregate(
+        Sum('transaction_amount')
+    )['transaction_amount__sum'] or 0
 
+    balance_payable = actual_cost - total_paid
 
     order.total_cost = total_cost
     order.discounted_cost = discounted_cost
