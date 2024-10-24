@@ -17,7 +17,6 @@ from users_app.models import User
 from orders_app.controllers.orders.serializers import serialize_order_details
 
 
-
 def determine_effective_unit_price(
     menu_item: MenuItem,
     option: Optional[int] = None
@@ -264,7 +263,10 @@ def process_item_extras(
 
 def update_order_amounts(order: Order) -> dict:
     # get the order items
-    order_items = OrderItem.objects.select_for_update().filter(order=order)
+    order_items = OrderItem.objects.select_for_update().filter(
+        order=order,
+        deleted=False
+    )
     total_cost = sum([item.total_cost for item in order_items])
     discounted_cost = sum([item.discounted_cost for item in order_items])
     savings = total_cost - discounted_cost

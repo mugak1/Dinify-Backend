@@ -19,7 +19,7 @@ def make_menu_item_messages(msg_data, footer) -> dict:
             'email': email,
             'sms': None
         }
-    
+
     elif msg_data.get('msg_type') == 'table-updated':
         email = f"""
         <p><span style="font-weight: 400;">Hello {msg_data['restaurant_name']},</span></p>
@@ -34,7 +34,7 @@ def make_menu_item_messages(msg_data, footer) -> dict:
             'email': email,
             'sms': None
         }
-    
+
     elif msg_data.get('msg_type') == 'table-disabled':
         email = f"""
         <p><span style="font-weight: 400;">Hello {msg_data['restaurant_name']},</span></p>
