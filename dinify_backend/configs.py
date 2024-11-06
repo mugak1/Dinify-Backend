@@ -13,6 +13,8 @@ ROLES = {
     'RESTAURANT_OWNER': 'restaurant_owner',
     'RESTAURANT_MANAGER': 'restaurant_manager',
     'RESTAURANT_STAFF': 'restaurant_staff',
+    'RESTAURANT_KITCHEN': 'restaurant_kitchen',
+    'RESTAURANT_WAITER': 'restaurant_waiter',
     'DINER': 'diner'
 }
 

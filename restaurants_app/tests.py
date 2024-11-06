@@ -1,3 +1,4 @@
+from cgi import test
 from django.db import transaction
 from django.test import TestCase
 from dinify_backend.configs import ROLES
@@ -7,6 +8,7 @@ from users_app.models import User
 from restaurants_app.controllers.create_restaurant import (
     create_restaurant, admin_register_restaurant
 )
+from restaurants_app.controllers.create_employee import create_employee
 from restaurants_app.models import Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table
 
 
@@ -157,7 +159,9 @@ class RestaurantAppTestFunctions(TestCase):
         """
         user_id = str(User.objects.get(username=TEST_PHONE).pk)
         auth_info = {
-            'user_id': user_id
+            'user_id': user_id,
+            'first_name': 'First',
+            'email': 'dummy@email.com'
         }
 
         def test_missing_info():
@@ -178,13 +182,29 @@ class RestaurantAppTestFunctions(TestCase):
             self.assertEqual(result['status'], 200)
             self.assertEqual(result['message'], MESSAGES.get('OK_CREATE_RESTAURANT'))
 
+        def test_create_employee():
+            restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+            result = create_employee(
+                first_name='Test',
+                last_name='Employee',
+                email='dummy@email.com',
+                phone_number='256777777777',
+                restaurant=restaurant,
+                roles=[ROLES.get('RESTAURANT_KITCHEN')],
+                creator=restaurant.owner
+            )
+            self.assertEqual(result['status'], 200)
+
         test_missing_info()
         test_ok()
+        test_create_employee()
 
     def test_admin_register_restaurant(self):
         user_id = str(User.objects.get(username=TEST_PHONE).pk)
         auth_info = {
-            'user_id': user_id
+            'user_id': user_id,
+            'first_name': 'First',
+            'email': 'dummy@email.com'
         }
 
         data = {
@@ -201,3 +221,5 @@ class RestaurantAppTestFunctions(TestCase):
         result = admin_register_restaurant(data, auth_info)
         print(f'admin result: {result}')
         self.assertEqual(result['status'], 200)
+
+
