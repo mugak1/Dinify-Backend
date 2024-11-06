@@ -2,6 +2,7 @@
 endpoints for restaurant configurations
 """
 import ast
+from logging import config
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from restaurants_app.controllers.create_restaurant import (
@@ -36,6 +37,15 @@ from dinify_backend.configss.messages import (
     OK_ADDED_SECTION_GROUP, ERR_ADDED_SECTION_GROUP, OK_RETRIEVED_SECTION_GROUP, ERR_RETRIEVED_SECTION_GROUP, OK_UPDATED_SECTION_GROUP, ERR_UPDATED_SECTION_GROUP  # noqa
 )
 from restaurants_app.controllers.create_employee import create_employee
+from dinify_backend.configss.string_definitions import (
+    OrderStatus_Pending,
+    OrderStatus_Preparing,
+    OrderStatus_Served,
+    OrderStatus_Cancelled,
+    OrderStatus_Refunded,
+    PaymentStatus_Paid,
+    PaymentStatus_Pending
+)
 
 
 class RestaurantSetupEndpoint(APIView):
@@ -252,7 +262,47 @@ class RestaurantSetupEndpoint(APIView):
         if config_detail == 'details':
             return self.get_detail(request)
 
-        orm_filter = define_filter_params(request.GET, config_detail)
+        filter_params = request.GET.copy()
+        if config_detail == 'orders':
+            if 'status' in request.GET:
+                filter_params.pop('status')
+
+        orm_filter = define_filter_params(filter_params, config_detail)
+
+        if config_detail == 'orders':
+            if 'status' in request.GET:
+                try:
+                    orm_filter.pop('order_status')
+                except KeyError:
+                    pass
+                try:
+                    orm_filter.pop('payment_status')
+                except KeyError:
+                    pass
+
+                if request.GET.get('status') == 'active':
+                    orm_filter['order_status__in'] = [
+                        OrderStatus_Pending,
+                        OrderStatus_Preparing,
+                        OrderStatus_Served
+                    ]
+                    orm_filter['payment_status'] = PaymentStatus_Pending
+
+                if request.GET.get('status') == 'closed':
+                    orm_filter['order_status'] = OrderStatus_Served
+                    orm_filter['payment_status'] = PaymentStatus_Paid
+                
+                if request.GET.get('status') == 'all':
+                    orm_filter['order_status__in'] = [
+                        OrderStatus_Pending,
+                        OrderStatus_Preparing,
+                        OrderStatus_Served,
+                        OrderStatus_Cancelled,
+                        OrderStatus_Refunded
+                    ]
+                    # orm_filter['payment_status'] = PaymentStatus_Pending
+
+
 
         serializers = {
             'restaurants': SerializerPublicGetRestaurant,
