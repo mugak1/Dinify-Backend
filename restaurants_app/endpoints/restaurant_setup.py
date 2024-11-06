@@ -35,6 +35,7 @@ from dinify_backend.configss.messages import (
     ERR_UNSPECIFIED_RECORD_DETAILS,
     OK_ADDED_SECTION_GROUP, ERR_ADDED_SECTION_GROUP, OK_RETRIEVED_SECTION_GROUP, ERR_RETRIEVED_SECTION_GROUP, OK_UPDATED_SECTION_GROUP, ERR_UPDATED_SECTION_GROUP  # noqa
 )
+from restaurants_app.controllers.create_employee import create_employee
 
 
 class RestaurantSetupEndpoint(APIView):
@@ -94,6 +95,36 @@ class RestaurantSetupEndpoint(APIView):
                 }
             )
             return Response(response, status=response['status'])
+
+        if config_detail == 'create-employee':
+            # TODO if the user is not a Dinify admin,.
+            # then set the owner value from the auth details
+            data = request.data
+            try:
+                data = data.dict()
+            except Exception as error:
+                print(f"Error: {error}")
+
+            try:
+                response = create_employee(
+                    first_name=data.get('first_name'),
+                    last_name=data.get('last_name'),
+                    email=data.get('email'),
+                    phone_number=data.get('phone_number'),
+                    restaurant=Restaurant.objects.get(id=data.get('restaurant')),
+                    roles=data.get('roles'),
+                    creator=request.user
+                )
+            except Exception as error:
+                print(f"Error while creating employee: {error}")
+                response = {
+                    'status': 500,
+                    'message': "An error occurred while creating the employee. Please check that you have provided all the details."
+                }
+            return Response(
+                response,
+                status=response['status']
+            )
 
         serializers = {
             'employees': SerializerPutRestaurantEmployee,
