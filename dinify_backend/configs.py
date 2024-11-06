@@ -10,11 +10,13 @@ ACTION_LOG_STATUSES = {
 # the roles that can be granted on the system
 ROLES = {
     'DINIFY_ADMIN': 'dinify_admin',
-    'RESTAURANT_OWNER': 'restaurant_owner',
-    'RESTAURANT_MANAGER': 'restaurant_manager',
+    'DINIFY_ACCOUNT_MANAGER': 'dinify_account_manager',
+    'RESTAURANT_OWNER': 'owner',
+    'RESTAURANT_MANAGER': 'manager',
     'RESTAURANT_STAFF': 'restaurant_staff',
-    'RESTAURANT_KITCHEN': 'restaurant_kitchen',
-    'RESTAURANT_WAITER': 'restaurant_waiter',
+    'RESTAURANT_KITCHEN': 'kitchen',
+    'RESTAURANT_WAITER': 'waiter',
+    'RESTAURANT_FINANCE': 'finance',
     'DINER': 'diner'
 }
 
