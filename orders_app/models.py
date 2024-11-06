@@ -41,8 +41,8 @@ class Order(BaseModel):
     total_paid = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     balance_payable = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
 
-    payment_status = models.CharField(max_length=50, default=PaymentStatus_Pending)
-    order_status = models.CharField(max_length=50, default=OrderStatus_Initiated)
+    payment_status = models.CharField(max_length=50, default=PaymentStatus_Pending, db_index=True)
+    order_status = models.CharField(max_length=50, default=OrderStatus_Initiated, db_index=True)
     last_updated_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='last_updated_by')  # noqa
 
     rating = models.IntegerField(null=True, blank=True)
