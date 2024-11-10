@@ -37,51 +37,62 @@ def self_update_user_profile(
         require_approval = True
 
     if require_approval:
+        return {
+            'status': 200,
+            'message': 'Kindly refer to your manager to update the profile.'
+        }
+
         profile_changes = []
         if country is not None:
             if user.country != country:
                 profile_changes.append({
-                    'user_id': user_id,
+                    'user_id': str(user_id),
+                    'detail': 'country',
                     'old': user.country,
                     'new': country
                 })
         if first_name is not None:
             if user.first_name != first_name:
                 profile_changes.append({
-                    'user_id': user_id,
+                    'user_id': str(user_id),
+                    'detail': 'first_name',
                     'old': user.first_name,
                     'new': first_name
                 })
         if last_name is not None:
             if user.last_name != last_name:
                 profile_changes.append({
-                    'user_id': user_id,
+                    'user_id': str(user_id),
+                    'detail': 'last_name',
                     'old': user.last_name,
                     'new': last_name
                 })
         if other_names is not None:
             if user.other_names != other_names:
                 profile_changes.append({
-                    'user_id': user_id,
+                    'user_id': str(user_id),
+                    'detail': 'other_names',
                     'old': user.other_names,
                     'new': other_names
                 })
         if email is not None:
             if user.email != email:
                 profile_changes.append({
-                    'user_id': user_id,
+                    'user_id': str(user_id),
+                    'detail': 'email',
                     'old': user.email,
                     'new': email
                 })
         if phone_number is not None:
             if user.phone_number != phone_number:
                 profile_changes.append({
-                    'user_id': user_id,
+                    'user_id': str(user_id),
+                    'detail': 'phone_number',
                     'old': user.phone_number,
                     'new': phone_number
                 })
 
-        # TODO replace with batch insert 
+        # TODO replace with batch insert
         # which should still consider the inclusion of record creation time
         if len(profile_changes) > 0:
             for profile_change in profile_changes:
@@ -112,3 +123,8 @@ def self_update_user_profile(
         'status': 200,
         'message': 'Your profile has been updated successfully.'
     }
+
+
+# def update_user_profile(
+    
+# )

@@ -1,6 +1,7 @@
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from users_app.controllers.update_user_profile import self_update_user_profile
+from users_app.controllers.profile_update_approvals import get_pending_profile_updates
 
 
 class UserProfileEndpoint(APIView):
@@ -22,4 +23,14 @@ class UserProfileEndpoint(APIView):
                 'status': 400,
                 'message': 'Sorry, an error occurred.'
             }
+            return Response(response, status=200)
+
+
+class UserProfileUpdateEndpoint(APIView):
+    def get(self, request, intention):
+        if intention == 'pending-approvals':
+            response = get_pending_profile_updates(
+                user=request.user,
+                restaurant=request.query_params.get('restaurant')
+            )
             return Response(response, status=200)
