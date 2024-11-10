@@ -71,3 +71,14 @@ ProcessingStatus_Done = 'done'
 
 # aggregators
 Aggregator_DPO = 'dpo'
+
+
+DINIFY_ADMIN = 'dinify_admin',
+DINIFY_ACCOUNT_MANAGER = 'dinify_account_manager',
+RESTAURANT_OWNER = 'owner',
+RESTAURANT_MANAGER = 'manager',
+RESTAURANT_STAFF = 'restaurant_staff',
+RESTAURANT_KITCHEN = 'kitchen',
+RESTAURANT_WAITER = 'waiter',
+RESTAURANT_FINANCE = 'finance',
+DINER = 'diner'
