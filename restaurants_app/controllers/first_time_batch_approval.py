@@ -75,22 +75,21 @@ def first_time_batch_approval(
             'message': 'Sorry, you cannot approve a menu that you created.'
         }
 
-
-
-
     # get the restaurant
     restaurant = Restaurant.objects.get(id=restaurant_id)
 
-    if approval_decision not in ['approve', 'reject']:
+    if approval_decision not in ['approve', 'reject', 'submit']:
         return {
             'status': 400,
             'message': 'Invalid decision. Please try again.'
         }
 
     with transaction.atomic():
-        if approval_decision == 'approve':
+        if approval_decision in ['approve', 'submit']:
             # flag the restaurant detail to indicate that a first time memenu approval has been done
-            restaurant.first_time_menu_approval = True
+            restaurant.first_time_menu_approval_decision = approval_decision
+            if approval_decision == 'approve':
+                restaurant.first_time_menu_approval = True
             restaurant.save()
 
             # bulk update the menu sections

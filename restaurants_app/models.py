@@ -48,6 +48,10 @@ class Restaurant(BaseModel):
     country = models.CharField(max_length=5, default="UG")
 
     # for batch approvals
+    first_time_menu_approval_decision = models.CharField(
+        max_length=255,
+        default='pending',
+    )
     first_time_menu_approval = models.BooleanField(default=False)
 
     class Meta:
