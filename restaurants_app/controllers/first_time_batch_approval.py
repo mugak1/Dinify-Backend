@@ -12,6 +12,13 @@ from dinify_backend.configss.string_definitions import(
     RESTAURANT_OWNER,
     RESTAURANT_MANAGER
 )
+from dinify_backend.mongo_db import ACTON_LOGS
+from users_app.models import User
+from users_app.controllers.permissions_check import (
+    is_dinify_admin,
+    is_dinify_superuser,
+    is_restaurant_owner
+)
 
 
 def check_permissions(
@@ -37,7 +44,8 @@ def first_time_batch_approval(
     restaurant_id: str,
     approval_decision: str,
     auth: dict,
-    rejection_reason: Optional[str] = None
+    user: User,
+    rejection_reason: Optional[str] = None    
 ) -> dict:
     """
     handling the first time batch approvals
@@ -47,16 +55,17 @@ def first_time_batch_approval(
         'message': 'Sorry an occurred. Please try again later.'
     }
 
-    # TODO check that the user has the necessary rights
+    # check that the user has the necessary rights
     has_permission = check_permissions(
         restaurant_id=restaurant_id,
         user_id=auth.get('user_id')
     )
     if not has_permission:
-        return {
-            'status': 401,
-            'message': 'You do not have the necessary permissions to perform this action.'
-        }
+        if not is_dinify_admin(user):
+            return {
+                'status': 401,
+                'message': 'You do not have the necessary permissions to perform this action.'
+            }
 
     # check if the person is not the one who created the menu
     # pick a random menu section and check who created it
@@ -69,12 +78,6 @@ def first_time_batch_approval(
             'message': 'Sorry, the restaurant does not have any menu sections.'
         }
 
-    if first_menu_section.created_by == auth.get('user_id'):
-        return {
-            'status': 400,
-            'message': 'Sorry, you cannot approve a menu that you created.'
-        }
-
     # get the restaurant
     restaurant = Restaurant.objects.get(id=restaurant_id)
 
@@ -85,10 +88,52 @@ def first_time_batch_approval(
         }
 
     with transaction.atomic():
+        message = 'The restaurant menu has been submitted.'
         if approval_decision in ['approve', 'submit']:
             # flag the restaurant detail to indicate that a first time memenu approval has been done
             restaurant.first_time_menu_approval_decision = approval_decision
+
+            if approval_decision == 'submit':
+                if not restaurant.first_time_menu_approval_decision == 'pending':
+                    return {
+                        'status': 400,
+                        'message': 'Sorry, the restaurant menu has already been submitted.'
+                    }
+
             if approval_decision == 'approve':
+                message = 'The restaurant menu has been approved.'
+
+                # user should not approve a menu that they created
+                if first_menu_section.created_by == auth.get('user_id'):
+                    # check if the user is not a restaurant owner or dinify admin
+                    if not is_dinify_superuser(user) and not is_restaurant_owner(user, restaurant_id):  # noqa
+                        return {
+                            'status': 400,
+                            'message': 'Sorry, you cannot approve a menu that you created.'
+                        }
+
+                # user who submitted menu for approval should not approve
+                # except for dinify superuser and restaurant owner
+                action_logs = ACTON_LOGS.find({
+                    'affected_model': 'restaurant-menu-approval',
+                    'affected_record': restaurant_id,
+                    'action': approval_decision,
+                    'result': 'success'
+                })
+
+                submitter_id = None
+                for log in action_logs:
+                    if log.get('action') == 'submit':
+                        submitter_id = log.get('user_id')
+                        break
+
+                if submitter_id == auth.get('user_id'):
+                    if not is_dinify_superuser(user) and not is_restaurant_owner(user, restaurant_id):
+                        return {
+                            'status': 400,
+                            'message': 'Sorry, you cannot approve a menu that you submitted.'
+                        }
+
                 restaurant.first_time_menu_approval = True
             restaurant.save()
 
@@ -104,9 +149,22 @@ def first_time_batch_approval(
             items = MenuItem.objects.filter(section__restaurant=restaurant)
             items.update(approved=True, enabled=True)
 
+            save_action(
+                affected_model='restaurant-menu-approval',
+                affected_record=restaurant_id,
+                action=approval_decision,
+                narration=f'{approval_decision} the restaurant menu',
+                result='success',
+                user_id=auth.get('user_id'),
+                username=auth.get('username'),
+                changes=None,
+                filter_information=None
+            )
+
+            message
             response = {
                 'status': 200,
-                'message': 'The menu has been approved.'
+                'message': message
             }
 
         else:
@@ -119,8 +177,8 @@ def first_time_batch_approval(
 
             #  log the reason for not accepting the menu
             save_action(
-                affected_model='',
-                affected_record='',
+                affected_model='restaurant-menu-approval',
+                affected_record=restaurant_id,
                 action='Reviewed restaurant menu',
                 narration='',
                 result='success',
