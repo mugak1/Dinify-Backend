@@ -28,6 +28,7 @@ class RestaurantManagerActionsEndpoint(APIView):
                 restaurant_id=post_data.get('restaurant'),
                 approval_decision=post_data.get('decision'),
                 rejection_reason=post_data.get('reason'),
-                auth=auth
+                auth=auth,
+                user=request.user
             )
         return Response(response, status=200)

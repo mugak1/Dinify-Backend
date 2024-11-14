@@ -102,7 +102,7 @@ def first_time_batch_approval(
 
             if approval_decision == 'approve':
                 message = 'The restaurant menu has been approved.'
-                
+
                 # user should not approve a menu that they created
                 if first_menu_section.created_by == auth.get('user_id'):
                     # check if the user is not a restaurant owner or dinify admin
