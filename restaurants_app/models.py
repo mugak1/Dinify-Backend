@@ -139,6 +139,7 @@ class MenuItem(BaseModel):
 
     name = models.CharField(max_length=255)
     description = models.TextField(null=True, blank=True)
+    allergens = models.JSONField(default=list)
     primary_price = models.FloatField()
 
     discounted_price = models.FloatField(null=True, blank=True)
