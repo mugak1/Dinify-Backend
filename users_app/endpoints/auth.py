@@ -6,6 +6,7 @@ from users_app.controllers.login import login
 from users_app.controllers.reset_password import reset_password
 from users_app.controllers.change_password import change_password
 from misc_app.controllers.decode_auth_token import decode_jwt_token
+from users_app.controllers.otp_manager import OtpManager
 
 
 class UsersAuthenticationEndpoint(APIView):
@@ -40,7 +41,16 @@ class UsersAuthenticationEndpoint(APIView):
                 old_password=request.data.get('old_password'),
                 new_password=request.data['new_password'],  # not using get to avoid None
             )
-
+        elif action == "resend-otp":
+            identification = request.data.get('identification', 'msisdn')
+            identifier = request.data.get('identifier', None)
+            if request.user is not None:
+                identification = 'id'
+                identifier = request.user.id
+            response = OtpManager().resend_otp(
+                identification=identification,
+                identifier=identifier
+            )
         return Response(
             response,
             status=response['status']

@@ -164,5 +164,10 @@ class UsersAppTestFunctions(TestCase):
             self.assertTrue(otp_manager.verify_otp(user.id, '1234'))
             self.assertFalse(otp_manager.verify_otp(user.id, '1111'))
 
+        def test_resend_otp():
+            """ test reset_otp """
+            result = otp_manager.resend_otp('msisdn', TEST_PHONE)
+            self.assertEqual(result.get('status'), 200)
+
         test_make_otp()
         test_verify_otp()
