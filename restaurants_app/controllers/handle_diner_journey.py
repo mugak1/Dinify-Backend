@@ -28,11 +28,12 @@ def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
     filters = {
         'restaurant': restaurant_id,
         # 'approved': True,
-        'enabled': True,
+        # 'enabled': True,
     }
 
     if ignore_approval == 'true':
         filters.pop('approved')
+        filters.pop('enabled')
 
     sections = MenuSection.objects.filter(
         # restaurant=restaurant_id,
