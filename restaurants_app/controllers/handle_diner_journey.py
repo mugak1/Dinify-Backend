@@ -27,11 +27,12 @@ def handle_table_scan(table_id: str) -> dict:
 def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
     filters = {
         'restaurant': restaurant_id,
-        # 'approved': True,
-        # 'enabled': True,
+        'approved': True,
+        'enabled': True,
     }
 
-    if ignore_approval == 'true':
+    # if ignore_approval == 'true':
+    if ignore_approval is None:
         filters.pop('approved')
         filters.pop('enabled')
 
