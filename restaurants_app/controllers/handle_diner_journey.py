@@ -24,11 +24,21 @@ def handle_table_scan(table_id: str) -> dict:
     }
 
 
-def handle_show_menu(restaurant_id: str) -> dict:
+def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
+    filters = {
+        'restaurant': restaurant_id,
+        'approved': True,
+        'enabled': True,
+    }
+
+    if ignore_approval == 'true':
+        filters.pop('approved')
+
     sections = MenuSection.objects.filter(
-        restaurant=restaurant_id,
-        approved=True,
-        enabled=True
+        # restaurant=restaurant_id,
+        # approved=True,
+        # enabled=True
+        **filters
     )
     menu_data = SerializerGetFullMenu(
         sections, many=True

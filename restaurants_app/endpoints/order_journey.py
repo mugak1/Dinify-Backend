@@ -23,7 +23,8 @@ class OrderJourneyEndpoint(APIView):
             )
         elif stage == 'show-menu':
             response = handle_show_menu(
-                restaurant_id=request.GET.get('restaurant')
+                restaurant_id=request.GET.get('restaurant'),
+                ignore_approval=request.GET.get('ignore-approval')
             )
         elif stage == 'order-details':
             response = handle_show_order_details(
