@@ -2,7 +2,7 @@
 saves an action that a user has performed
 """
 from django.utils import timezone
-from dinify_backend.mongo_db import MONGO_DB, ACTON_LOGS
+from dinify_backend.mongo_db import MONGO_DB, ACTION_LOGS
 
 day_names = [
     'Mon', 'Tue', 'Wed',
@@ -70,4 +70,4 @@ def save_action(
 
     action_details['timestamp'] = time_detail
     # save to mongodb
-    MONGO_DB[ACTON_LOGS].insert_one(action_details)
+    MONGO_DB[ACTION_LOGS].insert_one(action_details)

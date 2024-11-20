@@ -12,7 +12,7 @@ from dinify_backend.configss.string_definitions import(
     RESTAURANT_OWNER,
     RESTAURANT_MANAGER
 )
-from dinify_backend.mongo_db import ACTON_LOGS
+from dinify_backend.mongo_db import MONGO_DB, ACTION_LOGS
 from users_app.models import User
 from users_app.controllers.permissions_check import (
     is_dinify_admin,
@@ -91,9 +91,8 @@ def first_time_batch_approval(
         message = 'The restaurant menu has been submitted.'
         if approval_decision in ['approve', 'submit']:
             # flag the restaurant detail to indicate that a first time memenu approval has been done
-            restaurant.first_time_menu_approval_decision = approval_decision
-
             if approval_decision == 'submit':
+                # print(f"the current approval decision is {restaurant.first_time_menu_approval_decision}")
                 if not restaurant.first_time_menu_approval_decision == 'pending':
                     return {
                         'status': 400,
@@ -114,12 +113,13 @@ def first_time_batch_approval(
 
                 # user who submitted menu for approval should not approve
                 # except for dinify superuser and restaurant owner
-                action_logs = ACTON_LOGS.find({
+                filter = {
                     'affected_model': 'restaurant-menu-approval',
                     'affected_record': restaurant_id,
                     'action': approval_decision,
                     'result': 'success'
-                })
+                }
+                action_logs = MONGO_DB[ACTION_LOGS].find(filter)
 
                 submitter_id = None
                 for log in action_logs:
@@ -135,19 +135,20 @@ def first_time_batch_approval(
                         }
 
                 restaurant.first_time_menu_approval = True
+                # bulk update the menu sections
+                sections = MenuSection.objects.filter(restaurant=restaurant)
+                sections.update(approved=True, enabled=True)
+
+                # bulk update the section groups
+                groups = SectionGroup.objects.filter(section__restaurant=restaurant)
+                groups.update(approved=True, enabled=True)
+
+                # bulk update the menu items
+                items = MenuItem.objects.filter(section__restaurant=restaurant)
+                items.update(approved=True, enabled=True)
+
+            restaurant.first_time_menu_approval_decision = approval_decision
             restaurant.save()
-
-            # bulk update the menu sections
-            sections = MenuSection.objects.filter(restaurant=restaurant)
-            sections.update(approved=True, enabled=True)
-
-            # bulk update the section groups
-            groups = SectionGroup.objects.filter(section__restaurant=restaurant)
-            groups.update(approved=True, enabled=True)
-
-            # bulk update the menu items
-            items = MenuItem.objects.filter(section__restaurant=restaurant)
-            items.update(approved=True, enabled=True)
 
             save_action(
                 affected_model='restaurant-menu-approval',
@@ -157,11 +158,11 @@ def first_time_batch_approval(
                 result='success',
                 user_id=auth.get('user_id'),
                 username=auth.get('username'),
+                submitted_data={'decision': approval_decision, 'reason': rejection_reason},
                 changes=None,
                 filter_information=None
             )
 
-            message
             response = {
                 'status': 200,
                 'message': message
