@@ -12,7 +12,7 @@ from dinify_backend.configss.string_definitions import(
     RESTAURANT_OWNER,
     RESTAURANT_MANAGER
 )
-from dinify_backend.mongo_db import ACTION_LOGS
+from dinify_backend.mongo_db import MONGO_DB, ACTION_LOGS
 from users_app.models import User
 from users_app.controllers.permissions_check import (
     is_dinify_admin,
@@ -119,7 +119,7 @@ def first_time_batch_approval(
                     'action': approval_decision,
                     'result': 'success'
                 }
-                action_logs = ACTION_LOGS.find(filter)
+                action_logs = MONGO_DB[ACTION_LOGS].find(filter)
 
                 submitter_id = None
                 for log in action_logs:
