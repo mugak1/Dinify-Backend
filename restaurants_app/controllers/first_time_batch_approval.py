@@ -133,11 +133,6 @@ def first_time_batch_approval(
                             'status': 400,
                             'message': 'Sorry, you cannot approve a menu that you submitted.'
                         }
-                
-                return {
-                    'status': 200,
-                    'message': 'Approval Debu Complete'
-                }
 
                 restaurant.first_time_menu_approval = True
                 # bulk update the menu sections
