@@ -44,7 +44,7 @@ class UsersAuthenticationEndpoint(APIView):
         elif action == "resend-otp":
             identification = request.data.get('identification', 'msisdn')
             identifier = request.data.get('identifier', None)
-            if request.user is not None:
+            if request.user is not None and request.user.is_authenticated:
                 identification = 'id'
                 identifier = request.user.id
             response = OtpManager().resend_otp(
