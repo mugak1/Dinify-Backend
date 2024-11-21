@@ -2,6 +2,7 @@ from typing import Optional
 import random
 import hashlib
 from datetime import datetime, timedelta
+from warnings import filters
 from users_app.models import User, UserOtp
 from misc_app.controllers.notifications.notification import Notification
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -26,17 +27,36 @@ class OtpManager:
         }).create_notification()
         return True
 
-    def verify_otp(self, user_id, otp) -> bool:
+    def verify_otp(self, user_id, otp, purpose) -> dict:
         encrypted_otp = hashlib.sha256(otp.encode()).hexdigest()
         try:
-            UserOtp.objects.get(
+            otp = UserOtp.objects.filter(
                 user_id=user_id,
                 otp_hash=encrypted_otp,
                 expiry_time__gte=datetime.now()
-            )
-            return True
+            ).order_by('-time_created').first()
+
+            # if the otp purpose is for login,
+            # make a token and return it
+            if purpose == 'login':
+                token = RefreshToken.for_user(otp.user)
+                # delete the otp right after verification
+                otp.delete()
+                return {
+                    'valid': True,
+                    'token': str(token.access_token),
+                    'refresh': str(token)
+                }
+
+            # delete the otp right after verification
+            otp.delete()
+            return {
+                'valid': True
+            }
         except UserOtp.DoesNotExist:
-            return False
+            return {
+                'valid': False
+            }
 
     def resend_otp(
         self,
