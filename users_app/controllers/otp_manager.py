@@ -14,6 +14,10 @@ class OtpManager:
         otp_str = str(otp)
         otp_str = '1234'
         encrypted_otp = hashlib.sha256(otp_str.encode()).hexdigest()
+
+        # delete any old otps associated with the user
+        UserOtp.objects.filter(user=user).delete()
+
         user_otp = UserOtp(
             user=user,
             otp_hash=encrypted_otp,
@@ -27,21 +31,27 @@ class OtpManager:
         }).create_notification()
         return True
 
-    def verify_otp(self, user_id, otp, purpose) -> dict:
+    def verify_otp(self, user_id, otp) -> dict:
         encrypted_otp = hashlib.sha256(otp.encode()).hexdigest()
         try:
-            otp = UserOtp.objects.filter(
+            otps = UserOtp.objects.filter(
                 user_id=user_id,
                 otp_hash=encrypted_otp,
                 expiry_time__gte=datetime.now()
-            ).order_by('-time_created').first()
+            ).order_by('-time_created')
+            if otps.count() < 1:
+                return {
+                    'valid': False
+                }
+            
+            verified_otp = otps.first()
 
             # if the otp purpose is for login,
             # make a token and return it
-            if purpose == 'login':
+            if verified_otp.purpose == 'login':
                 token = RefreshToken.for_user(otp.user)
                 # delete the otp right after verification
-                otp.delete()
+                verified_otp.delete()
                 return {
                     'valid': True,
                     'token': str(token.access_token),
@@ -49,7 +59,7 @@ class OtpManager:
                 }
 
             # delete the otp right after verification
-            otp.delete()
+            verified_otp.delete()
             return {
                 'valid': True
             }
