@@ -123,6 +123,7 @@ def login(username: str, password: str) -> dict:
             require_otp = True
             break
 
+    # require_otp = True
     if require_otp:
         otp = OtpManager().make_otp(user=auth_user, purpose='login')
         if otp:
