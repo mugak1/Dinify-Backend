@@ -1,19 +1,23 @@
 from typing import Optional
 import random
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from users_app.models import User, UserOtp
 from misc_app.controllers.notifications.notification import Notification
+from rest_framework_simplejwt.tokens import RefreshToken
 
 
-# @dataclass
 class OtpManager:
-    def make_otp(self, user: User) -> True:
+    def make_otp(self, user: User, purpose: Optional[str] = None) -> True:
         otp = random.randint(1000, 9999)
         otp_str = str(otp)
         otp_str = '1234'
         encrypted_otp = hashlib.sha256(otp_str.encode()).hexdigest()
-        user_otp = UserOtp(user=user, otp_hash=encrypted_otp)
+        user_otp = UserOtp(
+            user=user,
+            otp_hash=encrypted_otp,
+            purpose=purpose
+        )
         user_otp.save()
         Notification(msg_data={
             'msg_type': 'otp',
@@ -37,7 +41,8 @@ class OtpManager:
     def resend_otp(
         self,
         identification: Optional[str] = None,
-        identifier: Optional[str] = None
+        identifier: Optional[str] = None,
+        purpose: Optional[str] = None
     ) -> dict:
         user = None
         if identification is None or identifier is None:
@@ -57,7 +62,28 @@ class OtpManager:
                 'message': 'User not found'
             }
 
-        if self.make_otp(user):
+        # if the purpose is login, check if there is a recent otp,
+        # the otp should not be older than 5 minutes
+        if purpose == 'login':
+            ten_minutes_ago = datetime.now() - timedelta(minutes=5)
+            try:
+                old_otps = UserOtp.objects.filter(
+                    user_id=user.id,
+                    purpose=purpose,
+                    time_created__gte=ten_minutes_ago
+                ).count()
+                if old_otps < 1:
+                    return {
+                        'status': 400,
+                        'message': 'Please provide your username and password again to get a login OTP'
+                    }
+            except UserOtp.DoesNotExist:
+                return {
+                    'status': 400,
+                    'message': 'Please provide your username and password again to get a login OTP'
+                }
+
+        if self.make_otp(user=user, purpose=purpose):
             return {
                 'status': 200,
                 'message': 'OTP sent successfully'
