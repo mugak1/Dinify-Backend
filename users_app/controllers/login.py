@@ -131,6 +131,7 @@ def login(username: str, password: str) -> dict:
                 'status': 200,
                 'message': 'Please enter the OTP',
                 'data': {
+                    'require_otp': True,
                     'profile': SerGetUserProfile(auth_user).data
                 }
             }
@@ -139,6 +140,7 @@ def login(username: str, password: str) -> dict:
         'status': 200,
         'message': MESSAGES.get('OK_LOGIN'),
         'data': {
+            'require_otp': False,
             'token': str(token.access_token),
             'refresh': str(token),
             'profile': SerGetUserProfile(auth_user).data
