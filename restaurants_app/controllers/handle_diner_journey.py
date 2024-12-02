@@ -83,7 +83,7 @@ def handle_show_transaction_details(transaction_id: str) -> dict:
 
     transaction_record = DinifyTransaction.objects.values(
         'id', 'order', 'transaction_amount', 'transaction_status',
-        'order__review'
+        'order__review', 'order__rating'
     ).get(id=transaction_id)
 
     response = {
