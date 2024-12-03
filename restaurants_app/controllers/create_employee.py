@@ -1,9 +1,11 @@
+from typing import Optional
 from restaurants_app.models import Restaurant
 from users_app.controllers.self_register import self_register
 from users_app.models import User
 from restaurants_app.serializers import SerializerPutRestaurantEmployee
 from misc_app.controllers.secretary import Secretary
 from django.db import transaction
+from users_app.controllers.otp_manager import OtpManager
 
 
 def create_employee(
@@ -13,11 +15,29 @@ def create_employee(
     phone_number: str,
     restaurant: Restaurant,
     roles: list,
-    creator: User
+    creator: User,
+    otp: Optional[str] = None
 ) -> dict:
     with transaction.atomic():
         password = User.objects.make_random_password()
         password = 'password'
+
+        # attempt to verify the OTP
+        if otp is None:
+            return {
+                'status': 400,
+                'message': 'Please provide the OTP.'
+            }
+
+        otp_verification = OtpManager().verify_otp(
+            user_id=str(creator.id),
+            otp=otp
+        )
+        if not otp_verification['data']['valid']:
+            return {
+                'status': 400,
+                'message': 'Invalid OTP.'
+            }
 
         create_user = self_register(
             data={
