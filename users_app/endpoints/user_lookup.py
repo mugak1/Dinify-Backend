@@ -1,5 +1,6 @@
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.permissions import AllowAny
 from users_app.models import User
 
 
@@ -33,3 +34,31 @@ class UserLookupEndpoint(APIView):
                 'message': 'User not found'
             }
             return Response(response, status=200)
+
+
+class MsisdnLookupEndpoint(APIView):
+    permission_classes = (AllowAny,)
+
+    def get(self, request):
+        try:
+            User.objects.values('id').get(
+                phone_number=request.GET.get('msisdn')
+            )
+            response = {
+                'status': 200,
+                'message': 'User found',
+                'data': {
+                    'found': True
+                }
+            }
+        except Exception as error:
+            print(f"Error while looking up user: {error}")
+            response = {
+                'status': 400,
+                'message': 'User not found',
+                'data': {
+                    'found': False
+                }
+            }
+        
+        return Response(response, status=200)
