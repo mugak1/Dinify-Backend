@@ -15,6 +15,8 @@ from dinify_backend.configss.messages import (
 )
 from payment_integrations_app.controllers.flutterwave import Flutterwave
 from payment_integrations_app.controllers.dpo import DpoIntegration
+from users_app.models import User
+from users_app.controllers.otp_manager import OtpManager
 
 
 def initiate_order_payment(
@@ -27,7 +29,8 @@ def initiate_order_payment(
     amount: Optional[int] = None,
     user: Optional[User] = None,
     manual_payment: Optional[bool] = False,
-    manual_payment_details: Optional[dict] = None
+    manual_payment_details: Optional[dict] = None,
+    otp: Optional[str] = None
 ) -> dict:
     """
     Initiates the payment process for an order
@@ -48,6 +51,36 @@ def initiate_order_payment(
     if payment_form is PaymentForm_Split:
         if amount is not None:
             transaction_amount = clean_amount(Decimal(amount))
+
+    # determine of the verify otp
+    check_otp = False
+
+    if not manual_payment and payment_mode == PaymentMode_MobileMoney:
+        try:
+            User.objects.get(username=msisdn)
+        except Exception as error:
+            print(f"Error checking for msisdn when initiating payment: {error}")
+            check_otp = True
+
+    # print(manual_payment, not manual_payment, payment_mode, payment_mode is PaymentMode_MobileMoney)
+
+    # check_otp = True
+    if check_otp:
+        if otp is None:
+            return {
+                'status': 400,
+                'message': 'Please provide the OTP.'
+            }
+
+        otp_verification = OtpManager().verify_otp(
+            user_id=str(user.id),
+            otp=otp
+        )
+        if not otp_verification['data']['valid']:
+            return {
+                'status': 400,
+                'message': 'Invalid OTP.'
+            }
 
     # determine the amount to collect based on the aggregator charges
     amount_collectable = transaction_amount + tip_amount
