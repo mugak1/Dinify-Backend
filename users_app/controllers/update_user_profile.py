@@ -10,7 +10,9 @@ from users_app.controllers.permissions_check import (
 )
 from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER,
-    RESTAURANT_MANAGER
+    RESTAURANT_MANAGER,
+    DINIFY_ACCOUNT_MANAGER,
+    DINIFY_ADMIN
 )
 from misc_app.controllers.secretary import Secretary
 from users_app.controllers.otp_manager import OtpManager
