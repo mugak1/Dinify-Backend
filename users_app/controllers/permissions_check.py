@@ -18,6 +18,10 @@ def get_user_restaurant_roles(user_id: str, restaurant_id: str) -> list:
             deleted=False
         )['roles']
     except RestaurantEmployee.DoesNotExist:
+        print('User does not have roles in the restaurant')
+        return []
+    except Exception as error:
+        print(f"Error while getting user roles in the restaurant: {error}")
         return []
 
 

@@ -2,7 +2,7 @@
 endpoints for restaurant configurations
 """
 import ast
-from logging import config
+from tabnanny import check
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from restaurants_app.controllers.create_restaurant import (
@@ -44,8 +44,51 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Cancelled,
     OrderStatus_Refunded,
     PaymentStatus_Paid,
-    PaymentStatus_Pending
+    PaymentStatus_Pending,
+    RESTAURANT_OWNER,
+    RESTAURANT_MANAGER
 )
+
+from users_app.controllers.permissions_check import (
+    is_dinify_admin,
+    get_user_restaurant_roles
+)
+
+from restaurants_app.models import RestaurantEmployee
+from users_app.models import User
+
+
+def check_permission(
+    user: User,
+    record: str,
+    id: str,
+):
+    has_permission = False
+    if is_dinify_admin(user):
+        has_permission = True
+
+    if not has_permission:
+        # get the restaurants to which the user belongs
+        # TODO #60 only get roles at the restaurant in question
+        res_mapping = RestaurantEmployee.objects.values('restaurant').filter(
+            user=user,
+            active=True,
+        )
+        for x in res_mapping:
+            print(f"res mapping: {x['restaurant']}")
+        restaurant_ids = [str(res['restaurant']) for res in res_mapping]
+        for restaurant_id in restaurant_ids:
+            roles = get_user_restaurant_roles(
+                user_id=str(user.id),
+                restaurant_id=restaurant_id
+            )
+            print(roles)
+            restaurant_roles = [RESTAURANT_OWNER, RESTAURANT_MANAGER]
+            if len(roles) > 0:
+                if any(role in restaurant_roles for role in roles):
+                    has_permission = True
+                    break
+    return has_permission
 
 
 class RestaurantSetupEndpoint(APIView):
@@ -170,6 +213,18 @@ class RestaurantSetupEndpoint(APIView):
         }
 
         post_data = request.data
+
+        # check if the actor has rights to perform the action
+        if not check_permission(
+            user=request.user,
+            record=config_detail,
+            id=post_data.get('restaurant')
+        ):
+            response = {
+                'status': 401,
+                'message': 'You do not have permission to perform this action.'
+            }
+            return Response(response, status=400)
 
         # attempt to auto approve menu items if a first time approval has already been done
         if config_detail in ['menusections', 'sectiongroups', 'menuitems']:
@@ -422,6 +477,18 @@ class RestaurantSetupEndpoint(APIView):
 
         put_data = request.data
 
+        # check if the actor has rights to perform the action
+        if not check_permission(
+            user=request.user,
+            record=config_detail,
+            id=put_data.get('restaurant')
+        ):
+            response = {
+                'status': 401,
+                'message': 'You do not have permission to perform this action.'
+            }
+            return Response(response, status=400)
+
         # if editing a menu item,
         # convert the options and extras_applicable to a list
         if config_detail == 'menuitems':
@@ -467,6 +534,18 @@ class RestaurantSetupEndpoint(APIView):
         response = {'status': 500, 'message': "Invalid request"}
         # decode the token
         auth = decode_jwt_token(request)
+
+        # check if the actor has rights to perform the action
+        if not check_permission(
+            user=request.user,
+            record=config_detail,
+            id=request.data['id']
+        ):
+            response = {
+                'status': 401,
+                'message': 'You do not have permission to perform this action.'
+            }
+            return Response(response, status=400)
 
         serializer = {
             'restaurant': SerializerPutRestaurant,
