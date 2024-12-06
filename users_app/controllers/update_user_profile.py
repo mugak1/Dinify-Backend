@@ -128,7 +128,8 @@ def self_update_user_profile(
         user.phone_number = phone_number
     user.save()
 
-    user = user.refresh_from_db()
+    # user = user.refresh_from_db()
+
     response = {
         'status': 200,
         'message': 'Your profile has been updated successfully.',
