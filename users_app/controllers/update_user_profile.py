@@ -1,6 +1,6 @@
 from typing import Optional
 from users_app.models import User
-from users_app.serializers import SerPutUserProfile
+from users_app.serializers import SerPutUserProfile, SerGetUserProfile
 from restaurants_app.models import RestaurantEmployee
 from dinify_backend.mongo_db import COL_PROFILE_UPDATE_APPROVALS
 from misc_app.controllers.save_to_mongo import save_to_mongodb
@@ -128,10 +128,16 @@ def self_update_user_profile(
         user.phone_number = phone_number
     user.save()
 
-    return {
+    # user = user.refresh_from_db()
+
+    response = {
         'status': 200,
-        'message': 'Your profile has been updated successfully.'
+        'message': 'Your profile has been updated successfully.',
+        'data': {
+            'profile': SerGetUserProfile(user, many=False).data
+        }
     }
+    return response
 
 
 def update_user_profile(
@@ -226,4 +232,10 @@ def update_user_profile(
         'success_message': 'The user profile has been updated successfully.',
         'error_message': 'Sorry, an error occurred while updating the user profile.'
     }
-    return Secretary(secretary_args).update()
+
+    secretary_response = Secretary(secretary_args).update()
+    secretary_response['data'] = {}
+
+    user_object = User.objects.get(id=put_data['id'])
+    secretary_response['data']['profile'] = SerGetUserProfile(user_object, many=False).data
+    return secretary_response

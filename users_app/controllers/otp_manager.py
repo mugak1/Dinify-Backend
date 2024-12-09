@@ -21,7 +21,7 @@ class OtpManager:
 
         # delete any old otps associated with the user
         UserOtp.objects.filter(user=user, msisdn=msisdn).delete()
-        
+
         user_otp = UserOtp(
             user=user,
             msisdn=msisdn,
@@ -143,7 +143,11 @@ class OtpManager:
                 }
 
         # if purpose == 'first-time-payment':
-        if self.make_otp(user=user, purpose=purpose):
+        if self.make_otp(
+            user=user,
+            purpose=purpose,
+            msisdn=identifier
+        ):
             return {
                 'status': 200,
                 'message': 'OTP sent successfully'
