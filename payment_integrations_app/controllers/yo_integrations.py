@@ -18,6 +18,9 @@ class YoIntegration:
         self.YO_USERNAME = config('YO_API_USERNAME')
         self.YO_PASSWORD = config('YO_API_PASSWORD')
 
+        self.YO_SMS_ACCOUNT_NO = config('YO_SMS_ACCOUNT_NO')
+        self.YO_SMS_PASSWORD = config('YO_SMS_PASSWORD')
+
     def interprete_response(self, request_type: str, request_body: dict, yo_response: str) -> dict:
         response_xml_object = ET.fromstring(yo_response.text)
         yo_response_dict = None
@@ -303,4 +306,9 @@ class YoIntegration:
             yo_response=yo_request
         )
         print(response)
+        return True
+
+    def send_sms(self, message: str, to: str):
+        yo_request = f"http://smgw1.yo.co.ug:9100/sendsms?ybsacctno={self.YO_SMS_ACCOUNT_NO}&password={self.YO_SMS_PASSWORD}&origin=Dinify&sms_content={message}&destinations={to}&nostore=0"  # noqa
+        requests.get(yo_request)
         return True

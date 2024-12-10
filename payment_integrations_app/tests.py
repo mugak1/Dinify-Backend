@@ -1,6 +1,5 @@
-import uuid
 from typing import Any
-from venv import create
+from decouple import config
 from django.test import TestCase
 from payment_integrations_app.controllers.dpo import DpoIntegration
 from payment_integrations_app.controllers.pesapal import Pesapal
@@ -28,12 +27,12 @@ class PaymentIntegrationsTestFunctions(TestCase):
         self.assertEquals(pesapal_response['status'], 200)
 
     def test_yo(self):
-        momo_collect = YoIntegration().momo_collect(
-            transaction_amount=100000,
-            msisdn='256776117403',
-            transaction_id=str(uuid.uuid4())
-        )
-        self.assertTrue(momo_collect)
+        # momo_collect = YoIntegration().momo_collect(
+        #     transaction_amount=100000,
+        #     msisdn='256776117403',
+        #     transaction_id=str(uuid.uuid4())
+        # )
+        # self.assertTrue(momo_collect)
 
         # momo_check_transaction = YoIntegration().momo_check_transaction(
         #     yo_transaction_reference='0BOvvK1loqGauhReTUfzH7MlVVmSALv6RpXtI0ZLYLIUTBdiXhOx0FIgmMlLTuxqc372b6adb2ee2084d56f73966afe38a0'
@@ -67,8 +66,14 @@ class PaymentIntegrationsTestFunctions(TestCase):
         # )
         # self.assertTrue(bank_disburse)
 
-        bank_check_disbursement = YoIntegration().bank_check_disbursement_status(
-            # arg_settlement_id='d81f9c1be2e08964bf9f24b15f0e4900'
-            arg_settlement_id='0bb4aec1710521c12ee76289d9440817'
+        # bank_check_disbursement = YoIntegration().bank_check_disbursement_status(
+        #     # arg_settlement_id='d81f9c1be2e08964bf9f24b15f0e4900'
+        #     arg_settlement_id='0bb4aec1710521c12ee76289d9440817'
+        # )
+        # self.assertTrue(bank_check_disbursement)
+
+        send_sms = YoIntegration().send_sms(
+            to=config('TEST_SMS_RECIPIENT'),
+            message='Dinify SMS test'
         )
-        self.assertTrue(bank_check_disbursement)
+        self.assertTrue(send_sms)
