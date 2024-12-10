@@ -1,28 +1,33 @@
 from dinify_backend.mongo_db import MONGO_DB, COL_NOTIFICATIONS
 
 
-def get_notifications(email: str, phone: str):
+def get_notifications(
+    email: str,
+    phone: str,
+    skip_read: bool = False,
+    skip_archived: bool = True
+):
     try:
-        # notifications = MONGO_DB[COL_NOTIFICATIONS].find(
-        #     {'user_id': user_id, 'read': {'$exists': False}},
-        # )
-        # 
         # find notifications where the email is incluced in the tos
         # or the phone is included in the tos
         # or the email is included in the ccs
         # or the phone is included in the ccs
-        # 
-        notifications = MONGO_DB[COL_NOTIFICATIONS].find(
-            {
-                '$or': [
-                    {'tos': email},
-                    {'tos': phone},
-                    {'ccs': email},
-                    {'ccs': phone}
-                ],
-                'read': {'$exists': False}
-            }
-        )
+        #
+        filter = {
+            '$or': [
+                {'tos': email},
+                {'tos': phone},
+                {'ccs': email},
+                {'ccs': phone}
+            ]
+        }
+        if skip_read:
+            filter['read'] = {'$exists': False}
+        if skip_archived:
+            filter['archived'] = {'$exists': False}
+
+        notifications = MONGO_DB[COL_NOTIFICATIONS].find(filter=filter)
+
         notifications = list(notifications)
 
         # Convert ObjectId to string
@@ -30,7 +35,7 @@ def get_notifications(email: str, phone: str):
             notification['_id'] = str(notification['_id'])
 
         return notifications
-    
+
     except Exception as error:
         print(f"Error while getting notifications: {error}")
         return []

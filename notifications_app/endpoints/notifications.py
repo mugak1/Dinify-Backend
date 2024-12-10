@@ -7,7 +7,9 @@ class NotificationsEndpoint(APIView):
     def get(self, request):
         notifications = get_notifications(
             email=request.user.email,
-            phone=request.user.phone_number
+            phone=request.user.phone_number,
+            skip_read=request.query_params.get('skip_read', False),
+            skip_archived=request.query_params.get('skip_archived', True)
         )
         response = {
             'status': 200,
