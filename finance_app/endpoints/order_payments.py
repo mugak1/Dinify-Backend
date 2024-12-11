@@ -6,6 +6,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from orders_app.models import Order
 from finance_app.controllers.initiate_order_payment import initiate_order_payment
+from finance_app.controllers.tx_order_payment import OrderPaymentTransaction
 from dinify_backend.configss.string_definitions import TransactionPlatform_Web
 
 
@@ -27,7 +28,7 @@ class OrderPaymentsEndpoint(APIView):
         else:
             manual_payment = False
 
-        response = initiate_order_payment(
+        response = OrderPaymentTransaction().initiate(
             order=Order.objects.get(id=data.get('order')),
             tip_amount=data.get('tip_amount', 0),
             payment_mode=data.get('payment_mode'),
@@ -37,6 +38,8 @@ class OrderPaymentsEndpoint(APIView):
             amount=data.get('amount'),
             user=user,
             manual_payment=manual_payment,
-            manual_payment_details=data.get('manual_payment_details')
+            manual_payment_details=data.get('manual_payment_details'),
+            otp=data.get('otp')
         )
+
         return Response(response, status=200)
