@@ -5,7 +5,7 @@ from restaurants_app.models import Restaurant
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
     AccountType_Restaurant, AccountType_DinifyRevenue, AccountType_User,
-    PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card,
+    PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card, PaymentMode_Ova,
     AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked,
     TransactionType_OrderPayment, TransactionType_OrderRefund, TransactionType_OrderCharge, TransactionType_Disbursement, TransactionType_Subscription,  # noqa
     TransactionStatus_Success, TransactionStatus_Failed, TransactionStatus_Pending, TransactionStatus_Initiated,  # noqa
@@ -15,7 +15,7 @@ from dinify_backend.configss.string_definitions import (
 )
 
 ACCOUNT_TYPES = [AccountType_Restaurant, AccountType_DinifyRevenue, AccountType_User]
-PAYMENT_MODES = [PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card]
+PAYMENT_MODES = [PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card, PaymentMode_Ova]
 ACCOUNT_STATUSES = [AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked]
 TRANSACTION_TYPES = [TransactionType_OrderPayment, TransactionType_OrderRefund, TransactionType_OrderCharge, TransactionType_Disbursement, TransactionType_Subscription]  # noqa
 TRANSACTION_STATUSES = [TransactionStatus_Success, TransactionStatus_Failed, TransactionStatus_Pending, TransactionStatus_Initiated]  # noqa
@@ -132,6 +132,8 @@ class DinifyTransaction(BaseModel):
     transaction_collected_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     msisdn = models.CharField(max_length=255, null=True, blank=True)
     payment_form = models.CharField(max_length=20, default=PaymentForm_Full)
+    amount_in = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
+    amount_out = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
 
     # for orders and revenue collection
     parent_transaction = models.ForeignKey(
