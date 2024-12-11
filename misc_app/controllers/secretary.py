@@ -28,15 +28,16 @@ def make_notification_for_new_entry(
     """
     make a notification
     """
-    restaurant_name = Restaurant.objects.values('name').get(id=restaurant_id)['name']
-    msg_data = {
-        'msg_type': msg_type,
-        'restaurant_name': restaurant_name,
-        'restaurant_id': restaurant_id,
-        'user': f'{user.first_name} {user.last_name}',
-        'item_name': item_name,
-    }
-    Notification(msg_data).create_notification()
+    if restaurant_id is not None:
+        restaurant_name = Restaurant.objects.values('name').get(id=restaurant_id)['name']
+        msg_data = {
+            'msg_type': msg_type,
+            'restaurant_name': restaurant_name,
+            'restaurant_id': restaurant_id,
+            'user': f'{user.first_name} {user.last_name}',
+            'item_name': item_name,
+        }
+        Notification(msg_data).create_notification()
 
 
 @dataclass
@@ -155,9 +156,9 @@ class Secretary:
                     restaurant_id = record.data['restaurant']
 
                 make_notification_for_new_entry(
-                    restaurant_id=record.data['restaurant'],
+                    restaurant_id=record.data.get('restaurant'),
                     user=self.user,
-                    item_name=record.data['name'],
+                    item_name=record.data.get('name'),
                     msg_type=self.msg_type
                 )
 
