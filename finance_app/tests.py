@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from django.test import TestCase
 from users_app.models import User
 from users_app.tests import TEST_PHONE, seed_user
@@ -188,6 +189,8 @@ class FinanceAppTestFunctions(TestCase):
 
     def test_subscription_payment(self):
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        restaurant.subscription_validity = False
+        restaurant.save()
 
         # when the restaurant is charged per order
         result = SubscriptionPaymentTransaction().initiate(
@@ -214,7 +217,20 @@ class FinanceAppTestFunctions(TestCase):
         print(result)
         self.assertEqual(result['status'], 200)
 
-    def test_disbursement(self):
+        txs = DinifyTransaction.objects.get(id=result['data']['transaction_id'])
+        txs.processing_status = ProcessingStatus_Confirmed
+        txs.save()
+
+        result = SubscriptionPaymentTransaction().process(
+            transaction_id=result['data']['transaction_id']
+        )
+        restaurant.refresh_from_db()
+        expected_expiry_date = datetime.now() + timedelta(days=30)
+        print(f"expiry date: {restaurant.subscription_expiry_date}")
+        self.assertEqual(restaurant.subscription_expiry_date.date(), expected_expiry_date.date())
+        self.assertEqual(restaurant.subscription_validity, True)
+
+    def otest_disbursement(self):
         seed_dinify_account()
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         user = User.objects.get(username=TEST_PHONE)

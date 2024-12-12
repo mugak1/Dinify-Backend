@@ -1,15 +1,20 @@
 from typing import Optional
+from datetime import timedelta
+from django.db import transaction
+from psycopg import Transaction
 from restaurants_app.models import Restaurant
 from users_app.models import User
 from finance_app.models import DinifyAccount, DinifyTransaction
 from dinify_backend.configss.string_definitions import (
-    AccountType_DinifyRevenue,
+    AccountType_DinifyRevenue, ProcessingStatus_Confirmed, ProcessingStatus_Failed,
+    ProcessingStatus_Done, TransactionStatus_Success,
     AccountType_Restaurant,
     TransactionType_Subscription,
     PaymentMode_MobileMoney, PaymentMode_Card, PaymentMode_Ova,
 )
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
 from payment_integrations_app.controllers.dpo import DpoIntegration
+from finance_app.controllers.update_wallet_balance import update_wallet_balance
 
 
 class SubscriptionPaymentTransaction:
@@ -136,3 +141,48 @@ class SubscriptionPaymentTransaction:
                 "transaction_id": str(subscription_payment.id)
             }
         }
+
+    def process(self, transaction_id: str):
+        with transaction.atomic():
+            txs_record = DinifyTransaction.objects.select_for_update().get(id=transaction_id)
+            restaurant = Restaurant.objects.select_for_update().get(id=txs_record.restaurant.id)
+
+            if txs_record.processing_status == ProcessingStatus_Confirmed:
+                if txs_record.payment_mode in [PaymentMode_MobileMoney, PaymentMode_Card]:
+                    # TODO update account balances
+                    balance_update = update_wallet_balance(
+                        id=str(txs_record.account.id),
+                        mode=txs_record.payment_mode,
+                        credit=txs_record.transaction_amount
+                    )
+                    txs_record.account_balances = balance_update
+                    txs_record.transaction_status = TransactionStatus_Success
+                    txs_record.processing_status = ProcessingStatus_Done
+                    txs_record.save()
+
+                    # extend the restaurant subscription_expiry_date
+                    days = 30
+                    if restaurant.preferred_subscription_method == 'yearly':
+                        days = 365
+
+                    current_expiry = restaurant.subscription_expiry_date
+                    if current_expiry is None:
+                        current_expiry = txs_record.time_created
+
+                    new_expiry_date = current_expiry + timedelta(days=days)
+                    restaurant.subscription_validity = True
+                    restaurant.subscription_expiry_date = new_expiry_date
+                    restaurant.save()
+                else:
+                    print("Payment mode  not supported yet")
+            elif txs_record.processing_status == ProcessingStatus_Failed:
+                # TODO update account balances
+                balance_update = update_wallet_balance(
+                    id=str(txs_record.account.id),
+                    mode=txs_record.payment_mode,
+                    credit=0
+                )
+                txs_record.account_balances = balance_update
+                txs_record.transaction_status = TransactionStatus_Success
+                txs_record.processing_status = ProcessingStatus_Done
+                txs_record.save()
