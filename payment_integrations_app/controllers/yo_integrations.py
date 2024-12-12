@@ -330,10 +330,7 @@ class YoIntegration:
         # skip if there is no response_dict
         # print(f"\nProcessing Yo Response: {response_id} : {yo_response.get('response_dict')}\n")
         if yo_response.get('response_dict') is None:
-            flag_doc_as_processed(
-                collection_name=COL_YO_RESPONSES,
-                doc_id=response_id
-            )
+            flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
             return
 
         if yo_response.get('request_type') == 'momo_collect':

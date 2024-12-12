@@ -43,3 +43,5 @@ class Command(BaseCommand):
                 YoIntegration().process_yo_response(response_id=x['_id'])
             elif aggregator == 'dpo':
                 DpoIntegration().process_response(response_id=x['_id'])
+            else:
+                continue
