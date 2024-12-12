@@ -1,8 +1,20 @@
+from re import A
 from typing import Optional
 import requests
 import xml.etree.ElementTree as ET
 from decouple import config
+from bson import ObjectId
+from django.db import transaction
 from dinify_backend.mongo_db import MONGO_DB, COL_YO_RESPONSES
+from finance_app.models import DinifyTransaction
+from misc_app.controllers.flag_doc_as_processed import flag_doc_as_processed
+from dinify_backend.configss.string_definitions import (
+    ProcessingStatus_Pending,
+    ProcessingStatus_Failed,
+    ProcessingStatus_Confirmed,
+    Aggregator_Yo
+)
+
 
 # API_URL = 'https://paymentsapi2.yo.co.ug/ybs/task.php'
 API_URL = 'https://sandbox.yo.co.ug/services/yopaymentsdev/task.php'
@@ -312,3 +324,99 @@ class YoIntegration:
         yo_request = f"http://smgw1.yo.co.ug:9100/sendsms?ybsacctno={self.YO_SMS_ACCOUNT_NO}&password={self.YO_SMS_PASSWORD}&origin=Dinify&sms_content={message}&destinations={to}&nostore=0"  # noqa
         requests.get(yo_request)
         return True
+
+    def process_yo_response(self, response_id):
+        yo_response = MONGO_DB[COL_YO_RESPONSES].find_one({'_id': ObjectId(response_id)})
+        # skip if there is no response_dict
+        # print(f"\nProcessing Yo Response: {response_id} : {yo_response.get('response_dict')}\n")
+        if yo_response.get('response_dict') is None:
+            flag_doc_as_processed(
+                collection_name=COL_YO_RESPONSES,
+                doc_id=response_id
+            )
+            return
+
+        if yo_response.get('request_type') == 'momo_collect':
+            request_body = yo_response.get('request_body')
+            response_dict = yo_response.get('response_dict')
+            transaction_id = request_body.get('transaction_id')
+
+            if response_dict.get('Status') == 'ERROR':
+                with transaction.atomic():
+                    try:
+                        DinifyTransaction.objects.select_for_update().get(
+                            id=transaction_id
+                        ).update(
+                            aggregator=Aggregator_Yo,
+                            processing_status=ProcessingStatus_Failed
+                        )
+                    except DinifyTransaction.DoesNotExist:
+                        pass
+
+                flag_doc_as_processed(
+                    collection_name=COL_YO_RESPONSES,
+                    doc_id=response_id
+                )
+                return
+
+            elif response_dict.get('Status') == 'OK':
+                with transaction.atomic():
+                    try:
+                        DinifyTransaction.objects.select_for_update().get(
+                            id=transaction_id
+                        ).update(
+                            aggregator=Aggregator_Yo,
+                            aggregator_status=response_dict.get('TransactionStatus'),
+                            aggregator_reference=response_dict.get('TransactionReference'),
+                        )
+                    except DinifyTransaction.DoesNotExist:
+                        pass
+
+                flag_doc_as_processed(
+                    collection_name=COL_YO_RESPONSES,
+                    doc_id=response_id
+                )
+                return
+
+        elif yo_response.get('request_type') == 'momo_check_transaction':
+            request_body = yo_response.get('request_body')
+            response_dict = yo_response.get('response_dict')
+            aggregator_reference = request_body.get('transaction_id')
+
+            with transaction.atomic():
+                txs_record = None
+                try:
+                    txs_record = DinifyTransaction.objects.select_for_update().get(
+                        aggregator=Aggregator_Yo,
+                        aggregator_reference=aggregator_reference
+                    )
+                except DinifyTransaction.DoesNotExist:
+                    pass
+
+                if txs_record is None:
+                    flag_doc_as_processed(
+                        collection_name=COL_YO_RESPONSES,
+                        doc_id=response_id
+                    )
+                    return
+
+                aggregator_status = response_dict.get('TransactionStatus')
+                if aggregator_status is None:
+                    flag_doc_as_processed(
+                        collection_name=COL_YO_RESPONSES,
+                        doc_id=response_id
+                    )
+                    return
+
+                if aggregator_status == 'SUCCEEDED':
+                    if txs_record.processing_status != ProcessingStatus_Pending:
+                        flag_doc_as_processed(
+                            collection_name=COL_YO_RESPONSES,
+                            doc_id=response_id
+                        )
+                        return
+
+                    txs_record.update(
+                        processing_status=ProcessingStatus_Confirmed,
+                        aggregator_status=aggregator_status
+                    )
