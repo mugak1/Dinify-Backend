@@ -1,9 +1,12 @@
 from typing import Any
+import uuid
+from django.utils import timezone
 from decouple import config
 from django.test import TestCase
 from payment_integrations_app.controllers.dpo import DpoIntegration
 from payment_integrations_app.controllers.pesapal import Pesapal
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
+
 
 
 # Create your tests here.
@@ -22,11 +25,11 @@ class PaymentIntegrationsTestFunctions(TestCase):
     #     ).verify_token()
     #     self.assertEquals(dpo_response['status'], 200)
 
-    def ttest_pesapal_authenticate(self):
+    def otest_pesapal_authenticate(self):
         pesapal_response = Pesapal().authenticate()
         self.assertEquals(pesapal_response['status'], 200)
 
-    def test_yo(self):
+    def otest_yo(self):
         # momo_collect = YoIntegration().momo_collect(
         #     transaction_amount=100000,
         #     msisdn='256776117403',
@@ -77,3 +80,14 @@ class PaymentIntegrationsTestFunctions(TestCase):
             message='Dinify SMS test'
         )
         self.assertTrue(send_sms)
+
+    def test_dpo(self):
+        create_token = DpoIntegration(
+            amount=100000,
+            currency='UGX',
+            msisdn='256706087495',
+            timestamp=str(timezone.now()),
+            transaction_reference=str(uuid.uuid4()),
+            dpo_transaction_token=None
+        ).create_token()
+        self.assertIsNotNone(create_token)

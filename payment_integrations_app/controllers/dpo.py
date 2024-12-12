@@ -1,3 +1,4 @@
+from urllib import response
 import requests
 import datetime
 import xml.etree.ElementTree as ET
@@ -10,7 +11,12 @@ from dinify_backend.configss.string_definitions import (
     TransactionStatus_Pending,
     Aggregator_DPO
 )
-from dinify_backend.mongo_db import COL_DPO_TOKENS, COL_DPO_TOKEN_VERIFICATION
+from dinify_backend.mongo_db import (
+    MONGO_DB,
+    COL_DPO_TOKENS,
+    COL_DPO_TOKEN_VERIFICATION,
+    COL_DPO_RESPONSES
+)
 from misc_app.controllers.save_to_mongo import save_to_mongodb
 from finance_app.controllers.process_payment_feedback import process_payment_feedback
 
@@ -31,11 +37,82 @@ class DpoIntegration:
     SERVICE_TYPE = config('DPO_SERVICE_TYPE')
     REDIRECT_URL = 'https://dinify-web'
 
+    def interprete_response(self, request_type: str, request_body: dict, dpo_response: str):
+        response_xml_object = ET.fromstring(dpo_response.text)
+
+        dpo_response_dict = {}
+        for elem in response_xml_object.iter():
+            dpo_response_dict[elem.tag] = elem.text
+
+        MONGO_DB[COL_DPO_RESPONSES].insert_one({
+            'request_type': request_type,
+            'request_body': request_body,
+            'response_string': dpo_response.text,
+            'response_dict': dpo_response_dict
+        })
+        return dpo_response_dict
+
     def create_token(self):
+        api3g = ET.Element('API3G')
+        request = ET.SubElement(api3g, 'Request')
+        request.text = 'createToken'
+        company_token = ET.SubElement(api3g, 'CompanyToken')
+        company_token.text = self.COMPANY_TOKEN
+        # the transaction details
+        transaction = ET.SubElement(api3g, 'Transaction')
+        payment_amount = ET.SubElement(transaction, 'PaymentAmount')
+        payment_amount.text = str(self.amount)
+        payment_currency = ET.SubElement(transaction, 'PaymentCurrency')
+        payment_currency.text = self.currency
+        company_ref_unique = ET.SubElement(transaction, 'CompanyRefUnique')
+        company_ref_unique.text = '1'  # confirm that we are not doing payments
+        company_ref = ET.SubElement(transaction, 'CompanyRef')
+        company_ref.text = self.transaction_reference
+        redirect_url = ET.SubElement(transaction, 'RedirectURL')
+        redirect_url.text = self.REDIRECT_URL
+        # the service details
+        services = ET.SubElement(api3g, 'Services')
+        service = ET.SubElement(services, 'Service')
+        service_type = ET.SubElement(service, 'ServiceType')
+        service_type.text = self.SERVICE_TYPE
+        service_description = ET.SubElement(service, 'ServiceDescription')
+        service_description.text = 'Dinify Order Payment'
+        service_date = ET.SubElement(service, 'ServiceDate')
+        new_time = datetime.datetime.strptime(str(self.timestamp[:-13]), '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M')
+        # new_time = self.timestamp
+        service_date.text = new_time
+
+        REQUEST_HEADERS = {
+            'Content-Type': 'text/xml',
+            'Content-transfer-encoding': 'text'
+        }
+
+        post_data = ET.tostring(api3g, xml_declaration=True, encoding='utf-8')
+        dpo_token_request = requests.post(
+            self.API_URL,
+            data=post_data,
+            headers=REQUEST_HEADERS
+        )
+
+        response = self.interprete_response(
+            request_type='create_token',
+            request_body={
+                'amount': self.amount,
+                'currency': self.currency,
+                'transaction_reference': self.transaction_reference
+            },
+            dpo_response=dpo_token_request
+        )
+
+        # return only the token
+        if response.get('Result') == '000':
+            return f"{self.PAYMENT_URL}{response.get('TransToken')}"
+        return None
+
+    def create_token0(self):
         """
         - Creates a token with DPO to enable a user make a payment for their order
         """
-        print(self.timestamp)
         api3g = ET.Element('API3G')
         request = ET.SubElement(api3g, 'Request')
         request.text = 'createToken'
