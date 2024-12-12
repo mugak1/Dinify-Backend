@@ -151,29 +151,20 @@ class DpoIntegration:
         if dpo_response.get('request_type') == 'create_token':
             with transaction.atomic():
                 try:
+                    txs_record = DinifyTransaction.objects.select_for_update().get(id=transaction_id)  # noqa
+                    txs_record.aggregator = Aggregator_DPO
+                    txs_record.aggregator_status = response_dict.get('Result')
+
                     if response_dict.get('Result') == '000':
-                        DinifyTransaction.objects.select_for_update().get(
-                            id=transaction_id
-                        ).update(
-                            aggregator=Aggregator_DPO,
-                            aggregator_status=response_dict.get('Result'),
-                            aggregator_reference=response_dict.get('TransToken'),
-                        )
+                        txs_record.aggregator_reference = response_dict.get('TransToken')
+                        txs_record.save()
                     else:
-                        DinifyTransaction.objects.select_for_update().get(
-                            id=transaction_id
-                        ).update(
-                            aggregator=Aggregator_DPO,
-                            aggregator_status=response_dict.get('Result'),
-                            processing_status=ProcessingStatus_Failed
-                        )
+                        txs_record = DinifyTransaction.objects.select_for_update().get(id=transaction_id)  # noqa
+                        txs_record.processing_status = ProcessingStatus_Failed
+                        txs_record.save()
                 except DinifyTransaction.DoesNotExist:
                     pass
-                flag_doc_as_processed(
-                    collection_name=COL_DPO_RESPONSES,
-                    doc_id=response_id
-                )
-            return
+            flag_doc_as_processed(collection_name=COL_DPO_RESPONSES, doc_id=response_id)
 
         elif dpo_response.get('request_type') == 'verify_token':
             with transaction.atomic():
@@ -187,18 +178,14 @@ class DpoIntegration:
                     flag_doc_as_processed(collection_name=COL_DPO_RESPONSES, doc_id=response_id)
                     return
 
+                txs_record.aggregator_status = response_dict.get('Result')
                 if response_dict.get('Result') == '000':
-                    txs_record.update(
-                        aggregator_status=response_dict.get('Result'),
-                        processing_status=ProcessingStatus_Confirmed,
-                    )
+                    txs_record.processing_status = ProcessingStatus_Confirmed
                 elif response_dict.get('Result') in ['901', '902', '903', '904', '950']:
-                    txs_record.update(
-                        aggregator_status=response_dict.get('Result'),
-                        processing_status=ProcessingStatus_Failed
-                    )
-
+                    txs_record.processing_status = ProcessingStatus_Failed
+                txs_record.save()
             flag_doc_as_processed(collection_name=COL_DPO_RESPONSES, doc_id=response_id)
+        else:
             return
 
 # 000	Transaction Paid

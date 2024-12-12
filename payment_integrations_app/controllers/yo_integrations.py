@@ -341,42 +341,20 @@ class YoIntegration:
             response_dict = yo_response.get('response_dict')
             transaction_id = request_body.get('transaction_id')
 
-            if response_dict.get('Status') == 'ERROR':
+            try:
                 with transaction.atomic():
-                    try:
-                        DinifyTransaction.objects.select_for_update().get(
-                            id=transaction_id
-                        ).update(
-                            aggregator=Aggregator_Yo,
-                            processing_status=ProcessingStatus_Failed
-                        )
-                    except DinifyTransaction.DoesNotExist:
-                        pass
+                    txs = DinifyTransaction.objects.select_for_update().get(id=transaction_id)
+                    txs.aggregator = Aggregator_Yo
 
-                flag_doc_as_processed(
-                    collection_name=COL_YO_RESPONSES,
-                    doc_id=response_id
-                )
-                return
-
-            elif response_dict.get('Status') == 'OK':
-                with transaction.atomic():
-                    try:
-                        DinifyTransaction.objects.select_for_update().get(
-                            id=transaction_id
-                        ).update(
-                            aggregator=Aggregator_Yo,
-                            aggregator_status=response_dict.get('TransactionStatus'),
-                            aggregator_reference=response_dict.get('TransactionReference'),
-                        )
-                    except DinifyTransaction.DoesNotExist:
-                        pass
-
-                flag_doc_as_processed(
-                    collection_name=COL_YO_RESPONSES,
-                    doc_id=response_id
-                )
-                return
+                    if response_dict.get('Status') == 'ERROR':
+                        txs.processing_status = ProcessingStatus_Failed
+                    elif response_dict.get('Status') == 'OK':
+                        txs.aggregator_status = response_dict.get('TransactionStatus')
+                        txs.aggregator_reference = response_dict.get('TransactionReference')
+                    txs.save()
+            except DinifyTransaction.DoesNotExist:
+                pass
+            flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
 
         elif yo_response.get('request_type') == 'momo_check_transaction':
             request_body = yo_response.get('request_body')
@@ -394,29 +372,24 @@ class YoIntegration:
                     pass
 
                 if txs_record is None:
-                    flag_doc_as_processed(
-                        collection_name=COL_YO_RESPONSES,
-                        doc_id=response_id
-                    )
+                    flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
                     return
 
                 aggregator_status = response_dict.get('TransactionStatus')
                 if aggregator_status is None:
-                    flag_doc_as_processed(
-                        collection_name=COL_YO_RESPONSES,
-                        doc_id=response_id
-                    )
+                    flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
                     return
 
                 if aggregator_status == 'SUCCEEDED':
                     if txs_record.processing_status != ProcessingStatus_Pending:
-                        flag_doc_as_processed(
-                            collection_name=COL_YO_RESPONSES,
-                            doc_id=response_id
-                        )
+                        flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
                         return
+                    txs_record.processing_status = ProcessingStatus_Confirmed
+                    txs_record.aggregator_status = aggregator_status
+                    txs_record.save()
+                else:
+                    return
 
-                    txs_record.update(
-                        processing_status=ProcessingStatus_Confirmed,
-                        aggregator_status=aggregator_status
-                    )
+                flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
+        else:
+            return
