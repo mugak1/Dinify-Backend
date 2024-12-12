@@ -171,13 +171,20 @@ class FinanceAppTestFunctions(TestCase):
         tx.processing_status = ProcessingStatus_Confirmed
         tx.save()
         print(f"account balances: {tx.account.momo_actual_balance} | {tx.account.card_actual_balance} | {tx.account.cash_actual_balance}")
+        old_momo_balance = tx.account.momo_actual_balance
 
         result = OrderPaymentTransaction().process(
             transaction_id=result['data']['transaction_id'],
         )
         account = DinifyAccount.objects.get(restaurant=restaurant)
         print(f"account balances: {account.momo_actual_balance} | {account.card_actual_balance} | {account.cash_actual_balance}")
+        new_momo_balance = account.momo_actual_balance
 
+        expected_balance = old_momo_balance + order.actual_cost
+        self.assertEqual(expected_balance, new_momo_balance)
+
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, 'Paid')
 
     def test_subscription_payment(self):
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
