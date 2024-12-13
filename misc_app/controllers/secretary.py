@@ -151,17 +151,18 @@ class Secretary:
                 )
 
                 # TODO send a notification
-                restaurant_id = record.data.get('restaurant')
-                if self.msg_type in ['new-menu-section']:
-                    restaurant_id = record.data['restaurant']
-
-                make_notification_for_new_entry(
-                    restaurant_id=record.data.get('restaurant'),
-                    user=self.user,
-                    item_name=record.data.get('name'),
-                    msg_type=self.msg_type
-                )
-
+                try:
+                    restaurant_id = record.data.get('restaurant')
+                    if self.msg_type in ['new-menu-section']:
+                        restaurant_id = record.data['restaurant']
+                    make_notification_for_new_entry(
+                        restaurant_id=restaurant_id,
+                        user=self.user,
+                        item_name=record.data.get('name'),
+                        msg_type=self.msg_type
+                    )
+                except Exception as error:
+                    print(f'Secretary Notification Prompt Error:{error}')
 
                 return {
                     'status': 200,

@@ -2,7 +2,6 @@
 endpoints for restaurant configurations
 """
 import ast
-from tabnanny import check
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from restaurants_app.controllers.create_restaurant import (

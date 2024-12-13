@@ -171,8 +171,8 @@ class DinifyTransaction(BaseModel):
 
 
 class BankAccountRecord(BaseModel):
-    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, null=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True)  # considerations for user refunds
+    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, null=True, blank=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)  # considerations for user refunds
     account_name = models.CharField(max_length=255)
     account_number = models.CharField(max_length=255)
     bank_name = models.CharField(max_length=255)
@@ -189,5 +189,5 @@ class BankAccountRecord(BaseModel):
     yo_reference = models.CharField(max_length=255, null=True, blank=True)
 
     class Meta:
-        db_table = 'bank_accounts'
+        db_table = 'bank_account_records'
         unique_together = ['restaurant', 'bank_name', 'account_number']

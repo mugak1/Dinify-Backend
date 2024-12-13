@@ -1,5 +1,5 @@
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
-from finance_app.models import DinifyAccount, DinifyTransaction
+from finance_app.models import DinifyAccount, DinifyTransaction, BankAccountRecord
 from dinify_backend.configss.string_definitions import (
     TransactionType_OrderPayment
 )
@@ -53,3 +53,9 @@ class SerializerGetDinifyTransactionListing(ModelSerializer):
             'payment_mode', 'aggregator', 'aggregator_reference',
             'account_balances'
         )
+
+
+class SerializerPutBankAccountRecord(ModelSerializer):
+    class Meta:
+        model = BankAccountRecord
+        fields = '__all__'
