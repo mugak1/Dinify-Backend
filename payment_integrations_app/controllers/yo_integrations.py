@@ -361,12 +361,10 @@ class YoIntegration:
             flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
 
         elif request_type == 'momo_check_transaction':
+            print('processing transaction status check...')
             request_body = yo_response.get('request_body')
             response_dict = yo_response.get('response_dict')
             aggregator_reference = request_body.get('transaction_id')
-
-            print(f"\nreponse_dict: {response_dict}\n")
-
             with transaction.atomic():
                 txs_record = None
                 try:
@@ -375,6 +373,7 @@ class YoIntegration:
                         aggregator_reference=aggregator_reference
                     )
                 except DinifyTransaction.DoesNotExist:
+                    print('no yo transaction found')
                     pass
 
                 if txs_record is None:
