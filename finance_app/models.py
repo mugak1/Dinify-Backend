@@ -145,7 +145,7 @@ class DinifyTransaction(BaseModel):
     )
 
     # aggregator details
-    aggregator = models.CharField(max_length=255, null=True, blank=True)
+    aggregator = models.CharField(max_length=255, null=True, blank=True, db_index=True)
     aggregator_reference = models.CharField(max_length=255, null=True, blank=True, db_index=True)
     payment_mode = models.CharField(validators=[validate_payment_mode], max_length=255, null=True, blank=True)  # noqa
     aggregator_status = models.CharField(max_length=255, null=True, blank=True)
