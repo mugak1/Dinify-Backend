@@ -330,13 +330,17 @@ class YoIntegration:
     def process_yo_response(self, response_id):
         yo_response = MONGO_DB[COL_YO_RESPONSES].find_one({'_id': ObjectId(response_id)})
         # skip if there is no response_dict
-        print(f"\nProcessing Yo Response: {response_id} : {yo_response.get('response_dict')}\n")
+        print(f"\nProcessing Yo Response: {response_id} : {type(yo_response.get('response_dict'))}\n")
 
         if yo_response.get('response_dict') is None:
+            print('skipping NONE response')
             flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
             return
 
-        if yo_response.get('request_type') == 'momo_collect':
+        request_type = yo_response.get('request_type')
+        print(f"\nRequest Type: {request_type}\n")
+
+        if request_type == 'momo_collect':
             request_body = yo_response.get('request_body')
             response_dict = yo_response.get('response_dict')
             transaction_id = request_body.get('transaction_id')
@@ -356,7 +360,7 @@ class YoIntegration:
                 pass
             flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
 
-        elif yo_response.get('request_type') == 'momo_check_transaction':
+        elif request_type == 'momo_check_transaction':
             request_body = yo_response.get('request_body')
             response_dict = yo_response.get('response_dict')
             aggregator_reference = request_body.get('transaction_id')
