@@ -18,7 +18,7 @@ REQUIRED_INFORMATION = [
 class BankAccountRecordsEndpoint(APIView):
     def post(self, request):
         # TODO only dinify admins should be able to add bank account records
- 
+
         data = request.data
         data = {k: (v.upper() if k not in ['restaurant', 'user'] else v) for k, v in data.items()}
 
