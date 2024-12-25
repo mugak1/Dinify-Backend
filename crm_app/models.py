@@ -11,13 +11,13 @@ class ServiceTicket(BaseModel):
     ticket_status = models.CharField(max_length=255, default='open')
     ticket_priority = models.CharField(max_length=255, default='normal')
 
-    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name='service_tickets')  # noqa
+    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name='restaurant_tickets', null=True)  # noqa
 
-    assigned_to = models.ForeignKey(User, on_delete=models.SET_NULL, related_name='assigned_tickets', null=True)  # noqa
-    assigned_by = models.ForeignKey(User, on_delete=models.SET_NULL, related_name='assigned_tickets', null=True)  # noqa
+    assigned_to = models.ForeignKey(User, on_delete=models.SET_NULL, related_name='ticket_assigned_to', null=True)  # noqa
+    assigned_by = models.ForeignKey(User, on_delete=models.SET_NULL, related_name='ticket_assigned_by', null=True)  # noqa
 
     resolution_notes = models.TextField(null=True, blank=True)
-    resolution_date = models.DateTimeField(null=True)
+    # resolution_date = models.DateTimeField(null=True)
 
     class Meta:
         db_table = 'service_tickets'

@@ -28,4 +28,5 @@ urlpatterns = [
     path('api/v1/finances/', include('finance_app.urls')),
     path('api/v1/reports/', include('reports_app.urls')),
     path('api/v1/notifications/', include('notifications_app.urls')),
+    path('api/v1/crm/', include('crm_app.urls')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
