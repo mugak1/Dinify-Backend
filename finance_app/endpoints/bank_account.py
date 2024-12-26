@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from finance_app.serializers import SerializerPutBankAccountRecord
 from misc_app.controllers.secretary import Secretary
+from users_app.controllers.permissions_check import is_dinify_admin
 
 
 REQUIRED_INFORMATION = [
@@ -18,6 +19,12 @@ REQUIRED_INFORMATION = [
 class BankAccountRecordsEndpoint(APIView):
     def post(self, request):
         # TODO only dinify admins should be able to add bank account records
+        if not is_dinify_admin(request.user):
+            response = {
+                'status': 403,
+                'message': 'You are not authorized to perform this action.'
+            }
+            return Response(response, status=400)
 
         data = request.data
         data = {k: (v.upper() if k not in ['restaurant', 'user'] else v) for k, v in data.items()}
@@ -34,7 +41,7 @@ class BankAccountRecordsEndpoint(APIView):
             'msg_type': 'new-bank-account',
         }
         response = Secretary(secretary_args).create()
-        return Response(response, status=201)
+        return Response(response, status=200)
 
     def get(self, request):
 
