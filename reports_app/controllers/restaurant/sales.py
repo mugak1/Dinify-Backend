@@ -120,7 +120,7 @@ def generate_restaurant_sales_listing(
         restaurant=restaurant_id,
         time_created__gte=date_from,
         time_created__lte=date_to
-    )
+    ).order_by('time_created')
 
     records = SerializerOrderListingReport(orders, many=True)
     return {
