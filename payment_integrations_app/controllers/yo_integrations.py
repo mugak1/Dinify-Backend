@@ -6,7 +6,8 @@ from decouple import config
 from bson import ObjectId
 from django.db import transaction
 from dinify_backend.mongo_db import MONGO_DB, COL_YO_RESPONSES
-from finance_app.models import DinifyTransaction
+from finance_app.endpoints import bank_account
+from finance_app.models import BankAccountRecord, DinifyTransaction
 from misc_app.controllers.flag_doc_as_processed import flag_doc_as_processed
 from dinify_backend.configss.string_definitions import (
     ProcessingStatus_Pending,
@@ -242,7 +243,14 @@ class YoIntegration:
             },
             yo_response=yo_request
         )
-        print(response)
+        # update the bank account record with the yo reference
+        try:
+            if response.get('Status') == 'OK':
+                bank_account_record = BankAccountRecord.objects.get(id=arg_account_id)
+                bank_account_record.yo_reference = response.get('ApiBankIdentifier')
+                bank_account_record.save()
+        except Exception as error:
+            print(f"\nError updating bank account record: {error}\n")
         return True
 
     def bank_disburse(

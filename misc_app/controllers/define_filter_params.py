@@ -65,6 +65,19 @@ ORDERITEMREVIEWS_FILTERS = {
     'to': 'time_created__lte',
 }
 
+
+SERVICE_TICKET_FILTERS = {
+    'ticket_type': 'ticket_type',
+    'ticket_title': 'ticket_title__icontains',
+    'ticket_description': 'ticket_description__icontains',
+    'ticket_status': 'ticket_status',
+    'ticket_priority': 'ticket_priority',
+    'restaurant': 'restaurant',
+    'assigned_to': 'assigned_to',
+    'assigned_by': 'assigned_by',
+    'resolution_notes': 'resolution_notes__icontains',
+}
+
 FILTER_DEFINITIONS = {
     'restaurants': RESTAURANT_FILTERS,
     'employees': EMPLOYEE_FILTERS,
@@ -75,6 +88,7 @@ FILTER_DEFINITIONS = {
     'orders': ORDER_FILTERS,
     'orderreviews': ORDERREVIEWS_FILTERS,
     'orderitemreviews': ORDERITEMREVIEWS_FILTERS,
+    'servicetickets': SERVICE_TICKET_FILTERS
 }
 
 
