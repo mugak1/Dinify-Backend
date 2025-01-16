@@ -6,6 +6,7 @@ class SerializerOrderListingReport(ModelSerializer):
     no_items = SerializerMethodField()
     payment_mode = SerializerMethodField()
     last_updated_by = SerializerMethodField()
+    payment_status = SerializerMethodField()
 
     class Meta:
         model = Order
@@ -21,9 +22,12 @@ class SerializerOrderListingReport(ModelSerializer):
         return items.count()
 
     def get_payment_mode(self, order):
-        return 'momo'
+        return 'MoMo'
 
     def get_last_updated_by(self, order):
         if order.last_updated_by is not None:
             return f"{order.last_updated_by.first_name} {order.last_updated_by.last_name}"
         return ''
+
+    def get_paymnent_status(self, order):
+        return order.payment_status.replace('_', ' ').title()

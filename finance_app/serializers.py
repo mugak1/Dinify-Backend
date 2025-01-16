@@ -71,7 +71,6 @@ class SerializerGetDinifyTransactionListing(ModelSerializer):
             'payment_mode', 'aggregator', 'aggregator_reference',
             'account_balances'
         )
-    
 
     def get_transaction_type(self, record):
         return record.transaction_type.replace('_', ' ').title()
