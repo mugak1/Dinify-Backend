@@ -29,5 +29,5 @@ class SerializerOrderListingReport(ModelSerializer):
             return f"{order.last_updated_by.first_name} {order.last_updated_by.last_name}"
         return ''
 
-    def get_paymnent_status(self, order):
+    def get_payment_status(self, order):
         return order.payment_status.replace('_', ' ').title()
