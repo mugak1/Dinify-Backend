@@ -17,7 +17,7 @@ class OtpManager:
     ) -> True:
         otp = random.randint(1000, 9999)
         otp_str = str(otp)
-        otp_str = '1234'
+        # otp_str = '1234'
         encrypted_otp = hashlib.sha256(otp_str.encode()).hexdigest()
 
         # delete any old otps associated with the user
