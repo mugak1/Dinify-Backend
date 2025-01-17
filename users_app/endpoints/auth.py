@@ -46,7 +46,9 @@ class UsersAuthenticationEndpoint(APIView):
             identification = request.data.get('identification', 'msisdn')
             identifier = request.data.get('identifier', None)
             purpose = request.data.get('purpose', None)
-            if request.user is not None and request.user.is_authenticated:
+            skip_auth = request.data.get('skip_auth', 'no')
+
+            if skip_auth == 'no' and request.user is not None and request.user.is_authenticated:
                 identification = 'id'
                 identifier = request.user.id
             response = OtpManager().resend_otp(
