@@ -19,3 +19,4 @@ The backend application for dinify_project.
 
 /home/scripts/verifydpotokens.sh >> /home/script_logs/verify_dpo_tokens/`date +\%Y-\%m-\%d`.log 2>&1
 
+- createaccoutswithyo
