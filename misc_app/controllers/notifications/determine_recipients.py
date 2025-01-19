@@ -10,15 +10,19 @@ def determine_receipients(message_type: str, restaurant_id: str,):
     ccs = []
 
     if restaurant_id is not None:
-        if message_type in ['admin-new-restaurant', 'new-menu-section']:
+        if message_type in [
+            'admin-new-restaurant',
+            'new-menu-section',
+            'new-restaurant'
+        ]:
             employees = RestaurantEmployee.objects.filter(restaurant_id=restaurant_id)
             owners = [employee.user.email for employee in employees if RESTAURANT_OWNER in employee.roles]  # noqa
             managers = [employee.user.email for employee in employees if RESTAURANT_MANAGER in employee.roles]  # noqa
             tos = owners + managers
 
-    if message_type in ['admin-new-restaurant']:
+    if message_type in ['admin-new-restaurant', 'new-restaurant']:
         dinify_admins = User.objects.filter(roles__contains=[DINIFY_ADMIN])
-        tos += [admin.email for admin in dinify_admins]
+        ccs += [admin.email for admin in dinify_admins]
 
     return {
         'tos': tos,
