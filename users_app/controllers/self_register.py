@@ -31,10 +31,12 @@ def self_register(
         }
 
     # check that that the phone number is not repeated
-    if User.objects.filter(phone_number=data.get('phone_number')).exists():
+    existing_phone = User.objects.filter(phone_number=data.get('phone_number'))
+    if existing_phone.exists():
         return {
             'status': 400,
-            'message': MESSAGES.get('PHONE_NUMBER_EXISTS')
+            'message': MESSAGES.get('PHONE_NUMBER_EXISTS'),
+            'user_id': existing_phone.first().id
         }
 
     # check that the email is not repeated
@@ -42,7 +44,7 @@ def self_register(
         if User.objects.filter(email=data.get('email')).exists():
             return {
                 'status': 400,
-                'message': MESSAGES.get('EMAIL_EXISTS')
+                'message': MESSAGES.get('EMAIL_EXISTS'),
             }
 
     # verify otp

@@ -51,8 +51,6 @@ def create_restaurant(data: dict, auth_info: dict) -> dict:
     if record.is_valid():
         with transaction.atomic():
             record.save()
-
-            
             # create the restaurant account
             account_data = {
                 'account_type': AccountType_Restaurant,
@@ -159,7 +157,8 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
         )
 
         if not user_creation_result.get('status') == 200:
-            return user_creation_result
+            if not user_creation_result.get('message') == MESSAGES.get('PHONE_NUMBER_EXISTS'):
+                return user_creation_result
 
         # construct the info to submit to the database
         record_data = data.copy()
