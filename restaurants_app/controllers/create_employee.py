@@ -49,7 +49,8 @@ def create_employee(
                 'password': password
             },
             return_user_id=True,
-            send_credential_email=True
+            send_credential_email=True,
+            skip_otp=True
         )
 
         if create_user['status'] != 200:
