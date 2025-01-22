@@ -192,7 +192,8 @@ class RestaurantAppTestFunctions(TestCase):
                 phone_number='256777777777',
                 restaurant=restaurant,
                 roles=[ROLES.get('RESTAURANT_KITCHEN')],
-                creator=restaurant.owner
+                creator=restaurant.owner,
+                skip_otp=True
             )
             print(f'employee result: {result}')
             self.assertEqual(result['status'], 200)

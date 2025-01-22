@@ -52,7 +52,6 @@ def reset_password(username):
         filter_information=None
     )
 
-    #  TODO send out the email with the new password
     Notification(msg_data={
         'msg_type': 'forgot-password',
         'first_name': user.first_name,

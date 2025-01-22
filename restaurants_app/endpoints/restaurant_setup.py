@@ -131,7 +131,8 @@ class RestaurantSetupEndpoint(APIView):
                 restaurant=Restaurant.objects.get(id=data.get('restaurant')),
                 roles=data.get('roles'),
                 creator=request.user,
-                otp=data.get('otp')
+                otp=data.get('otp'),
+                skip_otp=True
             )
         except Exception as error:
             print(f"Error while creating employee: {error}")

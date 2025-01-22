@@ -6,6 +6,7 @@ from restaurants_app.serializers import SerializerPutRestaurantEmployee
 from misc_app.controllers.secretary import Secretary
 from django.db import transaction
 from users_app.controllers.otp_manager import OtpManager
+from misc_app.controllers.notifications.notification import Notification
 
 
 def create_employee(
@@ -16,29 +17,30 @@ def create_employee(
     restaurant: Restaurant,
     roles: list,
     creator: User,
-    otp: Optional[str] = None
+    otp: Optional[str] = None,
+    skip_otp: Optional[bool] = False
 ) -> dict:
     with transaction.atomic():
         password = User.objects.make_random_password()
         password = 'password'
 
         # attempt to verify the OTP
-        if otp is None:
-            return {
-                'status': 400,
-                'message': 'Please provide the OTP.'
-            }
+        if not skip_otp:
+            if otp is None:
+                return {
+                    'status': 400,
+                    'message': 'Please provide the OTP.'
+                }
 
-        otp_verification = OtpManager().verify_otp(
-            user_id=str(creator.id),
-            otp=otp
-        )
-        if not otp_verification['data']['valid']:
-            return {
-                'status': 400,
-                'message': 'Invalid OTP.'
-            }
-
+            otp_verification = OtpManager().verify_otp(
+                user_id=str(creator.id),
+                otp=otp
+            )
+            if not otp_verification['data']['valid']:
+                return {
+                    'status': 400,
+                    'message': 'Invalid OTP.'
+                }
         create_user = self_register(
             data={
                 'first_name': first_name,
@@ -74,4 +76,11 @@ def create_employee(
         if response['status'] != 200:
             # delete the user account that was created
             User.objects.get(id=create_user['user_id']).delete()
+
+        Notification(msg_data={
+            'msg_type': 'new-restaurant-employee',
+            'first_name': first_name,
+            'restaurant_name': restaurant.name,
+            'user_id': str(create_user['user_id'])
+        }).create_notification()
         return response

@@ -33,7 +33,7 @@ def make_user_messages(msg_data, footer) -> dict:
         message = {
             'subject': 'Dinify Account Details Updated',
             'email': email,
-            'sms': None
+            'sms': "Your Dinify details have been updated."
         }
 
     elif msg_data.get('msg_type') == 'password-change':
@@ -49,7 +49,7 @@ def make_user_messages(msg_data, footer) -> dict:
         message = {
             'subject': 'Dinify Password Changed',
             'email': email,
-            'sms': None
+            'sms': 'Your Dinify password has been changed.'
         }
 
     elif msg_data.get('msg_type') == 'forgot-password':
@@ -63,7 +63,7 @@ def make_user_messages(msg_data, footer) -> dict:
         message = {
             'subject': 'Dinify Password Reset',
             'email': email,
-            'sms': None
+            'sms': f"Your Dinify one-time password is {msg_data['password']}"
         }
 
     elif msg_data.get('msg_type') == 'otp':

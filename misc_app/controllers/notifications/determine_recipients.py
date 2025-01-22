@@ -32,6 +32,7 @@ def determine_receipients(
     if message_type in [
         'forgot-password',
         'password-change',
+        'new-restaurant-employee'
     ]:
         user = User.objects.values('phone_number', 'email').get(id=user_id)
         tos = user['email']
