@@ -33,7 +33,7 @@ class User(AbstractUser):
     phone_number = models.CharField(max_length=255, unique=True, db_index=True)
 
     roles = models.JSONField(default=list)
-    prompt_password_change = models.BooleanField(default=False)
+    prompt_password_change = models.BooleanField(default=True)
 
     # track if profile is
 
