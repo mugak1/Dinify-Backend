@@ -26,7 +26,7 @@ class Command(BaseCommand):
 
             # if the x['sms'] is not None, send the sms
             if x['sms']:
-                Messenger.send_sms(
+                Messenger().send_sms(
                     msisdn=x['msisdn'],
                     message=x['sms']
                 )
