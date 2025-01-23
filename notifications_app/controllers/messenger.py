@@ -8,6 +8,9 @@ class Messenger():
         self.from_email = ''+settings.EMAIL_HOST_USER
 
     def send_email(self, to: list, cc: list, subject: str, message: str) -> bool:
+        # if to is not a list, make it a list
+        if not isinstance(to, list):
+            to = [to]
         message = EmailMessage(
             subject=subject,
             body=message,
