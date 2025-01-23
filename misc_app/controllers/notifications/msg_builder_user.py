@@ -27,10 +27,11 @@ def make_user_messages(msg_data, footer) -> dict:
         <p><span style="font-weight:400;">Thank you for choosing Dinify. &nbsp;</span></p>
         {footer}
         """
+        sms = f"Dinify login\nUsername: {msg_data.get('username')}\nPassword: {msg_data.get('password')}."  # noqa
         message = {
             'subject': 'Dinify Credentials!',
             'email': email,
-            'sms': None
+            'sms': sms
         }
 
     elif msg_data.get('msg_type') == 'user-update':

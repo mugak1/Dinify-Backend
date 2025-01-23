@@ -23,3 +23,16 @@ class Command(BaseCommand):
                 subject=x['subject'],
                 message=x['email']
             )
+
+            # if the x['sms'] is not None, send the sms
+            if x['sms']:
+                Messenger.send_sms(
+                    msisdn=x['msisdn'],
+                    message=x['sms']
+                )
+
+            # update the sent attribute to True
+            MONGO_DB[COL_NOTIFICATIONS].update_one(
+                {"_id": x['_id']},
+                {"$set": {"sent": True}}
+            )

@@ -1,5 +1,6 @@
 from dinify_backend import settings
 from django.core.mail import EmailMessage
+from payment_integrations_app.controllers.yo_integrations import YoIntegration
 
 
 class Messenger():
@@ -18,3 +19,9 @@ class Messenger():
         )
         message.content_subtype = 'html'
         message.send(fail_silently=False)
+
+    def send_sms(self, msisdn, message):
+        YoIntegration().send_sms(
+            to=msisdn,
+            message=message
+        )
