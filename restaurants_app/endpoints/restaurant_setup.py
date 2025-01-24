@@ -74,8 +74,8 @@ def check_permission(
             user=user,
             active=True,
         )
-        for x in res_mapping:
-            print(f"res mapping: {x['restaurant']}")
+        # for x in res_mapping:
+        #     print(f"res mapping: {x['restaurant']}")
         restaurant_ids = [str(res['restaurant']) for res in res_mapping]
         for restaurant_id in restaurant_ids:
             roles = get_user_restaurant_roles(
@@ -552,7 +552,6 @@ class RestaurantSetupEndpoint(APIView):
             'error_message': error_message
         }
 
-        print(f'\n\nthe submitted data for {config_detail} is:\n {put_data}\n\n')
         response = Secretary(secretary_args).update()
 
         return Response(
