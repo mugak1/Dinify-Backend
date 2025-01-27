@@ -1,3 +1,4 @@
+import random
 from typing import Optional
 from restaurants_app.models import Restaurant
 from users_app.controllers.self_register import self_register
@@ -21,8 +22,12 @@ def create_employee(
     skip_otp: Optional[bool] = False
 ) -> dict:
     with transaction.atomic():
-        password = User.objects.make_random_password()
+        # password = User.objects.make_random_password()
         # password = 'password'
+        password = ''.join(random.choices(
+            'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+            k=8
+        ))
 
         # attempt to verify the OTP
         if not skip_otp:
