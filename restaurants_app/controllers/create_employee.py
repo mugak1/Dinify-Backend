@@ -22,7 +22,7 @@ def create_employee(
 ) -> dict:
     with transaction.atomic():
         password = User.objects.make_random_password()
-        password = 'password'
+        # password = 'password'
 
         # attempt to verify the OTP
         if not skip_otp:
