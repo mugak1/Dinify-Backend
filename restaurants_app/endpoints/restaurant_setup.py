@@ -55,6 +55,8 @@ from users_app.controllers.permissions_check import (
 
 from restaurants_app.models import RestaurantEmployee
 from users_app.models import User
+from restaurants_app.controllers.subscriptions import RestaurantSubscription
+
 
 
 def check_permission(
@@ -255,7 +257,7 @@ class RestaurantSetupEndpoint(APIView):
                 'message': 'You do not have permission to perform this action.'
             }
             return Response(response, status=400)
-        
+
         try:
             post_data = post_data.dict()
         except Exception as error:
@@ -350,6 +352,9 @@ class RestaurantSetupEndpoint(APIView):
         if config_detail == 'details':
             return self.get_detail(request)
 
+        if config_detail == 'subscription-details':
+            return RestaurantSubscription().get_details(request)
+
         filter_params = request.GET.copy()
         if config_detail == 'orders':
             if 'status' in request.GET:
@@ -390,7 +395,7 @@ class RestaurantSetupEndpoint(APIView):
                     ]
                     # orm_filter['payment_status'] = PaymentStatus_Pending
 
-        if config_detail == 'rest=urants':
+        if config_detail == 'restaurants':
             orm_filter['status__in'] = [
                 'active',
                 'pending'
@@ -509,7 +514,6 @@ class RestaurantSetupEndpoint(APIView):
 
         put_data = request.data
 
-
         # check if the actor has rights to perform the action
         if not check_permission(
             user=request.user,
@@ -521,6 +525,10 @@ class RestaurantSetupEndpoint(APIView):
                 'message': 'You do not have permission to perform this action.'
             }
             return Response(response, status=400)
+
+        if config_detail == 'subscription-details':
+            return RestaurantSubscription().update(request)
+
 
         # if editing a menu item,
         # convert the options and extras_applicable to a list
