@@ -282,7 +282,7 @@ class Secretary:
             record = old_record = self.serializer.Meta.model.objects.get(
                 id=self.data.get('id')
             )
-            print(f"old record details: {old_record.status}")
+            # print(f"old record details: {old_record.status}")
             # formulate the new data to consider
             new_data = {}
             edit_considerations = self.args.get('edit_considerations')
