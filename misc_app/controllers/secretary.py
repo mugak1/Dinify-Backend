@@ -1,6 +1,7 @@
 """
 implementation for crud functions to the database
 """
+import copy
 from django.db import transaction
 from django.utils import timezone
 from dataclasses import dataclass
@@ -18,8 +19,9 @@ from restaurants_app.models import Restaurant, MenuItem
 from users_app.models import User
 from misc_app.controllers.notifications.notification import Notification
 from restaurants_app.serializers import SerializerAdminGetOrderReview
-
+from restaurants_app.serializers import SerializerPutRestaurant
 from restaurants_app.controllers.get_review_summary import get_review_summary
+from misc_app.controllers.notifications.notification import Notification
 
 
 def make_notification_for_new_entry(
@@ -277,10 +279,10 @@ class Secretary:
 
         with transaction.atomic():
             # get the current record
-            record = self.serializer.Meta.model.objects.get(
+            record = old_record = self.serializer.Meta.model.objects.get(
                 id=self.data.get('id')
             )
-
+            # print(f"old record details: {old_record.status}")
             # formulate the new data to consider
             new_data = {}
             edit_considerations = self.args.get('edit_considerations')
@@ -353,6 +355,7 @@ class Secretary:
                 data=new_data,
                 partial=True
             )
+            old_record = copy.deepcopy(old_record)
             if record.is_valid():
                 record.save()
                 # save to the log
@@ -371,6 +374,11 @@ class Secretary:
                     )
                 except Exception as error:
                     print(f'SecretaryError-Update:{error}')
+
+                self.make_notification(
+                    old_record=old_record,
+                    new_record=record
+                )
 
                 return {
                     'status': 200,
@@ -499,3 +507,25 @@ class Secretary:
                 'status': 400,
                 'message': error_message
             }
+
+    def make_notification(self, old_record, new_record):
+        # check if the status of the restaurant has changed
+        if self.serializer is SerializerPutRestaurant:
+            if old_record.status != new_record.instance.status:
+                if new_record.instance.status == 'active':
+                    Notification(msg_data={
+                        'msg_type': 'restaurant-activated',
+                        'first_name': new_record.instance.owner.first_name,
+                        'restaurant_id': str(old_record.id),
+                        'restaurant_name': old_record.name,
+                        'user_id': str(new_record.instance.owner.id)
+                    }).create_notification()
+
+                elif new_record.instance.status == 'rejected':
+                    Notification(msg_data={
+                        'msg_type': 'restaurant-rejected',
+                        'first_name': new_record.instance.owner.first_name,
+                        'restaurant_id': str(old_record.id),
+                        'restaurant_name': old_record.name,
+                        'user_id': str(new_record.instance.owner.id)
+                    }).create_notification()

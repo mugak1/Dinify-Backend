@@ -1,6 +1,7 @@
 from typing import Optional
 import random
 import hashlib
+from decouple import config
 from datetime import datetime, timedelta
 from users_app.models import User, UserOtp
 from misc_app.controllers.notifications.notification import Notification
@@ -17,7 +18,8 @@ class OtpManager:
     ) -> True:
         otp = random.randint(1000, 9999)
         otp_str = str(otp)
-        # otp_str = '1234'
+        if config('ENV') in ['dev']:
+            otp_str = '1234'
         encrypted_otp = hashlib.sha256(otp_str.encode()).hexdigest()
 
         # delete any old otps associated with the user

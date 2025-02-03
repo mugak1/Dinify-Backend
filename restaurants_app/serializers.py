@@ -97,12 +97,14 @@ class SerializerGetRestaurantEmployee(ModelSerializer):
     serializer for getting restaurant employees
     """
     name = SerializerMethodField()
+    user = SerializerMethodField()
 
     class Meta:
         model = RestaurantEmployee
         fields = (
             "id", "time_created", "time_last_updated",
-            "name", "roles", "active"
+            "name", "roles", "active",
+            "user"
         )
 
     def get_name(self, employee):
@@ -110,6 +112,18 @@ class SerializerGetRestaurantEmployee(ModelSerializer):
         returns the name of the employee
         """
         return f"{employee.user.first_name} {employee.user.last_name}"
+
+    def get_user(self, employee):
+        """
+        returns the user details of the employee
+        """
+        return {
+            'id': str(employee.user.pk),
+            'first_name': employee.user.first_name,
+            'last_name': employee.user.last_name,
+            'email': employee.user.email,
+            'phone_number': employee.user.phone_number,
+        }
 
 
 class SerializerPutMenuSection(ModelSerializer):

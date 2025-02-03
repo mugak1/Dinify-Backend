@@ -44,6 +44,8 @@ def build_messages(msg_data: dict) -> dict:
         'new-restaurant',
         'admin-new-restaurant',
         'new-restaurant-employee',
+        'restaurant-activated',
+        'restaurant-rejected',
     ]:
         return make_restaurant_messages(msg_data, footer)
 

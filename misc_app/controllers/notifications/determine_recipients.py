@@ -18,7 +18,9 @@ def determine_receipients(
         if message_type in [
             'admin-new-restaurant',
             'new-menu-section',
-            'new-restaurant'
+            'new-restaurant',
+            'restaurant-activated',
+            'restaurant-rejected',
         ]:
             employees = RestaurantEmployee.objects.filter(restaurant_id=restaurant_id)
             owners = [employee.user.email for employee in employees if RESTAURANT_OWNER in employee.roles]  # noqa

@@ -20,17 +20,6 @@ def self_register(
     Handle user self registration
     - `data` is the registration data
     """
-    # check if all the required information is present
-    info_check = check_required_information(
-        REQUIRED_INFORMATION.get('new_user'),
-        data
-    )
-    if not info_check.get('status'):
-        return {
-            'status': 400,
-            'message': info_check.get('message')
-        }
-
     # check that that the phone number is not repeated
     existing_phone = User.objects.filter(phone_number=data.get('phone_number'))
     if existing_phone.exists():
@@ -48,6 +37,17 @@ def self_register(
                 'status': 400,
                 'message': MESSAGES.get('EMAIL_EXISTS'),
             }
+
+    # check if all the required information is present
+    info_check = check_required_information(
+        REQUIRED_INFORMATION.get('new_user'),
+        data
+    )
+    if not info_check.get('status'):
+        return {
+            'status': 400,
+            'message': info_check.get('message')
+        }
 
     # verify otp
     # check if the otp has been provided

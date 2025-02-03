@@ -23,12 +23,12 @@ def make_user_messages(msg_data, footer) -> dict:
         email = f"""
         <p><span style="font-weight: 400;">Hello {msg_data.get('first_name', '')},</span></p>
         <p>&nbsp;</p>
-        <p><span style="font-weight: 400;">Your Dinify credentials are <br>Username: {msg_data.get('username')}<br>Password: {msg_data.get('password')}<br>&nbsp;</span></p>
-        <p><span style="font-weight: 400;">You can log in at <a href="https://dinify-uat.web.app/login">Dinify Login</a>.</span></p>
+        <p><span style="font-weight: 400;">Your Dinify credentials are:<br>Username: {msg_data.get('username')}<br>Temporary Password: {msg_data.get('password')}<br>&nbsp;</span></p>
+        <p><span style="font-weight: 400;">You can log in at <a href="https://dinify-uat.web.app/login">https://dinify-uat.web.app/login</a>.</span></p>
         <p><span style="font-weight:400;">Thank you for choosing Dinify. &nbsp;</span></p>
         {footer}
         """
-        sms = f"Dinify Login Username {msg_data.get('username')}. Password {msg_data.get('password')}."  # noqa
+        sms = f"Dinify Login Username {msg_data.get('username')}. Temporary Password {msg_data.get('password')}."  # noqa
         message = {
             'subject': 'Dinify Credentials!',
             'email': email,

@@ -55,6 +55,8 @@ from users_app.controllers.permissions_check import (
 
 from restaurants_app.models import RestaurantEmployee
 from users_app.models import User
+from restaurants_app.controllers.subscriptions import RestaurantSubscription
+
 
 
 def check_permission(
@@ -74,8 +76,8 @@ def check_permission(
             user=user,
             active=True,
         )
-        for x in res_mapping:
-            print(f"res mapping: {x['restaurant']}")
+        # for x in res_mapping:
+        #     print(f"res mapping: {x['restaurant']}")
         restaurant_ids = [str(res['restaurant']) for res in res_mapping]
         for restaurant_id in restaurant_ids:
             roles = get_user_restaurant_roles(
@@ -255,7 +257,7 @@ class RestaurantSetupEndpoint(APIView):
                 'message': 'You do not have permission to perform this action.'
             }
             return Response(response, status=400)
-        
+
         try:
             post_data = post_data.dict()
         except Exception as error:
@@ -350,6 +352,9 @@ class RestaurantSetupEndpoint(APIView):
         if config_detail == 'details':
             return self.get_detail(request)
 
+        if config_detail == 'subscription-details':
+            return RestaurantSubscription().get_details(request)
+
         filter_params = request.GET.copy()
         if config_detail == 'orders':
             if 'status' in request.GET:
@@ -390,7 +395,7 @@ class RestaurantSetupEndpoint(APIView):
                     ]
                     # orm_filter['payment_status'] = PaymentStatus_Pending
 
-        if config_detail == 'rest=urants':
+        if config_detail == 'restaurants':
             orm_filter['status__in'] = [
                 'active',
                 'pending'
@@ -521,6 +526,10 @@ class RestaurantSetupEndpoint(APIView):
             }
             return Response(response, status=400)
 
+        if config_detail == 'subscription-details':
+            return RestaurantSubscription().update(request)
+
+
         # if editing a menu item,
         # convert the options and extras_applicable to a list
         if config_detail == 'menuitems':
@@ -551,7 +560,6 @@ class RestaurantSetupEndpoint(APIView):
             'error_message': error_message
         }
 
-        print(f'\n\nthe submitted data for {config_detail} is:\n {put_data}\n\n')
         response = Secretary(secretary_args).update()
 
         return Response(
