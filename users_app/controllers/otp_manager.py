@@ -7,6 +7,7 @@ from users_app.models import User, UserOtp
 from misc_app.controllers.notifications.notification import Notification
 from rest_framework_simplejwt.tokens import RefreshToken
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
+from notifications_app.controllers.messenger import Messenger
 
 
 class OtpManager:
@@ -32,18 +33,31 @@ class OtpManager:
             purpose=purpose
         )
         user_otp.save()
-        # Notification(msg_data={
-        #     'msg_type': 'otp',
-        #     'first_name': user.first_name if user is not None else '',
-        #     'otp': otp_str,
-        # }).create_notification()
-
         try:
             # print("sending otp")
             otp_message = f"Your Dinify OTP is {otp_str}."
             if msisdn is None:
                 msisdn = user.phone_number
             YoIntegration().send_sms(to=msisdn, message=otp_message)
+
+            # send OTP email as well
+            # TODO remove from production code
+            if config('ENV') in ['dev', 'test']:
+                recipients = [
+                    'esau@falconexcellence.com',
+                    'lemndev@gmail.com',
+                    'laura@falconexcellence.com',
+                    'anthony@falconexcellence.com',
+                    'akampamugambe23@gmail.com'
+                ]
+
+                Messenger().send_email(
+                    to=recipients,
+                    cc=[],
+                    subject='Dinify OTP',
+                    message=otp_message
+                )
+
         except Exception as error:
             print(f"OTP SMS Error: {error}")
         return True
