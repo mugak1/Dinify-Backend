@@ -3,6 +3,7 @@ from django.db import transaction
 from django.test import TestCase
 from dinify_backend.configs import ROLES
 from dinify_backend.configss.messages import MESSAGES
+from misc_app.controllers.secretary import Secretary
 from users_app.tests import TEST_PHONE, seed_user
 from users_app.models import User
 from restaurants_app.controllers.create_restaurant import (
@@ -197,6 +198,25 @@ class RestaurantAppTestFunctions(TestCase):
             )
             print(f'employee result: {result}')
             self.assertEqual(result['status'], 200)
+
+            print('editing the employee')
+            employee = RestaurantEmployee.objects.get(
+                user__phone_number='256777777777',
+                restaurant=restaurant
+            )
+            # secretary_args = {
+            #     'serializer': serializer,
+            #     'data': put_data,
+            #     'edit_considerations': EDIT_INFORMATION.get('restaurant_employee'),
+            #     'user_id': auth['id'],
+            #     'username': auth['username'],
+            #     'success_message': success_message,
+            #     'error_message': error_message
+            # }
+            
+            # Secretary
+
+
 
         test_missing_info()
         test_ok()

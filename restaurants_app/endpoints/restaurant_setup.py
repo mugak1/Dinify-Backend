@@ -401,6 +401,9 @@ class RestaurantSetupEndpoint(APIView):
                 'pending'
             ]
 
+            if 'deleted' not in request.GET:
+                orm_filter['deleted'] = False
+
         serializers = {
             'restaurants': SerializerPublicGetRestaurant,
             'employees': SerializerGetRestaurantEmployee,

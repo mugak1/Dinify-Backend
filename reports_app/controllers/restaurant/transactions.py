@@ -99,10 +99,11 @@ def generate_restaurant_transaction_listing(
     date_to = dates.get('date_to')
 
     if (date_to - date_from).days > 31:
-        return {
-            'status': 400,
-            'message': 'Date range should not exceed 31 days'
-        }
+        if transaction_type != 'subscription':
+            return {
+                'status': 400,
+                'message': 'Date range should not exceed 31 days'
+            }
 
     transactions = None
     filters = {
