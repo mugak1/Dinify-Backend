@@ -22,7 +22,7 @@ class Command(BaseCommand):
             # if the user is attached to a restaurant, check if it is active
             if x['subject'] == 'Dinify Credentials!':
                 owner = x['tos'][0]
-                user_restaurants = Restaurant.objects.filter(owner__email=owner).order_by('time_created')
+                user_restaurants = Restaurant.objects.filter(owner__email=owner).order_by('time_created')  # noqa
                 if user_restaurants.count() > 0:
                     restaurant = user_restaurants.first()
                     if restaurant.status != 'active':
@@ -35,13 +35,12 @@ class Command(BaseCommand):
                 message=x['email']
             )
 
-            # if the x['sms'] is not None, send the sms
-            # print(f"The sms is {x['sms']}")
-            # if x['sms'] is not None:
-            #     Messenger().send_sms(
-            #         msisdn=x['msisdn'],
-            #         message=x['sms']
-            #     )
+            if x['sms'] is not None:
+                if x['subject'] == 'Dinify Credentials!':
+                    Messenger().send_sms(
+                        msisdn=x['msisdn'],
+                        message=x['sms']
+                    )
 
             # update the sent attribute to True
             MONGO_DB[COL_NOTIFICATIONS].update_one(

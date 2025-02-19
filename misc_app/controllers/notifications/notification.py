@@ -33,14 +33,14 @@ class Notification:
         try:
             # if the sms is not None, send it inline
             if message_data['sms'] is not None:
-                print('sending sms...')
-                Messenger().send_sms(
-                    msisdn=message_data['msisdn'],
-                    message=message_data['sms']
-                )
-                # YoIntegration().send_sms(
-                #     to=message_data['msisdn'],
-                #     message=message_data['sms']
-                # )
+                if message_data['subject'] != 'Dinify Credentials!':
+                    Messenger().send_sms(
+                        msisdn=message_data['msisdn'],
+                        message=message_data['sms']
+                    )
+                    # YoIntegration().send_sms(
+                    #     to=message_data['msisdn'],
+                    #     message=message_data['sms']
+                    # )
         except Exception as error:
             print(f"Error sending sms: {error}")
