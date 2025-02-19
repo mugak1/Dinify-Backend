@@ -21,17 +21,12 @@ class Command(BaseCommand):
             # if the subject is user credentials, check if the user has aany restaurant
             # if the user is attached to a restaurant, check if it is active
             if x['subject'] == 'Dinify Credentials!':
-                # owner = x['tos'][0]
                 owner = x['tos']
-                # print(x['tos'])
-                # print(type(x['tos']))
-                # continue
-                print(owner)
                 user_restaurants = Restaurant.objects.filter(owner__email=owner).order_by('time_created')  # noqa
-                print(user_restaurants)
                 if user_restaurants.count() > 0:
                     restaurant = user_restaurants.first()
                     if restaurant.status != 'active':
+                        print('Restaurant is not active yet')
                         continue
 
             Messenger().send_email(
