@@ -396,10 +396,11 @@ class RestaurantSetupEndpoint(APIView):
                     # orm_filter['payment_status'] = PaymentStatus_Pending
 
         if config_detail == 'restaurants':
-            orm_filter['status__in'] = [
-                'active',
-                'pending'
-            ]
+            if 'status' not in request.GET:
+                orm_filter['status__in'] = [
+                    'active',
+                    'pending'
+                ]
 
             if 'deleted' not in request.GET:
                 orm_filter['deleted'] = False
