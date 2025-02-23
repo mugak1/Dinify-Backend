@@ -26,7 +26,8 @@ def summarize_restaurants():
     ]
     summary = {'total': restaurants.count()}
     summary['monthly'] = Restaurant.objects.filter(
-        time_created__month=datetime.now().month
+        time_created__month=datetime.now().month,
+        time_created__year=datetime.now().year
     ).count()
     summary['month_growth'] = 'up'
     status_breakdown = {}
@@ -41,7 +42,8 @@ def summarize_orders():
     orders = Order.objects.all()
     summary = {'total': orders.count()}
     summary['monthly'] = orders.filter(
-        time_created__month=datetime.now().month
+        time_created__month=datetime.now().month,
+        time_created__year=datetime.now().year
     ).count()
     summary['month_growth'] = 'up'
     status_breakdown = {}
@@ -62,7 +64,8 @@ def summarize_users():
     users = User.objects.all()
     summary = {'total': users.count()}
     summary['monthly'] = users.filter(
-        date_joined__month=datetime.now().month
+        date_joined__month=datetime.now().month,
+        date_joined__year=datetime.now().year
     ).count()
     summary['month_growth'] = 'up'
     # filter for users where the roles have the word 'dinify' in them
@@ -79,7 +82,8 @@ def summarize_dinify_earnings():
 
     cum_dinify_revenue = dinify_revenue.aggregate(Sum('transaction_amount'))['transaction_amount__sum']
     monthly_dinify_revenue = dinify_revenue.filter(
-        time_created__month=datetime.now().month
+        time_created__month=datetime.now().month,
+        time_created__year=datetime.now().year
     ).aggregate(Sum('transaction_amount'))['transaction_amount__sum']
 
     summary = {'total': cum_dinify_revenue if cum_dinify_revenue else 0.0}
