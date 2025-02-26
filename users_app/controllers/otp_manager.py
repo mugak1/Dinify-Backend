@@ -51,12 +51,14 @@ class OtpManager:
                     'akampamugambe23@gmail.com'
                 ]
 
-                # Messenger().send_email(
-                #     to=recipients,
-                #     cc=[],
-                #     subject='Dinify OTP',
-                #     message=otp_message
-                # )
+                otp_email_message = f"{otp_message} OTP is valid for 5 minutes."
+
+                Messenger().send_email(
+                    to=recipients,
+                    cc=[],
+                    subject='Dinify OTP',
+                    message=otp_email_message
+                )
 
         except Exception as error:
             print(f"OTP Error: {error}")
