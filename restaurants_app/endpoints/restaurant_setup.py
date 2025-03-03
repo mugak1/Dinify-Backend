@@ -603,6 +603,20 @@ class RestaurantSetupEndpoint(APIView):
         if config_detail == 'employees':
             data['active'] = False
 
+            # check if the employee is an owner
+            roles = RestaurantEmployee.objects.values('roles', 'restaurant').get(id=data['id'])
+            if RESTAURANT_OWNER in roles['roles']:
+                more_owners = RestaurantEmployee.objects.filter(
+                    restaurant_id=roles['restaurant'],
+                    roles__contains=[RESTAURANT_OWNER]
+                ).exclude(id=data['id']).count() > 0
+                if not more_owners:
+                    response = {
+                        'status': 400,
+                        'message': 'You need to assign another restaurant owner before you can delete this one.'
+                    }
+                    return Response(response, status=400)
+
         serializer = {
             'restaurant': SerializerPutRestaurant,
             'employees': SerializerPutRestaurantEmployee,
