@@ -24,6 +24,7 @@ from restaurants_app.serializers import (
 )
 from orders_app.serializers import SerializerListGetOrder
 from restaurants_app.models import Restaurant, MenuSection, SectionGroup, MenuItem
+from restaurants_app.controllers.tables import create_tables_in_section
 from dinify_backend.configss.required_information import (
     REQUIRED_INFORMATION,
     RI_RESTAURANT_EMPLOYEES,
@@ -281,6 +282,18 @@ class RestaurantSetupEndpoint(APIView):
                 post_data['number'] = str(post_data.get('number'))
             except Exception as error:
                 print(f"Error converting table number to string: {error}")
+
+        if config_detail == 'section-tables':
+            response = create_tables_in_section(
+                restuarant_id=post_data.get('restaurant'),
+                section_name=post_data.get('room_name'),
+                no_tables=int(post_data.get('number')),
+                user=request.user,
+                smoking_zone=post_data.get('smoking_zone'),
+                outdoor_seating=post_data.get('outdoor_seating')
+            )
+            return Response(response, status=response['status'])
+
 
         serializer = serializers.get(config_detail)
         required_information = required_information.get(config_detail)

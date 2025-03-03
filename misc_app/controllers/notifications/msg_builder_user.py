@@ -79,7 +79,7 @@ def make_user_messages(msg_data, footer) -> dict:
         message = {
             'subject': 'Dinify Password Reset',
             'email': email,
-            'sms': f"Your Dinify one-time password is {msg_data['password']}"
+            'sms': f"Your Dinify one-time password is {msg_data['password']}."
         }
 
     elif msg_data.get('msg_type') == 'otp':
