@@ -289,7 +289,7 @@ class RestaurantSetupEndpoint(APIView):
                 section_name=post_data.get('room_name'),
                 no_tables=int(post_data.get('number')),
                 user=request.user,
-                smoking_zone=post_data.get('smoking_zone'),
+                smoking_zone=post_data.get('smoking_zone', False),
                 outdoor_seating=post_data.get('outdoor_seating')
             )
             return Response(response, status=response['status'])
