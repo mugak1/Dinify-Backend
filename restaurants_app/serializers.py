@@ -161,7 +161,8 @@ class SerializerPublicGetMenuSection(ModelSerializer):
         return [
             {
                 'id': str(group.pk),
-                'name': group.name
+                'name': group.name,
+                'available': group.available
             } for group in groups
         ]
 
