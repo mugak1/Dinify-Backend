@@ -195,7 +195,9 @@ class SerializerPublicGetSectionGroup(ModelSerializer):
         return MenuItem.objects.filter(
             section_group=group,
             section_group__deleted=False,
-            section_group__available=True
+            section_group__available=True,
+            deleted=False,
+            available=True
         ).count()
 
 
@@ -375,7 +377,9 @@ class SerializerGetFullMenu(ModelSerializer):
         filters = {
             'section': section,
             'approved': True,
-            'enabled': True
+            'enabled': True,
+            'deleted': False,
+            'available': True
         }
         if self.context.get('ignore_approval') == 'true':
             filters.pop('approved')
