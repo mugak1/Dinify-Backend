@@ -29,6 +29,8 @@ def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
         'restaurant': restaurant_id,
         'approved': True,
         'enabled': True,
+        'available': True,
+        'deleted': False
     }
 
     if ignore_approval == 'true':
