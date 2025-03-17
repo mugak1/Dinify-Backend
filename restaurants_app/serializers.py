@@ -184,7 +184,10 @@ class SerializerPublicGetSectionGroup(ModelSerializer):
         fields = ('id', 'name', 'item_count')
 
     def get_item_count(self, group):
-        return MenuItem.objects.filter(section_group=group).count()
+        return MenuItem.objects.filter(
+            section_group=group,
+            section_group__deleted=False
+        ).count()
 
 
 class SerializerPutMenuItem(ModelSerializer):
