@@ -59,8 +59,7 @@ from users_app.models import User
 from restaurants_app.controllers.subscriptions import RestaurantSubscription
 
 
-def check_permission(
-    user: User, record: str, id: str):
+def check_permission(user: User, record: str, id: str):
     # return False
     has_permission = False
     if is_dinify_admin(user):

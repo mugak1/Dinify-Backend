@@ -90,6 +90,7 @@ class MenuSection(BaseModel):
     the sections of the menu
     """
     name = models.CharField(max_length=255)
+    listing_position = models.IntegerField(default=0)
     description = models.TextField(null=True, blank=True)
     restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE)
     section_banner_image = models.ImageField(null=True, blank=True, upload_to='menu_section_banners/')  # noqa
@@ -107,7 +108,7 @@ class MenuSection(BaseModel):
         the metadata for the MenuSection model
         """
         db_table = 'menu_sections'
-        ordering = ['name']
+        ordering = ['listing_position', 'time_created']
         unique_together = ['name', 'restaurant']
 
 
