@@ -416,6 +416,9 @@ class RestaurantSetupEndpoint(APIView):
         if 'deleted' not in request.GET:
             orm_filter['deleted'] = False
 
+        if config_detail == 'menuitems':
+            orm_filter['section_group__deleted'] = False
+
         serializers = {
             'restaurants': SerializerPublicGetRestaurant,
             'employees': SerializerGetRestaurantEmployee,
