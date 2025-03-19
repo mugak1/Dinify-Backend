@@ -363,7 +363,11 @@ class SerializerGetFullMenu(ModelSerializer):
         filters = {
             'section': section,
             'approved': True,
-            'enabled': True
+            'enabled': True,
+            'section_group__deleted': False,
+            'section_group__available': True,
+            'deleted': False,
+            'available': True
         }
         if self.context.get('ignore_approval') == 'true':
             filters.pop('approved')
@@ -378,6 +382,8 @@ class SerializerGetFullMenu(ModelSerializer):
             'section': section,
             'approved': True,
             'enabled': True,
+            'section_group__deleted': False,
+            'section_group__available': True,
             'deleted': False,
             'available': True
         }
