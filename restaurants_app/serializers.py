@@ -156,7 +156,6 @@ class SerializerPublicGetMenuSection(ModelSerializer):
             section=menu_section,
             section_group__deleted=False,
             section_group__available=True,
-            available=True,
             deleted=False
         ).count()
 
@@ -197,7 +196,6 @@ class SerializerPublicGetSectionGroup(ModelSerializer):
             section_group__deleted=False,
             section_group__available=True,
             deleted=False,
-            available=True
         ).count()
 
 
@@ -494,7 +492,7 @@ class SerializerGetDiningArea(ModelSerializer):
 
     def get_no_tables(self, dining_area):
         return Table.objects.filter(dining_area=dining_area).count()
-    
+
     def get_tables(self, dining_area):
         tables = Table.objects.filter(dining_area=dining_area)
         return [
