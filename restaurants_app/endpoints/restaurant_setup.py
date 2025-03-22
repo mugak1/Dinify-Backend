@@ -29,6 +29,7 @@ from orders_app.serializers import SerializerListGetOrder
 from restaurants_app.models import Restaurant, MenuSection, SectionGroup, MenuItem
 from restaurants_app.controllers.tables import create_tables_in_section
 from restaurants_app.controllers.dining_areas import create_dining_area
+from restaurants_app.controllers.menu_sections import ConMenuSection
 from dinify_backend.configss.required_information import (
     REQUIRED_INFORMATION,
     RI_RESTAURANT_EMPLOYEES,
@@ -586,6 +587,14 @@ class RestaurantSetupEndpoint(APIView):
 
         if config_detail == 'subscription-details':
             return RestaurantSubscription().update(request)
+
+        if config_detail == 'reorder-menu-items':
+            response = ConMenuSection().reorder_listing(
+                ordering=put_data.get('ordering'),
+                user=request.user
+            )
+            return Response(response, status=response['status'])
+            # reorder the menu items
 
         # if editing a menu item,
         # convert the options and extras_applicable to a list

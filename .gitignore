@@ -10,3 +10,4 @@ dev.env
 .pylintrc
 .DS_Store
 uploads/
+*.env
