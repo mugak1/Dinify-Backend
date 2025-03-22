@@ -5,11 +5,8 @@ from django.db import transaction
 
 
 def create_tables_in_section(
-    restuarant_id: str,
-    section_name: str,
+    restaurant_id: str,
     no_tables: int,
-    smoking_zone: bool,
-    outdoor_seating: bool,
     user: User,
     consideration: Optional[str] = 'count',
     range_from: Optional[int] = None,
@@ -17,7 +14,7 @@ def create_tables_in_section(
     dining_area: Optional[DiningArea] = None
 ) -> dict:
     tables = []
-    restaurant = Restaurant.objects.get(id=restuarant_id)
+    restaurant = Restaurant.objects.get(id=restaurant_id)
     with transaction.atomic():
         if consideration == 'count':
             # get the count of tables at the restaurant
@@ -28,31 +25,26 @@ def create_tables_in_section(
                 table = Table(
                     number=table_count+i+1,
                     restaurant=restaurant,
-                    room_name=section_name,
                     created_by=user,
-                    smoking_zone=smoking_zone,
-                    outdoor_seating=outdoor_seating,
                     dining_area=dining_area
                 )
                 tables.append(table)
-
-            Table.objects.bulk_create(tables)
         else:
             for i in range(range_from, range_to+1):
                 table = Table(
                     number=i,
                     restaurant=restaurant,
-                    room_name=section_name,
                     created_by=user,
-                    smoking_zone=smoking_zone,
-                    outdoor_seating=outdoor_seating,
                     dining_area=dining_area
                 )
                 tables.append(table)
 
-            Table.objects.bulk_create(tables)
+        Table.objects.bulk_create(tables)
 
     return {
         'status': 200,
-        'message': f"{len(tables)} tables created successfully in the section, {section_name}"
+        'message': f"{len(tables)} tables created successfully",
+        "data": {
+            "no_tables": len(tables)
+        }
     }

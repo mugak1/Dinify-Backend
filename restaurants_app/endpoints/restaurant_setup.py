@@ -28,6 +28,7 @@ from restaurants_app.serializers import (
 from orders_app.serializers import SerializerListGetOrder
 from restaurants_app.models import Restaurant, MenuSection, SectionGroup, MenuItem
 from restaurants_app.controllers.tables import create_tables_in_section
+from restaurants_app.controllers.dining_areas import create_dining_area
 from dinify_backend.configss.required_information import (
     REQUIRED_INFORMATION,
     RI_RESTAURANT_EMPLOYEES,
@@ -297,7 +298,7 @@ class RestaurantSetupEndpoint(APIView):
                 dining_area = DiningArea.objects.get(id=post_data.get('dining_area'))
 
             response = create_tables_in_section(
-                restuarant_id=post_data.get('restaurant'),
+                restaurant_id=post_data.get('restaurant'),
                 section_name=post_data.get('room_name'),
                 no_tables=int(post_data.get('number', 0)),
                 user=request.user,
@@ -307,6 +308,21 @@ class RestaurantSetupEndpoint(APIView):
                 range_from=int(post_data.get('start', 0)),
                 range_to=int(post_data.get('end', 0)),
                 dining_area=dining_area
+            )
+            return Response(response, status=response['status'])
+
+        if config_detail == 'diningareas':
+            response = create_dining_area(
+                restaurant_id=post_data.get('restaurant'),
+                dining_area_name=post_data.get('name'),
+                smoking_zone=post_data.get('smoking_zone'),
+                outdoor_seating=post_data.get('outdoor_seating'),
+                user=request.user,
+                create_tables=post_data.get('create_tables', False),
+                consideration=post_data.get('consideration', 'count'),
+                no_tables=post_data.get('no_tables', 0),
+                range_from=int(post_data.get('start', 0)),
+                range_to=int(post_data.get('end', 0))
             )
             return Response(response, status=response['status'])
 
