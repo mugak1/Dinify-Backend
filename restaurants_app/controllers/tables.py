@@ -4,6 +4,22 @@ from users_app.models import User
 from django.db import transaction
 
 
+def confirm_availability_of_table_numbers(restaurant_id: str, range_from: int, range_to: int):
+    existing_table_numbers = set(
+        Table.objects.filter(
+            restaurant=restaurant_id,
+            number__gte=range_from, number__lte=range_to
+        ).count()
+    )
+    for number in range(range_from, range_to + 1):
+        if number in existing_table_numbers:
+            return {
+                'status': 400,
+                'message': f"Table number {number} is already in use."
+            }
+    return {'status': 200}
+
+
 def create_tables_in_section(
     restaurant_id: str,
     no_tables: int,
