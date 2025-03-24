@@ -8,7 +8,6 @@ from restaurants_app.controllers.tables import (
 )
 
 
-
 def create_dining_area(
     restaurant_id: str,
     dining_area_name: str,

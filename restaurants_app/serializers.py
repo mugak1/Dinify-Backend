@@ -231,6 +231,8 @@ class SerializerPublicGetMenuItem(ModelSerializer):
     def get_group(self, menu_item):
         if menu_item.section_group is None:
             return None
+        if menu_item.section_group.deleted:
+            return None
         return {
             'id': str(menu_item.section_group.pk),
             'name': menu_item.section_group.name
