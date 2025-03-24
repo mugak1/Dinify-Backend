@@ -154,8 +154,8 @@ class SerializerPublicGetMenuSection(ModelSerializer):
     def get_item_count(self, menu_section):
         return MenuItem.objects.filter(
             section=menu_section,
-            section_group__deleted=False,
-            section_group__available=True,
+            # section_group__deleted=False,
+            # section_group__available=True,
             deleted=False
         ).count()
 
