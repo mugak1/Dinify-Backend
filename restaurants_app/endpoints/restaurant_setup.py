@@ -675,7 +675,9 @@ class RestaurantSetupEndpoint(APIView):
             if RESTAURANT_OWNER in roles['roles']:
                 more_owners = RestaurantEmployee.objects.filter(
                     restaurant_id=roles['restaurant'],
-                    roles__contains=[RESTAURANT_OWNER]
+                    roles__contains=[RESTAURANT_OWNER],
+                    active=True,
+                    deleted=False
                 ).exclude(id=data['id']).count() > 0
                 if not more_owners:
                     response = {
