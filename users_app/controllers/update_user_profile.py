@@ -126,6 +126,7 @@ def self_update_user_profile(
         user.email = email
     if phone_number is not None:
         user.phone_number = phone_number
+        user.username = phone_number
     user.save()
 
     # user = user.refresh_from_db()
@@ -209,7 +210,8 @@ def update_user_profile(
         'last_name': last_name,
         'other_names': other_names,
         'email': email,
-        'phone_number': phone_number
+        'phone_number': phone_number,
+        'username': phone_number
     }
     # remove None values
     put_data = {k: v for k, v in put_data.items() if v is not None}
@@ -220,7 +222,8 @@ def update_user_profile(
         {'key': 'last_name', 'label': 'Last Name'},
         {'key': 'other_names', 'label': 'Other Names'},
         {'key': 'email', 'label': 'Email'},
-        {'key': 'phone_number', 'label': 'Phone Number'}
+        {'key': 'phone_number', 'label': 'Phone Number'},
+        {'key': 'username', 'label': 'Username'}
     ]
 
     secretary_args = {
