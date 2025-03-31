@@ -10,11 +10,15 @@ def confirm_availability_of_table_numbers(restaurant_id: str, range_from: int, r
         number__gte=range_from, number__lte=range_to
     )
     existing_table_numbers = [int(x['number']) for x in current_table_nos]
-    for number in range(range_from, range_to + 1):
+    r_start = range_from
+    r_end = range_to + 1
+    print(f" table numbers from {r_start} to {r_end} ")
+    print(f" existing table numbers {existing_table_numbers} ")
+    for number in range(r_start, r_end):
         if number in existing_table_numbers:
             return {
                 'status': 400,
-                'message': f"Table number {number} is already in use."
+                'message': f"Table number {number} is already present."
             }
     return {'status': 200}
 
