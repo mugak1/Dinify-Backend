@@ -79,6 +79,7 @@ class BaseModel(models.Model):
 
     # determine if the record has been archived
     archived = models.BooleanField(default=False)
+    vacuumed = models.BooleanField(default=False)
 
     class Meta:
         """
