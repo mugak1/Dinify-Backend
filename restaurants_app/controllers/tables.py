@@ -70,3 +70,43 @@ def create_tables_in_section(
             "no_tables": len(tables)
         }
     }
+
+
+def get_tables_by_area(restaurant_id: str):
+    tables_listing = []
+
+    # get the dining areas to consider
+    dining_areas = DiningArea.objects.filter(
+        restaurant=restaurant_id,
+        deleted=False
+    ).values('id', 'name')
+
+    # get the tables in each area
+    for area in dining_areas:
+        tables = Table.objects.filter(
+            deleted=False,
+            dining_area=area['id']
+        ).values('id', 'number', 'available', 'reserved')
+
+        tables_listing.append({
+            'dining_area': area,
+            'tables': list(tables)
+        })
+
+    # include tables that are associated with any area
+    tables = Table.objects.filter(
+        deleted=False,
+        dining_area=None
+    ).values('id', 'number', 'available', 'reserved')
+    tables_listing.append({
+        'dining_area': {
+            'id': None,
+            'name': 'Not Assigned'
+        },
+        'tables': list(tables)
+    })
+    return {
+        'status': 200,
+        'message': 'Tables by dining area',
+        'data': tables_listing
+    }

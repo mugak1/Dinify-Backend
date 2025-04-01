@@ -27,7 +27,10 @@ from restaurants_app.serializers import (
 )
 from orders_app.serializers import SerializerListGetOrder
 from restaurants_app.models import Restaurant, MenuSection, SectionGroup, MenuItem
-from restaurants_app.controllers.tables import create_tables_in_section
+from restaurants_app.controllers.tables import (
+    create_tables_in_section,
+    get_tables_by_area
+)
 from restaurants_app.controllers.dining_areas import create_dining_area
 from restaurants_app.controllers.menu_sections import ConMenuSection
 from dinify_backend.configss.required_information import (
@@ -465,6 +468,13 @@ class RestaurantSetupEndpoint(APIView):
         if config_detail == 'sectiongroups':
             if 'available' not in request.GET:
                 orm_filter['available'] = True
+
+        if config_detail == 'tables':
+            if request.GET.get('grouping') is not None:
+                response = get_tables_by_area(
+                    restaurant_id=request.GET.get('restaurant_id')
+                )
+                return Response(response, status=response['status'])
 
         serializers = {
             'restaurants': SerializerPublicGetRestaurant,
