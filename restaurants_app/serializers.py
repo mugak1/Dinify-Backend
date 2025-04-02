@@ -393,7 +393,7 @@ class SerializerGetFullMenu(ModelSerializer):
             'deleted': False,
             'available': True
         }
-        if self.context.get('ignore_approval') == 'true':
+        if self.context.get('ignore_approval') in ['true', True]:
             filters.pop('approved')
             filters.pop('enabled')
         items = MenuItem.objects.filter(**filters)
