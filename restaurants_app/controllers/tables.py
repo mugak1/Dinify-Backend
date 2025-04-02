@@ -79,7 +79,7 @@ def get_tables_by_area(restaurant_id: str):
     dining_areas = DiningArea.objects.filter(
         restaurant=restaurant_id,
         deleted=False
-    ).values('id', 'name')
+    ).values('id', 'name', 'available')
 
     # get the tables in each area
     for area in dining_areas:
