@@ -7,14 +7,14 @@ from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.save_action_log import save_action
 from misc_app.controllers.notifications.notification import Notification
+from users_app.controllers.otp_manager import OtpManager
 
 
-def reset_password(username):
+def reset_password(username, otp):
     """
     reset a user's password
     """
     # check if the user exists
-    # determine if to consider the phone or email
     user = None
     try:
         if '@' in username:
@@ -43,6 +43,14 @@ def reset_password(username):
         return {
             'status': 400,
             'message': 'No user found.'
+        }
+
+    # verify the otp
+    verified_otp = OtpManager().verify_otp(user_id=str(user.id), otp=otp)
+    if not verified_otp['data']['valid']:
+        return {
+            'status': 400,
+            'message': 'Invalid OTP.'
         }
 
     password = User.objects.make_random_password()
