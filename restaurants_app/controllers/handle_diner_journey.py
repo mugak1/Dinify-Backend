@@ -33,7 +33,7 @@ def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
         'deleted': False
     }
 
-    if ignore_approval == 'true':
+    if ignore_approval in ['true', True]:
     # if ignore_approval is None:
         filters.pop('approved')
         filters.pop('enabled')

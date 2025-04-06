@@ -32,6 +32,7 @@ MENU_ITEM_FILTERS = {
 TABLE_FILTERS = {
     'restaurant': 'restaurant',
     'number': 'number',
+    'grouping': 'grouping',
 }
 
 GROUP_FILTERS = {

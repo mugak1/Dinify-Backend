@@ -27,7 +27,10 @@ from restaurants_app.serializers import (
 )
 from orders_app.serializers import SerializerListGetOrder
 from restaurants_app.models import Restaurant, MenuSection, SectionGroup, MenuItem
-from restaurants_app.controllers.tables import create_tables_in_section
+from restaurants_app.controllers.tables import (
+    create_tables_in_section,
+    get_tables_by_area
+)
 from restaurants_app.controllers.dining_areas import create_dining_area
 from restaurants_app.controllers.menu_sections import ConMenuSection
 from dinify_backend.configss.required_information import (
@@ -60,7 +63,7 @@ from users_app.controllers.permissions_check import (
     get_user_restaurant_roles
 )
 
-from restaurants_app.models import RestaurantEmployee, DiningArea
+from restaurants_app.models import RestaurantEmployee, DiningArea, Table
 from users_app.models import User
 from restaurants_app.controllers.subscriptions import RestaurantSubscription
 
@@ -205,6 +208,18 @@ class RestaurantSetupEndpoint(APIView):
 
         if config_detail == 'create-employee':
             return self.handle_create_employee(request)
+
+        if config_detail == 'tables':
+            tables_count = Table.objects.filter(
+                restaurant=request.data.get('restaurant'),
+                number=request.data.get('number')
+            ).count()
+            if tables_count > 0:
+                response = {
+                    'status': 400,
+                    'message': f"Table number {request.data.get('number')} is already in use."
+                }
+                return Response(response, status=400)
 
         serializers = {
             'employees': SerializerPutRestaurantEmployee,
@@ -444,14 +459,22 @@ class RestaurantSetupEndpoint(APIView):
             orm_filter['deleted'] = False
 
         if config_detail == 'menuitems':
-            orm_filter['section_group__deleted'] = False
+            # orm_filter['section_group__deleted'] = False
             # orm_filter['section_group__available'] = True
             # if 'available' not in request.GET:
             #     orm_filter['available'] = True
+            pass
 
         if config_detail == 'sectiongroups':
             if 'available' not in request.GET:
                 orm_filter['available'] = True
+
+        if config_detail == 'tables':
+            if request.GET.get('grouping') is not None:
+                response = get_tables_by_area(
+                    restaurant_id=request.GET.get('restaurant')
+                )
+                return Response(response, status=response['status'])
 
         serializers = {
             'restaurants': SerializerPublicGetRestaurant,
@@ -662,7 +685,9 @@ class RestaurantSetupEndpoint(APIView):
             if RESTAURANT_OWNER in roles['roles']:
                 more_owners = RestaurantEmployee.objects.filter(
                     restaurant_id=roles['restaurant'],
-                    roles__contains=[RESTAURANT_OWNER]
+                    roles__contains=[RESTAURANT_OWNER],
+                    active=True,
+                    deleted=False
                 ).exclude(id=data['id']).count() > 0
                 if not more_owners:
                     response = {

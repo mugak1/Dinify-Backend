@@ -154,8 +154,8 @@ class SerializerPublicGetMenuSection(ModelSerializer):
     def get_item_count(self, menu_section):
         return MenuItem.objects.filter(
             section=menu_section,
-            section_group__deleted=False,
-            section_group__available=True,
+            # section_group__deleted=False,
+            # section_group__available=True,
             deleted=False
         ).count()
 
@@ -166,7 +166,7 @@ class SerializerPublicGetMenuSection(ModelSerializer):
         groups = SectionGroup.objects.filter(
             section=menu_section,
             deleted=False,
-            available=True
+            # available=True
         )
         return [
             {
@@ -231,6 +231,8 @@ class SerializerPublicGetMenuItem(ModelSerializer):
     def get_group(self, menu_item):
         if menu_item.section_group is None:
             return None
+        if menu_item.section_group.deleted:
+            return None
         return {
             'id': str(menu_item.section_group.pk),
             'name': menu_item.section_group.name
@@ -271,6 +273,7 @@ class SerializerPublicGetTable(ModelSerializer):
             return None
         return {
             'name': table.dining_area.name,
+            'available': table.dining_area.available,
             'smoking_zone': table.dining_area.smoking_zone,
             'outdoor_seating': table.dining_area.outdoor_seating
         }
@@ -297,6 +300,7 @@ class SerializerPublicGetTableDetails(ModelSerializer):
             return None
         return {
             'name': table.dining_area.name,
+            'available': table.dining_area.available,
             'smoking_zone': table.dining_area.smoking_zone,
             'outdoor_seating': table.dining_area.outdoor_seating
         }
@@ -384,12 +388,12 @@ class SerializerGetFullMenu(ModelSerializer):
             'section': section,
             'approved': True,
             'enabled': True,
-            'section_group__deleted': False,
-            'section_group__available': True,
+            # 'section_group__deleted': False,
+            # 'section_group__available': True,
             'deleted': False,
             'available': True
         }
-        if self.context.get('ignore_approval') == 'true':
+        if self.context.get('ignore_approval') in ['true', True]:
             filters.pop('approved')
             filters.pop('enabled')
         items = MenuItem.objects.filter(**filters)
@@ -402,12 +406,12 @@ class SerializerGetFullMenu(ModelSerializer):
             'section': section,
             'approved': True,
             'enabled': True,
-            'section_group__deleted': False,
-            'section_group__available': True,
+            # 'section_group__deleted': False,
+            # 'section_group__available': True,
             'deleted': False,
             'available': True
         }
-        if self.context.get('ignore_approval') == 'true':
+        if self.context.get('ignore_approval') in ['true', True]:
             filters.pop('approved')
             filters.pop('enabled')
         return MenuItem.objects.filter(**filters).count()
@@ -487,7 +491,7 @@ class SerializerGetDiningArea(ModelSerializer):
         fields = (
             'id', 'name', 'description',
             'smoking_zone', 'outdoor_seating',
-            'no_tables', 'tables'
+            'no_tables', 'tables', 'available'
         )
 
     def get_no_tables(self, dining_area):
@@ -497,6 +501,7 @@ class SerializerGetDiningArea(ModelSerializer):
         tables = Table.objects.filter(dining_area=dining_area)
         return [
             {
+                'id': str(table.pk),
                 'number': table.number,
                 'available': table.available,
                 'reserved': table.reserved

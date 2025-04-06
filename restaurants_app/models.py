@@ -198,6 +198,7 @@ class DiningArea(BaseModel):
     name = models.CharField(max_length=255)
     restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE)
     description = models.TextField(null=True, blank=True)
+    available = models.BooleanField(default=True)
     smoking_zone = models.BooleanField(default=False)
     outdoor_seating = models.BooleanField(default=False)
 
@@ -215,6 +216,7 @@ class Table(BaseModel):
     the tables at the restaurant
     """
     number = models.IntegerField()
+    str_number = models.CharField(max_length=20, blank=True, default='')
     prepayment_required = models.BooleanField(default=False)
 
     restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE)
@@ -236,4 +238,4 @@ class Table(BaseModel):
         """
         db_table = 'tables'
         ordering = ['number']
-        unique_together = ['number', 'restaurant']
+        unique_together = ['number', 'str_number', 'restaurant']

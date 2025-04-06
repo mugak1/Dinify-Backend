@@ -236,6 +236,9 @@ class UsersAppTestFunctions(TestCase):
                 phone_number='256712345678',
                 otp='1234'
             )
+            user.refresh_from_db()
+            self.assertEqual(user.phone_number, '256712345678')
+            self.assertEqual(user.username, '256712345678')
             self.assertEqual(response.get('status'), 200)
         
         def test_no_otp_need():
