@@ -32,7 +32,8 @@ class UsersAuthenticationEndpoint(APIView):
             )
         elif action == "reset-password":
             response = reset_password(
-                request.data.get('phone_number')
+                username=request.data.get('phone_number'),
+                otp=request.data.get('otp')
             )
         elif action == "change-password":
             # decode the token to get the user id

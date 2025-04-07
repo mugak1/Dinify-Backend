@@ -41,7 +41,7 @@ class OtpManager:
             YoIntegration().send_sms(to=msisdn, message=otp_message)
 
             # send OTP email as well
-            # TODO remove from production code
+            # TODO remove from production code, move email values to an env file
             if config('ENV') in ['dev', 'test']:
                 recipients = [
                     'esau@falconexcellence.com',
@@ -68,7 +68,8 @@ class OtpManager:
         self,
         otp: str,
         user_id: Optional[str] = None,
-        msisdn: Optional[str] = None
+        msisdn: Optional[str] = None,
+        email: Optional[str] = None
     ) -> dict:
         encrypted_otp = hashlib.sha256(otp.encode()).hexdigest()
         time_now = datetime.now()
@@ -79,9 +80,15 @@ class OtpManager:
                 otp_hash=encrypted_otp,
                 expiry_time__gte=time_now
             ).order_by('-time_created')
-        else:
+        elif msisdn is not None:
             otps = UserOtp.objects.filter(
                 msisdn=msisdn,
+                otp_hash=encrypted_otp,
+                expiry_time__gte=time_now
+            ).order_by('-time_created')
+        elif email is not None:
+            otps = UserOtp.objects.filter(
+                user__email=email,
                 otp_hash=encrypted_otp,
                 expiry_time__gte=time_now
             ).order_by('-time_created')
@@ -140,6 +147,8 @@ class OtpManager:
                 user = User.objects.get(pk=identifier)
             elif identification == 'phone':
                 user = User.objects.get(phone_number=identifier)
+            elif identification == 'email':
+                user = User.objects.get(email=identifier)
             elif identification == 'msisdn':
                 pass
         except Exception as error:
@@ -174,7 +183,7 @@ class OtpManager:
         if self.make_otp(
             user=user,
             purpose=purpose,
-            msisdn=identifier
+            msisdn=user.phone_number
         ):
             return {
                 'status': 200,
