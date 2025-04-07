@@ -1,14 +1,30 @@
 # DINIFY BACKEND
 The backend application for dinify_project.
 
-## Getting started
+# Getting started
+- Knowledge of Python, Django, and REST APIs is required.
+- If you know django, then you know what to do.
 
-## code organisation
+# code organisation | overview of directories
+The directory organisation builds on top of django's default directory structure. The overall structure is as follows:
+```
+xxx_app
+|__controllers i.e. where the actual functions are
+|__endpoints i.e. where the endpoints are defined
+|__management i.e. where the management commands are defined
+```
 
-## 
-ConXXX - Controller class.
-SerializerXXX - Serializer class.
+# Understanding file and function naming conventions
+- ConXXX - Controller class.
+- SerializerXXX - Serializer class.
 
+
+# Background tasks
+- Determine customer who has made the order | `determine-customers`
+- Verify DPO tokens | `verify-dpo-tokens`
+- Processing Yo responses | `process_yo_responses`
+- Check transaction status with aggregator | `check_transaction_statuses`
+- Processing transactions | `process_transactions`
 
 # TODO
 - Refactor serializer files to smaller manageable ones, probably model based files.
@@ -16,22 +32,3 @@ SerializerXXX - Serializer class.
 - Refactor to adopt class implementations for the various functions. Apart from misc/controller functions, many of these functions are likely in the same files or in the same controller folders.
 - Refactor to have a single file for string definitions. This may be a huge file but best to keep all string in one location.
 - Refactor to have single file for definitions of non-variable dependent messages.
-
-## Background tasks
-- Determine customer who has made the order | `python manage.py determine-customers`
-- Verify DPO tokens | `python manage.py verify-dpo-tokens`
-- Processing Yo responses | `python manage.py process_yo_responses`
-- Check transaction status with aggregator | `python manage.py check_transaction_statuses`
-- Processing transactions | `python manage.py process_transactions`
-
-/home/venv/bin/python /home/dinify_backend/manage.py determine-customers
-/home/venv/bin/python /home/dinify_backend/manage.py verify-dpo-tokens
-
-/home/scripts/determinecustomers.sh >> /home/script_logs/determine_customers/`date +\%Y-\%m-\%d`.log 2>&1
-
-/home/scripts/verifydpotokens.sh >> /home/script_logs/verify_dpo_tokens/`date +\%Y-\%m-\%d`.log 2>&1
-
-- createaccoutswithyo
-
-
-ConXXX => Custom Controller class for a model.
