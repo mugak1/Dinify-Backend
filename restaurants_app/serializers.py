@@ -218,6 +218,7 @@ class SerializerPublicGetMenuItem(ModelSerializer):
     has_options = SerializerMethodField()
     group = SerializerMethodField()
     extras = SerializerMethodField()
+    discount_percentage = SerializerMethodField()
 
     class Meta:
         model = MenuItem
@@ -225,7 +226,8 @@ class SerializerPublicGetMenuItem(ModelSerializer):
             'id', 'name', 'description', 'primary_price',
             'discounted_price', 'running_discount', 'image',
             'available', 'allergens', 'discount_details',
-            'has_options', 'options', 'group', 'extras', 'is_extra'
+            'has_options', 'options', 'group', 'extras', 'is_extra',
+            'discount_percentage'
         )
 
     def get_has_options(self, menu_item):
@@ -250,6 +252,17 @@ class SerializerPublicGetMenuItem(ModelSerializer):
             ).get(id=extra)
             extras.append(record)
         return extras
+
+    def get_discount_percentage(self, menu_item):
+        if not menu_item.running_discount:
+            return 0
+        if menu_item.discounted_price is None:
+            return 0
+        difference = menu_item.discounted_price - menu_item.primary_price
+        if difference == 0:
+            return 0
+        percentage = (difference / menu_item.primary_price) * 100
+        return round(percentage, 2)
 
 
 class SerializerPutTable(ModelSerializer):
