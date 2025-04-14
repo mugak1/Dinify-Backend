@@ -1,10 +1,24 @@
 from django.core.management.base import BaseCommand
 from django.core.management import CommandError
 from .vacuum_configuration import VACUUM_MODELS
+from restaurants_app.models import DiningArea, Table
 
 
 class Command(BaseCommand):
     help = "Alters the 'renameable fields' of deleted records and sets a flag of vacuum on them."
+
+    def delete_tables_under_dining_areas(self):
+        # find deleted dining areas and delete the respective tables under them
+        deleted_dining_areas = DiningArea.objects.filter(deleted=True)
+        for dining_area in deleted_dining_areas:
+            # tables = Table.objects.filter(dining_area=dining_area)
+            # for table in tables:
+            #     table.deleted = True
+            #     table.save()
+            Table.objected.filter(
+                dining_area=dining_area,
+            ).update(deleted=True)
+
 
     def handle(self, *args, **options):
         for model in VACUUM_MODELS:
@@ -12,6 +26,10 @@ class Command(BaseCommand):
                 deleted=True,
                 vacuumed=False
             )
+
+            # if the model is dining area, delete the table under it
+            if model == DiningArea:
+                pass
 
             for rec in records_pending_vacuum:
                 filters = {
