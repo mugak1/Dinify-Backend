@@ -7,20 +7,18 @@ from restaurants_app.models import DiningArea, Table
 class Command(BaseCommand):
     help = "Alters the 'renameable fields' of deleted records and sets a flag of vacuum on them."
 
-    def delete_tables_under_dining_areas(self):
+    def delete_tables_under_dining_areas(self, dining_area):
         # find deleted dining areas and delete the respective tables under them
-        deleted_dining_areas = DiningArea.objects.filter(deleted=True)
-        for dining_area in deleted_dining_areas:
+        # deleted_dining_areas = DiningArea.objects.filter(deleted=True)
+        # for dining_area in deleted_dining_areas:
             # tables = Table.objects.filter(dining_area=dining_area)
             # for table in tables:
             #     table.deleted = True
             #     table.save()
-            print(str(dining_area.pk))
-            Table.objected.filter(
-                dining_area=dining_area,
-            ).update(deleted=True)
-
-            #  bulk update tables
+            # print(str(dining_area.pk))
+        Table.objected.filter(
+            dining_area=dining_area,
+        ).update(deleted=True)
 
 
     def handle(self, *args, **options):
@@ -32,9 +30,15 @@ class Command(BaseCommand):
 
             # if the model is dining area, delete the table under it
             if model == DiningArea:
-                pass
+                self.delete_tables_under_dining_areas(
+                    dining_area=str()
+                )
+                delete_dining_areas = True
 
             for rec in records_pending_vacuum:
+                if delete_dining_areas:
+                    self.delete_tables_under_dining_areas(dining_area=rec)
+
                 filters = {
                     'deleted': True,
                     'vacuumed': True,
