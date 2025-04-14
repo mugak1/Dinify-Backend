@@ -16,6 +16,7 @@ class Command(BaseCommand):
             #     table.deleted = True
             #     table.save()
             # print(str(dining_area.pk))
+        print(f"deleting tables under dining area: {dining_area.pk}")
         Table.objected.filter(
             dining_area=dining_area,
         ).update(deleted=True)
@@ -29,10 +30,8 @@ class Command(BaseCommand):
             )
 
             # if the model is dining area, delete the table under it
+            delete_dining_areas = False
             if model == DiningArea:
-                self.delete_tables_under_dining_areas(
-                    dining_area=str()
-                )
                 delete_dining_areas = True
 
             for rec in records_pending_vacuum:
