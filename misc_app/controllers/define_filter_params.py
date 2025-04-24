@@ -22,6 +22,7 @@ MENU_SECTIION_FILTERS = {
 }
 
 MENU_ITEM_FILTERS = {
+    'restaurant': 'section__restaurant',
     'section': 'section',
     'name': 'name__icontains',
     'running_discount': 'running_discount',

@@ -38,12 +38,7 @@ def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
         filters.pop('approved')
         filters.pop('enabled')
 
-    sections = MenuSection.objects.filter(
-        # restaurant=restaurant_id,
-        # approved=True,
-        # enabled=True
-        **filters
-    )
+    sections = MenuSection.objects.filter(**filters)
 
     menu_data = SerializerGetFullMenu(
         sections,
