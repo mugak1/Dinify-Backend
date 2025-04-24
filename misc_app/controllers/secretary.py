@@ -15,6 +15,7 @@ from misc_app.controllers.notifications.msg_builder_restaurant import make_resta
 from misc_app.controllers.paginator import DinifyPaginator
 from misc_app.controllers.determine_changes import determine_changes
 from misc_app.controllers.save_action_log import save_action
+from misc_app.management.commands.vacuum_deleted_records import ConVacuumDeletedRecords
 from restaurants_app.models import Restaurant, MenuItem
 from users_app.models import User
 from misc_app.controllers.notifications.notification import Notification
@@ -480,6 +481,11 @@ class Secretary:
                 submitted_data=self.data,
                 changes=None,
             )
+
+            # vacuum deleted records
+            # this is typically doing the cron job inline
+            ConVacuumDeletedRecords().vacuum()
+
             return {
                 'status': 200,
                 'message': MESSAGES.get('OK_DELETION')
