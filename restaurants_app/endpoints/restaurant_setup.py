@@ -43,7 +43,9 @@ from dinify_backend.configss.edit_information import EDIT_INFORMATION, EI_DINING
 from dinify_backend.configss.messages import (
     OK_GET_RECORD_DETAIL, ERR_GENERAL,
     ERR_UNSPECIFIED_RECORD_DETAILS,
-    OK_ADDED_SECTION_GROUP, ERR_ADDED_SECTION_GROUP, OK_RETRIEVED_SECTION_GROUP, ERR_RETRIEVED_SECTION_GROUP, OK_UPDATED_SECTION_GROUP, ERR_UPDATED_SECTION_GROUP  # noqa
+    OK_ADDED_SECTION_GROUP, ERR_ADDED_SECTION_GROUP,
+    OK_RETRIEVED_SECTION_GROUP, ERR_RETRIEVED_SECTION_GROUP,
+    OK_UPDATED_SECTION_GROUP, ERR_UPDATED_SECTION_GROUP  # noqa
 )
 from restaurants_app.controllers.create_employee import create_employee
 from dinify_backend.configss.string_definitions import (
@@ -464,7 +466,8 @@ class RestaurantSetupEndpoint(APIView):
             # orm_filter['section_group__available'] = True
             # if 'available' not in request.GET:
             #     orm_filter['available'] = True
-            pass
+            if 'is_extra' in request.GET:
+                orm_filter['is_extra'] = True if request.GET.get('is_extra') == 'true' else False
 
         if config_detail == 'sectiongroups':
             if 'available' not in request.GET:
