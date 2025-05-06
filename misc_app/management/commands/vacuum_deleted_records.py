@@ -50,8 +50,11 @@ class ConVacuumDeletedRecords:
                     'deleted': True,
                     'vacuumed': True,
                 }
+
+                ignore_str_fields = ['str_number']
                 for field, value in model['unique_fields'][0].items():
-                    filters[value] = getattr(rec, field)
+                    if value not in ignore_str_fields:
+                        filters[value] = getattr(rec, field)
                 count_prior_vacuums = model['model'].objects.filter(**filters).count()
                 deletion_count = count_prior_vacuums + 1
 
