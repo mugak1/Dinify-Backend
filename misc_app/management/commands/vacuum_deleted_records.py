@@ -52,8 +52,6 @@ class ConVacuumDeletedRecords:
                 }
                 for field, value in model['unique_fields'][0].items():
                     filters[value] = getattr(rec, field)
-                # print(filters)
-
                 count_prior_vacuums = model['model'].objects.filter(**filters).count()
                 deletion_count = count_prior_vacuums + 1
 
@@ -63,6 +61,8 @@ class ConVacuumDeletedRecords:
                     new_name = f"{model['model'].__name__}_autodel{deletion_count}"
                 else:
                     new_name = f"{getattr(rec, model['rename_field'])}_autodel{deletion_count}"
+                print(f"\n{filters} {new_name}\n")
+
                 setattr(rec, model['rename_field'], new_name)
                 rec.vacuumed = True
                 rec.save()
