@@ -97,15 +97,16 @@ def get_tables_by_area(restaurant_id: str):
             deleted=False,
             dining_area=area['id']
         )
-        tables_listing = [
-            {
-                'id': str(table.pk),
-                'number': table.number,
-                # 'available': get_table_availability(table_id=str(table.pk)),
-                'reserved': table.reserved,
-                'enabled': table.enabled,
-            } for table in table_records
-        ]
+        # tables_listing = [
+        #     {
+        #         'id': str(table.pk),
+        #         'number': table.number,
+        #         # 'available': get_table_availability(table_id=str(table.pk)),
+        #         'reserved': table.reserved,
+        #         'enabled': table.enabled,
+        #     } for table in table_records
+        # ]
+        tables_listing = []
 
         tables_listing.append({
             'dining_area': area,
