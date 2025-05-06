@@ -44,8 +44,10 @@ def create_tables_in_section(
                 restaurant=restaurant
             ).count()
             for i in range(no_tables):
+                table_number = table_count + i + 1
                 table = Table(
-                    number=table_count+i+1,
+                    number=table_number,
+                    str_number=str(table_number),
                     restaurant=restaurant,
                     created_by=user,
                     dining_area=dining_area
@@ -55,6 +57,7 @@ def create_tables_in_section(
             for i in range(range_from, range_to+1):
                 table = Table(
                     number=i,
+                    str_number=str(i),
                     restaurant=restaurant,
                     created_by=user,
                     dining_area=dining_area

@@ -223,6 +223,8 @@ class RestaurantSetupEndpoint(APIView):
                     'message': f"Table number {request.data.get('number')} is already in use."
                 }
                 return Response(response, status=400)
+        
+
 
         serializers = {
             'employees': SerializerPutRestaurantEmployee,
@@ -308,6 +310,7 @@ class RestaurantSetupEndpoint(APIView):
         if config_detail == 'tables':
             try:
                 post_data['number'] = str(post_data.get('number'))
+                post_data['str_number'] = str(post_data.get('number'))
             except Exception as error:
                 print(f"Error converting table number to string: {error}")
 
