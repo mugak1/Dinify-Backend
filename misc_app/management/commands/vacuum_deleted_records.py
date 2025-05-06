@@ -66,9 +66,9 @@ class ConVacuumDeletedRecords:
                     new_name = f"{getattr(rec, model['rename_field'])}_autodel{deletion_count}"
                 print(f"\n{filters} {new_name}\n")
 
-                # setattr(rec, model['rename_field'], new_name)
-                # rec.vacuumed = True
-                # rec.save()
+                setattr(rec, model['rename_field'], new_name)
+                rec.vacuumed = True
+                rec.save()
 
                 # TODO save action to mongodb as a log
 
