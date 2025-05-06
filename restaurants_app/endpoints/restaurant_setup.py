@@ -214,7 +214,8 @@ class RestaurantSetupEndpoint(APIView):
         if config_detail == 'tables':
             tables_count = Table.objects.filter(
                 restaurant=request.data.get('restaurant'),
-                number=request.data.get('number')
+                number=request.data.get('number'),
+                deleted=False
             ).count()
             if tables_count > 0:
                 response = {
