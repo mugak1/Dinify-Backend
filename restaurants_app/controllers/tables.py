@@ -1,6 +1,6 @@
 from typing import Optional
 from restaurants_app.models import Restaurant, Table, DiningArea
-from orders_app.controllers.initiate_order import any_present_ongoing_order
+# from orders_app.controllers.initiate_order import any_present_ongoing_order
 from users_app.models import User
 from django.db import transaction
 
