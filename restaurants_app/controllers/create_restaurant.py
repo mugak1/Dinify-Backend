@@ -168,8 +168,10 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
         record_data['name'] = data['name'].strip().title()
         record_data['owner'] = user_creation_result['user_id']
         record_data['created_by'] = auth_info['user_id']
-
-        print(f"RestaurantData:{record_data}")
+        try:
+            record_data.pop('status', None)
+        except Exception as error:
+            print(f"Error while dropping status: {error}")
 
         record = SerializerPutRestaurant(data=record_data)
         user_profile = user_creation_result['user_profile']
