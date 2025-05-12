@@ -364,7 +364,7 @@ class RestaurantSetupEndpoint(APIView):
             'error_message': error_message,
             'user': request.user,
             'msg_type': msg_types.get(config_detail),
-            'non_unique_combination': RECORDS_NON_UNIQUE_COMBINATIONS.get(config_detail),
+            'non_unique_handling': RECORDS_NON_UNIQUE_COMBINATIONS.get(config_detail),
         }
         response = Secretary(secretary_args).create()
 
