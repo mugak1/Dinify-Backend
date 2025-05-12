@@ -11,6 +11,7 @@ class ConMiscUtils:
     def check_non_unique_conflicts(
         model,
         unique_combination: list,
+        fks: list,
         values: dict,
         error_message: str,
         existing_record_id: Optional[str] = None,
@@ -21,6 +22,7 @@ class ConMiscUtils:
         return check_non_unique_conflicts(
             model=model,
             unique_combination=unique_combination,
+            fks=fks,
             values=values,
             error_message=error_message,
             existing_record_id=existing_record_id

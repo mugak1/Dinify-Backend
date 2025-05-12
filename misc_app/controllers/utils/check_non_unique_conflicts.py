@@ -5,6 +5,7 @@ from django.db.models import Model
 def check_non_unique_conflicts(
     model: Model,
     unique_combination: list,
+    fks: list,
     values: dict,
     error_message: str,
     existing_record_id: Optional[str] = None,
@@ -13,7 +14,10 @@ def check_non_unique_conflicts(
     filters = {}
     for key in unique_combination:
         if values.get(key) is not None:
-            filters[f"{key}__iexact"] = values.get(key)
+            if key in fks:
+                filters[key] = values.get(key)
+            else:
+                filters[f"{key}__iexact"] = values.get(key)
 
     if len(filters) < len(unique_combination):
         return {

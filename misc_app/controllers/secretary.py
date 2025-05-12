@@ -138,6 +138,7 @@ class Secretary:
                 all_unique = ConMiscUtils.check_non_unique_conflicts(
                     model=self.serializer.Meta.model,
                     unique_combination=self.non_unique_handling.get('unique_combination'),
+                    fks=self.non_unique_handling.get('fks'),
                     values=self.data,
                     error_message=self.non_unique_handling.get('error_message'),
                     # existing_record_id=self.data.get('id')
