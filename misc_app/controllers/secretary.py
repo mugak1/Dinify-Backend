@@ -19,6 +19,7 @@ from misc_app.management.commands.vacuum_deleted_records import ConVacuumDeleted
 from restaurants_app.models import Restaurant, MenuItem
 from users_app.models import User
 from misc_app.controllers.notifications.notification import Notification
+from misc_app.controllers.con_class_utils import ConMiscUtils
 from restaurants_app.serializers import SerializerAdminGetOrderReview
 from restaurants_app.serializers import SerializerPutRestaurant
 from restaurants_app.controllers.get_review_summary import get_review_summary
@@ -66,6 +67,9 @@ class Secretary:
         self.required_information = self.args.get('required_information')
         self.user = self.args.get('user')
         self.msg_type = self.args.get('msg_type')
+
+        # for non unique handling
+        self.non_unique_handling = self.args.get('non_unique_handling')
 
     def formulate_log_data(self) -> dict:
         """
@@ -128,6 +132,22 @@ class Secretary:
                     'status': 400,
                     'message': info_check['message']
                 }
+
+            # check if a duplicate entry exists
+            if self.non_unique_handling is not None:
+                all_unique = ConMiscUtils.check_non_unique_conflicts(
+                    model=self.serializer.Meta.model,
+                    unique_combination=self.non_unique_handling.get('unique_combination'),
+                    values=self.data,
+                    error_message=self.non_unique_handling.get('error_message'),
+                    # existing_record_id=self.data.get('id')
+                )
+
+                if not all_unique['status'] == 200:
+                    return {
+                        'status': 400,
+                        'message': all_unique['message']
+                    }
 
             # clean up the character details accordingly
             for info in self.required_information:

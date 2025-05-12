@@ -68,6 +68,7 @@ from users_app.controllers.permissions_check import (
 from restaurants_app.models import RestaurantEmployee, DiningArea, Table
 from users_app.models import User
 from restaurants_app.controllers.subscriptions import RestaurantSubscription
+from restaurants_app.configs.non_unique_combination import RECORDS_NON_UNIQUE_COMBINATIONS
 
 
 def check_permission(user: User, record: str, id: str):
@@ -161,6 +162,7 @@ class RestaurantSetupEndpoint(APIView):
         response = {'status': 500, 'message': "Invalid request"}
         # decode the token
         auth = decode_jwt_token(request)
+        non_unique_combination = None
 
         if config_detail == 'restaurants':
             # TODO if the user is not a Dinify admin,.
@@ -223,8 +225,6 @@ class RestaurantSetupEndpoint(APIView):
                     'message': f"Table number {request.data.get('number')} is already in use."
                 }
                 return Response(response, status=400)
-        
-
 
         serializers = {
             'employees': SerializerPutRestaurantEmployee,
@@ -363,7 +363,8 @@ class RestaurantSetupEndpoint(APIView):
             'success_message': success_message,
             'error_message': error_message,
             'user': request.user,
-            'msg_type': msg_types.get(config_detail)
+            'msg_type': msg_types.get(config_detail),
+            'non_unique_combination': RECORDS_NON_UNIQUE_COMBINATIONS.get(config_detail),
         }
         response = Secretary(secretary_args).create()
 
