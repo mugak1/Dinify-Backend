@@ -157,21 +157,21 @@ def get_table_availability(table_id: str) -> dict:
     if not table_record.enabled:
         return {
             'available': False,
-            'message': 'Table is disabled'
+            'message': 'Disabled'
         }
     if table_record.reserved:
         return {
             'available': False,
-            'message': 'Table is reserved'
+            'message': 'Reserved'
         }
     # check for ongoing orders
     present_order = any_present_ongoing_order(table=table_record)
     if present_order['present']:
         return {
             'available': False,
-            'message': 'Table has an ongoing order'
+            'message': 'Ongoing order'
         }
     return {
         'available': True,
-        'message': 'Table is available'
+        'message': 'Available'
     }
