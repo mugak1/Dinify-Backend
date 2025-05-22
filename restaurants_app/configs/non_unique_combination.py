@@ -11,7 +11,7 @@ RECORDS_NON_UNIQUE_COMBINATIONS = {
     },
     'sectiongroups': {
         'unique_combination': ['section', 'name'],
-        'error_message': 'A section group with this name already exists for this section.',
+        'error_message': 'A section group with this name already exists for this restaurant.',
         'fks': ['section']
     },
     'menuitems': {

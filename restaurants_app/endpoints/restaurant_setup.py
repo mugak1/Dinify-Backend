@@ -69,6 +69,8 @@ from restaurants_app.models import RestaurantEmployee, DiningArea, Table
 from users_app.models import User
 from restaurants_app.controllers.subscriptions import RestaurantSubscription
 from restaurants_app.configs.non_unique_combination import RECORDS_NON_UNIQUE_COMBINATIONS
+from restaurants_app.controllers.con_cla_employees import ConRestaurantEmployee
+
 
 
 def check_permission(user: User, record: str, id: str):
@@ -225,6 +227,19 @@ class RestaurantSetupEndpoint(APIView):
                     'message': f"Table number {request.data.get('number')} is already in use."
                 }
                 return Response(response, status=400)
+
+        if config_detail == 'employees':
+            shortcut_employee_creation = ConRestaurantEmployee.create_employee_from_existing_user(
+                user_id=request.data.get('user'),
+                restaurant_id=request.data.get('restaurant'),
+                roles=request.data.get('roles')
+            )
+
+            if shortcut_employee_creation['status'] == 200:
+                return Response(
+                    shortcut_employee_creation,
+                    status=shortcut_employee_creation['status']
+                )
 
         serializers = {
             'employees': SerializerPutRestaurantEmployee,
