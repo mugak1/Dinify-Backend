@@ -58,6 +58,10 @@ class Restaurant(BaseModel):
     )
     first_time_menu_approval = models.BooleanField(default=False)
 
+    # eod processing
+    eod_restaurant_last_date = models.DateField(null=True, db_index=True)
+    eod_restaurant_status = models.IntegerField(default=0, db_index=True)
+
     class Meta:
         """
         the metadata for the Restaurant model

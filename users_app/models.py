@@ -81,6 +81,10 @@ class BaseModel(models.Model):
     archived = models.BooleanField(default=False)
     vacuumed = models.BooleanField(default=False)
 
+    # eod_processing
+    eod_last_date = models.DateField(null=True, db_index=True)
+    eod_record_date = models.DateField(null=True, db_index=True)
+
     class Meta:
         """
         the metadata for the BaseModel model

@@ -31,4 +31,4 @@ xxx_app
 - Refactor to minify endpoint handler files. this may go hand in hand with the refactor to adopt Class-scoped functions.
 - Refactor to adopt class implementations for the various functions. Apart from misc/controller functions, many of these functions are likely in the same files or in the same controller folders.
 - Refactor to have a single file for string definitions. This may be a huge file but best to keep all string in one location.
-- Refactor to have single file for definitions of non-variable dependent messages.
+- Refactor to have single file for all definitions of non-variable dependent messages.
