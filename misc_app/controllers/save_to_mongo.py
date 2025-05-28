@@ -21,3 +21,4 @@ def save_to_mongodb(
     except Exception as e:
         print(f"\n...Failed to save to mongodb: {e}...\n{data}\n.......")
         return False
+

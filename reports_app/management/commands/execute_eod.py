@@ -34,8 +34,6 @@ class Command(BaseCommand):
             defaults={'config_integer_value': 1}
         )
 
-
-
         self.stdout.write(self.style.WARNING("Blocking new orders..."))
         
         
