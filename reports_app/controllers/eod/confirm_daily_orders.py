@@ -49,10 +49,6 @@ def snapshot_daily_orders(restaurant_id: str, eod_date: date) -> dict:
         )
 
         #  bulk update the restaurant records with the eod date
-        # for x in restaurant_orders:
-        #     x.eod_record_date = eod_date
-        for x in restaurant_order_items:
-            x.eod_record_date = eod_date
         for x in restaurant_transactions:
             x.eod_record_date = eod_date
 
@@ -86,17 +82,8 @@ def snapshot_daily_orders(restaurant_id: str, eod_date: date) -> dict:
                 archive_collection='archive_accounts'
             )
 
-        # Order.objects.bulk_update(
-        #     restaurant_orders,
-        #     fields=['eod_record_date']
-        # )
-        restaurant_orders.update(
-            eod_record_date=eod_date
-        )
-        OrderItem.objects.bulk_update(
-            restaurant_order_items,
-            fields=['eod_record_date']
-        )
+        restaurant_orders.update(eod_record_date=eod_date)
+        restaurant_order_items.update(eod_record_date=eod_date)
         DinifyTransaction.objects.bulk_update(
             restaurant_transactions,
             fields=['eod_record_date']

@@ -5,7 +5,9 @@ from dinify_backend.configss.messages import MESSAGES
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated,
     OrderStatus_Pending,
-    OrderStatus_Preparing
+    OrderStatus_Preparing,
+    OrderStatus_Served,
+    PaymentStatus_Pending
 )
 from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
 from orders_app.models import Order
@@ -30,6 +32,19 @@ def any_present_ongoing_order(table: Table) -> dict:
         return {
             'present': True,
             'order_id': present_orders.first()['id']
+        }
+
+    served_unpaid_orders = Order.objects.values('id').filter(
+        table=table,
+        order_status=OrderStatus_Served,
+        payment_status=PaymentStatus_Pending
+    ).order_by(
+        '-time_created'
+    )
+    if served_unpaid_orders.count() > 0:
+        return {
+            'present': True,
+            'order_id': served_unpaid_orders.first()['id']
         }
     return {'present': False}
 
