@@ -91,6 +91,7 @@ def snapshot_daily_orders(restaurant_id: str, eod_date: date) -> dict:
             restaurant_transactions,
             fields=['eod_record_date']
         )
+
         # set new system date for the restaurant to allow new orders
         restaurant.system_date = eod_date + timedelta(days=1)
         restaurant.eod_restaurant_status = 4

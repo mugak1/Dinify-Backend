@@ -10,10 +10,9 @@ from dinify_backend.configss.string_definitions import (
     SysConfig_EodCurrentStatus,
     SysConfig_BusinessDate
 )
-
-
 from reports_app.controllers.eod.confirm_daily_orders import initiate_restaurant_eod
 from reports_app.controllers.eod.establish_eod_status import establish_eod_status
+from reports_app.controllers.eod.generate_daily_reports import generate_daily_reports
 
 
 class Command(BaseCommand):
@@ -44,7 +43,7 @@ class Command(BaseCommand):
         # 1. block incoming orders
         #  for each restaurant, take a snapshot of the values as at the moment
         # 2. Confirm daily orders
-        Restaurant.objects.all().update(eod_restaurant_status=1)
+        # Restaurant.objects.all().update(eod_restaurant_status=1)
 
         # return
         SysActivityConfig.objects.update_or_create(
@@ -52,7 +51,7 @@ class Command(BaseCommand):
             defaults={'config_integer_value': 2}
         )
         # 3a. Set new system business date at restaurant level
-        initiate_restaurant_eod(eod_date)
+        # initiate_restaurant_eod(eod_date)
 
         # 3b. Set new system business date at system level
         # system is typically open for orders at this stage
@@ -64,11 +63,13 @@ class Command(BaseCommand):
         self.stdout.write(self.style.WARNING("Establishing EOD statuses..."))
         # 4. organising records by EOD status
         # this can be run outside of django
-        establish_eod_status(eod_date)
+        # establish_eod_status(eod_date)
 
         # 5. reconcile payments and confirm accounts balances
 
+        self.stdout.write(self.style.WARNING("Generating daily reports..."))
         # 6. generate daily reports
+        generate_daily_reports(eod_date)
 
         # 7. generate periodical reports
 

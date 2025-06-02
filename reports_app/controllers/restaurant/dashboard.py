@@ -182,7 +182,6 @@ def summarize_orders(restaurant_id: str):
     ).order_by('-total_orders')[:3]
     # === end dummy content
 
-
     diners = closed_orders.values('customer').distinct().count()
     monthly_diners = closed_orders.filter(
         time_created__month=datetime.now().month,

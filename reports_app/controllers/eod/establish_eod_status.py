@@ -1,5 +1,4 @@
 from datetime import date, datetime
-from tracemalloc import start
 from dinify_backend.mongo_db import MONGO_DB
 from bson import ObjectId
 from misc_app.controllers.save_to_mongo import save_to_mongodb
@@ -88,7 +87,7 @@ def establish_eod_status(eod_date: date):
         'count_transactions': len(eod_transactions),
         'start_time': start_time,
         'end_time': end_time,
-        'duration': (end_time - start_time).total_seconds()
+        'duration_seconds': (end_time - start_time).total_seconds()
     }
 
     save_to_mongodb(
