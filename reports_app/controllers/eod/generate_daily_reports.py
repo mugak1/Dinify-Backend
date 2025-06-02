@@ -11,10 +11,15 @@ from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
 from misc_app.controllers.save_to_mongo import save_to_mongodb
 from misc_app.controllers.utils.archive_record import archive_record
 import concurrent.futures
+from reports_app.controllers.eod.reports.establish_customer_ages import establish_customer_ages
 from reports_app.controllers.eod.reports.daily_reports import generate_restaurant_daily_report
 
 
 def generate_daily_reports(eod_date):
+    # Establish customer ages
+    establish_customer_ages()
+
+    #  report for each restaurant
     all_restaurants = Restaurant.objects.all()
     # with concurrent.futures.ThreadPoolExecutor(thread_name_prefix='DinifyEodDailyReports') as executor:
     #     futures = [

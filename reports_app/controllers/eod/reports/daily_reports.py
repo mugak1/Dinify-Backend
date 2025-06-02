@@ -87,6 +87,7 @@ def make_orders_report(orders: list) -> dict:
                 summary[f'stats_by_paymentstatus_count_{status.lower()}'] = 0
                 summary[f'stats_by_paymentstatus_amount_{status.lower()}'] = 0.0
                 summary[f'stats_by_paymentstatus_percentage_{status.lower()}'] = 0.0
+
     # maintain 2dps for all values
     for key in summary:
         value = float(summary[key])
@@ -157,6 +158,75 @@ def make_order_items_report(orders: list) -> dict:
     return summary
 
 
+def report_on_customer_behaviour(orders: list) -> None:
+    summary = {}
+    # load the orders into a pandas DataFrame
+    df_orders = pandas.DataFrame(orders)
+
+    if df_orders.empty:
+        return {
+            'distinct_customers': 0,
+            'count_returning_customers': 0,
+            'percentage_returning_customers': 0,
+            'amount_paid_by_returning_customers': 0,
+            'count_new_customers': 0,
+            'percentage_new_customers': 0,
+            'amount_paid_by_new_customers': 0,
+            'top_customer_by_amount': None,
+            'top_customer_by_no_orders': None
+        }
+
+    #  get the distinct customers
+    distinct_customers = df_orders['customer'].nunique()
+    summary['distinct_customers'] = distinct_customers
+
+    # to get the returning customers, orders where anl_days_since_last_customer_order_at_restaurant is greater than 0 and not None
+    returning_customers = df_orders['anl_days_since_last_customer_order_at_restaurant'].apply(
+        lambda x: x is not None and x > 0
+    )
+    returning_customers = df_orders[returning_customers]
+    count_returning_customers = returning_customers['customer'].nunique()
+    percentage_returning_customers = (count_returning_customers / distinct_customers) * 100
+
+    # amount from returning customers
+    paid_orders_by_returning_customers = returning_customers['statuses_at_eod'].apply(
+        lambda x: x.get('payment_status') == PaymentStatus_Paid and x.get('order_status') != OrderStatus_Cancelled
+    )
+    paid_orders_by_returning_customers = returning_customers[paid_orders_by_returning_customers]
+    amount_paid_by_returning_customers = paid_orders_by_returning_customers['total_cost'].sum()
+
+    # to get the new customers, orders where anl_days_since_last_customer_order_at_restaurant is None or 0
+    new_customers = df_orders['anl_days_since_last_customer_order_at_restaurant'].apply(
+        lambda x: x is None or x == 0
+    )
+    new_customers = df_orders[new_customers]
+    count_new_customers = new_customers['customer'].nunique()
+    percentage_new_customers = (count_new_customers / distinct_customers) * 100
+    paid_orders_by_new_customers = new_customers['statuses_at_eod'].apply(
+        lambda x: x.get('payment_status') == PaymentStatus_Paid and x.get('order_status') != OrderStatus_Cancelled
+    )
+    paid_orders_by_new_customers = new_customers[paid_orders_by_new_customers]
+    amount_paid_by_new_customers = paid_orders_by_new_customers['total_cost'].sum()
+
+    # top customer by amount
+    top_customer_by_amount = df_orders.groupby('customer')['total_cost'].sum().idxmax()
+    top_customer_by_no_orders = df_orders.groupby('customer').size().idxmax()
+
+    summary = {
+        'distinct_customers': distinct_customers,
+        'count_returning_customers': count_returning_customers,
+        'percentage_returning_customers': round(percentage_returning_customers, 2),
+        'amount_paid_by_returning_customers': round(amount_paid_by_returning_customers, 2),
+        'count_new_customers': count_new_customers,
+        'percentage_new_customers': round(percentage_new_customers, 2),
+        'amount_paid_by_new_customers': round(amount_paid_by_new_customers, 2),
+        'top_customer_by_amount': top_customer_by_amount,
+        'top_customer_by_no_orders': top_customer_by_no_orders
+    }
+
+    return summary
+
+
 def generate_restaurant_daily_report(restaurant_id: int, eod_date: date) -> None:
     eod_date = '2025-05-31'
     orders = MONGO_DB['archive_orders'].find(
@@ -168,8 +238,13 @@ def generate_restaurant_daily_report(restaurant_id: int, eod_date: date) -> None
         'eod_date': str(eod_date)
     }
     # to the report, add the result from make_orders_report
-    # orders_report = make_orders_report(orders)
+    orders_report = make_orders_report(orders)
+    report.update(orders_report)
+
     order_items_report = make_order_items_report(orders)
-    # report.update(orders_report)
     report.update(order_items_report)
+
+    customer_behaviour = report_on_customer_behaviour(orders)
+    report.update(customer_behaviour)
+
     print(f"\n\n{restaurant_id}\n{report}\n\n")
