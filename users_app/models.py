@@ -5,8 +5,10 @@ import uuid
 import datetime
 from django.db import models
 from django.contrib.auth.models import AbstractUser
-from django.db.models.signals import pre_save
+from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
+from rest_framework.serializers import ModelSerializer
+from misc_app.controllers.utils.archive_record import archive_record
 
 
 # Create your models here.
@@ -118,3 +120,19 @@ def add_time_last_updated(sender, instance, **kwargs):
 @receiver(pre_save, sender=UserOtp)
 def set_expiry_time(sender, instance, **kwargs):
     instance.expiry_time = datetime.datetime.now() + datetime.timedelta(minutes=5)
+
+
+class SerArcUser(ModelSerializer):
+    class Meta:
+        model = User
+        fields = '__all__'
+
+
+@receiver(post_save, sender=User)
+def archive_user(sender, instance, **kwargs):
+    data = SerArcUser(instance).data
+    data['time_created'] = data['date_joined']
+    archive_record(
+        record_data=data,
+        archive_collection='archive_users',
+    )
