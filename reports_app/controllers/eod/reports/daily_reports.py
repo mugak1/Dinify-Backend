@@ -229,9 +229,10 @@ def report_on_customer_behaviour(orders: list) -> None:
 
 def generate_restaurant_daily_report(restaurant_id: int, eod_date: date) -> None:
     eod_date = '2025-05-31'
-    orders = MONGO_DB['archive_orders'].find(
-        {'restaurant': restaurant_id, 'eod_record_date': str(eod_date)}
-    )
+    orders = MONGO_DB['archive_orders'].find({
+        'restaurant': restaurant_id,
+        'eod_record_date': str(eod_date)
+    })
     orders = list(orders)
     report = {
         'restaurant_id': restaurant_id,
@@ -247,10 +248,19 @@ def generate_restaurant_daily_report(restaurant_id: int, eod_date: date) -> None
     customer_behaviour = report_on_customer_behaviour(orders)
     report.update(customer_behaviour)
 
+    report['eod_date'] = eod_date
+    report['report_type'] = 'daily'
+    str_eod_date = str(eod_date)
     # change the eod_date to a datetime object where the time is 23:59:59
     eod_date = f"{eod_date}T23:59:59"
     eod_date = datetime.fromisoformat(eod_date)
-    report['eod_date'] = eod_date
-
+    report['eod_time'] = eod_date
     # save the report to MongoDB
-    MONGO_DB['analysis_restaurant_daily_reports'].insert_one(report)
+    MONGO_DB['analysis_restaurant_reports'].find_one_and_update(
+        {
+            'restaurant_id': restaurant_id,
+            'eod_date': str_eod_date
+        },
+        {'$set': report},
+        upsert=True
+    )
