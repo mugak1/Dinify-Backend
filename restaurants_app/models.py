@@ -260,7 +260,7 @@ class SerArcRestaurant(ModelSerializer):
 
 
 @receiver(post_save, sender=Restaurant)
-def archive_restaurant(sender, instance, created, **kwargs):
+def archive_restaurant(sender, instance, **kwargs):
     record_data = SerArcRestaurant(instance).data
     archive_record(record_data, 'archive_restaurants')
 
@@ -272,7 +272,7 @@ class SerArcMenuSection(ModelSerializer):
 
 
 @receiver(post_save, sender=MenuSection)
-def archive_menu_section(sender, instance, created, **kwargs):
+def archive_menu_section(sender, instance, **kwargs):
     record_data = SerArcMenuSection(instance).data
     archive_record(record_data, 'archive_menu_sections')
 
@@ -283,7 +283,7 @@ class SerArcSectionGroup(ModelSerializer):
         fields = '__all__'
 
 @receiver(post_save, sender=SectionGroup)
-def archive_section_group(sender, instance, created, **kwargs):
+def archive_section_group(sender, instance, **kwargs):
     record_data = SerArcSectionGroup(instance).data
     archive_record(record_data, 'archive_section_groups')
 
@@ -295,7 +295,7 @@ class SerArcMenuItem(ModelSerializer):
 
 
 @receiver(post_save, sender=MenuItem)
-def archive_menu_item(sender, instance, created, **kwargs):
+def archive_menu_item(sender, instance, **kwargs):
     record_data = SerArcMenuItem(instance).data
     archive_record(record_data, 'archive_menu_items')
 
@@ -307,7 +307,7 @@ class SerArcDiningArea(ModelSerializer):
 
 
 @receiver(post_save, sender=DiningArea)
-def archive_dining_area(sender, instance, created, **kwargs):
+def archive_dining_area(sender, instance, **kwargs):
     record_data = SerArcDiningArea(instance).data
     archive_record(record_data, 'archive_dining_areas')
 
@@ -319,7 +319,7 @@ class SerArcTable(ModelSerializer):
 
 
 @receiver(post_save, sender=Table)
-def archive_table(sender, instance, created, **kwargs):
+def archive_table(sender, instance, **kwargs):
     record_data = SerArcTable(instance).data
     archive_record(record_data, 'archive_tables')
 
@@ -331,7 +331,7 @@ class SerArcRestaurantEmployee(ModelSerializer):
 
 
 @receiver(post_save, sender=RestaurantEmployee)
-def archive_restaurant_employee(sender, instance, created, **kwargs):
+def archive_restaurant_employee(sender, instance, **kwargs):
     record_data = SerArcRestaurantEmployee(instance).data
     archive_record(record_data, 'archive_restaurant_employees')
 
