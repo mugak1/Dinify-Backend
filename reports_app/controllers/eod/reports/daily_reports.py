@@ -1,3 +1,4 @@
+from operator import le
 import pandas
 from datetime import date, datetime
 from dinify_backend.mongo_db import MONGO_DB
@@ -9,7 +10,19 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Refunded,
     OrderStatus_Cancelled,
     PaymentStatus_Paid,
-    PaymentStatus_Pending
+    PaymentStatus_Pending,
+
+    TransactionType_OrderPayment,
+    TransactionType_OrderRefund,
+    TransactionType_OrderCharge,
+    TransactionType_Disbursement,
+    TransactionType_Subscription,
+    TransactionType_Tip,
+
+    TransactionStatus_Success,
+    TransactionStatus_Failed,
+    TransactionStatus_Pending,
+    TransactionStatus_Initiated
 )
 
 
@@ -158,7 +171,7 @@ def make_order_items_report(orders: list) -> dict:
     return summary
 
 
-def report_on_customer_behaviour(orders: list) -> None:
+def report_on_customer_behaviour(orders: list) -> dict:
     summary = {}
     # load the orders into a pandas DataFrame
     df_orders = pandas.DataFrame(orders)
@@ -227,6 +240,104 @@ def report_on_customer_behaviour(orders: list) -> None:
     return summary
 
 
+def report_on_transactions(restaurant_id: str, eod_date: date) -> dict:
+    summary = {}
+    # get all the accounts associated with the restaurant
+    accounts = MONGO_DB['archive_accounts'].find(
+        filter={'restaurant': restaurant_id},
+        projection={'id': 1, '_id': 0}
+    )
+    # get all the transactions associated with the accounts for the restaurant
+    account_ids = [account['id'] for account in accounts]
+    transactions = MONGO_DB['archive_transactions'].find({
+        '$or': [
+            {'account': {'$in': account_ids}},
+            {'restaurant': restaurant_id}
+        ],
+        'eod_record_date': str(eod_date)
+    })
+
+    transactions = list(transactions)
+    df_transactions = pandas.DataFrame(transactions)
+
+    if df_transactions.empty:
+        summary['no_transactions'] = 0
+
+    no_transactions = df_transactions.shape[0]
+
+    # report on each transaction type
+    transaction_types = [
+        TransactionType_OrderPayment,
+        TransactionType_OrderRefund,
+        TransactionType_OrderCharge,
+        TransactionType_Disbursement,
+        TransactionType_Subscription,
+        TransactionType_Tip
+    ]
+
+    transaction_statuses = [
+        TransactionStatus_Success,
+        TransactionStatus_Failed,
+        TransactionStatus_Pending,
+        TransactionStatus_Initiated
+    ]
+
+    for transaction_type in transaction_types:
+        if df_transactions.empty:
+            summary[f'stats_by_transactiontype_count_{transaction_type.lower()}'] = 0
+            summary[f'stats_by_transactiontype_amount_{transaction_type.lower()}'] = 0.0
+            summary[f'stats_by_transactiontype_percentage_{transaction_type.lower()}'] = 0.0
+        else:
+            type_transactions = df_transactions[df_transactions['transaction_type'] == transaction_type]
+            print('\n\n', type_transactions.shape, '\n\n')
+            count = type_transactions.shape[0]
+            amount = type_transactions['transaction_amount'].sum() if not type_transactions.empty else 0.0
+            percentage = (count / no_transactions) * 100
+
+            summary[f'stats_by_transactiontype_count_{transaction_type.lower()}'] = count
+            summary[f'stats_by_transactiontype_amount_{transaction_type.lower()}'] = amount
+            summary[f'stats_by_transactiontype_percentage_{transaction_type.lower()}'] = percentage
+
+        # summarize by transaction status for each transaction type
+        for transaction_status in transaction_statuses:
+            if df_transactions.empty:
+                summary[f'stats_by_transactiontype_status_{transaction_type.lower()}_count_{transaction_status.lower()}'] = 0
+                summary[f'stats_by_transactiontype_status_{transaction_type.lower()}_amount_{transaction_status.lower()}'] = 0.0
+                summary[f'stats_by_transactiontype_status_{transaction_type.lower()}_percentage_{transaction_status.lower()}'] = 0.0
+            else:
+                status_transactions = type_transactions[type_transactions['transaction_status'] == transaction_status]
+                status_count = status_transactions.shape[0]
+                status_amount = status_transactions['transaction_amount'].sum() if not status_transactions.empty else 0.0
+                status_percentage = (status_count / count) * 100 if count > 0 else 0.0
+
+                summary[f'stats_by_transactiontype_status_{transaction_type.lower()}_count_{transaction_status.lower()}'] = status_count
+                summary[f'stats_by_transactiontype_status_{transaction_type.lower()}_amount_{transaction_status.lower()}'] = status_amount
+                summary[f'stats_by_transactiontype_status_{transaction_type.lower()}_percentage_{transaction_status.lower()}'] = status_percentage
+
+    for transaction_status in transaction_statuses:
+        if df_transactions.empty:
+            summary[f'stats_by_transactionstatus_count_{transaction_status.lower()}'] = 0
+            summary[f'stats_by_transactionstatus_amount_{transaction_status.lower()}'] = 0.0
+            summary[f'stats_by_transactionstatus_percentage_{transaction_status.lower()}'] = 0.0
+        else:
+            status_transactions = df_transactions[df_transactions['transaction_status'] == transaction_status]
+            count = status_transactions.shape[0]
+            amount = status_transactions['transaction_amount'].sum() if not status_transactions.empty else 0.0
+            percentage = (count / no_transactions) * 100
+
+            summary[f'stats_by_transactionstatus_count_{transaction_status.lower()}'] = count
+            summary[f'stats_by_transactionstatus_amount_{transaction_status.lower()}'] = amount
+            summary[f'stats_by_transactionstatus_percentage_{transaction_status.lower()}'] = percentage
+
+    for key in summary:
+        try:
+            value = float(summary[key])
+            summary[key] = round(value, 2)
+        except (ValueError, TypeError):
+            summary[key] = summary[key]
+    return summary
+
+
 def generate_restaurant_daily_report(restaurant_id: int, eod_date: date) -> None:
     eod_date = '2025-05-31'
     orders = MONGO_DB['archive_orders'].find({
@@ -239,14 +350,19 @@ def generate_restaurant_daily_report(restaurant_id: int, eod_date: date) -> None
         'eod_date': str(eod_date)
     }
     # to the report, add the result from make_orders_report
-    orders_report = make_orders_report(orders)
-    report.update(orders_report)
+    # orders_report = make_orders_report(orders)
+    # report.update(orders_report)
 
-    order_items_report = make_order_items_report(orders)
-    report.update(order_items_report)
+    # order_items_report = make_order_items_report(orders)
+    # report.update(order_items_report)
 
-    customer_behaviour = report_on_customer_behaviour(orders)
-    report.update(customer_behaviour)
+    # customer_behaviour = report_on_customer_behaviour(orders)
+    # report.update(customer_behaviour)
+
+    transactions_report = report_on_transactions(restaurant_id, eod_date)
+    report.update(transactions_report)
+
+    print('\n\n', report, '\n\n')
 
     report['eod_date'] = eod_date
     report['report_type'] = 'daily'
@@ -256,11 +372,11 @@ def generate_restaurant_daily_report(restaurant_id: int, eod_date: date) -> None
     eod_date = datetime.fromisoformat(eod_date)
     report['eod_time'] = eod_date
     # save the report to MongoDB
-    MONGO_DB['analysis_restaurant_reports'].find_one_and_update(
-        {
-            'restaurant_id': restaurant_id,
-            'eod_date': str_eod_date
-        },
-        {'$set': report},
-        upsert=True
-    )
+    # MONGO_DB['analysis_restaurant_reports'].find_one_and_update(
+    #     {
+    #         'restaurant_id': restaurant_id,
+    #         'eod_date': str_eod_date
+    #     },
+    #     {'$set': report},
+    #     upsert=True
+    # )
