@@ -30,7 +30,7 @@ def any_present_ongoing_order(table: Table) -> dict:
     )
     if present_orders.count() > 0:
         order = present_orders.first()
-        if not order['eod_record_date'] is None:
+        if order['eod_record_date'] is None:
             return {
                 'present': True,
                 'order_id': order['id']
@@ -45,7 +45,7 @@ def any_present_ongoing_order(table: Table) -> dict:
     )
     if served_unpaid_orders.count() > 0:
         order = served_unpaid_orders.first()
-        if not order['eod_record_date'] is None:
+        if order['eod_record_date'] is None:
             return {
                 'present': True,
                 'order_id': order['id']
