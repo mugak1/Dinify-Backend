@@ -168,7 +168,8 @@ def get_table_availability(table_id: str) -> dict:
     if present_order['present']:
         return {
             'available': False,
-            'message': 'Ongoing order'
+            'message': 'Ongoing order',
+            'order_id': present_order['order_id']
         }
     return {
         'available': True,
