@@ -30,11 +30,11 @@ def any_present_ongoing_order(table: Table) -> dict:
     )
     if present_orders.count() > 0:
         order = present_orders.first()
-        if order['eod_record_date'] is None:
-            return {
-                'present': True,
-                'order_id': order['id']
-            }
+        # if order['eod_record_date'] is None:
+        return {
+            'present': True,
+            'order_id': order['id']
+        }
 
     served_unpaid_orders = Order.objects.values('id', 'eod_record_date').filter(
         table=table,
@@ -45,11 +45,11 @@ def any_present_ongoing_order(table: Table) -> dict:
     )
     if served_unpaid_orders.count() > 0:
         order = served_unpaid_orders.first()
-        if order['eod_record_date'] is None:
-            return {
-                'present': True,
-                'order_id': order['id']
-            }
+        # if order['eod_record_date'] is None:
+        return {
+            'present': True,
+            'order_id': order['id']
+        }
     return {'present': False}
 
 
