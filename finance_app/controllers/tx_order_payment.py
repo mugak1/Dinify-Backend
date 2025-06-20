@@ -83,16 +83,16 @@ class OrderPaymentTransaction:
                 }
 
         print(f"{str(order.pk)} - {amount} - {transaction_amount} - {payment_form}")
-        return {
-            'status': 400,
-            'message': 'Blocking all payments for now.',
-            'data': {
-                'order': str(order.pk),
-                'amount': amount,
-                'transaction_amount': transaction_amount,
-                'payment_form': payment_form
-            }
-        }
+        # return {
+        #     'status': 400,
+        #     'message': 'Blocking all payments for now.',
+        #     'data': {
+        #         'order': str(order.pk),
+        #         'amount': amount,
+        #         'transaction_amount': transaction_amount,
+        #         'payment_form': payment_form
+        #     }
+        # }
         if amount is None:
             return {
                 'status': 400,
