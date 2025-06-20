@@ -67,7 +67,7 @@ class OrderPaymentTransaction:
             }
         tip_amount = clean_amount(Decimal(tip_amount))
 
-        if payment_form is PaymentForm_Split:
+        if payment_form == PaymentForm_Split:
             print("inside split payment form", amount)
             if amount is None:
                 return {
@@ -75,7 +75,7 @@ class OrderPaymentTransaction:
                     'message': 'Specify an amount for the split payment.'
                 }
 
-        if payment_form is PaymentForm_Split:
+        if payment_form == PaymentForm_Split:
             if transaction_amount >= clean_amount(Decimal(order.actual_cost)):
                 return {
                     'status': 400,
