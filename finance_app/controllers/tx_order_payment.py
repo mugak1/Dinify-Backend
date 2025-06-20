@@ -71,10 +71,15 @@ class OrderPaymentTransaction:
                 }
 
         print(f"{str(order.pk)} - {amount} - {transaction_amount} - {payment_form}")
-        return {
-            'status': 400,
-            'message': 'Blocking all payments for now.'
-        }
+        # return {
+        #     'status': 400,
+        #     'message': 'Blocking all payments for now.'
+        # }
+        if amount is None:
+            return {
+                'status': 400,
+                'message': 'Invalid amount'
+            }
 
         if payment_form is PaymentForm_Split:
             if transaction_amount >= clean_amount(Decimal(order.actual_cost)):
