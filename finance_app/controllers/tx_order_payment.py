@@ -62,12 +62,16 @@ class OrderPaymentTransaction:
         transaction_amount = clean_amount(Decimal(order.actual_cost))
         tip_amount = clean_amount(Decimal(tip_amount))
 
+        print(f"{str(order.pk)} - {amount} - {transaction_amount} - {payment_form}")
+        return {
+            'status': 400,
+            'message': 'Blocking all payments for now.'
+        }
+
         if payment_form is PaymentForm_Split:
             print("inside split payment form", amount)
             if amount is not None:
                 transaction_amount = clean_amount(Decimal(amount))
-
-        print(f"{str(order.pk)} - {amount} - {transaction_amount} - {payment_form}")
 
         if payment_form is PaymentForm_Split:
             if transaction_amount >= clean_amount(Decimal(order.actual_cost)):
