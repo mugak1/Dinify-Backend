@@ -19,40 +19,44 @@ from orders_app.controllers.orders.serializers import serialize_order_details
 from finance_app.models import DinifyTransaction
 
 
-
 def determine_effective_unit_price(
     menu_item: MenuItem,
-    option: Optional[int] = None
+    options: dict = None
 ) -> dict:
     unit_price = menu_item.primary_price
     effective_unit_price = unit_price
 
-    if option is not None:
-        if option < 0:
-            return {
-                'status': 400,
-                'message': f'Invalid item option selected for item, {menu_item.name}'
-            }
+    # options = { 0: [0,1], 1: [0,1] }
 
-    # determine the option considered
-    item_options = menu_item.options.get('options', [])
-    if option is not None:
-        if option < len(item_options):
-            effective_unit_price = item_options[option].get('cost')
-            if effective_unit_price is None:
+    if options is not None:
+        # check if any key in the options is less than 0
+        for key, value in options.items():
+            if key < 0 or any(v < 0 for v in value):
                 return {
                     'status': 400,
-                    'message': f'Selected option for item, {menu_item.name}, has no cost'
+                    'message': f'Invalid options selected for item, {menu_item.name}'
                 }
-            return {
-                'status': 200,
-                'price': effective_unit_price
-            }
-        else:
-            return {
-                'status': 400,
-                'message': f'Invalid item option selected for item, {menu_item.name}'
-            }
+
+
+    # determine the option considered
+    # item_options = menu_item.options.get('options', [])
+    # if option is not None:
+    #     if option < len(item_options):
+    #         effective_unit_price = item_options[option].get('cost')
+    #         if effective_unit_price is None:
+    #             return {
+    #                 'status': 400,
+    #                 'message': f'Selected option for item, {menu_item.name}, has no cost'
+    #             }
+    #         return {
+    #             'status': 200,
+    #             'price': effective_unit_price
+    #         }
+    #     else:
+    #         return {
+    #             'status': 400,
+    #             'message': f'Invalid item option selected for item, {menu_item.name}'
+    #         }
 
     # consideration for the discount
     if menu_item.running_discount:
@@ -108,6 +112,14 @@ def determine_effective_unit_price(
                 effective_unit_price = unit_price - (unit_price * discount_percentage/100)
             if discount_amount > 0:
                 effective_unit_price = unit_price - discount_amount
+
+    # add the cost of the options
+    if options is not None:
+        item_options = menu_item.options.get('options', [])
+        for key, value in options.items():
+            option_item = item_options[key]
+            option_price = option_item.get('cost', 0)
+            effective_unit_price += option_price
 
     return {
         'status': 200,
@@ -344,6 +356,8 @@ def v2_initiate_order(
             'status': 400,
             'message': MESSAGES.get('NO_ORDER_ITEMS')
         }
+
+    # for each order item, check if the options are applicable
 
     # check that the table does not have any other ongoing order
     table = Table.objects.get(pk=table_id)

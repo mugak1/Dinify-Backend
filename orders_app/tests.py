@@ -216,16 +216,22 @@ class TestOrderFunctions(TestCase):
         menu_item = MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME)
         effective_unit_price = determine_effective_unit_price(
             menu_item=menu_item,
-            option=0
+            options={
+                0: []
+            }
         )
         self.assertEqual(effective_unit_price['status'], 200)
-        self.assertEqual(effective_unit_price['price'], 1100)
+        self.assertEqual(effective_unit_price['price'], 2000)
 
         effective_unit_price = determine_effective_unit_price(
             menu_item=menu_item,
-            option=1
+            options={
+                0: [],
+                1: []
+            }
         )
-        self.assertEqual(effective_unit_price['status'], 400)
+        self.assertEqual(effective_unit_price['status'], 200)
+        self.assertEqual(effective_unit_price['price'], 3500)
 
     def test_add_order_item(self):
         order_record = Order.objects.get(
@@ -295,6 +301,13 @@ class TestOrderFunctions(TestCase):
             {
                 'item': str(menu_item1.pk),
                 'quantity': 2
+            },
+            {
+                'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
+                'quantity': 1,
+                'option': 0,
+                'choice': 1,
+                'extras': [str(menu_item1.pk), str(menu_item2.pk)]
             },
             {
                 'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),

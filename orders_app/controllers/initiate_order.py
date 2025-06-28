@@ -122,6 +122,12 @@ def initiate_order(data):
         try:
             menu_item = MenuItem.objects.get(pk=item['item'])
 
+            # check if options are applicable
+            item_options = menu_item.options
+            # try to make options a dict
+            if isinstance(item_options, str):
+                pass
+
             unit_price = menu_item.primary_price
             effective_unit_price = unit_price
             if menu_item.running_discount:
