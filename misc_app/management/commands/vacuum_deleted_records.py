@@ -64,9 +64,13 @@ class ConVacuumDeletedRecords:
                     new_name = f"{model['model'].__name__}_autodel{deletion_count}"
                 else:
                     new_name = f"{getattr(rec, model['rename_field'])}_autodel{deletion_count}"
+                try:
+                    if len(new_name) > 255:
+                        new_name = new_name[:255]
+                except Exception as e:
+                    print(f"Error truncating new_name: {e}")
                 setattr(rec, model['rename_field'], new_name)
                 rec.vacuumed = True
-                print(f"Renaming {model['model'].__name__} {rec.id} to {new_name}")
                 rec.save()
 
                 # TODO save action to mongodb as a log
