@@ -1,6 +1,10 @@
 # DINIFY BACKEND
 The backend application for dinify_project.
 
+# Requirements
+- Python 3.9.6
+- requirements.txt
+
 # Getting started
 - Knowledge of Python, Django, and REST APIs is required.
 - If you know django, then you know what to do.

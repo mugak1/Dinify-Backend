@@ -58,7 +58,7 @@ from dinify_backend.configss.string_definitions import (
     PaymentStatus_Paid,
     PaymentStatus_Pending,
     RESTAURANT_OWNER,
-    RESTAURANT_MANAGER
+    RESTAURANT_MANAGER, OrderStatus_Initiated
 )
 
 from users_app.controllers.permissions_check import (
@@ -455,6 +455,7 @@ class RestaurantSetupEndpoint(APIView):
 
                 if request.GET.get('status') == 'active':
                     orm_filter['order_status__in'] = [
+                        OrderStatus_Initiated,
                         OrderStatus_Pending,
                         OrderStatus_Preparing,
                         OrderStatus_Served
@@ -468,6 +469,7 @@ class RestaurantSetupEndpoint(APIView):
                 if request.GET.get('status') == 'all':
                     orm_filter['order_status__in'] = [
                         # OrderStatus_Pending,
+                        OrderStatus_Initiated,
                         OrderStatus_Preparing,
                         # OrderStatus_Served,
                         OrderStatus_Cancelled,
