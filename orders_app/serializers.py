@@ -86,7 +86,8 @@ class SerializerListGetOrder(ModelSerializer):
 
     def get_count_items_considered(self, order):
         return OrderItem.objects.values('id').filter(
-            order=order
+            order=order,
+            deleted=False,
         ).exclude(status__in=[OrderItemStatus_Unavailable, OrderStatus_Cancelled]).count()
 
 
