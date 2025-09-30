@@ -127,6 +127,61 @@ def determine_effective_unit_price(
     }
 
 
+def determine_existing_order_item(item: dict, order_id: str) -> bool:
+    menu_item = MenuItem.objects.get(pk=item['item'])
+    existing_item = OrderItem.objects.filter(
+        order__id=order_id,
+        item=menu_item,
+        deleted=False
+    )
+
+    if existing_item.exists():
+        extras = item.get('extras')
+        existing_item_extras = OrderItem.objects.filter(parent_item=existing_item[0])
+
+        if existing_item_extras.count() == 0:
+            if extras is None:
+                return True
+            if len(extras) == 0:
+                return True
+
+        if len(extras) == existing_item_extras.count():
+            for existing_item in existing_item_extras:
+                if str(existing_item.item.pk) not in extras:
+                    return False
+            return True
+    return False
+
+
+def update_item_quantity(
+    item: dict,
+    order_id: str
+) -> dict:
+    menu_item = MenuItem.objects.get(pk=item['item'])
+    existing_item = OrderItem.objects.get(
+        order__id=order_id,
+        item=menu_item,
+        deleted=False
+    )
+    new_quantity = existing_item.quantity + item['quantity']
+    new_total_cost = existing_item.unit_price * new_quantity
+    new_discounted_cost = existing_item.discounted_price * new_quantity
+    new_savings = new_total_cost - new_discounted_cost
+
+    existing_item.quantity = new_quantity
+    existing_item.total_cost = new_total_cost
+    existing_item.discounted_cost = new_discounted_cost
+    existing_item.savings = new_savings
+
+    existing_item.save()
+
+    return {
+        'status': 200,
+        'message': 'Order item quantity has been updated successfully.'
+    }
+
+
+
 def add_order_item(
     item: dict,
     order_id: str
@@ -137,6 +192,11 @@ def add_order_item(
     # process item extras
     menu_item = MenuItem.objects.get(pk=item['item'])
     unit_price = menu_item.primary_price
+
+    # check if the item already exists in the order so that we just update the quantity
+    existing_item = determine_existing_order_item(item=item, order_id=order_id)
+    if existing_item:
+        return update_item_quantity(item=item, order_id=order_id)
 
     option = item.get('option', None)
     option_cost = None

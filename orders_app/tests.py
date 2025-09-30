@@ -35,7 +35,8 @@ from orders_app.controllers.v2_initiate_order import (
     update_order_amounts,
     v2_initiate_order,
     handle_add_order_items,
-    check_options_requirements
+    check_options_requirements,
+    determine_existing_order_item
 )
 
 
@@ -349,18 +350,19 @@ class TestOrderFunctions(TestCase):
             items=items
         )
         self.assertEqual(response['status'], 400)
+        order_item1 = {
+            'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
+            'quantity': 1,
+            'options': {0: [1]},
+            'extras': [str(menu_item1.pk), str(menu_item2.pk)]
+        }
 
         items = [
             {
                 'item': str(menu_item1.pk),
                 'quantity': 2
             },
-            {
-                'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
-                'quantity': 1,
-                'options': {0: [1]},
-                'extras': [str(menu_item1.pk), str(menu_item2.pk)]
-            },
+            order_item1,
         ]
         response = v2_initiate_order(
             restaurant_id=str(restaurant.pk),
@@ -368,6 +370,14 @@ class TestOrderFunctions(TestCase):
             items=items
         )
         self.assertEqual(response['status'], 200)
+
+        # checking that the order item was created
+        order_id = str(response['data']['order_details']['id'])
+        response_existing = determine_existing_order_item(
+            item=order_item1,
+            order_id=order_id
+        )
+        self.assertEqual(response_existing, True)
 
 
 
