@@ -438,8 +438,7 @@ class RestaurantSetupEndpoint(APIView):
         filter_params = request.GET.copy()
         if config_detail == 'orders':
             if 'status' in request.GET:
-                filter_params.pop('status')
-
+                filter_params.pop('status')A
         orm_filter = define_filter_params(filter_params, config_detail)
 
         if config_detail == 'orders':
@@ -455,7 +454,7 @@ class RestaurantSetupEndpoint(APIView):
 
                 if request.GET.get('status') == 'active':
                     orm_filter['order_status__in'] = [
-                        OrderStatus_Initiated,
+                        # OrderStatus_Initiated,
                         OrderStatus_Pending,
                         OrderStatus_Preparing,
                         OrderStatus_Served
@@ -469,9 +468,13 @@ class RestaurantSetupEndpoint(APIView):
                 if request.GET.get('status') == 'all':
                     orm_filter['order_status__in'] = [
                         # OrderStatus_Pending,
-                        OrderStatus_Initiated,
-                        OrderStatus_Preparing,
+                        # OrderStatus_Initiated,
+                        # OrderStatus_Preparing,
                         # OrderStatus_Served,
+                        # OrderStatus_Cancelled,
+                        # OrderStatus_Refunded,
+
+                        OrderStatus_Paid,
                         OrderStatus_Cancelled,
                         OrderStatus_Refunded
                     ]
