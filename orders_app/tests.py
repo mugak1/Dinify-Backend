@@ -353,7 +353,7 @@ class TestOrderFunctions(TestCase):
         order_item1 = {
             'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
             'quantity': 1,
-            'options': {0: [1]},
+            'options': {"0": [1]},
             'extras': [str(menu_item1.pk), str(menu_item2.pk)]
         }
 

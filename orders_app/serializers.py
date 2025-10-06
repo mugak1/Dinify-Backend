@@ -39,7 +39,7 @@ class SerializerListOrderItem(ModelSerializer):
             'options', 'cost_of_options',
             'actual_cost', 'status',
             'deleted', 'deletion_reason',
-            'time_last_updated'
+            'time_last_updated',
         )
 
     def get_item(self, item):
