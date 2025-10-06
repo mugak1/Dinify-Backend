@@ -181,7 +181,6 @@ def update_item_quantity(
     }
 
 
-
 def add_order_item(
     item: dict,
     order_id: str
@@ -216,6 +215,7 @@ def add_order_item(
     effective_unit_price = price_selection.get('price')
     if option is not None:
         effective_unit_price = option_cost
+
     total_cost = unit_price * item['quantity']
     discounted_cost = effective_unit_price * item['quantity']
     savings = total_cost - discounted_cost
