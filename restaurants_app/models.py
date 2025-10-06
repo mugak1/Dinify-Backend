@@ -173,6 +173,7 @@ class MenuItem(BaseModel):
     # if the kitchen can process the item or not
     available = models.BooleanField(default=True)
     is_extra = models.BooleanField(default=False)
+    is_special = models.BooleanField(default=False)
 
     options = models.JSONField(default=dict)
     # e.g. {

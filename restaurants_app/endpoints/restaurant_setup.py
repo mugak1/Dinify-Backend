@@ -438,7 +438,7 @@ class RestaurantSetupEndpoint(APIView):
         filter_params = request.GET.copy()
         if config_detail == 'orders':
             if 'status' in request.GET:
-                filter_params.pop('status')A
+                filter_params.pop('status')
         orm_filter = define_filter_params(filter_params, config_detail)
 
         if config_detail == 'orders':
