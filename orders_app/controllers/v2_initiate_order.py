@@ -208,6 +208,26 @@ def add_order_item(
         option_name = option['name']
         option_cost = option['cost']
 
+    # handling multiple options
+    selected_options = []
+    item_options = item.get('options')
+    if item_options is not None:
+        if isinstance(item_options, dict):
+            for key, value in item_options.items():
+                index = None
+                try:
+                    index = int(key)
+                except ValueError:
+                    pass
+                if isinstance(index, int):
+                    option_detail = menu_item.options.get('options')[index]
+                    option_name = option_detail['name']
+                    option_cost = option_detail['cost']
+                selected_options.append({
+                    'option_name': option_name,
+                    'option_cost': option_cost,
+                })
+
     price_selection = determine_effective_unit_price(menu_item=menu_item)
     if price_selection.get('status') != 200:
         return price_selection
@@ -229,6 +249,8 @@ def add_order_item(
         'choice': choice,
         'option_cost': option_cost,
         'quantity': item['quantity'],
+
+        'options': selected_options,
 
         'unit_price': unit_price,
         'discounted_price': effective_unit_price,
