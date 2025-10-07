@@ -29,6 +29,7 @@ class SerializerPutOrderItem(ModelSerializer):
 
 class SerializerListOrderItem(ModelSerializer):
     item = SerializerMethodField()
+    extra_items = SerializerMethodField()
 
     class Meta:
         model = OrderItem
@@ -39,7 +40,7 @@ class SerializerListOrderItem(ModelSerializer):
             'options', 'cost_of_options',
             'actual_cost', 'status',
             'deleted', 'deletion_reason',
-            'time_last_updated',
+            'time_last_updated', 'extra_items'
         )
 
     def get_item(self, item):
@@ -48,6 +49,25 @@ class SerializerListOrderItem(ModelSerializer):
             'name': item.item.name,
             'is_special': item.item.is_special,
         }
+
+    def get_extra_items(self, item):
+        extras = []
+        extra_items = OrderItem.objects.filter(order_item=item)
+        for extra in extra_items:
+            extras.append({
+                'id': extra.pk,
+                'name': extra.item.name,
+                'quantity': extra.quantity,
+                'unit_price': extra.unit_price,
+                'discounted_price': extra.discounted_price,
+                'savings': extra.savings,
+                'actual_cost': extra.actual_cost,
+                'status': extra.status,
+                'deleted': extra.deleted,
+                'deletion_reason': extra.deletion_reason,
+                'time_last_updated': extra.time_last_updated
+            })
+        return extras
 
 
 class SerializerListGetOrder(ModelSerializer):
