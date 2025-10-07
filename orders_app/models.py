@@ -81,6 +81,7 @@ class OrderItem(BaseModel):
     unit_price = models.FloatField()
     discounted_price = models.FloatField()
     discounted = models.BooleanField(default=False)
+    unit_cost_of_options = models.FloatField(null=True)
 
     options = models.JSONField(default=list)
 

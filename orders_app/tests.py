@@ -39,6 +39,8 @@ from orders_app.controllers.v2_initiate_order import (
     determine_existing_order_item
 )
 
+from orders_app.controllers.con_orders import ConOrder
+
 
 def seed_order():
     """
@@ -379,7 +381,69 @@ class TestOrderFunctions(TestCase):
         )
         self.assertEqual(response_existing, True)
 
+        order = Order.objects.get(id=order_id)
+        order_items = OrderItem.objects.filter(order=order)
 
+        for x in order_items:
+            print(x.total_cost, x.discounted_cost, x.options, x.cost_of_options)
+
+    def test_con_order(self):
+        menu_item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+        menu_item2 = MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME)
+        table = Table.objects.get(number=TEST_TABLE_NUMBER4)
+        restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+
+        items = [
+            {
+                'item': str(menu_item1.pk),
+                'quantity': 2
+            },
+            {
+                'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
+                'quantity': 1,
+                'extras': [str(menu_item1.pk), str(menu_item2.pk)]
+            },
+        ]
+        response = ConOrder.initiate_order(
+            restaurant_id=str(restaurant.pk),
+            table_id=str(table.pk),
+            items=items
+        )
+        self.assertEqual(response['status'], 400)
+        order_item1 = {
+            'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
+            'quantity': 1,
+            'options': {"0": [1]},
+            'extras': [str(menu_item1.pk), str(menu_item2.pk)]
+        }
+
+        items = [
+            {
+                'item': str(menu_item1.pk),
+                'quantity': 2
+            },
+            order_item1,
+        ]
+        response = ConOrder.initiate_order(
+            restaurant_id=str(restaurant.pk),
+            table_id=str(table.pk),
+            items=items
+        )
+        self.assertEqual(response['status'], 200)
+
+        # checking that the order item was created
+        order_id = str(response['data']['order_details']['id'])
+        response_existing = ConOrder.determine_existing_order_item(
+            item=order_item1,
+            order_id=order_id
+        )
+        self.assertEqual(response_existing, True)
+
+        order = Order.objects.get(id=order_id)
+        order_items = OrderItem.objects.filter(order=order)
+
+        for x in order_items:
+            print(x.total_cost, x.discounted_cost, x.options, x.cost_of_options)
 
     def test_handle_add_order_items(self):
         menu_item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)

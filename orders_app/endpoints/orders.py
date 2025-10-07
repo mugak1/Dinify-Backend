@@ -22,6 +22,7 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Cancelled,
     OrderStatus_Served
 )
+from orders_app.controllers.con_orders import ConOrder
 
 
 class OrdersEndpoint(APIView):
@@ -192,7 +193,15 @@ class V2OrdersEndpoint(APIView):
                     'message': 'Please provide the restaurant and table ID'
                 }
                 return Response(response, status=200)
-            response = v2_initiate_order(
+            # response = v2_initiate_order(
+            #     restaurant_id=restaurant_id,
+            #     table_id=table_id,
+            #     items=items,
+            #     order_remarks=order_remarks,
+            #     customer=customer,
+            #     created_by=created_by,
+            # )
+            response = ConOrder.initiate_order(
                 restaurant_id=restaurant_id,
                 table_id=table_id,
                 items=items,

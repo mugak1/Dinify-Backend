@@ -233,8 +233,16 @@ def add_order_item(
         return price_selection
 
     effective_unit_price = price_selection.get('price')
+
     if option is not None:
         effective_unit_price = option_cost
+
+    # get the cost of options
+    cost_of_options = 0.0
+    for opt in selected_options:
+        cost_of_options += opt.get('option_cost', 0.0)
+
+    effective_unit_price = effective_unit_price + cost_of_options
 
     total_cost = unit_price * item['quantity']
     discounted_cost = effective_unit_price * item['quantity']
@@ -256,6 +264,7 @@ def add_order_item(
         'discounted_price': effective_unit_price,
         'actual_price': effective_unit_price,
         'discounted': menu_item.running_discount,
+        'cost_of_options': cost_of_options,
 
         'total_cost': total_cost,
         'discounted_cost': discounted_cost,
