@@ -323,17 +323,17 @@ class ConOrder:
                         option_detail = menu_item.options.get('options')[index]
                         choices = option_detail.get('choices')
                         option_name = option_detail['name']
+                        names_of_choices = ''
                         if choices is not None:
                             if None in value:
                                 value.pop(value.index(None))
-                            names = ''
                             if len(choices) > 0:
-                                names += ', '.join([choices[v] for v in value if v < len(choices)])
-                                option_name = names
+                                names_of_choices += ', '.join([choices[v] for v in value if v < len(choices)])
                         option_cost = option_detail['cost']
                         selected_options.append({
                             'name': option_name,
                             'cost': option_cost,
+                            'choices': names_of_choices
                         })
 
         price_selection = ConOrder.determine_effective_unit_price(menu_item=menu_item, options=item_options)
