@@ -528,7 +528,7 @@ class RestaurantSetupEndpoint(APIView):
             'sectiongroups': OK_RETRIEVED_SECTION_GROUP,
             'menuitems': 'Successfully retrieved the menu items',
             'tables': 'Successfully retrieved the tables',
-            'orders': 'Successfully retrived the orders',
+            'orders': 'Successfully retrieved the orders',
             'orderreviews': 'Successfully retrieved the order reviews',
             'orderitemreviews': 'Successfully retrieved the order item reviews',
             'diningareas': 'Successfully retrieved the dining areas'

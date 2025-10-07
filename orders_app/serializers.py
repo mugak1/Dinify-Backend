@@ -45,7 +45,8 @@ class SerializerListOrderItem(ModelSerializer):
     def get_item(self, item):
         return {
             'id': item.item.pk,
-            'name': item.item.name
+            'name': item.item.name,
+            'is_special': item.item.is_special,
         }
 
 
