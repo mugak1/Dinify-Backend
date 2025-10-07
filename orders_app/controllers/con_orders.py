@@ -326,12 +326,10 @@ class ConOrder:
                         if choices is not None:
                             if None in value:
                                 value.pop(value.index(None))
-
                             names = ''
                             if len(choices) > 0:
                                 names += ', '.join([choices[v] for v in value if v < len(choices)])
-                                # option_name = choices[value]
-                            option_name = names
+                                option_name = names
                         option_cost = option_detail['cost']
                         selected_options.append({
                             'name': option_name,
