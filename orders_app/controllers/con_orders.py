@@ -103,9 +103,6 @@ class ConOrder:
                 return True
 
             options = item.get('options')
-
-
-
         return False
 
     @staticmethod
@@ -322,7 +319,14 @@ class ConOrder:
                         pass
                     if isinstance(index, int):
                         option_detail = menu_item.options.get('options')[index]
+                        choices = option_detail.get('choices')
                         option_name = option_detail['name']
+                        if choices is not None:
+                            names = ''
+                            if len(choices) > 0:
+                                names += ', '.join([choices[v] for v in value if v < len(choices)])
+                                # option_name = choices[value]
+                            option_name = names
                         option_cost = option_detail['cost']
                         selected_options.append({
                             'name': option_name,
