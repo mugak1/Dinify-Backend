@@ -3,8 +3,10 @@ a user creating a restaurant on their own
 """
 import random
 from django.db import transaction
+
+from misc_app.controllers.save_action_log import save_action
 from restaurants_app.models import Restaurant
-from dinify_backend.configs import ROLES
+from dinify_backend.configs import ROLES, ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from dinify_backend.configss.required_information import REQUIRED_INFORMATION
 from restaurants_app.serializers import SerializerPutRestaurant, SerializerPutRestaurantEmployee
@@ -81,7 +83,19 @@ def create_restaurant(data: dict, auth_info: dict) -> dict:
                         'recipient_email': auth_info['email'],
                         'restaurant_id': record.data['id']
                     }).create_notification()
-
+                    # save to the action log, i.e. creating a restaurant
+                    save_action(
+                        affected_model='Restaurant',
+                        affected_record=str(record.data['id']),
+                        action='created-restaurant',
+                        narration='Created a new restaurant record',
+                        result=ACTION_LOG_STATUSES.get('success'),
+                        user_id=auth_info['user_id'],
+                        username=auth_info['email'],
+                        submitted_data=data,
+                        changes=None,
+                        filter_information=None
+                    )
                     return {
                         'status': 200,
                         'message': MESSAGES.get('OK_CREATE_RESTAURANT'),
@@ -210,6 +224,34 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
                         'restaurant_name': data['name'],
                         'restaurant_id': record.data['id']
                     }).create_notification()
+
+                    # save action for creating a restaurant
+                    save_action(
+                        affected_model='Restaurant',
+                        affected_record=str(record.data['id']),
+                        action='created-restaurant',
+                        narration='Created a new restaurant record',
+                        result=ACTION_LOG_STATUSES.get('success'),
+                        user_id=auth_info['user_id'],
+                        username=auth_info['email'],
+                        submitted_data=data,
+                        changes=None,
+                        filter_information=None
+                    )
+
+                    # save action for creating employee mapping
+                    save_action(
+                        affected_model='RestaurantEmployee',
+                        affected_record=str(record.data['id']),
+                        action='added-employee-to-restaurant',
+                        narration='Added restaurant owner as an employee to the restaurant',
+                        result=ACTION_LOG_STATUSES.get('success'),
+                        user_id=auth_info['user_id'],
+                        username=auth_info['email'],
+                        submitted_data=data,
+                        changes=None,
+                        filter_information=None
+                    )
 
                     return {
                         'status': 200,
