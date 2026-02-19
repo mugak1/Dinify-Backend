@@ -2,12 +2,13 @@
 The backend application for dinify_project.
 
 # Requirements
-- Python 3.9.6
+- Python 3.9.6 +
+- PostgreSQL
+- MongoDB
 - requirements.txt
 
 # Getting started
 - Knowledge of Python, Django, and REST APIs is required.
-- If you know django, then you know what to do.
 
 # Code organisation | overview of directories
 The directory organisation builds on top of django's default directory structure. The overall structure is as follows:
@@ -18,7 +19,7 @@ xxx_app
 |__management i.e. where the management commands are defined
 ```
 
-# Understanding file and function naming conventions
+# Some file and function naming conventions | probably in later implementations
 - ConXXX - Controller class.
 - SerializerXXX - Serializer class.
 
@@ -31,8 +32,8 @@ xxx_app
 - Processing transactions | `process_transactions`
 
 # TODO
-- Refactor serializer files to smaller manageable ones, probably model based files.
+- Refactor serializer files to smaller manageable ones.
 - Refactor to minify endpoint handler files. this may go hand in hand with the refactor to adopt Class-scoped functions.
 - Refactor to adopt class implementations for the various functions. Apart from misc/controller functions, many of these functions are likely in the same files or in the same controller folders.
-- Refactor to have a single file for string definitions. This may be a huge file but best to keep all string in one location.
+- Refactor to have a single file for string definitions. This may be a huge file but best to keep all strings in one location.
 - Refactor to have single file for all definitions of non-variable dependent messages.

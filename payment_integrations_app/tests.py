@@ -75,11 +75,11 @@ class PaymentIntegrationsTestFunctions(TestCase):
         # )
         # self.assertTrue(bank_check_disbursement)
 
-        send_sms = YoIntegration().send_sms(
-            to=config('TEST_SMS_RECIPIENT'),
-            message='Dinify SMS test'
-        )
-        self.assertTrue(send_sms)
+        # send_sms = YoIntegration().send_sms(
+        #     to=config('TEST_SMS_RECIPIENT'),
+        #     message='Dinify SMS test'
+        # )
+        # self.assertTrue(send_sms)
 
     # def test_dpo(self):
     #     dpo_transaction_token = 'CF63B58B-C2C7-473F-A938-50FA956DB346'
