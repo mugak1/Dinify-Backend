@@ -31,4 +31,4 @@ class RestaurantManagerActionsEndpoint(APIView):
                 auth=auth,
                 user=request.user
             )
-        return Response(response, status=200)
+        return Response(response, status=response.get('status', 200))

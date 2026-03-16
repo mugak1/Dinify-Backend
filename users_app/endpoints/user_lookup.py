@@ -36,10 +36,10 @@ class UserLookupEndpoint(APIView):
         except Exception as error:
             print(f"Error while looking up user: {error}")
             response = {
-                'status': 400,
+                'status': 404,
                 'message': 'User not found'
             }
-            return Response(response, status=200)
+            return Response(response, status=404)
 
 
 class MsisdnLookupEndpoint(APIView):
@@ -60,11 +60,11 @@ class MsisdnLookupEndpoint(APIView):
         except Exception as error:
             print(f"Error while looking up user: {error}")
             response = {
-                'status': 400,
+                'status': 404,
                 'message': 'User not found',
                 'data': {
                     'found': False
                 }
             }
-        
-        return Response(response, status=200)
+
+        return Response(response, status=response['status'])

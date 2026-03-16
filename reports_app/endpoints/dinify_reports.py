@@ -28,4 +28,4 @@ class DinifyReportsEndpoint(APIView):
                 'status': 400,
                 'message': 'Invalid report specification'
             }
-        return Response(response)
+        return Response(response, status=response.get('status', 200))

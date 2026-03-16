@@ -43,7 +43,7 @@ class OrdersEndpoint(APIView):
                         'status': 401,
                         'message': 'Please log in'
                     }
-                    return Response(response, status=200)
+                    return Response(response, status=401)
                 data['customer'] = None
                 data['created_by'] = str(user)
             else:
@@ -53,7 +53,7 @@ class OrdersEndpoint(APIView):
                 data['created_by'] = None
 
             response = initiate_order(data)
-            return Response(response, status=200)
+            return Response(response, status=response.get('status', 200))
 
         elif action == 'review':
             data = request.data
@@ -64,14 +64,14 @@ class OrdersEndpoint(APIView):
                     rating=data.get('rating'),
                     review=data.get('review')
                 )
-                return Response(response, status=200)
+                return Response(response, status=response.get('status', 200))
             except Exception as error:
                 print(f"Error while reviewing order: {error}")
                 response = {
                     'status': 400,
                     'message': 'Sorry, an error occurred.'
                 }
-                return Response(response, status=200)
+                return Response(response, status=400)
         elif action == 'block-review':
             # check that the token is provided
             if request.user is None or request.user.is_anonymous:
@@ -88,14 +88,14 @@ class OrdersEndpoint(APIView):
                     order_item=data.get('order_item'),
                     block_reason=data.get('block_reason')
                 )
-                return Response(response, status=200)
+                return Response(response, status=response.get('status', 200))
             except Exception as error:
                 print(f"Error while blocking review: {error}")
                 response = {
                     'status': 400,
                     'message': 'Sorry, an error occurred while blocking the review.'
                 }
-                return Response(response, status=200)
+                return Response(response, status=400)
 
     def put(self, request, action):
         if action in ['submit', 'prepare', 'cancel']:
@@ -127,7 +127,7 @@ class OrdersEndpoint(APIView):
                 user=user
             )
 
-            return Response(response, status=200)
+            return Response(response, status=response.get('status', 200))
 
         elif action in ['update-item']:
             data = request.data
@@ -148,7 +148,7 @@ class OrdersEndpoint(APIView):
                 user=request.user
             )
 
-            return Response(response, status=200)
+            return Response(response, status=response.get('status', 200))
 
 
 class V2OrdersEndpoint(APIView):
@@ -176,7 +176,7 @@ class V2OrdersEndpoint(APIView):
                         'status': 401,
                         'message': 'Please log in'
                     }
-                    return Response(response, status=200)
+                    return Response(response, status=401)
                 created_by = request.user
             else:
                 if user is not None:
@@ -192,7 +192,7 @@ class V2OrdersEndpoint(APIView):
                     'status': 400,
                     'message': 'Please provide the restaurant and table ID'
                 }
-                return Response(response, status=200)
+                return Response(response, status=400)
             # response = v2_initiate_order(
             #     restaurant_id=restaurant_id,
             #     table_id=table_id,
@@ -209,7 +209,7 @@ class V2OrdersEndpoint(APIView):
                 customer=customer,
                 created_by=created_by,
             )
-            return Response(response, status=200)
+            return Response(response, status=response.get('status', 200))
 
         elif action == 'add-items':
             data = request.data
@@ -219,7 +219,7 @@ class V2OrdersEndpoint(APIView):
                 order_id=order_id,
                 items=items
             )
-            return Response(response, status=200)
+            return Response(response, status=response.get('status', 200))
 
     def delete(self, request, action):
         if action == 'add-items':
@@ -230,7 +230,7 @@ class V2OrdersEndpoint(APIView):
                 reason=data.get('reason'),
                 user=request.user
             )
-            return Response(response, status=200)
+            return Response(response, status=response.get('status', 200))
 
     def get(self, request, action):
         """
@@ -244,7 +244,7 @@ class V2OrdersEndpoint(APIView):
                     'status': 400,
                     'message': 'No order reference found'
                 }
-                return Response(response, status=200)
+                return Response(response, status=400)
 
             try:
                 order = Order.objects.get(id=order_id)
@@ -260,4 +260,4 @@ class V2OrdersEndpoint(APIView):
                     'status': 404,
                     'message': 'Order not found'
                 }
-            return Response(response, status=200)
+            return Response(response, status=response['status'])

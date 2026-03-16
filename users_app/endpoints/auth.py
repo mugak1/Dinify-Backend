@@ -3,7 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from users_app.controllers.self_register import self_register
 from users_app.controllers.login import login
-from users_app.controllers.reset_password import reset_password
+from users_app.controllers.reset_password import reset_password, initiate_password_reset
 from users_app.controllers.change_password import change_password
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from users_app.controllers.otp_manager import OtpManager
@@ -29,6 +29,10 @@ class UsersAuthenticationEndpoint(APIView):
                 username=request.data.get('username'),
                 password=request.data.get('password'),
                 source=request.data.get('source', 'restaurant')
+            )
+        elif action == "initiate-reset-password":
+            response = initiate_password_reset(
+                username=request.data.get('phone_number')
             )
         elif action == "reset-password":
             response = reset_password(
