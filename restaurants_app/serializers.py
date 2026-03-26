@@ -259,6 +259,7 @@ class SerializerPublicGetMenuItem(ModelSerializer):
         return extras
 
     def get_discount_percentage(self, menu_item):
+        from decimal import Decimal
         if not menu_item.running_discount:
             return 0
         if menu_item.discounted_price is None:
@@ -266,8 +267,8 @@ class SerializerPublicGetMenuItem(ModelSerializer):
         difference = menu_item.discounted_price - menu_item.primary_price
         if difference == 0:
             return 0
-        percentage = (difference / menu_item.primary_price) * 100
-        return round(percentage, 2)
+        percentage = (difference / menu_item.primary_price) * Decimal('100')
+        return float(round(percentage, 2))
 
 
 class SerializerPutTable(ModelSerializer):

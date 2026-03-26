@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
 from django.db import models
@@ -32,10 +34,10 @@ class Order(BaseModel):
     customer = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='user')
     customer_match_attempted = models.BooleanField(default=False)
 
-    total_cost = models.FloatField()  # the total cost of the order using primary prices
-    discounted_cost = models.FloatField()  # the total cost of the order using discounted prices
-    savings = models.FloatField()  # the total savings from the order i.e. discounted cost  - total cost  # noqa
-    actual_cost = models.FloatField()  # the actual cost that is payable by the customer
+    total_cost = models.DecimalField(max_digits=50, decimal_places=2)  # the total cost of the order using primary prices
+    discounted_cost = models.DecimalField(max_digits=50, decimal_places=2)  # the total cost of the order using discounted prices
+    savings = models.DecimalField(max_digits=50, decimal_places=2)  # the total savings from the order i.e. discounted cost  - total cost  # noqa
+    actual_cost = models.DecimalField(max_digits=50, decimal_places=2)  # the actual cost that is payable by the customer
     prepayment_required = models.BooleanField(default=False)
 
     total_paid = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)

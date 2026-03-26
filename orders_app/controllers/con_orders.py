@@ -1,5 +1,6 @@
 import logging
 
+from decimal import Decimal
 from django.db import transaction
 from django.db.models import Sum
 from datetime import datetime
@@ -196,8 +197,8 @@ class ConOrder:
             end_date = discount.get('end_date', '')
             start_time = discount.get('start_time', '')
             end_time = discount.get('end_time', '')
-            discount_percentage = discount.get('discount_percentage', 0.0)
-            discount_amount = discount.get('discount_amount', 0.0)
+            discount_percentage = Decimal(str(discount.get('discount_percentage', 0)))
+            discount_amount = Decimal(str(discount.get('discount_amount', 0)))
 
             # check if the discount is applicable
             # check if the discount is recurring
@@ -233,12 +234,12 @@ class ConOrder:
 
             if run_discount:
                 if discount_percentage > 0:
-                    effective_unit_price = unit_price - (unit_price * discount_percentage / 100)
+                    effective_unit_price = unit_price - (unit_price * discount_percentage / Decimal('100'))
                 if discount_amount > 0:
                     effective_unit_price = unit_price - discount_amount
 
         # add the cost of the options
-        cost_of_options = 0
+        cost_of_options = Decimal('0')
         if options is not None:
             item_options = menu_item.options.get('options', [])
             for key, value in options.items():
@@ -252,7 +253,7 @@ class ConOrder:
                         }
 
                 option_item = item_options[key]
-                option_price = option_item.get('cost', 0)
+                option_price = Decimal(str(option_item.get('cost', 0)))
                 cost_of_options += option_price
                 # effective_unit_price += option_price
 
@@ -433,8 +434,8 @@ class ConOrder:
             deleted=False,
             order=order
         )
-        total_cost = sum([item.total_cost for item in order_items])
-        discounted_cost = sum([item.discounted_cost for item in order_items])
+        total_cost = sum([Decimal(str(item.total_cost)) for item in order_items], Decimal('0'))
+        discounted_cost = sum([Decimal(str(item.discounted_cost)) for item in order_items], Decimal('0'))
         savings = total_cost - discounted_cost
         actual_cost = discounted_cost
 
@@ -445,7 +446,7 @@ class ConOrder:
         )
         total_paid = order_payments.aggregate(
             Sum('transaction_amount')
-        )['transaction_amount__sum'] or 0
+        )['transaction_amount__sum'] or Decimal('0')
 
         balance_payable = actual_cost - total_paid
 

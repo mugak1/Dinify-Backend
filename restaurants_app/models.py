@@ -1,6 +1,8 @@
 """
 models for the restaurant app
 """
+from decimal import Decimal
+
 from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
@@ -153,9 +155,9 @@ class MenuItem(BaseModel):
     name = models.CharField(max_length=255)
     description = models.TextField(null=True, blank=True)
     allergens = models.JSONField(default=list)
-    primary_price = models.FloatField()
+    primary_price = models.DecimalField(max_digits=50, decimal_places=2)
 
-    discounted_price = models.FloatField(null=True, blank=True)
+    discounted_price = models.DecimalField(max_digits=50, decimal_places=2, null=True, blank=True)
     running_discount = models.BooleanField(default=False)
     consider_discount_object = models.BooleanField(default=False)
     discount_description = models.TextField(null=True, blank=True)
