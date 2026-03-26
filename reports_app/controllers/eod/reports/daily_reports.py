@@ -1,5 +1,8 @@
+import logging
 from operator import le
 import pandas
+
+logger = logging.getLogger(__name__)
 from datetime import date, datetime
 from dinify_backend.mongo_db import MONGO_DB
 from dinify_backend.configss.string_definitions import (
@@ -289,7 +292,7 @@ def report_on_transactions(restaurant_id: str, eod_date: date) -> dict:
             summary[f'stats_by_transactiontype_percentage_{transaction_type.lower()}'] = 0.0
         else:
             type_transactions = df_transactions[df_transactions['transaction_type'] == transaction_type]
-            print('\n\n', type_transactions.shape, '\n\n')
+            logger.debug("Transaction type shape: %s", type_transactions.shape)
             count = type_transactions.shape[0]
             amount = type_transactions['transaction_amount'].sum() if not type_transactions.empty else 0.0
             percentage = (count / no_transactions) * 100
@@ -362,7 +365,7 @@ def generate_restaurant_daily_report(restaurant_id: int, eod_date: date) -> None
     transactions_report = report_on_transactions(restaurant_id, eod_date)
     report.update(transactions_report)
 
-    print('\n\n', report, '\n\n')
+    logger.debug("Daily report: %s", report)
 
     report['eod_date'] = eod_date
     report['report_type'] = 'daily'

@@ -1,6 +1,8 @@
 """
 handle the submission of an order
 """
+import logging
+
 from datetime import datetime
 from typing import Union
 from django.db import transaction
@@ -18,6 +20,8 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Cancelled, OrderStatus_Preparing,
     OrderStatus_Served
 )
+
+logger = logging.getLogger(__name__)
 
 
 def update_order_status(
@@ -41,7 +45,7 @@ def update_order_status(
                     'message': 'This order cannot be submitted.'
                 }
         order.order_status = new_status
-        print(f'The submitted user is {user}')
+        logger.debug("The submitted user is %s", user)
         if user is not None:
             # order.last_updated_by = User.objects.get(pk=user)
             order.last_updated_by = user
@@ -60,7 +64,7 @@ def update_order_status(
             'message': OK_ORDER_UPDATED
         }
     except Exception as error:
-        print(f"ErrorUpdateOrderStatus: {error}")
+        logger.error("ErrorUpdateOrderStatus: %s", error)
         return {
             'status': 400,
             'message': ERR_ORDER_UPDATED

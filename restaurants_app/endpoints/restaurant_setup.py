@@ -3,7 +3,10 @@ endpoints for restaurant configurations.
 Refactoring needed to make it more maintainable.
 """
 import ast
+import logging
 from rest_framework.response import Response
+
+logger = logging.getLogger(__name__)
 from rest_framework.views import APIView
 from restaurants_app.controllers.create_restaurant import (
     create_restaurant,
@@ -95,7 +98,7 @@ def check_permission(user: User, record: str, id: str):
                 user_id=str(user.id),
                 restaurant_id=restaurant_id
             )
-            print(restaurant_id, user.id, roles)
+            logger.debug("check_permission: restaurant_id=%s, user_id=%s, roles=%s", restaurant_id, user.id, roles)
             restaurant_roles = [RESTAURANT_OWNER, RESTAURANT_MANAGER]
             if len(roles) > 0:
                 if any(role in restaurant_roles for role in roles):
@@ -115,7 +118,7 @@ class RestaurantSetupEndpoint(APIView):
         try:
             data = data.dict()
         except Exception as error:
-            print(f"Error: {error}")
+            logger.debug("Error converting data to dict: %s", error)
 
         # check if the actor has rights to perform the action
         if not check_permission(
@@ -148,7 +151,7 @@ class RestaurantSetupEndpoint(APIView):
                 skip_otp=True
             )
         except Exception as error:
-            print(f"Error while creating employee: {error}")
+            logger.error("Error while creating employee: %s", error)
             response = {
                 'status': 500,
                 'message': "An error occurred while creating the employee. Please check that you have provided all the details."
@@ -174,7 +177,7 @@ class RestaurantSetupEndpoint(APIView):
             try:
                 post_data = post_data.dict()
             except Exception as error:
-                print(f"Error: {error}")
+                logger.debug("Error converting data to dict: %s", error)
 
             data = post_data.copy()
             data['owner'] = auth['user_id']
@@ -198,7 +201,7 @@ class RestaurantSetupEndpoint(APIView):
             try:
                 post_data = post_data.dict()
             except Exception as error:
-                print(f"Error: {error}")
+                logger.debug("Error converting data to dict: %s", error)
 
             data = post_data.copy()
             response = admin_register_restaurant(
@@ -304,7 +307,7 @@ class RestaurantSetupEndpoint(APIView):
         try:
             post_data = post_data.dict()
         except Exception as error:
-            print(f"Error: {error}")
+            logger.debug("Error converting data to dict: %s", error)
 
         # attempt to auto approve menu items if a first time approval has already been done
         if config_detail in ['menusections', 'sectiongroups', 'menuitems']:
@@ -328,7 +331,7 @@ class RestaurantSetupEndpoint(APIView):
                 post_data['number'] = str(post_data.get('number'))
                 post_data['str_number'] = str(post_data.get('number'))
             except Exception as error:
-                print(f"Error converting table number to string: {error}")
+                logger.error("Error converting table number to string: %s", error)
 
         if config_detail == 'section-tables':
             dining_area = None
@@ -413,7 +416,7 @@ class RestaurantSetupEndpoint(APIView):
                     )
                 SectionGroup.objects.bulk_create(group_records)
             except Exception as error:
-                print(f"BulkCreateSectionGroupsError: {error}")
+                logger.error("BulkCreateSectionGroupsError: %s", error)
                 response['message'] = f"{response['message']}. However, an error while defining the section groups." # noqa
 
         return Response(
@@ -486,8 +489,8 @@ class RestaurantSetupEndpoint(APIView):
 
         if 'deleted' not in request.GET:
             orm_filter['deleted'] = False
-        print(f"The ORM filter is: {orm_filter}")
-        print(f"The GET params are: {request.GET}")
+        logger.debug("The ORM filter is: %s", orm_filter)
+        logger.debug("The GET params are: %s", request.GET)
 
         if config_detail == 'menuitems':
             # orm_filter['section_group__deleted'] = False
@@ -658,7 +661,7 @@ class RestaurantSetupEndpoint(APIView):
                 if type(put_data) is not dict:
                     put_data = put_data.dict()
             except Exception as error:
-                print(f"Error parsing data to dict: {error}")
+                logger.error("Error parsing data to dict: %s", error)
 
             options = put_data.get('options')
             if options is not None:
@@ -782,7 +785,7 @@ class RestaurantSetupEndpoint(APIView):
             }
             return Response(response, status=200)
         except Exception as error:
-            print(f"Error while getting record detail: {error}")
+            logger.error("Error while getting record detail: %s", error)
             response = {
                 'status': 400,
                 'message': ERR_GENERAL

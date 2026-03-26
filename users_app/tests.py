@@ -293,8 +293,16 @@ class PasswordResetSecurityTests(TestCase):
         # containing the password. The new code should NOT call Notification at all.
         notification_mock = mocks[2]  # _PATCH_NOTIFICATION is outermost
         for call in notification_mock.call_args_list:
-            # This should not be reached at all for forgot-password
-            pass
-        # If Notification was called, ensure no 'password' key in msg_data
-        # (Notification is constructed, not called via create_notification mock)
-        # The key assertion: reset_password no longer imports or calls Notification
+            args, kwargs = call
+            if args:
+                msg_data = args[0] if isinstance(args[0], dict) else kwargs.get('msg_data', {})
+            else:
+                msg_data = kwargs.get('msg_data', {})
+            self.assertNotEqual(
+                msg_data.get('msg_type'), 'forgot-password',
+                "Notification with msg_type='forgot-password' should not be created"
+            )
+            self.assertNotIn(
+                'password', msg_data,
+                "Notification msg_data should not contain a 'password' key"
+            )

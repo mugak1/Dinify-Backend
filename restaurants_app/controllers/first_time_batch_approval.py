@@ -1,5 +1,8 @@
+import logging
 from typing import Optional
 from django.db import transaction
+
+logger = logging.getLogger(__name__)
 from restaurants_app.models import (
     Restaurant,
     MenuSection,
@@ -36,7 +39,7 @@ def check_permissions(
         else:
             return False
     except Exception as error:
-        print(f'FirstTimeBatchApprovalPermissionError: {error}')
+        logger.error("FirstTimeBatchApprovalPermissionError: %s", error)
         return False
 
 

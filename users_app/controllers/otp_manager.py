@@ -1,13 +1,17 @@
 from typing import Optional
+import logging
 import random
 import hashlib
 from decouple import config
-from datetime import datetime, timedelta
+from datetime import timedelta
+from django.utils import timezone
 from users_app.models import User, UserOtp
 from misc_app.controllers.notifications.notification import Notification
 from rest_framework_simplejwt.tokens import RefreshToken
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
 from notifications_app.controllers.messenger import Messenger
+
+logger = logging.getLogger(__name__)
 
 
 class OtpManager:
@@ -54,7 +58,7 @@ class OtpManager:
                 )
 
         except Exception as error:
-            print(f"OTP Error: {error}")
+            logger.error("OTP Error: %s", error)
         return True
 
     def verify_otp(
@@ -65,7 +69,7 @@ class OtpManager:
         email: Optional[str] = None
     ) -> dict:
         encrypted_otp = hashlib.sha256(otp.encode()).hexdigest()
-        time_now = datetime.now()
+        time_now = timezone.now()
 
         if user_id is not None:
             otps = UserOtp.objects.filter(
@@ -145,7 +149,7 @@ class OtpManager:
             elif identification == 'msisdn':
                 pass
         except Exception as error:
-            print(f"OTP Resend Error: {error}")
+            logger.error("OTP Resend Error: %s", error)
             return {
                 'status': 400,
                 'message': 'User not found'
@@ -154,7 +158,7 @@ class OtpManager:
         # if the purpose is login, check if there is a recent otp,
         # the otp should not be older than 5 minutes
         if purpose == 'login':
-            ten_minutes_ago = datetime.now() - timedelta(minutes=5)
+            ten_minutes_ago = timezone.now() - timedelta(minutes=5)
             try:
                 old_otps = UserOtp.objects.filter(
                     user_id=user.id,

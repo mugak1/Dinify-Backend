@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from users_app.controllers.update_user_profile import (
@@ -5,6 +7,8 @@ from users_app.controllers.update_user_profile import (
     update_user_profile
 )
 from users_app.controllers.profile_update_approvals import get_pending_profile_updates
+
+logger = logging.getLogger(__name__)
 
 
 class UserProfileEndpoint(APIView):
@@ -21,7 +25,7 @@ class UserProfileEndpoint(APIView):
             )
             return Response(response, status=response.get('status', 200))
         except Exception as error:
-            print(f"Error while updating profile: {error}")
+            logger.error("Error while updating profile: %s", error)
             response = {
                 'status': 400,
                 'message': 'Sorry, an error occurred.'
@@ -54,7 +58,7 @@ class V2UserProfileEndpoint(APIView):
                 )
                 return Response(response, status=response.get('status', 200))
             except Exception as error:
-                print(f"Error while updating profile: {error}")
+                logger.error("Error while updating profile: %s", error)
                 response = {
                     'status': 400,
                     'message': 'Sorry, an error occurred.'

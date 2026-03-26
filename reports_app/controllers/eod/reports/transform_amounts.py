@@ -1,5 +1,9 @@
+import logging
+
 from bson import ObjectId
 from dinify_backend.mongo_db import MONGO_DB
+
+logger = logging.getLogger(__name__)
 
 
 def transform_transaction_amounts():
@@ -53,7 +57,7 @@ def transform_account_amounts():
                     continue
                 amount_values[key] = round(float(value), 2)
             except Exception as error:
-                print(f"Error converting {key} in account {account['_id']}: {error}")
+                logger.error("Error converting %s in account %s: %s", key, account['_id'], error)
         amount_values['transformed_amounts'] = True
         MONGO_DB['archive_accounts'].update_one(
             {"_id": ObjectId(account['_id'])},

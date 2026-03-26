@@ -1,3 +1,5 @@
+import logging
+
 from datetime import datetime
 from typing import Optional, Union
 from django.db import transaction
@@ -17,6 +19,8 @@ from orders_app.controllers.initiate_order import any_present_ongoing_order
 from users_app.models import User
 from orders_app.controllers.orders.serializers import serialize_order_details
 from finance_app.models import DinifyTransaction
+
+logger = logging.getLogger(__name__)
 
 
 def determine_effective_unit_price(
@@ -452,7 +456,7 @@ def v2_initiate_order(
             'message': MESSAGES.get('RESTAURANT_NOT_FOUND')
         }
     except Exception as error:
-        print(f"InitiateOrder-Error: {error}")
+        logger.error("InitiateOrder-Error: %s", error)
         return {
             'status': 400,
             'message': MESSAGES.get('GENERAL_ERROR')
@@ -511,7 +515,7 @@ def v2_initiate_order(
     order_record = SerializerPutOrder(data=order_data)
     if not order_record.is_valid():
         error_message = ""
-        print(order_record.errors)
+        logger.error("Validation errors: %s", order_record.errors)
         for _, value in order_record.errors.items():
             error_message += f"{', '.join(value)}\n"
         return {
@@ -569,7 +573,7 @@ def handle_add_order_items(
             'message': "Invalid order selected"
         }
     except Exception as error:
-        print(f"AddOrderItems-Error: {error}")
+        logger.error("AddOrderItems-Error: %s", error)
         return {
             'status': 400,
             'message': MESSAGES.get('GENERAL_ERROR')

@@ -1,6 +1,9 @@
+import logging
 from typing import Union
 from dinify_backend.mongo_db import MONGO_DB
 from misc_app.controllers.save_action_log import make_detailed_time
+
+logger = logging.getLogger(__name__)
 
 
 def save_to_mongodb(
@@ -19,6 +22,6 @@ def save_to_mongodb(
             return str(record.inserted_id)
         return True
     except Exception as e:
-        print(f"\n...Failed to save to mongodb: {e}...\n{data}\n.......")
+        logger.error("Failed to save to MongoDB: %s", e)
         return False
 

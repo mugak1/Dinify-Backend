@@ -1,6 +1,8 @@
 """
 endpoints to handle order
 """
+import logging
+
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
@@ -23,6 +25,8 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Served
 )
 from orders_app.controllers.con_orders import ConOrder
+
+logger = logging.getLogger(__name__)
 
 
 class OrdersEndpoint(APIView):
@@ -66,7 +70,7 @@ class OrdersEndpoint(APIView):
                 )
                 return Response(response, status=response.get('status', 200))
             except Exception as error:
-                print(f"Error while reviewing order: {error}")
+                logger.error("Error while reviewing order: %s", error)
                 response = {
                     'status': 400,
                     'message': 'Sorry, an error occurred.'
@@ -90,7 +94,7 @@ class OrdersEndpoint(APIView):
                 )
                 return Response(response, status=response.get('status', 200))
             except Exception as error:
-                print(f"Error while blocking review: {error}")
+                logger.error("Error while blocking review: %s", error)
                 response = {
                     'status': 400,
                     'message': 'Sorry, an error occurred while blocking the review.'
@@ -255,7 +259,7 @@ class V2OrdersEndpoint(APIView):
                     'data': order_data
                 }
             except Exception as error:
-                print(f"Error retrieving order: {error}")
+                logger.error("Error retrieving order: %s", error)
                 response = {
                     'status': 404,
                     'message': 'Order not found'

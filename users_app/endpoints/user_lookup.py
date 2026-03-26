@@ -1,7 +1,11 @@
+import logging
+
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from users_app.models import User
+
+logger = logging.getLogger(__name__)
 
 
 class UserLookupEndpoint(APIView):
@@ -34,7 +38,7 @@ class UserLookupEndpoint(APIView):
             }
             return Response(response, status=200)
         except Exception as error:
-            print(f"Error while looking up user: {error}")
+            logger.error("Error while looking up user: %s", error)
             response = {
                 'status': 404,
                 'message': 'User not found'
@@ -58,7 +62,7 @@ class MsisdnLookupEndpoint(APIView):
                 }
             }
         except Exception as error:
-            print(f"Error while looking up user: {error}")
+            logger.error("Error while looking up user: %s", error)
             response = {
                 'status': 404,
                 'message': 'User not found',

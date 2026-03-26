@@ -1,3 +1,5 @@
+import logging
+
 from django.db import transaction
 from django.db.models import Sum
 from datetime import datetime
@@ -18,6 +20,8 @@ from orders_app.models import Order, OrderItem
 from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
 from finance_app.models import DinifyTransaction
 from orders_app.controllers.orders.serializers import serialize_order_details
+
+logger = logging.getLogger(__name__)
 
 
 class ConOrder:
@@ -130,7 +134,7 @@ class ConOrder:
 
             # only extras but no item_options
             if existing_item_extras.count() > 0 and len(item_options) == 0:
-                print('checking only extras with no items')
+                logger.debug("checking only extras with no items")
                 if len(extras) == existing_item_extras.count():
                     for existing_item in existing_item_extras:
                         if str(existing_item.item.pk) not in extras:
@@ -476,7 +480,7 @@ class ConOrder:
                 'message': MESSAGES.get('RESTAURANT_NOT_FOUND')
             }
         except Exception as error:
-            print(f"InitiateOrder-Error: {error}")
+            logger.error("InitiateOrder-Error: %s", error)
             return {
                 'status': 400,
                 'message': MESSAGES.get('GENERAL_ERROR')

@@ -2,7 +2,10 @@
 implementation for crud functions to the database
 """
 import copy
+import logging
 from django.db import transaction
+
+logger = logging.getLogger(__name__)
 from django.utils import timezone
 from dataclasses import dataclass
 from dinify_backend.configs import (
@@ -188,7 +191,7 @@ class Secretary:
                         msg_type=self.msg_type
                     )
                 except Exception as error:
-                    print(f'Secretary Notification Prompt Error:{error}')
+                    logger.error("Secretary Notification Prompt Error: %s", error)
 
                 return {
                     'status': 200,
@@ -197,7 +200,7 @@ class Secretary:
                 }
 
             else:
-                print(f"SecretaryError-Create:{record.errors}")
+                logger.error("SecretaryError-Create: %s", record.errors)
                 error_message = ""
                 for _, value in record.errors.items():
                     error_message += f"{', '.join(value)}\n"
@@ -363,7 +366,7 @@ class Secretary:
                             filter_information=None
                         )
                     except Exception as error:
-                        print(f'SecretaryError-Update:{error}')
+                        logger.error("SecretaryError-Update: %s", error)
                     return {
                         'status': 400,
                         'message': 'No changes detected'
@@ -394,7 +397,7 @@ class Secretary:
                         changes=changes,
                     )
                 except Exception as error:
-                    print(f'SecretaryError-Update:{error}')
+                    logger.error("SecretaryError-Update: %s", error)
 
                 self.make_notification(
                     old_record=old_record,
@@ -406,7 +409,7 @@ class Secretary:
                     'message': self.ok_message
                 }
             else:
-                print(f"SecretaryError-Update:{record.errors}")
+                logger.error("SecretaryError-Update: %s", record.errors)
                 error_message = ""
                 for _, value in record.errors.items():
                     error_message += f"{', '.join(value)}\n"
@@ -424,7 +427,7 @@ class Secretary:
                         changes=changes,
                     )
                 except Exception as error:
-                    print(f'SecretaryError-Update:{error}')
+                    logger.error("SecretaryError-Update: %s", error)
                 return {
                     'status': 400,
                     'message': error_message
@@ -490,7 +493,7 @@ class Secretary:
         )
 
         if record.is_valid():
-            print("\n\n\nRecord deleted\n\n\n")
+            logger.debug("Record deleted")
             record.save()
             save_action(
                 affected_model=self.model_name,
@@ -513,7 +516,7 @@ class Secretary:
                 'message': MESSAGES.get('OK_DELETION')
             }
         else:
-            print(f"SecretaryError-Delete:{record.errors}")
+            logger.error("SecretaryError-Delete: %s", record.errors)
             error_message = ""
             for _, value in record.errors.items():
                 error_message += f"{', '.join(value)}\n"

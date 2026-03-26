@@ -1,8 +1,11 @@
 """
 saves an action that a user has performed
 """
+import logging
 from django.utils import timezone
 from dinify_backend.mongo_db import MONGO_DB, ACTION_LOGS
+
+logger = logging.getLogger(__name__)
 
 day_names = [
     'Mon', 'Tue', 'Wed',
@@ -70,4 +73,7 @@ def save_action(
 
     action_details['timestamp'] = time_detail
     # save to mongodb
-    MONGO_DB[ACTION_LOGS].insert_one(action_details)
+    try:
+        MONGO_DB[ACTION_LOGS].insert_one(action_details)
+    except Exception as e:
+        logger.error("Failed to write action log to MongoDB: %s", e)

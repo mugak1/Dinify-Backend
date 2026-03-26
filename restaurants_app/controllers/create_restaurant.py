@@ -1,8 +1,11 @@
 """
 a user creating a restaurant on their own
 """
+import logging
 import random
 from django.db import transaction
+
+logger = logging.getLogger(__name__)
 
 from misc_app.controllers.save_action_log import save_action
 from restaurants_app.models import Restaurant
@@ -104,7 +107,7 @@ def create_restaurant(data: dict, auth_info: dict) -> dict:
                 raise Exception('Failed to create restaurant employee')
             raise Exception('Failed to create restaurant account')
     else:
-        print(f"RestaurantError-Create:{record.errors}")
+        logger.error("RestaurantError-Create: %s", record.errors)
         error_message = ""
         for _, value in record.errors.items():
             error_message += f"{', '.join(value)}\n"
@@ -186,7 +189,7 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
         try:
             record_data.pop('status', None)
         except Exception as error:
-            print(f"Error while dropping status: {error}")
+            logger.error("Error while dropping status: %s", error)
 
         record = SerializerPutRestaurant(data=record_data)
         user_profile = user_creation_result['user_profile']
@@ -261,7 +264,7 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
                 raise Exception('Failed to create restaurant employee')
             raise Exception('Failed to create restaurant account')
     else:
-        print(f"RestaurantError-Create:{record.errors}")
+        logger.error("RestaurantError-Create: %s", record.errors)
         error_message = ""
         for _, value in record.errors.items():
             error_message += f"{', '.join(value)}\n"

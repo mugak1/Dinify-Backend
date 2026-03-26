@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from decimal import Decimal
 from misc_app.controllers.secretary import make_notification_for_new_entry
@@ -20,6 +21,8 @@ from payment_integrations_app.controllers.dpo import DpoIntegration
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
 from users_app.models import User
 from users_app.controllers.otp_manager import OtpManager
+
+logger = logging.getLogger(__name__)
 
 
 def initiate_order_payment(
@@ -62,7 +65,7 @@ def initiate_order_payment(
         try:
             User.objects.get(username=msisdn)
         except Exception as error:
-            print(f"Error checking for msisdn when initiating payment: {error}")
+            logger.error("Error checking for msisdn when initiating payment: %s", error)
             check_otp = True
 
     if manual_payment:

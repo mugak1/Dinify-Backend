@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from decimal import Decimal
 from django.db import transaction
@@ -31,6 +32,8 @@ from dinify_backend.configss.messages import (
     ERR_ORDER_PAYMENT_INITIATION
 )
 from finance_app.controllers.update_wallet_balance import update_wallet_balance
+
+logger = logging.getLogger(__name__)
 
 
 class OrderPaymentTransaction:
@@ -68,7 +71,7 @@ class OrderPaymentTransaction:
         tip_amount = clean_amount(Decimal(tip_amount))
 
         if payment_form == PaymentForm_Split:
-            print("inside split payment form", amount)
+            logger.debug("inside split payment form, amount: %s", amount)
             if amount is None:
                 return {
                     'status': 400,
@@ -82,7 +85,7 @@ class OrderPaymentTransaction:
                     'message': 'The split payment amount should be less than the order amount.'
                 }
 
-        print(f"{str(order.pk)} - {amount} - {transaction_amount} - {payment_form}")
+        logger.debug("%s - %s - %s - %s", order.pk, amount, transaction_amount, payment_form)
         # return {
         #     'status': 400,
         #     'message': 'Blocking all payments for now.',
@@ -106,7 +109,7 @@ class OrderPaymentTransaction:
             try:
                 User.objects.get(username=msisdn)
             except Exception as error:
-                print(f"Error checking for msisdn when initiating payment: {error}")
+                logger.error("Error checking for msisdn when initiating payment: %s", error)
                 check_otp = True
 
         if manual_payment:

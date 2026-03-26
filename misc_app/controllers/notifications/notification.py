@@ -1,3 +1,7 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
 from misc_app.controllers.notifications.message_builder import build_messages
 from misc_app.controllers.notifications.determine_recipients import determine_receipients
 from misc_app.controllers.save_to_mongo import save_to_mongodb
@@ -43,4 +47,4 @@ class Notification:
                     #     message=message_data['sms']
                     # )
         except Exception as error:
-            print(f"Error sending sms: {error}")
+            logger.error("Error sending sms: %s", error)

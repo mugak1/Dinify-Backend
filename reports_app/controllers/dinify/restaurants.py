@@ -1,4 +1,8 @@
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
 from restaurants_app.models import Restaurant
 from finance_app.models import DinifyAccount
 from orders_app.models import Order
@@ -26,8 +30,7 @@ def generate_dinify_restaurant_report(
         try:
             restaurant_account = DinifyAccount.objects.get(restaurant=restaurant)
         except Exception as error:
-            print(f"Error when getting restaurant account: {error}")
-            pass
+            logger.error("Error when getting restaurant account: %s", error)
 
         data.append({
             'id': str(restaurant.id),

@@ -7,6 +7,7 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
+from django.utils import timezone
 from rest_framework.serializers import ModelSerializer
 from misc_app.controllers.utils.archive_record import archive_record
 
@@ -114,12 +115,12 @@ class UserOtp(models.Model):
 
 @receiver(pre_save, sender=BaseModel)
 def add_time_last_updated(sender, instance, **kwargs):
-    instance.time_last_updated = datetime.datetime.now()
+    instance.time_last_updated = timezone.now()
 
 
 @receiver(pre_save, sender=UserOtp)
 def set_expiry_time(sender, instance, **kwargs):
-    instance.expiry_time = datetime.datetime.now() + datetime.timedelta(minutes=5)
+    instance.expiry_time = timezone.now() + datetime.timedelta(minutes=5)
 
 
 class SerArcUser(ModelSerializer):

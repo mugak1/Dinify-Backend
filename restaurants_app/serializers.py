@@ -1,6 +1,10 @@
 """
 the serializers for the restaurant app
 """
+import logging
+
+logger = logging.getLogger(__name__)
+
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from orders_app.models import Order, OrderItem
 from restaurants_app.models import (
@@ -36,7 +40,7 @@ class SerializerGetRestaurantDetail(ModelSerializer):
         except DinifyAccount.DoesNotExist:
             return {}
         except Exception as error:
-            print(f"Error in getting account: {error}")
+            logger.error("Error in getting account: %s", error)
             return None
 
 

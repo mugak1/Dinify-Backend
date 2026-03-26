@@ -1,5 +1,9 @@
+import logging
+
 from dinify_backend.mongo_db import MONGO_DB, COL_NOTIFICATIONS
 from bson import ObjectId
+
+logger = logging.getLogger(__name__)
 
 
 def get_notifications(
@@ -38,7 +42,7 @@ def get_notifications(
         return notifications
 
     except Exception as error:
-        print(f"Error while getting notifications: {error}")
+        logger.error("Error while getting notifications: %s", error)
         return []
 
 
@@ -50,5 +54,5 @@ def flag_notification_as_read(notification_id: str):
         )
         return True
     except Exception as error:
-        print(f"Error while flagging notification as read: {error}")
+        logger.error("Error while flagging notification as read: %s", error)
         return False

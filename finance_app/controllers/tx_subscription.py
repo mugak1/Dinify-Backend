@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 from datetime import timedelta
 from django.db import transaction
@@ -16,6 +17,8 @@ from dinify_backend.configss.string_definitions import (
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
 from payment_integrations_app.controllers.dpo import DpoIntegration
 from finance_app.controllers.update_wallet_balance import update_wallet_balance
+
+logger = logging.getLogger(__name__)
 
 
 class SubscriptionPaymentTransaction:
@@ -150,7 +153,7 @@ class SubscriptionPaymentTransaction:
             restaurant = Restaurant.objects.select_for_update().get(id=txs_record.restaurant.id)
 
             if txs_record.processing_status == ProcessingStatus_Confirmed:
-                print(txs_record.payment_mode)
+                logger.debug("Payment mode: %s", txs_record.payment_mode)
                 if txs_record.payment_mode in [PaymentMode_MobileMoney, PaymentMode_Card]:
                     # TODO update account balances
                     balance_update = update_wallet_balance(
@@ -231,7 +234,7 @@ class SubscriptionPaymentTransaction:
                     restaurant.save()
 
                 else:
-                    print("Payment mode  not supported yet")
+                    logger.debug("Payment mode not supported yet")
             elif txs_record.processing_status == ProcessingStatus_Failed:
                 # TODO update account balances
                 balance_update = update_wallet_balance(

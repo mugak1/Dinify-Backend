@@ -1,4 +1,8 @@
+import logging
 from datetime import timedelta
+
+logger = logging.getLogger(__name__)
+
 from misc_app.controllers.clean_dates import clean_dates
 from misc_app.controllers.report_support_functions import (
     make_graph_series_data,
@@ -182,7 +186,7 @@ def generate_restaurant_sales_trends(
         )
 
     if trend_category == 'annual':
-        print((date_to - date_from).days)
+        logger.debug("Annual trend date range days: %s", (date_to - date_from).days)
         if (date_to - date_from).days > 1850:
             return {
                 'status': 400,

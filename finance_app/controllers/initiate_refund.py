@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 from orders_app.models import Order
 from finance_app.models import DinifyAccount, DinifyTransaction
@@ -8,6 +9,8 @@ from dinify_backend.configss.string_definitions import (
     TransactionPlatform_Web, PaymentMode_MobileMoney
 )
 from payment_integrations_app.controllers.flutterwave import Flutterwave
+
+logger = logging.getLogger(__name__)
 
 
 def initiate_refund(
@@ -55,7 +58,7 @@ def initiate_refund(
             restaurant_country=order.restaurant.country,
             currency=account.account_currency
         ).send_mobile_money()
-        print(flutterwave_response)
+        logger.debug("Response: %s", flutterwave_response)
     return {
         'status': 200,
         'message': 'Refund transaction has been initiated',

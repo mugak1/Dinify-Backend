@@ -1,3 +1,5 @@
+import logging
+
 from django.db import transaction
 from restaurants_app.models import Restaurant, MenuItem, Table
 from django.core.exceptions import ObjectDoesNotExist
@@ -11,6 +13,8 @@ from dinify_backend.configss.string_definitions import (
 )
 from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
 from orders_app.models import Order
+
+logger = logging.getLogger(__name__)
 
 
 def any_present_ongoing_order(table: Table) -> dict:
@@ -76,7 +80,7 @@ def initiate_order(data):
             'message': MESSAGES.get('RESTAURANT_NOT_FOUND')
         }
     except Exception as error:
-        print(f"InitiateOrder-Error: {error}")
+        logger.error("InitiateOrder-Error: %s", error)
         return {
             'status': 400,
             'message': MESSAGES.get('GENERAL_ERROR')
@@ -171,7 +175,7 @@ def initiate_order(data):
 
             order_items.append(item)
         except Exception as error:
-            print(f"InitiateOrder-CheckItemAvailability-Error: {error}")
+            logger.error("InitiateOrder-CheckItemAvailability-Error: %s", error)
             return {
                 'status': 400,
                 'message': MESSAGES.get('GENERAL_ERROR')
@@ -205,7 +209,7 @@ def initiate_order(data):
         order_record = SerializerPutOrder(data=order_data)
         if not order_record.is_valid():
             error_message = ""
-            print(order_record.errors)
+            logger.error("Validation errors: %s", order_record.errors)
             for _, value in order_record.errors.items():
                 error_message += f"{', '.join(value)}\n"
             return {

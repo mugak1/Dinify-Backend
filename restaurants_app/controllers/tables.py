@@ -1,4 +1,8 @@
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
 from restaurants_app.models import Restaurant, Table, DiningArea
 from users_app.models import User
 from django.db import transaction
@@ -12,12 +16,12 @@ def confirm_availability_of_table_numbers(restaurant_id: str, range_from: int, r
         deleted=False
     )
     for x in current_table_nos:
-        print(f" table number {x['number']} ")
+        logger.debug("table number %s", x['number'])
     existing_table_numbers = [int(x['number']) for x in current_table_nos]
     r_start = range_from
     r_end = range_to + 1
-    print(f" {restaurant_id} table numbers from {r_start} to {r_end} ")
-    print(f" existing table numbers {existing_table_numbers} ")
+    logger.debug("%s table numbers from %s to %s", restaurant_id, r_start, r_end)
+    logger.debug("existing table numbers %s", existing_table_numbers)
     for number in range(r_start, r_end):
         if number in existing_table_numbers:
             return {
