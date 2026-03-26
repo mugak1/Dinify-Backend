@@ -49,4 +49,4 @@ jobs:
           DATABASE_HOST: localhost
           DATABASE_PORT: 5432
         run: |
-          python -m django test users_app orders_app payment_integrations_app restaurants_app misc_app --settings=dinify_backend.test_settings --verbosity=2
+          python -m django test users_app orders_app payment_integrations_app restaurants_app misc_app finance_app --settings=dinify_backend.test_settings --verbosity=2
