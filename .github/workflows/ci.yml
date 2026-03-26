@@ -10,6 +10,21 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: test_dinify
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U test_user -d test_dinify"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -26,5 +41,12 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run tests
+        env:
+          DATABASE_ENGINE: django.db.backends.postgresql
+          DATABASE_NAME: test_dinify
+          DATABASE_USER: test_user
+          DATABASE_PASSWORD: test_password
+          DATABASE_HOST: localhost
+          DATABASE_PORT: 5432
         run: |
-          python -m django test users_app orders_app payment_integrations_app --settings=dinify_backend.test_settings --verbosity=2
+          python -m django test users_app orders_app payment_integrations_app restaurants_app misc_app --settings=dinify_backend.test_settings --verbosity=2
