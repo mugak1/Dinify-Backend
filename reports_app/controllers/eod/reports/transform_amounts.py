@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 
 from bson import ObjectId
 from dinify_backend.mongo_db import MONGO_DB
@@ -22,15 +23,15 @@ def transform_transaction_amounts():
     for tx in transactions:
         amount_values = {}
         for column in amount_columns:
-            amount_values[column] = round(float(tx[column]), 2)
+            amount_values[column] = Decimal(str(tx[column])).quantize(Decimal('0.01'))
         amount_values['transformed_amounts'] = True
         account_balances = tx.get('account_balances')
         if account_balances is not None:
             if account_balances.get('after') is not None:
                 for key, value in tx['account_balances']['after'].items():
-                    amount_values[f'account_balances.after.{key}'] = round(float(value), 2)
+                    amount_values[f'account_balances.after.{key}'] = Decimal(str(value)).quantize(Decimal('0.01'))
                 for key, value in tx['account_balances']['before'].items():
-                    amount_values[f'account_balances.before.{key}'] = round(float(value), 2)
+                    amount_values[f'account_balances.before.{key}'] = Decimal(str(value)).quantize(Decimal('0.01'))
 
         amount_values['transformed_amounts'] = True
         MONGO_DB['archive_transactions'].update_one(
@@ -55,7 +56,7 @@ def transform_account_amounts():
             try:
                 if key in ignore_fields:
                     continue
-                amount_values[key] = round(float(value), 2)
+                amount_values[key] = Decimal(str(value)).quantize(Decimal('0.01'))
             except Exception as error:
                 logger.error("Error converting %s in account %s: %s", key, account['_id'], error)
         amount_values['transformed_amounts'] = True
@@ -85,7 +86,7 @@ def transform_order_amounts():
         amount_values = {}
         for column in amount_columns:
             if column in order:
-                amount_values[column] = round(float(order[column]), 2)
+                amount_values[column] = Decimal(str(order[column])).quantize(Decimal('0.01'))
         amount_values['transformed_amounts'] = True
         MONGO_DB['archive_orders'].update_one(
             {"_id": ObjectId(order['_id'])},

@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 from operator import le
 import pandas
 
@@ -106,8 +107,7 @@ def make_orders_report(orders: list) -> dict:
 
     # maintain 2dps for all values
     for key in summary:
-        value = float(summary[key])
-        summary[key] = round(value, 2)
+        summary[key] = Decimal(str(summary[key])).quantize(Decimal('0.01'))
 
     return summary
 
@@ -167,10 +167,9 @@ def make_order_items_report(orders: list) -> dict:
     # maintain 2dps for all values
     for key in summary:
         try:
-            value = float(summary[key])
-            summary[key] = round(value, 2)
-        except (ValueError, TypeError):
-            summary[key] = summary[key]
+            summary[key] = Decimal(str(summary[key])).quantize(Decimal('0.01'))
+        except Exception:
+            pass
     return summary
 
 
@@ -232,10 +231,10 @@ def report_on_customer_behaviour(orders: list) -> dict:
         'distinct_customers': distinct_customers,
         'count_returning_customers': count_returning_customers,
         'percentage_returning_customers': round(percentage_returning_customers, 2),
-        'amount_paid_by_returning_customers': round(amount_paid_by_returning_customers, 2),
+        'amount_paid_by_returning_customers': Decimal(str(amount_paid_by_returning_customers)).quantize(Decimal('0.01')),
         'count_new_customers': count_new_customers,
         'percentage_new_customers': round(percentage_new_customers, 2),
-        'amount_paid_by_new_customers': round(amount_paid_by_new_customers, 2),
+        'amount_paid_by_new_customers': Decimal(str(amount_paid_by_new_customers)).quantize(Decimal('0.01')),
         'top_customer_by_amount': top_customer_by_amount,
         'top_customer_by_no_orders': top_customer_by_no_orders
     }
@@ -334,10 +333,9 @@ def report_on_transactions(restaurant_id: str, eod_date: date) -> dict:
 
     for key in summary:
         try:
-            value = float(summary[key])
-            summary[key] = round(value, 2)
-        except (ValueError, TypeError):
-            summary[key] = summary[key]
+            summary[key] = Decimal(str(summary[key])).quantize(Decimal('0.01'))
+        except Exception:
+            pass
     return summary
 
 
