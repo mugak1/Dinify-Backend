@@ -12,3 +12,4 @@ dev.env
 uploads/
 *.env
 db.sqlite3
+.vscode/
