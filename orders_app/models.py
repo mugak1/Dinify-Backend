@@ -69,7 +69,7 @@ class OrderItem(BaseModel):
     # tracking options and choices
     option = models.CharField(max_length=50, null=True)
     option_choice = models.CharField(max_length=50, null=True)
-    option_cost = models.FloatField(null=True)
+    option_cost = models.DecimalField(max_digits=50, decimal_places=2, null=True)
 
     # for extras
     parent_item = models.ForeignKey(
@@ -80,18 +80,18 @@ class OrderItem(BaseModel):
     )  # noqa
 
     quantity = models.IntegerField()
-    unit_price = models.FloatField()
-    discounted_price = models.FloatField()
+    unit_price = models.DecimalField(max_digits=50, decimal_places=2)
+    discounted_price = models.DecimalField(max_digits=50, decimal_places=2)
     discounted = models.BooleanField(default=False)
-    unit_cost_of_options = models.FloatField(null=True)
+    unit_cost_of_options = models.DecimalField(max_digits=50, decimal_places=2, null=True)
 
     options = models.JSONField(default=list)
 
-    total_cost = models.FloatField()
-    discounted_cost = models.FloatField()
-    savings = models.FloatField()
-    cost_of_options = models.FloatField(default=0.0)
-    actual_cost = models.FloatField()
+    total_cost = models.DecimalField(max_digits=50, decimal_places=2)
+    discounted_cost = models.DecimalField(max_digits=50, decimal_places=2)
+    savings = models.DecimalField(max_digits=50, decimal_places=2)
+    cost_of_options = models.DecimalField(max_digits=50, decimal_places=2, default=Decimal('0'))
+    actual_cost = models.DecimalField(max_digits=50, decimal_places=2)
 
     rating = models.IntegerField(null=True, blank=True)
     review = models.TextField(null=True, blank=True)

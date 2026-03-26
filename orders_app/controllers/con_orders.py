@@ -260,8 +260,8 @@ class ConOrder:
         effective_unit_price += cost_of_options
         return {
             'status': 200,
-            'price': effective_unit_price,
-            'cost_of_options': cost_of_options
+            'price': effective_unit_price.quantize(Decimal('0.01')),
+            'cost_of_options': cost_of_options.quantize(Decimal('0.01'))
         }
 
     @staticmethod
@@ -434,8 +434,8 @@ class ConOrder:
             deleted=False,
             order=order
         )
-        total_cost = sum([Decimal(str(item.total_cost)) for item in order_items], Decimal('0'))
-        discounted_cost = sum([Decimal(str(item.discounted_cost)) for item in order_items], Decimal('0'))
+        total_cost = sum([item.total_cost for item in order_items], Decimal('0'))
+        discounted_cost = sum([item.discounted_cost for item in order_items], Decimal('0'))
         savings = total_cost - discounted_cost
         actual_cost = discounted_cost
 
