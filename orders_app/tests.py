@@ -1,4 +1,3 @@
-from turtle import update
 from django.test import TestCase
 # from orders_app.controllers.order import Order as OrderController
 from orders_app.controllers.initiate_order import initiate_order

@@ -11,3 +11,4 @@ dev.env
 .DS_Store
 uploads/
 *.env
+db.sqlite3

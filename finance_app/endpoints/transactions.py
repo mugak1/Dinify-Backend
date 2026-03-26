@@ -41,7 +41,7 @@ class TransactionsEndpoint(APIView):
                 msisdn=data.get('msisdn'),
                 otp=data.get('otp'),
             )
-            return Response(response, status=200)
+            return Response(response, status=response.get('status', 200))
 
         if transaction_type == 'disbursement':
             response = DisbursementTransaction().initiate(
@@ -53,4 +53,4 @@ class TransactionsEndpoint(APIView):
                 bank_account_id=data.get('bank_account_id'),
                 otp=data.get('otp'),
             )
-            return Response(response, status=200)
+            return Response(response, status=response.get('status', 200))

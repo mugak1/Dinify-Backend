@@ -3,10 +3,22 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from users_app.controllers.self_register import self_register
 from users_app.controllers.login import login
-from users_app.controllers.reset_password import reset_password
+from users_app.controllers.reset_password import reset_password, initiate_password_reset
 from users_app.controllers.change_password import change_password
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from users_app.controllers.otp_manager import OtpManager
+from users_app.throttles import LoginThrottle, OtpThrottle, PasswordResetThrottle
+
+
+# Map action names to their throttle classes.
+# Actions not listed here get no extra throttling.
+_ACTION_THROTTLES = {
+    'login': [LoginThrottle],
+    'verify-otp': [OtpThrottle],
+    'resend-otp': [OtpThrottle],
+    'initiate-reset-password': [PasswordResetThrottle],
+    'reset-password': [PasswordResetThrottle],
+}
 
 
 class UsersAuthenticationEndpoint(APIView):
@@ -14,6 +26,12 @@ class UsersAuthenticationEndpoint(APIView):
     endpoint for authenticating users
     """
     permission_classes = (AllowAny,)
+
+    def get_throttles(self):
+        """Return throttle instances based on the requested action."""
+        action = self.kwargs.get('action', '')
+        throttle_classes = _ACTION_THROTTLES.get(action, [])
+        return [t() for t in throttle_classes]
 
     def post(self, request, action):
         """
@@ -29,6 +47,10 @@ class UsersAuthenticationEndpoint(APIView):
                 username=request.data.get('username'),
                 password=request.data.get('password'),
                 source=request.data.get('source', 'restaurant')
+            )
+        elif action == "initiate-reset-password":
+            response = initiate_password_reset(
+                username=request.data.get('phone_number')
             )
         elif action == "reset-password":
             response = reset_password(

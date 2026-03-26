@@ -39,4 +39,4 @@ class OrderJourneyEndpoint(APIView):
                 'status': 400,
                 'message': 'Error'
             }
-        return Response(response, status=200)
+        return Response(response, status=response.get('status', 200))

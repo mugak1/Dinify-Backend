@@ -42,4 +42,4 @@ class OrderPaymentsEndpoint(APIView):
             otp=data.get('otp')
         )
 
-        return Response(response, status=200)
+        return Response(response, status=response.get('status', 200))

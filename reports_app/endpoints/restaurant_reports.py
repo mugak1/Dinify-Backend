@@ -109,4 +109,4 @@ class RestaurantReportsEndpoint(APIView):
                 'message': 'Invalid report name'
             }
 
-        return Response(response, status=200)
+        return Response(response, status=response.get('status', 200))

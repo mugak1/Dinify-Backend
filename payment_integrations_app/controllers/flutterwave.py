@@ -1,10 +1,14 @@
+import logging
 import requests
-import json
 from typing import Optional
 from decouple import config
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from misc_app.controllers.determine_telecom import determine_telecom
 from dinify_backend.configss.string_definitions import PaymentMode_Card, PaymentMode_MobileMoney
+
+logger = logging.getLogger(__name__)
+
+REQUEST_TIMEOUT = 30  # seconds
 
 
 @dataclass
@@ -17,23 +21,24 @@ class Flutterwave:
     email: Optional[str] = None
     currency: str = "UGX"
     customer_name: str = "Dinify Customer"
-    momo_payout_endpoint = "https://api.flutterwave.com/v3/transfers"
-    ug_momo_collection_endpoint = "https://api.flutterwave.com/v3/charges?type=mobile_money_uganda"
+    momo_payout_endpoint: str = "https://api.flutterwave.com/v3/transfers"
+    ug_momo_collection_endpoint: str = "https://api.flutterwave.com/v3/charges?type=mobile_money_uganda"
 
-    momo_collection_endpoints = {
-        "UG": ug_momo_collection_endpoint
-    }
+    momo_collection_endpoints: dict = field(default_factory=lambda: {
+        "UG": "https://api.flutterwave.com/v3/charges?type=mobile_money_uganda"
+    })
 
-    HEADERS = {
-        'Authorization': f"Bearer {config('FLUTTERWAVE_SECRET')}"
-    }
+    @property
+    def HEADERS(self):
+        return {
+            'Authorization': f"Bearer {config('FLUTTERWAVE_SECRET')}"
+        }
 
     def collect(self) -> dict:
         if self.payment_channel == PaymentMode_MobileMoney:
             return self.collect_mobile_money()
 
     def collect_mobile_money(self):
-        # if self.email is None:
         self.email = config('DEFAULT_PAYMENT_EMAIL')
         network = determine_telecom(self.msisdn)
         if network == "airtelug":
@@ -54,36 +59,23 @@ class Flutterwave:
             "phone_number": self.msisdn,
             "network": network,
             "redirect_url": "https://dinify.com/order-payment/complete/",
-            # "meta": {}
         }
 
-        # print(req_body)
-        # return {"status": "error"}
-
         url = self.momo_collection_endpoints.get(self.restaurant_country, None)
-        response = requests.post(
-            url,
-            data=req_body,
-            headers=self.HEADERS,
-            # timeout=60000
-        )
-        response = response.json()
-        print(f"\n===Flutterwave MoMo Collection\n...Request...\n{req_body}\n...Response...\n{response}")  # noqa
+        try:
+            response = requests.post(
+                url,
+                json=req_body,
+                headers=self.HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+            response = response.json()
+        except requests.RequestException as exc:
+            logger.error("Flutterwave MoMo collection failed: %s", exc)
+            return {"status": "error", "message": "Payment provider request failed"}
+        logger.info("Flutterwave MoMo Collection: tx_ref=%s status=%s",
+                     self.transaction_id, response.get("status"))
         return response
-
-    # {'status': 'error', 'message': 'str.replace is not a function', 'data': None}
-    # {
-    #     'status': 'success',
-    #     'message': 'Charge initiated',
-    #     'meta': {
-    #         'authorization': {
-    #             'redirect': 'https://checkout.flutterwave.com/captcha/verify/lang-en/5748431:e08b9226a98d3da138b090f890432905', 
-    #             'mode': 'redirect'
-    #         }
-    #     }
-    # }
-
-    # webhook
 
     def send_mobile_money(self):
         req_body = {
@@ -95,11 +87,17 @@ class Flutterwave:
             "reference": self.transaction_id,
             "beneficiary_name": self.customer_name
         }
-        response = requests.post(
-            self.momo_payout_endpoint,
-            data=req_body,
-            headers=self.HEADERS
-        )
-        response = response.json()
-        print(f"\n===Flutterwave MoMo Payout\n...Request...\n{req_body}\n...Response...\n{response}")  # noqa
+        try:
+            response = requests.post(
+                self.momo_payout_endpoint,
+                json=req_body,
+                headers=self.HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+            response = response.json()
+        except requests.RequestException as exc:
+            logger.error("Flutterwave MoMo payout failed: %s", exc)
+            return {"status": "error", "message": "Payout provider request failed"}
+        logger.info("Flutterwave MoMo Payout: ref=%s status=%s",
+                     self.transaction_id, response.get("status"))
         return response

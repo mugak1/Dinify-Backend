@@ -1,3 +1,4 @@
+import logging
 import requests
 from bson import ObjectId
 from datetime import datetime
@@ -24,17 +25,32 @@ from misc_app.controllers.save_to_mongo import save_to_mongodb
 from finance_app.controllers.process_payment_feedback import process_payment_feedback
 from misc_app.controllers.flag_doc_as_processed import flag_doc_as_processed
 
+logger = logging.getLogger(__name__)
+
+REQUEST_TIMEOUT = 30  # seconds
+
+REQUEST_HEADERS = {
+    'Content-Type': 'text/xml',
+    'Content-transfer-encoding': 'text'
+}
+
 
 @dataclass
 class DpoIntegration:
-    API_URL = 'https://secure.3gdirectpay.com/API/v6/'
-    PAYMENT_URL = 'https://secure.3gdirectpay.com/payv3.php?ID='
-    COMPANY_TOKEN = config('DPO_COMPANY_TOKEN')
-    SERVICE_TYPE = config('DPO_SERVICE_TYPE')
-    REDIRECT_URL = 'https://dinify-web'
+    API_URL: str = 'https://secure.3gdirectpay.com/API/v6/'
+    PAYMENT_URL: str = 'https://secure.3gdirectpay.com/payv3.php?ID='
+    REDIRECT_URL: str = 'https://dinify-web'
+
+    def __post_init__(self):
+        self.COMPANY_TOKEN = config('DPO_COMPANY_TOKEN')
+        self.SERVICE_TYPE = config('DPO_SERVICE_TYPE')
 
     def interprete_response(self, request_type: str, request_body: dict, dpo_response: str):
-        response_xml_object = ET.fromstring(dpo_response.text)
+        try:
+            response_xml_object = ET.fromstring(dpo_response.text)
+        except ET.ParseError as exc:
+            logger.error("DPO XML parse error for %s: %s", request_type, exc)
+            return {}
 
         dpo_response_dict = {}
         for elem in response_xml_object.iter():
@@ -77,17 +93,17 @@ class DpoIntegration:
         new_time = datetime.strptime(str(timestamp[:-13]), '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M')
         service_date.text = new_time
 
-        REQUEST_HEADERS = {
-            'Content-Type': 'text/xml',
-            'Content-transfer-encoding': 'text'
-        }
-
         post_data = ET.tostring(api3g, xml_declaration=True, encoding='utf-8')
-        dpo_token_request = requests.post(
-            self.API_URL,
-            data=post_data,
-            headers=REQUEST_HEADERS
-        )
+        try:
+            dpo_token_request = requests.post(
+                self.API_URL,
+                data=post_data,
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error("DPO create_token request failed: %s", exc)
+            return None
 
         response = self.interprete_response(
             request_type='create_token',
@@ -113,17 +129,17 @@ class DpoIntegration:
         transaction_token = ET.SubElement(api3g, 'TransactionToken')
         transaction_token.text = dpo_token
 
-        REQUEST_HEADERS = {
-            'Content-Type': 'text/xml',
-            'Content-transfer-encoding': 'text'
-        }
-
         post_data = ET.tostring(api3g, xml_declaration=True, encoding='utf-8')
-        dpo_response = requests.post(
-            self.API_URL,
-            data=post_data,
-            headers=REQUEST_HEADERS
-        )
+        try:
+            dpo_response = requests.post(
+                self.API_URL,
+                data=post_data,
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error("DPO verify_token request failed: %s", exc)
+            return False
 
         self.interprete_response(
             request_type='verify_token',

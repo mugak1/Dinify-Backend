@@ -127,7 +127,7 @@ class RestaurantSetupEndpoint(APIView):
                 'status': 401,
                 'message': 'You do not have permission to perform this action.'
             }
-            return Response(response, status=400)
+            return Response(response, status=403)
 
         # response = {
         #     'status': 200,
@@ -299,7 +299,7 @@ class RestaurantSetupEndpoint(APIView):
                 'status': 401,
                 'message': 'You do not have permission to perform this action.'
             }
-            return Response(response, status=400)
+            return Response(response, status=403)
 
         try:
             post_data = post_data.dict()
@@ -638,7 +638,7 @@ class RestaurantSetupEndpoint(APIView):
                 'status': 401,
                 'message': 'You do not have permission to perform this action.'
             }
-            return Response(response, status=400)
+            return Response(response, status=403)
 
         if config_detail == 'subscription-details':
             return RestaurantSubscription().update(request)
@@ -706,7 +706,7 @@ class RestaurantSetupEndpoint(APIView):
                 'status': 401,
                 'message': 'You do not have permission to perform this action.'
             }
-            return Response(response, status=400)
+            return Response(response, status=403)
 
         data = request.data
         if config_detail == 'employees':
@@ -726,7 +726,7 @@ class RestaurantSetupEndpoint(APIView):
                         'status': 400,
                         'message': 'You need to assign another restaurant owner before you can delete this one.'
                     }
-                    return Response(response, status=400)
+                    return Response(response, status=403)
 
         serializer = {
             'restaurant': SerializerPutRestaurant,
@@ -769,7 +769,7 @@ class RestaurantSetupEndpoint(APIView):
                     'status': 400,
                     'message': ERR_UNSPECIFIED_RECORD_DETAILS
                 }
-                return Response(response, status=200)
+                return Response(response, status=400)
 
             serializer = serializers.get(record)
             db_record = serializer.Meta.model.objects.get(
@@ -787,4 +787,4 @@ class RestaurantSetupEndpoint(APIView):
                 'status': 400,
                 'message': ERR_GENERAL
             }
-            return Response(response, status=200)
+            return Response(response, status=400)

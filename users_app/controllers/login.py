@@ -133,16 +133,15 @@ def login(
         data = {
             'require_otp': True,
             'prompt_password_change': auth_user.prompt_password_change,
+            'user_id': str(auth_user.id),
             'profile': SerGetUserProfile(auth_user).data
         }
 
-        otp = False
-        if auth_user.prompt_password_change:
-            data['token'] = str(token.access_token)
-            data['refresh'] = str(token)
-            otp = True
-        else:
-            otp = OtpManager().make_otp(user=auth_user, purpose='login')
+        # Always require OTP for privileged roles — never leak tokens
+        # before OTP is verified.  When prompt_password_change is True
+        # the frontend should complete OTP first, then call
+        # change-password with the token returned by verify-otp.
+        otp = OtpManager().make_otp(user=auth_user, purpose='login')
 
         if otp:
             return {

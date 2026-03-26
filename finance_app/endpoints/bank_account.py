@@ -24,7 +24,7 @@ class BankAccountRecordsEndpoint(APIView):
                 'status': 403,
                 'message': 'You are not authorized to perform this action.'
             }
-            return Response(response, status=400)
+            return Response(response, status=403)
 
         data = request.data
         data = {k: (v.upper() if k not in ['restaurant', 'user'] else v) for k, v in data.items()}
@@ -41,7 +41,7 @@ class BankAccountRecordsEndpoint(APIView):
             'msg_type': 'new-bank-account',
         }
         response = Secretary(secretary_args).create()
-        return Response(response, status=200)
+        return Response(response, status=response.get('status', 200))
 
     def get(self, request):
 

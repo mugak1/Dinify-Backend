@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 import requests
 import xml.etree.ElementTree as ET
@@ -15,6 +16,7 @@ from dinify_backend.configss.string_definitions import (
     Aggregator_Yo
 )
 
+logger = logging.getLogger(__name__)
 
 # API_URL = 'https://paymentsapi2.yo.co.ug/ybs/task.php'
 API_URL = 'https://sandbox.yo.co.ug/services/yopaymentsdev/task.php'
@@ -23,6 +25,8 @@ REQUEST_HEADERS = {
     'Content-Type': 'text/xml',
     'Content-transfer-encoding': 'text'
 }
+
+REQUEST_TIMEOUT = 30  # seconds
 
 
 class YoIntegration:
@@ -34,14 +38,25 @@ class YoIntegration:
         self.YO_SMS_PASSWORD = config('YO_SMS_PASSWORD')
 
     def interprete_response(self, request_type: str, request_body: dict, yo_response: str) -> dict:
-        response_xml_object = ET.fromstring(yo_response.text)
+        try:
+            response_xml_object = ET.fromstring(yo_response.text)
+        except ET.ParseError as exc:
+            logger.error("Yo XML parse error for %s: %s", request_type, exc)
+            MONGO_DB[COL_YO_RESPONSES].insert_one({
+                'request_type': request_type,
+                'request_body': request_body,
+                'response_string': yo_response.text,
+                'response_dict': None
+            })
+            return None
+
         yo_response_dict = None
         try:
             response_element = response_xml_object.find('Response')
             if response_element is not None:
                 yo_response_dict = {child.tag: child.text for child in response_element}
         except Exception as error:
-            print(f"\nError interpreting Yo Response: {error}\n")
+            logger.error("Error interpreting Yo Response: %s", error)
 
         MONGO_DB[COL_YO_RESPONSES].insert_one({
             'request_type': request_type,
@@ -74,15 +89,18 @@ class YoIntegration:
         provider_reference_text = ET.SubElement(request, 'ProviderReferenceText')
         provider_reference_text.text = 'Dinify Order Payment'
 
-        # print(f"{self.YO_USERNAME} {self.YO_PASSWORD}")
-        # return True
         post_data = ET.tostring(auto_create, xml_declaration=True, encoding='utf-8')
 
-        yo_payment_request = requests.post(
-            API_URL,
-            data=post_data,
-            headers=REQUEST_HEADERS
-        )
+        try:
+            yo_payment_request = requests.post(
+                API_URL,
+                data=post_data,
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error("Yo momo_collect request failed: %s", exc)
+            return False
         response = self.interprete_response(
             request_type='momo_collect',
             request_body={
@@ -92,7 +110,7 @@ class YoIntegration:
             },
             yo_response=yo_payment_request
         )
-        print(response)
+        logger.info("Yo momo_collect: tx=%s response=%s", transaction_id, response)
         return True
 
     def momo_check_transaction(self, yo_transaction_reference: str) -> bool:
@@ -108,17 +126,23 @@ class YoIntegration:
         transaction_reference.text = yo_transaction_reference
 
         post_data = ET.tostring(auto_create, xml_declaration=True, encoding='utf-8')
-        yo_request = requests.post(
-            API_URL,
-            data=post_data,
-            headers=REQUEST_HEADERS
-        )
+        try:
+            yo_request = requests.post(
+                API_URL,
+                data=post_data,
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error("Yo momo_check_transaction request failed: %s", exc)
+            return False
         response = self.interprete_response(
             request_type='momo_check_transaction',
             request_body={'yo_transaction_reference': yo_transaction_reference},
             yo_response=yo_request
         )
-        print(response)
+        logger.info("Yo momo_check_transaction: ref=%s response=%s",
+                     yo_transaction_reference, response)
         return True
 
     def momo_disburse(self, transaction_amount: int, msisdn: str, transaction_id: str) -> bool:
@@ -145,11 +169,16 @@ class YoIntegration:
 
         post_data = ET.tostring(auto_create, xml_declaration=True, encoding='utf-8')
 
-        yo_payment_request = requests.post(
-            API_URL,
-            data=post_data,
-            headers=REQUEST_HEADERS
-        )
+        try:
+            yo_payment_request = requests.post(
+                API_URL,
+                data=post_data,
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error("Yo momo_disburse request failed: %s", exc)
+            return False
         response = self.interprete_response(
             request_type='momo_disburse',
             request_body={
@@ -159,7 +188,7 @@ class YoIntegration:
             },
             yo_response=yo_payment_request
         )
-        print(response)
+        logger.info("Yo momo_disburse: tx=%s response=%s", transaction_id, response)
         return True
 
     def bank_create_verified_account(
@@ -218,11 +247,16 @@ class YoIntegration:
             routing_number.text = arg_routing_number
 
         post_data = ET.tostring(auto_create, xml_declaration=True, encoding='utf-8')
-        yo_request = requests.post(
-            API_URL,
-            data=post_data,
-            headers=REQUEST_HEADERS
-        )
+        try:
+            yo_request = requests.post(
+                API_URL,
+                data=post_data,
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error("Yo bank_create_verified_account request failed: %s", exc)
+            return False
         response = self.interprete_response(
             request_type='bank_create_verified_account',
             request_body={
@@ -244,12 +278,12 @@ class YoIntegration:
         )
         # update the bank account record with the yo reference
         try:
-            if response.get('Status') == 'OK':
+            if response and response.get('Status') == 'OK':
                 bank_account_record = BankAccountRecord.objects.get(id=arg_account_id)
                 bank_account_record.yo_reference = response.get('ApiBankIdentifier')
                 bank_account_record.save()
         except Exception as error:
-            print(f"\nError updating bank account record: {error}\n")
+            logger.error("Error updating bank account record: %s", error)
         return True
 
     def bank_disburse(
@@ -284,11 +318,16 @@ class YoIntegration:
         private_transaction_reference.text = arg_transaction_id
 
         post_data = ET.tostring(auto_create, xml_declaration=True, encoding='utf-8')
-        yo_request = requests.post(
-            API_URL,
-            data=post_data,
-            headers=REQUEST_HEADERS
-        )
+        try:
+            yo_request = requests.post(
+                API_URL,
+                data=post_data,
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error("Yo bank_disburse request failed: %s", exc)
+            return False
         response = self.interprete_response(
             request_type='bank_disburse',
             request_body={
@@ -300,7 +339,7 @@ class YoIntegration:
             },
             yo_response=yo_request
         )
-        print(response)
+        logger.info("Yo bank_disburse: tx=%s response=%s", arg_transaction_id, response)
         return True
 
     def bank_check_disbursement_status(self, arg_settlement_id: str) -> bool:
@@ -316,37 +355,46 @@ class YoIntegration:
         settlement_transaction_identifier.text = arg_settlement_id
 
         post_data = ET.tostring(auto_create, xml_declaration=True, encoding='utf-8')
-        yo_request = requests.post(
-            API_URL,
-            data=post_data,
-            headers=REQUEST_HEADERS
-        )
+        try:
+            yo_request = requests.post(
+                API_URL,
+                data=post_data,
+                headers=REQUEST_HEADERS,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            logger.error("Yo bank_check_disbursement_status request failed: %s", exc)
+            return False
         response = self.interprete_response(
             request_type='bank_check_disbursement_status',
             request_body={'settlement_id': arg_settlement_id},
             yo_response=yo_request
         )
-        print(response)
+        logger.info("Yo bank_check_disbursement_status: id=%s response=%s",
+                     arg_settlement_id, response)
         return True
 
     def send_sms(self, message: str, to: str):
-        if config('ENV') in ['prod', 'test']:
+        if config('ENV', default='dev') in ['prod', 'test']:
             yo_request = f"http://smgw1.yo.co.ug:9100/sendsms?ybsacctno={self.YO_SMS_ACCOUNT_NO}&password={self.YO_SMS_PASSWORD}&origin=Dinify&sms_content={message}&destinations={to}&nostore=0"  # noqa
-            requests.get(yo_request)
+            try:
+                requests.get(yo_request, timeout=REQUEST_TIMEOUT)
+            except requests.RequestException as exc:
+                logger.error("Yo SMS send failed to %s: %s", to, exc)
+                return False
         return True
 
     def process_yo_response(self, response_id):
         yo_response = MONGO_DB[COL_YO_RESPONSES].find_one({'_id': ObjectId(response_id)})
-        # skip if there is no response_dict
-        print(f"\nProcessing Yo Response: {response_id} : {type(yo_response.get('response_dict'))}\n")
+        logger.info("Processing Yo Response: %s", response_id)
 
         if yo_response.get('response_dict') is None:
-            print('skipping NONE response')
+            logger.debug("Skipping Yo response %s: no response_dict", response_id)
             flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
             return
 
         request_type = yo_response.get('request_type')
-        print(f"\nRequest Type: {request_type}\n")
+        logger.info("Yo request type: %s", request_type)
 
         if request_type == 'momo_collect':
             request_body = yo_response.get('request_body')
@@ -369,7 +417,7 @@ class YoIntegration:
             flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
 
         elif request_type == 'momo_check_transaction':
-            print('processing transaction status check...')
+            logger.info("Processing transaction status check...")
             request_body = yo_response.get('request_body')
             response_dict = yo_response.get('response_dict')
             aggregator_reference = request_body.get('yo_transaction_reference')
@@ -381,15 +429,14 @@ class YoIntegration:
                         aggregator_reference=aggregator_reference
                     )
                 except DinifyTransaction.DoesNotExist:
-                    print('no yo transaction found')
-                    pass
+                    logger.warning("No Yo transaction found for ref=%s", aggregator_reference)
 
                 if txs_record is None:
                     flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
                     return
 
                 aggregator_status = response_dict.get('TransactionStatus')
-                print(f"\nAggregator Status: {aggregator_status}\n")
+                logger.info("Aggregator Status: %s", aggregator_status)
                 if aggregator_status is None:
                     flag_doc_as_processed(collection_name=COL_YO_RESPONSES, doc_id=response_id)
                     return
@@ -401,7 +448,7 @@ class YoIntegration:
                     txs_record.processing_status = ProcessingStatus_Confirmed
                     txs_record.aggregator_status = aggregator_status
                     txs_record.save()
-                    print('transaction updated')
+                    logger.info("Transaction %s updated to CONFIRMED", aggregator_reference)
                 else:
                     return
 

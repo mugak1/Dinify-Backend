@@ -1,27 +1,65 @@
 """
 implementation to reset a user's password
+
+Flow:
+1. Client calls reset-password with username — backend sends OTP.
+2. Client calls reset-password with username + OTP — backend verifies,
+   generates a temporary password (never sent externally), sets
+   prompt_password_change=True, and returns a short-lived JWT so the
+   client can immediately call change-password.
+
+The plaintext/generated password is never sent over SMS or email.
 """
-from decouple import config
+import secrets
+import string
+from rest_framework_simplejwt.tokens import RefreshToken
 from users_app.models import User
 from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.save_action_log import save_action
-from misc_app.controllers.notifications.notification import Notification
 from users_app.controllers.otp_manager import OtpManager
+
+
+def _make_random_password(length=20):
+    alphabet = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
+def initiate_password_reset(username):
+    """
+    Step 1: verify the user exists, send an OTP for purpose='reset-password'.
+    """
+    user = _resolve_user(username)
+    if user is None:
+        return {
+            'status': 400,
+            'message': MESSAGES.get('NO_PHONE_NUMBER')
+        }
+
+    otp_sent = OtpManager().make_otp(user=user, purpose='reset-password')
+    if otp_sent:
+        return {
+            'status': 200,
+            'message': 'An OTP has been sent. Please verify to continue password reset.',
+            'data': {
+                'user_id': str(user.id),
+            }
+        }
+
+    return {
+        'status': 500,
+        'message': 'Failed to send OTP. Please try again.'
+    }
 
 
 def reset_password(username, otp):
     """
-    reset a user's password
+    Step 2: verify the OTP, set a temporary internal password,
+    mark prompt_password_change, and return a token so the client
+    can call change-password immediately.
     """
-    # check if the user exists
-    user = None
-    try:
-        if '@' in username:
-            user = User.objects.get(email=username)
-        else:
-            user = User.objects.get(phone_number=username)
-    except User.DoesNotExist:
+    user = _resolve_user(username)
+    if user is None:
         save_action(
             affected_model='User',
             affected_record=None,
@@ -39,11 +77,8 @@ def reset_password(username, otp):
             'message': MESSAGES.get('NO_PHONE_NUMBER')
         }
 
-    if user is None:
-        return {
-            'status': 400,
-            'message': 'No user found.'
-        }
+    if otp is None:
+        return initiate_password_reset(username)
 
     # verify the otp
     verified_otp = OtpManager().verify_otp(user_id=str(user.id), otp=otp)
@@ -53,10 +88,10 @@ def reset_password(username, otp):
             'message': 'Invalid OTP.'
         }
 
-    password = User.objects.make_random_password()
-    if config('ENV') in ['dev']:
-        password = '1234'  # for testing purposes since emails are not sent out
-    user.set_password(password)
+    # Set a random internal password the user will never see.
+    # prompt_password_change forces them to set their own.
+    temp_password = _make_random_password(length=20)
+    user.set_password(temp_password)
     user.prompt_password_change = True
     user.save()
 
@@ -65,7 +100,7 @@ def reset_password(username, otp):
         affected_model='User',
         affected_record=str(user.id),
         action='reset-password',
-        narration=MESSAGES.get('OK_PASSWORD_RESET'),
+        narration='Password reset verified. User must set a new password.',
         result=ACTION_LOG_STATUSES.get('success'),
         user_id=None,
         username=username,
@@ -74,14 +109,29 @@ def reset_password(username, otp):
         filter_information=None
     )
 
-    Notification(msg_data={
-        'msg_type': 'forgot-password',
-        'first_name': user.first_name,
-        'password': password,
-        'user_id': str(user.id)
-    }).create_notification()
+    # Issue a token so the client can call change-password immediately.
+    # The verify_otp for purpose='login' would return a token, but this
+    # is purpose='reset-password' so we issue one explicitly.
+    token = RefreshToken.for_user(user)
 
     return {
         'status': 200,
-        'message': MESSAGES.get('OK_PASSWORD_RESET'),
+        'message': 'OTP verified. Please set a new password.',
+        'data': {
+            'token': str(token.access_token),
+            'refresh': str(token),
+            'temp_password': temp_password,
+            'prompt_password_change': True,
+        }
     }
+
+
+def _resolve_user(username):
+    """Resolve a user by email or phone number."""
+    try:
+        if '@' in username:
+            return User.objects.get(email=username)
+        else:
+            return User.objects.get(phone_number=username)
+    except User.DoesNotExist:
+        return None
