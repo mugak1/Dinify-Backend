@@ -240,7 +240,7 @@ class SubscriptionPaymentTransaction:
                 balance_update = update_wallet_balance(
                     id=str(txs_record.account.id),
                     mode=txs_record.payment_mode,
-                    credit=Decimal(0.00)
+                    credit=Decimal('0.00')
                 )
                 txs_record.account_balances = balance_update
                 txs_record.transaction_status = TransactionStatus_Success

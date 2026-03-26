@@ -46,10 +46,10 @@ class Restaurant(BaseModel):
         choices=SUBSCRIPTION_CHOICES,
         default='per_order'
     )
-    order_surcharge_percentage = models.FloatField(default=1.0)
-    flat_fee = models.FloatField(default=0.0)
-    order_surcharge_min_amount = models.FloatField(default=0.0)
-    order_surcharge_cap_amount = models.FloatField(default=0.0)
+    order_surcharge_percentage = models.DecimalField(max_digits=10, decimal_places=4, default=Decimal('1.0'))
+    flat_fee = models.DecimalField(max_digits=50, decimal_places=2, default=Decimal('0.00'))
+    order_surcharge_min_amount = models.DecimalField(max_digits=50, decimal_places=2, default=Decimal('0.00'))
+    order_surcharge_cap_amount = models.DecimalField(max_digits=50, decimal_places=2, default=Decimal('0.00'))
 
     subscription_validity = models.BooleanField(default=True)
     subscription_expiry_date = models.DateTimeField(null=True, blank=True)

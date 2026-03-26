@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from decimal import Decimal
 from django.test import TestCase
 from decouple import config
 from users_app.models import User
@@ -206,7 +207,7 @@ class FinanceAppTestFunctions(TestCase):
         print(result)
 
         restaurant.preferred_subscription_method = 'monthly'
-        restaurant.flat_fee = 50000
+        restaurant.flat_fee = Decimal('50000')
         restaurant.save()
 
         # when the restaurant is charged monthly
