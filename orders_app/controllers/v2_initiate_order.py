@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 def determine_effective_unit_price(
     menu_item: MenuItem,
-    options: dict = None
+    options: dict = None,
+    selected_modifiers: dict = None
 ) -> dict:
     unit_price = menu_item.primary_price
     effective_unit_price = unit_price
@@ -118,8 +119,28 @@ def determine_effective_unit_price(
             if discount_amount > 0:
                 effective_unit_price = unit_price - discount_amount
 
-    # add the cost of the options
-    if options is not None:
+    # Handle new grouped modifier format
+    if selected_modifiers and isinstance(selected_modifiers, dict):
+        modifier_data = menu_item.options
+        if modifier_data.get('hasModifiers') and modifier_data.get('groups'):
+            for group_id, choice_ids in selected_modifiers.items():
+                group = next((g for g in modifier_data['groups'] if g['id'] == group_id), None)
+                if group is None:
+                    return {'status': 400, 'message': f'Invalid modifier group for {menu_item.name}'}
+                if group.get('required') and len(choice_ids) < group.get('minSelections', 0):
+                    return {'status': 400, 'message': f'Not enough selections for {group["name"]}'}
+                if len(choice_ids) > group.get('maxSelections', 1):
+                    return {'status': 400, 'message': f'Too many selections for {group["name"]}'}
+                for choice_id in choice_ids:
+                    choice = next((c for c in group['choices'] if c['id'] == choice_id), None)
+                    if choice is None:
+                        return {'status': 400, 'message': f'Invalid choice in {group["name"]}'}
+                    if not choice.get('available', True):
+                        return {'status': 400, 'message': f'{choice["name"]} is not available'}
+                    effective_unit_price += Decimal(str(choice.get('additionalCostUGX', 0)))
+
+    # add the cost of the options (legacy format)
+    elif options is not None:
         item_options = menu_item.options.get('options', [])
         for key, value in options.items():
             option_item = item_options[key]
@@ -233,7 +254,12 @@ def add_order_item(
                     'option_cost': option_cost,
                 })
 
-    price_selection = determine_effective_unit_price(menu_item=menu_item)
+    selected_modifiers = item.get('selected_modifiers', None)
+
+    price_selection = determine_effective_unit_price(
+        menu_item=menu_item,
+        selected_modifiers=selected_modifiers
+    )
     if price_selection.get('status') != 200:
         return price_selection
 
@@ -264,6 +290,7 @@ def add_order_item(
         'quantity': item['quantity'],
 
         'options': selected_options,
+        'selected_modifiers': selected_modifiers,
 
         'unit_price': unit_price,
         'discounted_price': effective_unit_price,

@@ -87,6 +87,10 @@ class OrderItem(BaseModel):
 
     options = models.JSONField(default=list)
 
+    selected_modifiers = models.JSONField(default=dict, null=True, blank=True)
+    # Stores the diner's grouped modifier selections:
+    # { "group_id": ["choice_id", ...], ... }
+
     total_cost = models.DecimalField(max_digits=50, decimal_places=2)
     discounted_cost = models.DecimalField(max_digits=50, decimal_places=2)
     savings = models.DecimalField(max_digits=50, decimal_places=2)

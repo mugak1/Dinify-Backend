@@ -178,15 +178,24 @@ class MenuItem(BaseModel):
     is_special = models.BooleanField(default=False)
 
     options = models.JSONField(default=dict)
-    # e.g. {
-    # min_selections: 0,
-    # max_selections: 0,
-    # options : [{
-    #   name: '',
-    #   selectable: boolean, i.e. does it have options to select from
-    #   choices: [Spicy, Not spicy, Extra spicy],
-    #   cost: 0
-    # }, {...}, {...}]
+    # Grouped modifier structure (new):
+    # {
+    #     "hasModifiers": bool,
+    #     "groups": [
+    #         {
+    #             "id": "uuid",
+    #             "name": "Choose your size",
+    #             "required": bool,
+    #             "selectionType": "single" | "multi",
+    #             "minSelections": int,
+    #             "maxSelections": int,
+    #             "choices": [
+    #                 { "id": "uuid", "name": "Small", "additionalCostUGX": 0, "available": bool }
+    #             ]
+    #         }
+    #     ]
+    # }
+    # Legacy flat format ({ min_selections, max_selections, options: [...] }) still supported.
     has_extras = models.BooleanField(default=False)
     extras_applicable = models.JSONField(default=list)
 

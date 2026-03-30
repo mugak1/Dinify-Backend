@@ -236,7 +236,16 @@ class SerializerPublicGetMenuItem(ModelSerializer):
         )
 
     def get_has_options(self, menu_item):
-        return len(menu_item.options) > 0
+        options = menu_item.options
+        if not options:
+            return False
+        # New grouped format
+        if 'hasModifiers' in options:
+            return options.get('hasModifiers', False)
+        # Legacy flat format
+        if 'options' in options:
+            return len(options.get('options', [])) > 0
+        return False
 
     def get_group(self, menu_item):
         if menu_item.section_group is None:
@@ -474,10 +483,10 @@ class SerializerAdminGetOrderItemReview(ModelSerializer):
             'block_review', 'customer'
         )
 
-    def get_customer(self, order):
-        if order.customer is None:
+    def get_customer(self, order_item):
+        if order_item.order is None or order_item.order.customer is None:
             return ''
-        return f'{order.customer.first_name}'
+        return f'{order_item.order.customer.first_name}'
 
 
 class SerializerPublicGetOrderReview(ModelSerializer):
@@ -500,10 +509,10 @@ class SerializerPublicGetOrderItemReview(ModelSerializer):
         model = OrderItem
         fields = ('rating', 'review', 'customer')
 
-    def get_customer(self, order):
-        if order.customer is None:
+    def get_customer(self, order_item):
+        if order_item.order is None or order_item.order.customer is None:
             return ''
-        return f'{order.customer.first_name}'
+        return f'{order_item.order.customer.first_name}'
 
 
 class SerializerPutDiningArea(ModelSerializer):
