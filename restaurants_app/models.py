@@ -284,6 +284,49 @@ class Table(BaseModel):
         unique_together = ['number', 'str_number', 'restaurant']
 
 
+class UpsellConfig(BaseModel):
+    """
+    Per-restaurant configuration for checkout upsell suggestions.
+    One config per restaurant (created on first access).
+    """
+    restaurant = models.OneToOneField(
+        Restaurant,
+        on_delete=models.CASCADE,
+        related_name='upsell_config'
+    )
+    enabled = models.BooleanField(default=False)
+    title = models.CharField(max_length=255, default="You might also like")
+    max_items_to_show = models.IntegerField(default=6)
+    hide_if_in_basket = models.BooleanField(default=True)
+    hide_out_of_stock = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'upsell_configs'
+
+
+class UpsellItem(BaseModel):
+    """
+    A menu item included in the upsell carousel.
+    Ordering is controlled by listing_position.
+    """
+    config = models.ForeignKey(
+        UpsellConfig,
+        on_delete=models.CASCADE,
+        related_name='upsell_items'
+    )
+    menu_item = models.ForeignKey(
+        MenuItem,
+        on_delete=models.CASCADE,
+        related_name='upsell_entries'
+    )
+    listing_position = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'upsell_items'
+        ordering = ['listing_position']
+        unique_together = ['config', 'menu_item']
+
+
 # serializers for archival
 # serializers used in the same file to avoid circular dependencies
 class SerArcRestaurant(ModelSerializer):
@@ -367,5 +410,29 @@ class SerArcRestaurantEmployee(ModelSerializer):
 def archive_restaurant_employee(sender, instance, **kwargs):
     record_data = SerArcRestaurantEmployee(instance).data
     archive_record(record_data, 'archive_restaurant_employees')
+
+
+class SerArcUpsellConfig(ModelSerializer):
+    class Meta:
+        model = UpsellConfig
+        fields = '__all__'
+
+
+@receiver(post_save, sender=UpsellConfig)
+def archive_upsell_config(sender, instance, **kwargs):
+    record_data = SerArcUpsellConfig(instance).data
+    archive_record(record_data, 'archive_upsell_configs')
+
+
+class SerArcUpsellItem(ModelSerializer):
+    class Meta:
+        model = UpsellItem
+        fields = '__all__'
+
+
+@receiver(post_save, sender=UpsellItem)
+def archive_upsell_item(sender, instance, **kwargs):
+    record_data = SerArcUpsellItem(instance).data
+    archive_record(record_data, 'archive_upsell_items')
 
 

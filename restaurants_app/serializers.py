@@ -7,9 +7,10 @@ logger = logging.getLogger(__name__)
 
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from orders_app.models import Order, OrderItem
+from rest_framework import serializers
 from restaurants_app.models import (
     Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table,
-    SectionGroup, DiningArea
+    SectionGroup, DiningArea, UpsellConfig, UpsellItem
 )
 from dinify_backend.configss.string_definitions import (
     OrderItemStatus_Initiated,
@@ -557,3 +558,40 @@ class SerializerGetDiningArea(ModelSerializer):
                 'enabled': table.enabled,
             } for table in tables
         ]
+
+
+class UpsellItemSerializer(ModelSerializer):
+    """Serializer for individual upsell items — includes basic menu item info."""
+    item_id = serializers.UUIDField(source='menu_item.id', read_only=True)
+    item_name = serializers.CharField(source='menu_item.name', read_only=True)
+    item_price = serializers.DecimalField(
+        source='menu_item.primary_price', max_digits=50, decimal_places=2, read_only=True
+    )
+    item_image = serializers.ImageField(source='menu_item.image', read_only=True)
+    item_available = serializers.BooleanField(source='menu_item.available', read_only=True)
+
+    class Meta:
+        model = UpsellItem
+        fields = [
+            'id', 'menu_item', 'item_id', 'item_name', 'item_price',
+            'item_image', 'item_available', 'listing_position'
+        ]
+
+
+class UpsellConfigSerializer(ModelSerializer):
+    """Full upsell config with nested items."""
+    items = UpsellItemSerializer(source='upsell_items', many=True, read_only=True)
+
+    class Meta:
+        model = UpsellConfig
+        fields = [
+            'id', 'enabled', 'title', 'max_items_to_show',
+            'hide_if_in_basket', 'hide_out_of_stock', 'items'
+        ]
+
+
+class UpsellConfigUpdateSerializer(ModelSerializer):
+    """For updating config settings (without items)."""
+    class Meta:
+        model = UpsellConfig
+        fields = ['enabled', 'title', 'max_items_to_show', 'hide_if_in_basket', 'hide_out_of_stock']
