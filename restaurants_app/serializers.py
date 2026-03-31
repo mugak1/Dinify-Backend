@@ -152,7 +152,8 @@ class SerializerPublicGetMenuSection(ModelSerializer):
         model = MenuSection
         fields = (
             'id', 'name', 'description', 'section_banner_image',
-            'available', 'item_count', 'has_groups', 'groups',
+            'available', 'availability', 'schedules',
+            'item_count', 'has_groups', 'groups',
             'listing_position'
         )
 
@@ -398,13 +399,21 @@ class SerializerGetFullMenu(ModelSerializer):
     item_count = SerializerMethodField()
     groups = SerializerMethodField()
     items = SerializerMethodField()
+    is_currently_active = SerializerMethodField()
 
     class Meta:
         model = MenuSection
         fields = (
             'id', 'name', 'section_banner_image', 'available',
+            'availability', 'schedules', 'is_currently_active',
             'item_count', 'groups', 'items'
         )
+
+    def get_is_currently_active(self, section):
+        from restaurants_app.controllers.utils.schedule_utils import (
+            is_section_currently_active
+        )
+        return is_section_currently_active(section)
 
     def get_groups(self, section):
         filters = {
