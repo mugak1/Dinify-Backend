@@ -1,0 +1,24 @@
+name: Deploy UAT Backend
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to UAT server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.UAT_SSH_HOST }}
+          username: ${{ secrets.UAT_SSH_USER }}
+          key: ${{ secrets.UAT_SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/ubuntu/dinify_backend_handover_uat
+            source /home/ubuntu/venv_uat_handover/bin/activate
+            git pull origin main
+            python manage.py migrate
+            python manage.py check --deploy
+            sudo systemctl restart apache2
