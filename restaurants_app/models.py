@@ -109,6 +109,24 @@ class MenuSection(BaseModel):
     # e.g. breakfast availability may end at noon
     available = models.BooleanField(default=True)
 
+    availability = models.CharField(
+        max_length=20,
+        default='always',
+        choices=[('always', 'Always'), ('scheduled', 'Scheduled')]
+    )
+    # Controls whether this section is always visible or only during scheduled hours.
+
+    schedules = models.JSONField(default=list, blank=True)
+    # List of schedule slots when availability == 'scheduled':
+    # [
+    #     {
+    #         "id": "uuid",
+    #         "days": [1, 2, 3, 4, 5],       # 1=Monday, 7=Sunday
+    #         "startTime": "07:00",            # 24-hour format
+    #         "endTime": "11:00"               # 24-hour format
+    #     }
+    # ]
+
     # for approvals and enabling items
     approved = models.BooleanField(default=False)
     enabled = models.BooleanField(default=False)
