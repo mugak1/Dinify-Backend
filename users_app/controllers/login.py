@@ -49,8 +49,10 @@ def login(
     )
 
     if auth_user is None:
-        # check if the username exists
-        if not User.objects.filter(username=username).exists():
+        # Single query to check why auth failed (replaces exists() + get())
+        try:
+            existing_user = User.objects.get(username=username)
+        except User.DoesNotExist:
             save_action(
                 affected_model='User',
                 affected_record=None,
@@ -67,9 +69,8 @@ def login(
                 'status': 401,
                 'message': MESSAGES.get('NO_USERNAME')
             }
-        # check if the user account is not active
-        if not User.objects.get(username=username).is_active:
-            # save to indicate that the user account is not active
+
+        if not existing_user.is_active:
             save_action(
                 affected_model='User',
                 affected_record=None,
@@ -86,7 +87,6 @@ def login(
                 'status': 401,
                 'message': MESSAGES.get('ACCOUNT_NOT_ACTIVE')
             }
-        # TODO save to the action log indicating that the user failed to login
 
         return {
             'status': 401,

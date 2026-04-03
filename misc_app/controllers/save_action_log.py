@@ -2,6 +2,7 @@
 saves an action that a user has performed
 """
 import logging
+import threading
 from django.utils import timezone
 from dinify_backend.mongo_db import MONGO_DB, ACTION_LOGS
 
@@ -72,8 +73,12 @@ def save_action(
     action_details = action_data
 
     action_details['timestamp'] = time_detail
-    # save to mongodb
-    try:
-        MONGO_DB[ACTION_LOGS].insert_one(action_details)
-    except Exception as e:
-        logger.error("Failed to write action log to MongoDB: %s", e)
+
+    # save to mongodb in background — action logs are fire-and-forget
+    def _write_action_log():
+        try:
+            MONGO_DB[ACTION_LOGS].insert_one(action_details)
+        except Exception as e:
+            logger.error("Failed to write action log to MongoDB: %s", e)
+
+    threading.Thread(target=_write_action_log, daemon=True).start()
