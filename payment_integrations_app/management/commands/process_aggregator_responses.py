@@ -1,6 +1,9 @@
+import logging
 from datetime import datetime
 from django.core.management.base import BaseCommand
 from dinify_backend.mongo_db import MONGO_DB, COL_YO_RESPONSES, COL_DPO_RESPONSES
+
+logger = logging.getLogger(__name__)
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
 from payment_integrations_app.controllers.dpo import DpoIntegration
 from django.core.management import CommandError
@@ -33,10 +36,14 @@ class Command(BaseCommand):
 
         print(f"\nProcessing {aggregator} responses at {datetime.now()}...")
 
-        pending_responses = MONGO_DB[collection].find(
-            {'dinify_processed': {'$exists': False}},
-            {'_id': 1}
-        ).batch_size(1000)
+        try:
+            pending_responses = MONGO_DB[collection].find(
+                {'dinify_processed': {'$exists': False}},
+                {'_id': 1}
+            ).batch_size(1000)
+        except Exception as e:
+            logger.error("Failed to query pending %s responses from MongoDB: %s", aggregator, e)
+            return
 
         for x in pending_responses:
             if aggregator == 'yo':

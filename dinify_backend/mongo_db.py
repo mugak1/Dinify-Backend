@@ -40,7 +40,7 @@ class _LazyMongoClient:
                 self._client = MongoClient(
                     host,
                     uuidRepresentation='standard',
-                    serverSelectionTimeoutMS=5000,
+                    serverSelectionTimeoutMS=2000,
                 )
                 self._db = self._client[db_name]
             except Exception as exc:

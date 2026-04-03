@@ -115,10 +115,14 @@ def make_orders_report(orders: list) -> dict:
 def make_order_items_report(orders: list) -> dict:
     summary = {}
     order_ids = [order['id'] for order in orders]
-    order_items = MONGO_DB['archive_order_items'].find(
-        {'order': {'$in': order_ids}}
-    )
-    order_items = list(order_items)
+    try:
+        order_items = MONGO_DB['archive_order_items'].find(
+            {'order': {'$in': order_ids}}
+        )
+        order_items = list(order_items)
+    except Exception as e:
+        logger.error("Failed to query archive_order_items: %s", e)
+        order_items = []
     df_order_items = pandas.DataFrame(order_items)
 
     # find the most ordered item for the day
@@ -245,19 +249,28 @@ def report_on_customer_behaviour(orders: list) -> dict:
 def report_on_transactions(restaurant_id: str, eod_date: date) -> dict:
     summary = {}
     # get all the accounts associated with the restaurant
-    accounts = MONGO_DB['archive_accounts'].find(
-        filter={'restaurant': restaurant_id},
-        projection={'id': 1, '_id': 0}
-    )
+    try:
+        accounts = MONGO_DB['archive_accounts'].find(
+            filter={'restaurant': restaurant_id},
+            projection={'id': 1, '_id': 0}
+        )
+        account_ids = [account['id'] for account in accounts]
+    except Exception as e:
+        logger.error("Failed to query archive_accounts for restaurant %s: %s", restaurant_id, e)
+        return summary
+
     # get all the transactions associated with the accounts for the restaurant
-    account_ids = [account['id'] for account in accounts]
-    transactions = MONGO_DB['archive_transactions'].find({
-        '$or': [
-            {'account': {'$in': account_ids}},
-            {'restaurant': restaurant_id}
-        ],
-        'eod_record_date': str(eod_date)
-    })
+    try:
+        transactions = MONGO_DB['archive_transactions'].find({
+            '$or': [
+                {'account': {'$in': account_ids}},
+                {'restaurant': restaurant_id}
+            ],
+            'eod_record_date': str(eod_date)
+        })
+    except Exception as e:
+        logger.error("Failed to query archive_transactions for restaurant %s: %s", restaurant_id, e)
+        return summary
 
     transactions = list(transactions)
     df_transactions = pandas.DataFrame(transactions)
@@ -341,11 +354,15 @@ def report_on_transactions(restaurant_id: str, eod_date: date) -> dict:
 
 def generate_restaurant_daily_report(restaurant_id: int, eod_date: date) -> None:
     eod_date = '2025-05-31'
-    orders = MONGO_DB['archive_orders'].find({
-        'restaurant': restaurant_id,
-        'eod_record_date': str(eod_date)
-    })
-    orders = list(orders)
+    try:
+        orders = MONGO_DB['archive_orders'].find({
+            'restaurant': restaurant_id,
+            'eod_record_date': str(eod_date)
+        })
+        orders = list(orders)
+    except Exception as e:
+        logger.error("Failed to query archive_orders for restaurant %s daily report: %s", restaurant_id, e)
+        return
     report = {
         'restaurant_id': restaurant_id,
         'eod_date': str(eod_date)

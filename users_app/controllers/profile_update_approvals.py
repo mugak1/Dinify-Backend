@@ -1,9 +1,12 @@
+import logging
 from typing import Optional
 from users_app.models import User
 from dinify_backend.mongo_db import (
     MONGO_DB,
     COL_PROFILE_UPDATE_APPROVALS
 )
+
+logger = logging.getLogger(__name__)
 from restaurants_app.models import RestaurantEmployee
 from users_app.controllers.permissions_check import (
     dinify_roles,
@@ -54,8 +57,12 @@ def get_pending_profile_updates(
             "status": 401,
             "message": "You do not have permission to perform this action"
         }
-    pending_updates = MONGO_DB[COL_PROFILE_UPDATE_APPROVALS].find(
-        filter_query,
-        projection=projection
-    )
-    return list(pending_updates)
+    try:
+        pending_updates = MONGO_DB[COL_PROFILE_UPDATE_APPROVALS].find(
+            filter_query,
+            projection=projection
+        )
+        return list(pending_updates)
+    except Exception as e:
+        logger.error("Failed to query pending profile updates from MongoDB: %s", e)
+        return []

@@ -56,12 +56,15 @@ class DpoIntegration:
         for elem in response_xml_object.iter():
             dpo_response_dict[elem.tag] = elem.text
 
-        MONGO_DB[COL_DPO_RESPONSES].insert_one({
-            'request_type': request_type,
-            'request_body': request_body,
-            'response_string': dpo_response.text,
-            'response_dict': dpo_response_dict
-        })
+        try:
+            MONGO_DB[COL_DPO_RESPONSES].insert_one({
+                'request_type': request_type,
+                'request_body': request_body,
+                'response_string': dpo_response.text,
+                'response_dict': dpo_response_dict
+            })
+        except Exception as e:
+            logger.error("Failed to save DPO response to MongoDB: %s", e)
         return dpo_response_dict
 
     def create_token(self, amount: int, currency: str, transaction_reference: str, timestamp: datetime) -> str:  # noqa
@@ -152,7 +155,11 @@ class DpoIntegration:
         return True
 
     def process_response(self, response_id: str):
-        dpo_response = MONGO_DB[COL_DPO_RESPONSES].find_one({'_id': ObjectId(response_id)})
+        try:
+            dpo_response = MONGO_DB[COL_DPO_RESPONSES].find_one({'_id': ObjectId(response_id)})
+        except Exception as e:
+            logger.error("Failed to read DPO response %s from MongoDB: %s", response_id, e)
+            return
         if dpo_response.get('response_dict') is None:
             flag_doc_as_processed(
                 collection_name=COL_DPO_RESPONSES,

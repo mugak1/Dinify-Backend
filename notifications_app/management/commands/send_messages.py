@@ -1,6 +1,9 @@
+import logging
 
 from django.core.management.base import BaseCommand
 from dinify_backend.mongo_db import MONGO_DB, COL_NOTIFICATIONS
+
+logger = logging.getLogger(__name__)
 from notifications_app.controllers.messenger import Messenger
 from restaurants_app.models import Restaurant
 
@@ -12,7 +15,11 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         # find notifications where the sent attribute is missing
-        notifications = MONGO_DB[COL_NOTIFICATIONS].find({"sent": {"$exists": False}})
+        try:
+            notifications = MONGO_DB[COL_NOTIFICATIONS].find({"sent": {"$exists": False}})
+        except Exception as e:
+            logger.error("Failed to query pending notifications from MongoDB: %s", e)
+            return
         print('\n=== Sending emails ===\n')
         # print(list(notifications))
 
@@ -44,7 +51,11 @@ class Command(BaseCommand):
                     )
 
             # update the sent attribute to True
-            MONGO_DB[COL_NOTIFICATIONS].update_one(
-                {"_id": x['_id']},
-                {"$set": {"sent": True}}
-            )
+            try:
+                MONGO_DB[COL_NOTIFICATIONS].update_one(
+                    {"_id": x['_id']},
+                    {"$set": {"sent": True}}
+                )
+            except Exception as e:
+                logger.error("Failed to mark notification %s as sent: %s", x.get('_id'), e)
+                continue

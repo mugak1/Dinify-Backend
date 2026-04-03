@@ -122,7 +122,11 @@ def first_time_batch_approval(
                     'action': approval_decision,
                     'result': 'success'
                 }
-                action_logs = MONGO_DB[ACTION_LOGS].find(filter)
+                try:
+                    action_logs = MONGO_DB[ACTION_LOGS].find(filter)
+                except Exception as e:
+                    logger.error("Failed to query action logs from MongoDB: %s", e)
+                    action_logs = []
 
                 submitter_id = None
                 for log in action_logs:
