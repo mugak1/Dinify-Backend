@@ -2,6 +2,7 @@ from typing import Optional
 import logging
 import random
 import hashlib
+import threading
 from decouple import config
 from datetime import timedelta
 from django.utils import timezone
@@ -37,28 +38,29 @@ class OtpManager:
             purpose=purpose
         )
         user_otp.save()
-        try:
-            # print("sending otp")
-            otp_message = f"Your Dinify OTP is {otp_str}."
-            if msisdn is None:
-                msisdn = user.phone_number
-            YoIntegration().send_sms(to=msisdn, message=otp_message)
 
-            # send OTP email as well
-            if config('ENV') in ['dev', 'test']:
-                recipients = [user.email] if user and user.email else []
+        otp_message = f"Your Dinify OTP is {otp_str}."
+        if msisdn is None:
+            msisdn = user.phone_number
 
-                otp_email_message = f"{otp_message} OTP is valid for 5 minutes."
+        def _send_otp_notifications():
+            try:
+                YoIntegration().send_sms(to=msisdn, message=otp_message)
+            except Exception as error:
+                logger.error("OTP SMS send error: %s", error)
+            try:
+                if config('ENV') in ['dev', 'test']:
+                    recipients = [user.email] if user and user.email else []
+                    if recipients:
+                        otp_email_message = f"{otp_message} OTP is valid for 5 minutes."
+                        Messenger().send_email(
+                            to=recipients, cc=[], subject='Dinify OTP',
+                            message=otp_email_message
+                        )
+            except Exception as error:
+                logger.error("OTP email send error: %s", error)
 
-                Messenger().send_email(
-                    to=recipients,
-                    cc=[],
-                    subject='Dinify OTP',
-                    message=otp_email_message
-                )
-
-        except Exception as error:
-            logger.error("OTP Error: %s", error)
+        threading.Thread(target=_send_otp_notifications, daemon=True).start()
         return True
 
     def verify_otp(
