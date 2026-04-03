@@ -42,12 +42,15 @@ class YoIntegration:
             response_xml_object = ET.fromstring(yo_response.text)
         except ET.ParseError as exc:
             logger.error("Yo XML parse error for %s: %s", request_type, exc)
-            MONGO_DB[COL_YO_RESPONSES].insert_one({
-                'request_type': request_type,
-                'request_body': request_body,
-                'response_string': yo_response.text,
-                'response_dict': None
-            })
+            try:
+                MONGO_DB[COL_YO_RESPONSES].insert_one({
+                    'request_type': request_type,
+                    'request_body': request_body,
+                    'response_string': yo_response.text,
+                    'response_dict': None
+                })
+            except Exception as e:
+                logger.error("Failed to save Yo error response to MongoDB: %s", e)
             return None
 
         yo_response_dict = None
@@ -58,12 +61,15 @@ class YoIntegration:
         except Exception as error:
             logger.error("Error interpreting Yo Response: %s", error)
 
-        MONGO_DB[COL_YO_RESPONSES].insert_one({
-            'request_type': request_type,
-            'request_body': request_body,
-            'response_string': yo_response.text,
-            'response_dict': yo_response_dict
-        })
+        try:
+            MONGO_DB[COL_YO_RESPONSES].insert_one({
+                'request_type': request_type,
+                'request_body': request_body,
+                'response_string': yo_response.text,
+                'response_dict': yo_response_dict
+            })
+        except Exception as e:
+            logger.error("Failed to save Yo response to MongoDB: %s", e)
 
         return yo_response_dict
 
@@ -385,7 +391,11 @@ class YoIntegration:
         return True
 
     def process_yo_response(self, response_id):
-        yo_response = MONGO_DB[COL_YO_RESPONSES].find_one({'_id': ObjectId(response_id)})
+        try:
+            yo_response = MONGO_DB[COL_YO_RESPONSES].find_one({'_id': ObjectId(response_id)})
+        except Exception as e:
+            logger.error("Failed to read Yo response %s from MongoDB: %s", response_id, e)
+            return
         logger.info("Processing Yo Response: %s", response_id)
 
         if yo_response.get('response_dict') is None:

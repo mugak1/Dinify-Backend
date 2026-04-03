@@ -8,12 +8,17 @@ logger = logging.getLogger(__name__)
 
 
 def transform_transaction_amounts():
-    transactions = MONGO_DB['archive_transactions'].find({
-        '$or': [
-            {"transformed_amounts": {"$exists": False}},
-            {"transformed_amounts": {"$eq": False}},
-        ]
-    })
+    try:
+        transactions = MONGO_DB['archive_transactions'].find({
+            '$or': [
+                {"transformed_amounts": {"$exists": False}},
+                {"transformed_amounts": {"$eq": False}},
+            ]
+        })
+    except Exception as e:
+        logger.error("Failed to query archive_transactions for transform: %s", e)
+        return
+
     amount_columns = [
         'amount_in', 'amount_out', 'transaction_amount',
         'tip_amount', 'transaction_collected_amount', 'gross_amount_paid',
@@ -34,19 +39,27 @@ def transform_transaction_amounts():
                     amount_values[f'account_balances.before.{key}'] = Decimal(str(value)).quantize(Decimal('0.01'))
 
         amount_values['transformed_amounts'] = True
-        MONGO_DB['archive_transactions'].update_one(
-            {"_id": ObjectId(tx['_id'])},
-            {"$set": amount_values}
-        )
+        try:
+            MONGO_DB['archive_transactions'].update_one(
+                {"_id": ObjectId(tx['_id'])},
+                {"$set": amount_values}
+            )
+        except Exception as e:
+            logger.error("Failed to update transaction %s amounts: %s", tx.get('_id'), e)
+            continue
 
 
 def transform_account_amounts():
-    accounts = MONGO_DB['archive_accounts'].find({
-        '$or': [
-            {"transformed_amounts": {"$exists": False}},
-            {"transformed_amounts": {"$eq": False}},
-        ]
-    })
+    try:
+        accounts = MONGO_DB['archive_accounts'].find({
+            '$or': [
+                {"transformed_amounts": {"$exists": False}},
+                {"transformed_amounts": {"$eq": False}},
+            ]
+        })
+    except Exception as e:
+        logger.error("Failed to query archive_accounts for transform: %s", e)
+        return
 
     ignore_fields = ['archived']
 
@@ -60,22 +73,30 @@ def transform_account_amounts():
             except Exception as error:
                 logger.error("Error converting %s in account %s: %s", key, account['_id'], error)
         amount_values['transformed_amounts'] = True
-        MONGO_DB['archive_accounts'].update_one(
-            {"_id": ObjectId(account['_id'])},
-            {"$set": amount_values}
-        )
+        try:
+            MONGO_DB['archive_accounts'].update_one(
+                {"_id": ObjectId(account['_id'])},
+                {"$set": amount_values}
+            )
+        except Exception as e:
+            logger.error("Failed to update account %s amounts: %s", account.get('_id'), e)
+            continue
 
 
 def transform_order_amounts():
     """
     converts values from strings to decimal values
     """
-    orders = MONGO_DB['archive_orders'].find({
-        '$or': [
-            {"transformed_amounts": {"$exists": False}},
-            {"transformed_amounts": {"$eq": False}},
-        ]
-    })
+    try:
+        orders = MONGO_DB['archive_orders'].find({
+            '$or': [
+                {"transformed_amounts": {"$exists": False}},
+                {"transformed_amounts": {"$eq": False}},
+            ]
+        })
+    except Exception as e:
+        logger.error("Failed to query archive_orders for transform: %s", e)
+        return
 
     amount_columns = [
         'actual_cost', 'balance_payable', 'discounted_cost',
@@ -88,10 +109,14 @@ def transform_order_amounts():
             if column in order:
                 amount_values[column] = Decimal(str(order[column])).quantize(Decimal('0.01'))
         amount_values['transformed_amounts'] = True
-        MONGO_DB['archive_orders'].update_one(
-            {"_id": ObjectId(order['_id'])},
-            {"$set": amount_values}
-        )
+        try:
+            MONGO_DB['archive_orders'].update_one(
+                {"_id": ObjectId(order['_id'])},
+                {"$set": amount_values}
+            )
+        except Exception as e:
+            logger.error("Failed to update order %s amounts: %s", order.get('_id'), e)
+            continue
 
 
 def transform_amounts():
