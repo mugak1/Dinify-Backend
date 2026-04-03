@@ -94,9 +94,10 @@ def login(
         }
 
     # when the login is successful
+    # Use update() to avoid triggering the post_save archive_user signal —
+    # archiving the full user to MongoDB on every login is unnecessary overhead.
+    User.objects.filter(username=username).update(last_login=timezone.now())
     auth_user = User.objects.get(username=username)
-    auth_user.last_login = timezone.now()
-    auth_user.save()
     token = RefreshToken.for_user(auth_user)
 
     # save action
