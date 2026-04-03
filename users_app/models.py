@@ -3,6 +3,7 @@ the models for the Users app
 """
 import uuid
 import datetime
+import threading
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.db.models.signals import pre_save, post_save
@@ -133,7 +134,11 @@ class SerArcUser(ModelSerializer):
 def archive_user(sender, instance, **kwargs):
     data = SerArcUser(instance).data
     data['time_created'] = data['date_joined']
-    archive_record(
-        record_data=data,
-        archive_collection='archive_users',
-    )
+
+    def _archive():
+        archive_record(
+            record_data=data,
+            archive_collection='archive_users',
+        )
+
+    threading.Thread(target=_archive, daemon=True).start()
