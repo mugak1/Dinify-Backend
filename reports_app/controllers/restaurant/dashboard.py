@@ -593,3 +593,78 @@ def generate_restaurant_dashboard_v2(
             'kds': _build_kds(restaurant_id),
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Reviews Summary
+# ---------------------------------------------------------------------------
+
+def generate_restaurant_reviews_summary(restaurant_id: str) -> dict:
+    now = timezone.now()
+    thirty_days_ago = now - timedelta(days=30)
+
+    reviewed_30d = Order.objects.filter(
+        restaurant=restaurant_id,
+        rating__isnull=False,
+        time_created__gte=thirty_days_ago,
+    )
+
+    total_30d = reviewed_30d.count()
+
+    # Average rating
+    avg_raw = reviewed_30d.aggregate(v=Avg('rating'))['v']
+    avg_rating = (
+        str(Decimal(str(avg_raw)).quantize(Decimal('0.1')))
+        if avg_raw is not None else '0.0'
+    )
+
+    # Distribution (ensure all 5 star levels present)
+    dist_qs = (
+        reviewed_30d.values('rating')
+        .annotate(count=Count('id'))
+    )
+    dist_map = {r['rating']: r['count'] for r in dist_qs}
+    distribution = [
+        {'stars': s, 'count': dist_map.get(s, 0)}
+        for s in range(5, 0, -1)
+    ]
+
+    # Recent reviews (last 3 with a rating, across all time)
+    recent_qs = (
+        Order.objects.filter(
+            restaurant=restaurant_id,
+            rating__isnull=False,
+        )
+        .order_by('-time_created')[:3]
+    )
+    recent_reviews = [
+        {
+            'order_id': str(o.id),
+            'order_number': o.order_number,
+            'rating': o.rating,
+            'text': o.review or '',
+            'created_at': o.time_created.isoformat() if o.time_created else None,
+        }
+        for o in recent_qs
+    ]
+
+    # Low rating share (1-2 stars)
+    if total_30d > 0:
+        low_count = reviewed_30d.filter(rating__lte=2).count()
+        low_share = str(
+            (Decimal(low_count) * Decimal(100) / Decimal(total_30d))
+            .quantize(Decimal('0.1'))
+        )
+    else:
+        low_share = '0.0'
+
+    return {
+        'status': 200,
+        'data': {
+            'avg_rating_30d': avg_rating,
+            'total_reviews_30d': total_30d,
+            'distribution': distribution,
+            'recent_reviews': recent_reviews,
+            'low_rating_share_30d': low_share,
+        }
+    }
