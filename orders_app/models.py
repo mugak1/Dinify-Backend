@@ -7,9 +7,12 @@ from django.db import transaction
 from datetime import datetime
 from users_app.models import User, BaseModel
 from restaurants_app.models import Restaurant, MenuItem, Table
+from django.utils import timezone
 from dinify_backend.configss.string_definitions import (
     PaymentStatus_Pending, OrderStatus_Initiated,
-    OrderItemStatus_Initiated
+    OrderItemStatus_Initiated,
+    KdsStatus_New, KdsStatus_InPrep, KdsStatus_Ready,
+    KdsStatus_Fulfilled, KdsStatus_Cancelled
 )
 
 
@@ -111,6 +114,48 @@ class OrderItem(BaseModel):
         ordering = ['-time_created', 'item__name']
 
 
+KDS_STATUS_CHOICES = [
+    (KdsStatus_New, 'New'),
+    (KdsStatus_InPrep, 'In Prep'),
+    (KdsStatus_Ready, 'Ready'),
+    (KdsStatus_Fulfilled, 'Fulfilled'),
+    (KdsStatus_Cancelled, 'Cancelled'),
+]
+
+
+class KitchenTicket(BaseModel):
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='kitchen_tickets')
+    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name='kitchen_tickets_restaurant')
+    table = models.ForeignKey(Table, on_delete=models.CASCADE, null=True, blank=True, related_name='kitchen_tickets_table')
+    ticket_number = models.IntegerField(null=True)
+    status = models.CharField(max_length=50, choices=KDS_STATUS_CHOICES, default=KdsStatus_New, db_index=True)
+    station = models.CharField(max_length=100, null=True, blank=True)
+    items_count = models.PositiveIntegerField(default=0)
+    target_prep_minutes = models.PositiveIntegerField(default=15)
+    placed_at = models.DateTimeField(auto_now_add=True)
+    prep_started_at = models.DateTimeField(null=True, blank=True)
+    ready_at = models.DateTimeField(null=True, blank=True)
+    fulfilled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'kitchen_tickets'
+        ordering = ['-placed_at']
+
+
+class KitchenTicketItem(BaseModel):
+    ticket = models.ForeignKey(KitchenTicket, on_delete=models.CASCADE, related_name='ticket_items')
+    order_item = models.ForeignKey(OrderItem, on_delete=models.CASCADE, related_name='kitchen_ticket_items')
+    name = models.CharField(max_length=255)
+    quantity = models.PositiveIntegerField()
+    notes = models.TextField(null=True, blank=True)
+    station = models.CharField(max_length=100, null=True, blank=True)
+
+    class Meta:
+        db_table = 'kitchen_ticket_items'
+        ordering = ['ticket', 'name']
+
+
 @receiver(pre_save, sender=Order)
 def create_order_number(sender, instance, **kwargs):
     if instance.order_number is None:
@@ -122,3 +167,15 @@ def create_order_number(sender, instance, **kwargs):
                 time_created__date=date_today
             ).count()
             instance.order_number = count+1
+
+
+@receiver(pre_save, sender=KitchenTicket)
+def create_ticket_number(sender, instance, **kwargs):
+    if instance.ticket_number is None:
+        with transaction.atomic():
+            date_today = datetime.now().date()
+            count = KitchenTicket.objects.select_for_update().filter(
+                restaurant=instance.restaurant,
+                time_created__date=date_today
+            ).count()
+            instance.ticket_number = count + 1

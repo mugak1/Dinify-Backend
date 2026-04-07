@@ -67,6 +67,13 @@ OrderItemStatus_Preparing = 'preparing'
 OrderItemStatus_Unavailable = 'unavailable'
 OrderItemStatus_Served = 'served'
 
+# KDS ticket statuses
+KdsStatus_New = 'new'
+KdsStatus_InPrep = 'in_prep'
+KdsStatus_Ready = 'ready'
+KdsStatus_Fulfilled = 'fulfilled'
+KdsStatus_Cancelled = 'cancelled'
+
 # processing status
 ProcessingStatus_Pending = 'pending'
 ProcessingStatus_PendingRevenueAcknowledgement = 'pending_revenue_acknowledgement'
