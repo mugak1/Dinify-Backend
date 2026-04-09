@@ -18,7 +18,9 @@ jobs:
           script: |
             cd /home/ubuntu/dinify_backend_handover_uat
             source /home/ubuntu/venv_uat_handover/bin/activate
+            git checkout -- .
+            git clean -fd
             git pull origin main
-            python manage.py migrate
-            python manage.py check --deploy
+            python3 manage.py migrate
+            python3 manage.py check --deploy
             sudo systemctl restart apache2
