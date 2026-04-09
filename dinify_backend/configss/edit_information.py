@@ -46,6 +46,11 @@ EDIT_INFORMATION = {
         {'key': 'is_special', 'label': 'is special', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'has_extras', 'label': 'has extras', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'allergens', 'label': 'allergens', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'is_featured', 'label': 'is featured', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'is_popular', 'label': 'is popular', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'is_new', 'label': 'is new', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'tags', 'label': 'tags', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'in_stock', 'label': 'in stock', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
     ],
     'table': [
         {'key': 'dining_area', 'label': 'dining area', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
