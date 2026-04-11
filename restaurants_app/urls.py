@@ -6,6 +6,7 @@ from restaurants_app.endpoints.upsell_config import UpsellConfigEndpoint, Upsell
 from restaurants_app.endpoints.preset_tags import PresetTagsEndpoint
 from restaurants_app.endpoints.reservations import ReservationsEndpoint
 from restaurants_app.endpoints.waitlist import WaitlistEndpoint
+from restaurants_app.endpoints.table_actions import TableActionsEndpoint
 
 
 urlpatterns = [
@@ -19,6 +20,8 @@ urlpatterns = [
     # Reservations & waitlist endpoints (must be before the catch-all)
     path('reservations/', ReservationsEndpoint.as_view()),
     path('waitlist/', WaitlistEndpoint.as_view()),
+    # Table lifecycle actions (must be before the catch-all)
+    path('table-actions/<str:action>/', TableActionsEndpoint.as_view()),
     # Existing patterns
     path('<str:config_detail>/', RestaurantSetupEndpoint.as_view()),
     path('manager-actions/<str:action>/', RestaurantManagerActionsEndpoint.as_view()),
