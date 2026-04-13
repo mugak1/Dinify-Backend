@@ -26,6 +26,8 @@ EDIT_INFORMATION = {
         {'key': 'section_banner_image', 'label': 'section banner', 'type': 'file', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'available', 'label': 'available', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'listing_position', 'label': 'listing position', 'type': 'int', 'min_length': 1, 'text_presentation': None},  # noqa
+        {'key': 'availability', 'label': 'availability', 'type': 'char', 'min_length': 5, 'text_presentation': str.lower},  # noqa
+        {'key': 'schedules', 'label': 'schedules', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
     ],
     'menu_item': [
         {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
