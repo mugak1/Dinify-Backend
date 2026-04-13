@@ -24,7 +24,10 @@ def check_required_information(
             }
 
         if attribute_type not in ['list']:
-            if len(provided_information[key].strip()) < minimum_length:
+            value = provided_information[key]
+            # Convert to string for length check — numeric types don't have .strip()
+            str_value = str(value).strip() if not isinstance(value, str) else value.strip()
+            if len(str_value) < minimum_length:
                 return {
                     "status": False,
                     "message": f"{label} must be at least {minimum_length} characters long"
