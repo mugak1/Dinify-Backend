@@ -15,6 +15,8 @@ EDIT_INFORMATION = {
         {'key': 'order_surcharge_cap_amount', 'label': 'max order surcharge amount', 'type': 'decimal', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'flat_fee', 'label': 'flat fee', 'type': 'decimal', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'branding_configuration', 'label': 'branding configuration', 'type': 'dict', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'preset_tags', 'label': 'preset tags', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'country', 'label': 'country', 'type': 'char', 'min_length': 2, 'text_presentation': None},  # noqa
     ],
     'restaurant_employee': [
         {'key': 'roles', 'label': 'Roles', 'type': 'list', 'min_length': 5, 'text_presentation': None},  # noqa
