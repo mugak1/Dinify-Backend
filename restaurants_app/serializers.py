@@ -423,7 +423,8 @@ class SerializerPublicGetTableDetails(ModelSerializer):
             'logo': logo,
             'cover_photo': cover_photo,
             'branding_configuration': restaurant.branding_configuration,
-            'menu_approval_status': restaurant.first_time_menu_approval_decision
+            'menu_approval_status': restaurant.first_time_menu_approval_decision,
+            'preset_tags': restaurant.preset_tags or []
         }
 
     def get_available(self, table):
