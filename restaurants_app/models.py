@@ -189,6 +189,7 @@ class MenuItem(BaseModel):
 
     name = models.CharField(max_length=255)
     description = models.TextField(null=True, blank=True)
+    calories = models.PositiveIntegerField(null=True, blank=True, help_text="Calorie count (kcal)")
     allergens = models.JSONField(default=list)
     tags = models.JSONField(default=list, blank=True)
     primary_price = models.DecimalField(max_digits=50, decimal_places=2)

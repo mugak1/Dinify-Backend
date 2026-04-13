@@ -234,7 +234,7 @@ class SerializerPublicGetMenuItem(ModelSerializer):
     class Meta:
         model = MenuItem
         fields = (
-            'id', 'name', 'description', 'primary_price',
+            'id', 'name', 'description', 'calories', 'primary_price',
             'discounted_price', 'running_discount', 'image',
             'available', 'in_stock', 'allergens', 'tags', 'discount_details',
             'has_options', 'options', 'section', 'group', 'extras', 'is_extra',

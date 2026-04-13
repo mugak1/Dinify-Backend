@@ -34,6 +34,7 @@ EDIT_INFORMATION = {
     'menu_item': [
         {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
         {'key': 'primary_price', 'label': 'price', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'calories', 'label': 'calories', 'type': 'int', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'discounted_price', 'label': 'discounted price', 'type': 'float', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'running_discount', 'label': 'running discount', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'consider_discount_object', 'label': 'consider discount object', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
