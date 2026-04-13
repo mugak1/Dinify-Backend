@@ -620,12 +620,13 @@ class UpsellItemSerializer(ModelSerializer):
     )
     item_image = serializers.ImageField(source='menu_item.image', read_only=True)
     item_available = serializers.BooleanField(source='menu_item.available', read_only=True)
+    item_in_stock = serializers.BooleanField(source='menu_item.in_stock', read_only=True)
 
     class Meta:
         model = UpsellItem
         fields = [
             'id', 'menu_item', 'item_id', 'item_name', 'item_price',
-            'item_image', 'item_available', 'listing_position'
+            'item_image', 'item_available', 'item_in_stock', 'listing_position'
         ]
 
 
