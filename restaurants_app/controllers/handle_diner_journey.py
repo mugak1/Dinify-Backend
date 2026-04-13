@@ -1,5 +1,7 @@
-from restaurants_app.models import Table, MenuSection
-from restaurants_app.serializers import SerializerPublicGetTableDetails, SerializerGetFullMenu
+from restaurants_app.models import Table, MenuSection, UpsellConfig
+from restaurants_app.serializers import (
+    SerializerPublicGetTableDetails, SerializerGetFullMenu, UpsellConfigSerializer
+)
 from dinify_backend.configss.messages import OK_SCANNED_TABLE, OK_RETRIEVED_FULL_MENU
 from orders_app.models import Order
 from orders_app.serializers import SerializerPublicOrderDetails
@@ -46,10 +48,21 @@ def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
         context={'ignore_approval': ignore_approval}
     ).data
 
+    # Bundle upsell config (when enabled) so the diner basket can render
+    # the "You might also like" carousel without an extra round-trip.
+    upsell_data = None
+    try:
+        upsell_config = UpsellConfig.objects.get(restaurant_id=restaurant_id)
+        if upsell_config.enabled:
+            upsell_data = UpsellConfigSerializer(upsell_config).data
+    except UpsellConfig.DoesNotExist:
+        pass
+
     return {
         'status': 200,
         'message': OK_RETRIEVED_FULL_MENU,
-        'data': menu_data
+        'data': menu_data,
+        'upsell': upsell_data
     }
 
 
