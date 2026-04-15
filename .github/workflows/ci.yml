@@ -40,6 +40,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Check migrations consistency
+        env:
+          DATABASE_ENGINE: django.db.backends.postgresql
+          DATABASE_NAME: test_dinify
+          DATABASE_USER: test_user
+          DATABASE_PASSWORD: test_password
+          DATABASE_HOST: localhost
+          DATABASE_PORT: 5432
+        run: |
+          python -m django check --settings=dinify_backend.test_settings
+          python -m django makemigrations --check --dry-run --settings=dinify_backend.test_settings
+
       - name: Run tests
         env:
           DATABASE_ENGINE: django.db.backends.postgresql
