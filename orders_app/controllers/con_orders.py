@@ -30,18 +30,23 @@ class ConOrder:
     def check_options_requirements(order_items: list) -> dict:
         for item in order_items:
             menu_item = MenuItem.objects.get(pk=item['item'])
-            item_options = menu_item.options
-            if item_options:
-                min_selections = item_options.get('min_selections', 0)
-                max_selections = item_options.get('max_selections', 0)
-                selected_options = item.get('options', [])
+            modifier_data = menu_item.options or {}
+            if not modifier_data.get('hasModifiers'):
+                continue
 
-                if len(selected_options) < min_selections:
+            selected_modifiers = item.get('selected_modifiers') or {}
+            for group in modifier_data.get('groups', []):
+                group_id = group.get('id')
+                min_selections = group.get('minSelections', 0)
+                max_selections = group.get('maxSelections', 0)
+                selected_count = len(selected_modifiers.get(group_id, []) or [])
+
+                if selected_count < min_selections:
                     return {
                         'status': 400,
                         'message': f"Item {menu_item.name} requires at least {min_selections} option selections."
                     }
-                if len(selected_options) > max_selections:
+                if max_selections and selected_count > max_selections:
                     return {
                         'status': 400,
                         'message': f"Item {menu_item.name} allows a maximum of {max_selections} option selections."
@@ -51,33 +56,28 @@ class ConOrder:
     @staticmethod
     def construct_option_items(item: dict) -> list:
         menu_item = MenuItem.objects.get(pk=item['item'])
-        # handling multiple options
+        selected_modifiers = item.get('selected_modifiers') or {}
+        modifier_data = menu_item.options or {}
+        if not modifier_data.get('hasModifiers') or not selected_modifiers:
+            return []
+
+        groups_by_id = {g.get('id'): g for g in modifier_data.get('groups', [])}
         selected_options = []
-        item_options = item.get('options')
-        if item_options is not None:
-            if isinstance(item_options, dict):
-                for key, value in item_options.items():
-                    index = None
-                    try:
-                        index = int(key)
-                    except ValueError:
-                        pass
-                    if isinstance(index, int):
-                        option_detail = menu_item.options.get('options')[index]
-                        choices = option_detail.get('choices')
-                        option_name = option_detail['name']
-                        names_of_choices = ''
-                        if choices is not None:
-                            if None in value:
-                                value.pop(value.index(None))
-                            if len(choices) > 0:
-                                names_of_choices += ', '.join([choices[v] for v in value if v < len(choices)])
-                        option_cost = option_detail['cost']
-                        selected_options.append({
-                            'name': option_name,
-                            'cost': option_cost,
-                            'choices': names_of_choices
-                        })
+        for group_id, choice_ids in selected_modifiers.items():
+            group = groups_by_id.get(group_id)
+            if group is None or not choice_ids:
+                continue
+            choices_by_id = {c.get('id'): c for c in group.get('choices', [])}
+            resolved_choices = [choices_by_id[cid] for cid in choice_ids if cid in choices_by_id]
+            names_of_choices = ', '.join(c.get('name', '') for c in resolved_choices)
+            cost_total = float(sum(
+                Decimal(str(c.get('additionalCostUGX', 0))) for c in resolved_choices
+            ))
+            selected_options.append({
+                'name': group.get('name'),
+                'cost': cost_total,
+                'choices': names_of_choices,
+            })
         return selected_options
 
     @staticmethod
@@ -126,15 +126,16 @@ class ConOrder:
             existing_item = existing_item[0]
             extras = item.get('extras')
             existing_item_extras = OrderItem.objects.filter(parent_item=existing_item)
-            item_options = ConOrder.construct_option_items(item=item)
-            existing_options = existing_item.options
+            incoming_modifiers = item.get('selected_modifiers') or {}
+            existing_modifiers = existing_item.selected_modifiers or {}
+            has_modifiers = bool(incoming_modifiers)
 
             # no extras and no options
-            if existing_item_extras.count() == 0 and len(item_options) == 0:
+            if existing_item_extras.count() == 0 and not has_modifiers:
                 return True
 
             # only extras but no item_options
-            if existing_item_extras.count() > 0 and len(item_options) == 0:
+            if existing_item_extras.count() > 0 and not has_modifiers:
                 logger.debug("checking only extras with no items")
                 if len(extras) == existing_item_extras.count():
                     for existing_item in existing_item_extras:
@@ -143,45 +144,26 @@ class ConOrder:
                     return True
 
             # only options but no extras
-            if existing_item_extras.count() == 0 and len(item_options) > 0:
-                if existing_options == item_options:
+            if existing_item_extras.count() == 0 and has_modifiers:
+                if existing_modifiers == incoming_modifiers:
                     return True
                 return False
 
             # both extras and options
-            if existing_item_extras.count() > 0 and len(item_options) > 0:
+            if existing_item_extras.count() > 0 and has_modifiers:
                 if len(extras) == existing_item_extras.count():
                     for existing_item in existing_item_extras:
                         if str(existing_item.item.pk) not in extras:
                             return False
-                    if existing_options == item_options:
+                    if existing_modifiers == incoming_modifiers:
                         return True
 
         return False
 
     @staticmethod
-    def determine_effective_unit_price(menu_item: MenuItem, options: dict = None) -> dict:
+    def determine_effective_unit_price(menu_item: MenuItem, selected_modifiers: dict = None) -> dict:
         unit_price = menu_item.primary_price
         effective_unit_price = unit_price
-
-        if options is not None:
-            for key, value in options.items():
-                if None in value:
-                    value.pop(value.index(None))
-                if not isinstance(key, int):
-                    try:
-                        key = int(key)
-                    except ValueError:
-                        return {
-                            'status': 400,
-                            'message': f'Invalid options selected for item, {menu_item.name}'
-                        }
-
-                if key < 0 or any(v < 0 for v in value):
-                    return {
-                        'status': 400,
-                        'message': f'Invalid options selected for item, {menu_item.name}'
-                    }
 
         # consideration for the discount
         if menu_item.running_discount:
@@ -238,24 +220,27 @@ class ConOrder:
                 if discount_amount > 0:
                     effective_unit_price = unit_price - discount_amount
 
-        # add the cost of the options
+        # add the cost of the grouped modifier selections
         cost_of_options = Decimal('0')
-        if options is not None:
-            item_options = menu_item.options.get('options', [])
-            for key, value in options.items():
-                if not isinstance(key, int):
-                    try:
-                        key = int(key)
-                    except ValueError:
+        if selected_modifiers:
+            modifier_data = menu_item.options or {}
+            groups_by_id = {g.get('id'): g for g in modifier_data.get('groups', [])}
+            for group_id, choice_ids in selected_modifiers.items():
+                group = groups_by_id.get(group_id)
+                if group is None:
+                    return {
+                        'status': 400,
+                        'message': f'Invalid modifier group for item, {menu_item.name}'
+                    }
+                choices_by_id = {c.get('id'): c for c in group.get('choices', [])}
+                for choice_id in choice_ids or []:
+                    choice = choices_by_id.get(choice_id)
+                    if choice is None:
                         return {
                             'status': 400,
-                            'message': f'Invalid options selected for item, {menu_item.name}'
+                            'message': f'Invalid modifier choice for item, {menu_item.name}'
                         }
-
-                option_item = item_options[key]
-                option_price = Decimal(str(option_item.get('cost', 0)))
-                cost_of_options += option_price
-                # effective_unit_price += option_price
+                    cost_of_options += Decimal(str(choice.get('additionalCostUGX', 0)))
 
         effective_unit_price += cost_of_options
         return {
@@ -362,11 +347,14 @@ class ConOrder:
         if existing_item:
             return ConOrder.update_item_quantity(item=item, order_id=order_id)
 
-        # handling multiple options
+        # handling modifiers
+        selected_modifiers = item.get('selected_modifiers') or {}
         selected_options = ConOrder.construct_option_items(item=item)
-        item_options = item.get('options')
 
-        price_selection = ConOrder.determine_effective_unit_price(menu_item=menu_item, options=item_options)
+        price_selection = ConOrder.determine_effective_unit_price(
+            menu_item=menu_item,
+            selected_modifiers=selected_modifiers
+        )
         if price_selection.get('status') != 200:
             return price_selection
 
@@ -383,12 +371,10 @@ class ConOrder:
             'order': order_id,
             'item': str(menu_item.id),
             'item_name': menu_item.name,
-            # 'option': option_name,
-            # 'choice': choice,
-            # 'option_cost': option_cost,
             'quantity': item['quantity'],
 
             'options': selected_options,
+            'selected_modifiers': selected_modifiers,
 
             'unit_price': unit_price,
             'discounted_price': effective_unit_price,
@@ -572,3 +558,61 @@ class ConOrder:
                 'unavailable_extras': order_details.get('unavailable_extras')
             }
         }
+
+
+def handle_add_order_items(order_id: str, items: list) -> dict:
+    try:
+        order = Order.objects.get(pk=order_id)
+    except ObjectDoesNotExist:
+        return {
+            'status': 400,
+            'message': "Invalid order selected"
+        }
+    except Exception as error:
+        logger.error("AddOrderItems-Error: %s", error)
+        return {
+            'status': 400,
+            'message': MESSAGES.get('GENERAL_ERROR')
+        }
+
+    if items is None or len(items) < 1:
+        return {
+            'status': 400,
+            'message': MESSAGES.get('NO_ORDER_ITEMS')
+        }
+
+    with transaction.atomic():
+        for item in items:
+            ConOrder.add_order_item(item=item, order_id=order_id)
+        ConOrder.update_order_amounts(order=order)
+
+    order.refresh_from_db()
+    order_details = serialize_order_details(order=order)
+    return {
+        'status': 200,
+        'message': 'The order item(s) have been added successfully.',
+        'data': {
+            'order_details': order_details.get('order'),
+            'order_items': order_details.get('order_items'),
+            'available_items': order_details.get('available_items'),
+            'unavailable_items': order_details.get('unavailable_items'),
+            'extras': order_details.get('extras'),
+            'available_extras': order_details.get('available_extras'),
+            'unavailable_extras': order_details.get('unavailable_extras')
+        }
+    }
+
+
+def handle_delete_items(order_item: str, reason: str, user: User) -> dict:
+    with transaction.atomic():
+        item = OrderItem.objects.select_for_update().get(pk=order_item)
+        item.deleted = True
+        item.deletion_reason = reason
+        item.deleted_by = user
+        item.save()
+        ConOrder.update_order_amounts(order=item.order)
+
+    return {
+        'status': 200,
+        'message': 'The order item has been updated successfully.'
+    }

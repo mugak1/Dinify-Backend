@@ -244,8 +244,6 @@ class SerializerPublicGetMenuItem(ModelSerializer):
 
     def get_has_options(self, menu_item):
         options = menu_item.options
-        if not options:
-            return False
         if isinstance(options, str):
             try:
                 options = json.loads(options)
@@ -253,13 +251,7 @@ class SerializerPublicGetMenuItem(ModelSerializer):
                 return False
         if not isinstance(options, dict):
             return False
-        # New grouped format
-        if 'hasModifiers' in options:
-            return options.get('hasModifiers', False)
-        # Legacy flat format
-        if 'options' in options:
-            return len(options.get('options', [])) > 0
-        return False
+        return bool(options.get('hasModifiers'))
 
     def get_group(self, menu_item):
         if menu_item.section_group is None:

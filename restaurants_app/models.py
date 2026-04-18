@@ -273,7 +273,6 @@ class MenuItem(BaseModel):
     #         }
     #     ]
     # }
-    # Legacy flat format ({ min_selections, max_selections, options: [...] }) still supported.
     has_extras = models.BooleanField(default=False)
     extras_applicable = models.JSONField(default=list)
 

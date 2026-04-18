@@ -30,6 +30,12 @@ TEST_TABLE_NUMBER2 = 2
 TEST_TABLE_NUMBER3 = 3
 TEST_TABLE_NUMBER4 = 4
 
+TEST_OPTION_GROUP_ID = 'grp-size'
+TEST_OPTION_CHOICE_SMALL_ID = 'choice-small'
+TEST_OPTION_CHOICE_LARGE_ID = 'choice-large'
+TEST_OPTION_CHOICE_SMALL_COST = 1100
+TEST_OPTION_CHOICE_LARGE_COST = 1500
+
 
 def seed_restaurant(seed_owner=True):
     """
@@ -99,20 +105,29 @@ def seed_menu_items():
             discounted_price=900.0,
             running_discount=True,
             options={
-                'min_selections': 1,
-                'max_selections': 3,
-                'options': [
+                'hasModifiers': True,
+                'groups': [
                     {
-                        'name': 'Option 1',
-                        'selectable': True,
-                        'choices': ['oo1', 'oo2', 'oo3'],
-                        'cost': 1100
-                    },
-                    {
-                        'name': 'Option 2',
-                        'selectable': True,
-                        'choices': ['oo1', 'oo2', 'oo3'],
-                        'cost': 1500
+                        'id': TEST_OPTION_GROUP_ID,
+                        'name': 'Size',
+                        'required': True,
+                        'selectionType': 'single',
+                        'minSelections': 1,
+                        'maxSelections': 1,
+                        'choices': [
+                            {
+                                'id': TEST_OPTION_CHOICE_SMALL_ID,
+                                'name': 'Small',
+                                'additionalCostUGX': TEST_OPTION_CHOICE_SMALL_COST,
+                                'available': True
+                            },
+                            {
+                                'id': TEST_OPTION_CHOICE_LARGE_ID,
+                                'name': 'Large',
+                                'additionalCostUGX': TEST_OPTION_CHOICE_LARGE_COST,
+                                'available': True
+                            }
+                        ]
                     }
                 ]
             }

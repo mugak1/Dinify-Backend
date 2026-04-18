@@ -7,12 +7,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from orders_app.models import Order
-from orders_app.controllers.initiate_order import initiate_order
-from orders_app.controllers.v2_initiate_order import (
-    handle_add_order_items,
-    v2_initiate_order,
-    handle_delete_items
-)
 from orders_app.serializers import SerializerListGetOrder
 from orders_app.controllers.rate import rate_and_review
 from orders_app.controllers.manage_order import update_order_status, update_item_status
@@ -24,7 +18,11 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Cancelled,
     OrderStatus_Served
 )
-from orders_app.controllers.con_orders import ConOrder
+from orders_app.controllers.con_orders import (
+    ConOrder,
+    handle_add_order_items,
+    handle_delete_items,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,30 +34,7 @@ class OrdersEndpoint(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request, action):
-        if action == 'initiate':
-            data = request.data
-            source = data.get('source')
-            user = request.user.pk
-
-            if source == 'admin':
-                if user is None:
-                    response = {
-                        'status': 401,
-                        'message': 'Please log in'
-                    }
-                    return Response(response, status=401)
-                data['customer'] = None
-                data['created_by'] = str(user)
-            else:
-                if user is not None:
-                    user = str(user)
-                data['customer'] = user
-                data['created_by'] = None
-
-            response = initiate_order(data)
-            return Response(response, status=response.get('status', 200))
-
-        elif action == 'review':
+        if action == 'review':
             data = request.data
             try:
                 response = rate_and_review(
@@ -197,14 +172,6 @@ class V2OrdersEndpoint(APIView):
                     'message': 'Please provide the restaurant and table ID'
                 }
                 return Response(response, status=400)
-            # response = v2_initiate_order(
-            #     restaurant_id=restaurant_id,
-            #     table_id=table_id,
-            #     items=items,
-            #     order_remarks=order_remarks,
-            #     customer=customer,
-            #     created_by=created_by,
-            # )
             response = ConOrder.initiate_order(
                 restaurant_id=restaurant_id,
                 table_id=table_id,
