@@ -268,7 +268,7 @@ class MenuItem(BaseModel):
     #             "minSelections": int,
     #             "maxSelections": int,
     #             "choices": [
-    #                 { "id": "uuid", "name": "Small", "additionalCostUGX": 0, "available": bool }
+    #                 { "id": "uuid", "name": "Small", "additionalCost": 0, "available": bool }
     #             ]
     #         }
     #     ]

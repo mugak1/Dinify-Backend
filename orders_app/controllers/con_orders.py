@@ -71,7 +71,7 @@ class ConOrder:
             resolved_choices = [choices_by_id[cid] for cid in choice_ids if cid in choices_by_id]
             names_of_choices = ', '.join(c.get('name', '') for c in resolved_choices)
             cost_total = float(sum(
-                Decimal(str(c.get('additionalCostUGX', 0))) for c in resolved_choices
+                Decimal(str(c.get('additionalCost', 0))) for c in resolved_choices
             ))
             selected_options.append({
                 'name': group.get('name'),
@@ -240,7 +240,7 @@ class ConOrder:
                             'status': 400,
                             'message': f'Invalid modifier choice for item, {menu_item.name}'
                         }
-                    cost_of_options += Decimal(str(choice.get('additionalCostUGX', 0)))
+                    cost_of_options += Decimal(str(choice.get('additionalCost', 0)))
 
         effective_unit_price += cost_of_options
         return {

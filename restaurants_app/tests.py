@@ -118,13 +118,13 @@ def seed_menu_items():
                             {
                                 'id': TEST_OPTION_CHOICE_SMALL_ID,
                                 'name': 'Small',
-                                'additionalCostUGX': TEST_OPTION_CHOICE_SMALL_COST,
+                                'additionalCost': TEST_OPTION_CHOICE_SMALL_COST,
                                 'available': True
                             },
                             {
                                 'id': TEST_OPTION_CHOICE_LARGE_ID,
                                 'name': 'Large',
-                                'additionalCostUGX': TEST_OPTION_CHOICE_LARGE_COST,
+                                'additionalCost': TEST_OPTION_CHOICE_LARGE_COST,
                                 'available': True
                             }
                         ]
