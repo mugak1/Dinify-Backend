@@ -15,7 +15,6 @@ urlpatterns = [
     # Upsell config endpoints (must be before the catch-all)
     path('upsell-config/', UpsellConfigEndpoint.as_view()),
     path('upsell-config/items/reorder/', UpsellItemsEndpoint.as_view(), {'action': 'reorder'}),
-    path('upsell-config/items/<str:item_id>/', UpsellItemsEndpoint.as_view()),
     path('upsell-config/items/', UpsellItemsEndpoint.as_view()),
     # Reservations & waitlist endpoints (must be before the catch-all)
     path('reservations/', ReservationsEndpoint.as_view()),
