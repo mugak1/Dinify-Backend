@@ -44,7 +44,7 @@ def get_config_response(config):
 
 
 class UpsellConfigEndpoint(APIView):
-    """Endpoint for upsell config GET and PATCH."""
+    """Endpoint for upsell config GET and PUT."""
 
     def get(self, request):
         try:
@@ -73,29 +73,30 @@ class UpsellConfigEndpoint(APIView):
         response = get_config_response(config)
         return Response(response, status=200)
 
-    def patch(self, request):
+    def put(self, request):
         try:
             decode_jwt_token(request)
         except Exception:
             return Response({'status': 401, 'message': 'Unauthorized'}, status=401)
 
-        restaurant_id = request.data.get('restaurant')
-        if not restaurant_id:
+        config_id = request.data.get('id')
+        if not config_id:
             return Response(
-                {'status': 400, 'message': 'restaurant field is required'},
+                {'status': 400, 'message': 'id field is required'},
                 status=400
             )
 
-        if not check_restaurant_permission(request.user, restaurant_id):
-            return Response({'status': 403, 'message': 'Forbidden'}, status=403)
-
         try:
-            config = UpsellConfig.objects.get(restaurant=restaurant_id)
+            config = UpsellConfig.objects.get(id=config_id)
         except UpsellConfig.DoesNotExist:
             return Response(
-                {'status': 404, 'message': 'Upsell config not found. GET first to create it.'},
+                {'status': 404, 'message': 'Upsell config not found'},
                 status=404
             )
+
+        restaurant_id = str(config.restaurant_id)
+        if not check_restaurant_permission(request.user, restaurant_id):
+            return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         serializer = UpsellConfigUpdateSerializer(config, data=request.data, partial=True)
         if serializer.is_valid():
@@ -112,38 +113,29 @@ class UpsellConfigEndpoint(APIView):
 class UpsellItemsEndpoint(APIView):
     """Endpoint for upsell item management (add, remove, reorder)."""
 
-    def _get_config_and_check(self, request, restaurant_id):
-        """Validate auth + permissions + return config or error Response."""
+    def post(self, request, action=None, **kwargs):
         try:
             decode_jwt_token(request)
         except Exception:
             return Response({'status': 401, 'message': 'Unauthorized'}, status=401)
 
-        if not restaurant_id:
+        config_id = request.data.get('config')
+        if not config_id:
             return Response(
-                {'status': 400, 'message': 'restaurant field is required'},
+                {'status': 400, 'message': 'config field is required'},
                 status=400
             )
 
-        if not check_restaurant_permission(request.user, restaurant_id):
-            return Response({'status': 403, 'message': 'Forbidden'}, status=403)
-
         try:
-            config = UpsellConfig.objects.get(restaurant=restaurant_id)
+            config = UpsellConfig.objects.get(id=config_id)
         except UpsellConfig.DoesNotExist:
             return Response(
-                {'status': 404, 'message': 'Upsell config not found. GET the config first to create it.'},
+                {'status': 404, 'message': 'Upsell config not found'},
                 status=404
             )
 
-        return config
-
-    def post(self, request, action=None, **kwargs):
-        restaurant_id = request.data.get('restaurant')
-        result = self._get_config_and_check(request, restaurant_id)
-        if isinstance(result, Response):
-            return result
-        config = result
+        if not check_restaurant_permission(request.user, str(config.restaurant_id)):
+            return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         if action == 'reorder':
             return self._reorder_items(request, config)
@@ -204,7 +196,7 @@ class UpsellItemsEndpoint(APIView):
         for position, item_id in enumerate(item_ids):
             UpsellItem.objects.filter(
                 config=config,
-                menu_item_id=item_id
+                id=item_id
             ).update(listing_position=position)
 
         config.refresh_from_db()
@@ -212,32 +204,32 @@ class UpsellItemsEndpoint(APIView):
         response['message'] = 'Upsell items reordered successfully'
         return Response(response, status=200)
 
-    def delete(self, request, item_id=None, **kwargs):
-        restaurant_id = request.data.get('restaurant')
-        if not restaurant_id:
-            restaurant_id = request.GET.get('restaurant')
-        result = self._get_config_and_check(request, restaurant_id)
-        if isinstance(result, Response):
-            return result
-        config = result
+    def delete(self, request, **kwargs):
+        try:
+            decode_jwt_token(request)
+        except Exception:
+            return Response({'status': 401, 'message': 'Unauthorized'}, status=401)
 
+        item_id = request.data.get('id')
         if not item_id:
             return Response(
-                {'status': 400, 'message': 'item_id is required in the URL'},
+                {'status': 400, 'message': 'id field is required'},
                 status=400
             )
 
-        deleted_count, _ = UpsellItem.objects.filter(
-            config=config,
-            menu_item_id=item_id
-        ).delete()
-
-        if deleted_count == 0:
+        try:
+            item = UpsellItem.objects.select_related('config').get(id=item_id)
+        except UpsellItem.DoesNotExist:
             return Response(
                 {'status': 404, 'message': 'Upsell item not found'},
                 status=404
             )
 
+        if not check_restaurant_permission(request.user, str(item.config.restaurant_id)):
+            return Response({'status': 403, 'message': 'Forbidden'}, status=403)
+
+        config = item.config
+        item.delete()
         config.refresh_from_db()
         response = get_config_response(config)
         response['message'] = 'Upsell item removed successfully'
