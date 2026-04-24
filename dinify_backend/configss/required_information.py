@@ -13,12 +13,12 @@ REQUIRED_INFORMATION = {
     ],
     # 'restaurant_employee': ,
     'menu_section': [
-        {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
+        {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 2, 'text_presentation': str.title},  # noqa
         {'key': 'restaurant', 'label': 'description', 'type': 'char', 'min_length': 10, 'text_presentation': None},  # noqa
     ],
     'menu_item': [
-        {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
-        {'key': 'primary_price', 'label': 'price', 'type': 'float', 'min_length': 3, 'text_presentation': None},  # noqa
+        {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 2, 'text_presentation': str.title},  # noqa
+        {'key': 'primary_price', 'label': 'price', 'type': 'float', 'min_length': 1, 'text_presentation': None},  # noqa
         {'key': 'section', 'label': 'section', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
     ],
     'table': [
@@ -34,11 +34,11 @@ RI_RESTAURANT_EMPLOYEES = [
 ]
 
 RI_SECTION_GROUP = [
-    {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 3, 'text_presentation': str.title},  # noqa
+    {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 2, 'text_presentation': str.title},  # noqa
     {'key': 'section', 'label': 'section', 'type': 'char', 'min_length': 3, 'text_presentation': None}  # noqa
 ]
 
 RI_DINING_AREA = [
-    {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 3, 'text_presentation': str.title},  # noqa
+    {'key': 'name', 'label': 'name', 'type': 'char', 'min_length': 2, 'text_presentation': str.title},  # noqa
     {'key': 'restaurant', 'label': 'Restaurant', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
 ]
