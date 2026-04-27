@@ -16,6 +16,7 @@ jobs:
           username: ${{ secrets.UAT_SSH_USER }}
           key: ${{ secrets.UAT_SSH_PRIVATE_KEY }}
           script: |
+            set -e
             cd /home/ubuntu/dinify_backend_handover_uat
             source /home/ubuntu/venv_uat_handover/bin/activate
             git checkout -- .
