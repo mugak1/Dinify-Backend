@@ -360,6 +360,21 @@ class RestaurantSetupEndpoint(APIView):
                 ).aggregate(max_pos=Max('listing_position'))['max_pos']
                 post_data['listing_position'] = (max_pos + 1) if max_pos is not None else 0
 
+            # Default new menu items to the end of their section so they don't
+            # collide with existing items at listing_position=0. Items are scoped
+            # per-section (not per-restaurant) because reordering happens within
+            # a section, not across them.
+            if (
+                config_detail == 'menuitems'
+                and 'listing_position' not in post_data
+                and post_data.get('section') is not None
+            ):
+                max_pos = MenuItem.objects.filter(
+                    section_id=post_data['section'],
+                    deleted=False,
+                ).aggregate(max_pos=Max('listing_position'))['max_pos']
+                post_data['listing_position'] = (max_pos + 1) if max_pos is not None else 0
+
         if config_detail == 'tables':
             try:
                 post_data['number'] = str(post_data.get('number'))

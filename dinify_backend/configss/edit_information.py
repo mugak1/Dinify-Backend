@@ -56,6 +56,7 @@ EDIT_INFORMATION = {
         {'key': 'is_new', 'label': 'is new', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'tags', 'label': 'tags', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'in_stock', 'label': 'in stock', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'listing_position', 'label': 'listing position', 'type': 'int', 'min_length': 1, 'text_presentation': None},  # noqa
     ],
     'table': [
         {'key': 'dining_area', 'label': 'dining area', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
