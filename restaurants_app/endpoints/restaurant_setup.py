@@ -674,6 +674,49 @@ class RestaurantSetupEndpoint(APIView):
                 if type(put_data) is not dict:
                     put_data['extras_applicable'] = ast.literal_eval(extras_applicable)
 
+        # Handle explicit image-clearing sentinels.
+        # These must be processed before Secretary.update() runs because Secretary
+        # treats None/missing values as "no change" — which is correct in general
+        # but means there's no way to clear a file field through the normal path.
+        if config_detail == 'menusections':
+            try:
+                if type(put_data) is not dict:
+                    put_data = put_data.dict()
+            except Exception as error:
+                logger.error("Error parsing data to dict: %s", error)
+
+        if config_detail == 'menuitems' and put_data.get('clear_image'):
+            record_id = put_data.get('id')
+            if record_id:
+                try:
+                    target = MenuItem.objects.get(id=record_id)
+                    if target.image:
+                        try:
+                            target.image.delete(save=False)
+                        except Exception as file_err:
+                            logger.error("Failed to delete menu item image file: %s", file_err)
+                    target.image = None
+                    target.save(update_fields=['image'])
+                except MenuItem.DoesNotExist:
+                    pass
+            put_data.pop('clear_image', None)
+
+        if config_detail == 'menusections' and put_data.get('clear_section_banner_image'):
+            record_id = put_data.get('id')
+            if record_id:
+                try:
+                    target = MenuSection.objects.get(id=record_id)
+                    if target.section_banner_image:
+                        try:
+                            target.section_banner_image.delete(save=False)
+                        except Exception as file_err:
+                            logger.error("Failed to delete menu section banner file: %s", file_err)
+                    target.section_banner_image = None
+                    target.save(update_fields=['section_banner_image'])
+                except MenuSection.DoesNotExist:
+                    pass
+            put_data.pop('clear_section_banner_image', None)
+
         secretary_args = {
             'serializer': serializer,
             'data': put_data,
