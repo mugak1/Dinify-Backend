@@ -518,3 +518,124 @@ class NewMenuItemListingPositionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         created = MenuItem.objects.get(name='B First Item', section=section_b)
         self.assertEqual(created.listing_position, 0)
+
+
+class MenuItemReorderTests(TestCase):
+    """Tests for ConMenuItem.reorder_listing — the item-reorder controller."""
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant()
+        seed_menu_section()
+        self.admin_user = User.objects.get(username=TEST_PHONE)
+        self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        self.section = MenuSection.objects.get(name=TEST_MENU_SECTION_NAME)
+
+        # Three items in the section, positions 0/1/2.
+        self.item_a = MenuItem.objects.create(
+            name='Alpha', section=self.section,
+            primary_price=1000, listing_position=0,
+        )
+        self.item_b = MenuItem.objects.create(
+            name='Bravo', section=self.section,
+            primary_price=1000, listing_position=1,
+        )
+        self.item_c = MenuItem.objects.create(
+            name='Charlie', section=self.section,
+            primary_price=1000, listing_position=2,
+        )
+
+    def _put_reorder(self, section_id, ordered_ids, user=None):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        actor = user or self.admin_user
+        token = str(RefreshToken.for_user(actor).access_token)
+        return self.client.put(
+            f'/api/v1/restaurant-setup/reorder-section-items/',
+            data={'section_id': str(section_id), 'ordered_ids': ordered_ids},
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+
+    def test_reorder_flips_two_items(self):
+        # Swap A and C: target order [C, B, A]
+        ordered = [str(self.item_c.id), str(self.item_b.id), str(self.item_a.id)]
+        response = self._put_reorder(self.section.id, ordered)
+        self.assertEqual(response.status_code, 200)
+        self.item_a.refresh_from_db()
+        self.item_b.refresh_from_db()
+        self.item_c.refresh_from_db()
+        self.assertEqual(self.item_c.listing_position, 0)
+        self.assertEqual(self.item_b.listing_position, 1)
+        self.assertEqual(self.item_a.listing_position, 2)
+
+    def test_reorder_rejects_cross_section(self):
+        # Create another section with one item; include its id in our reorder.
+        other_section = MenuSection.objects.create(
+            name='Other', restaurant=self.restaurant,
+        )
+        other_item = MenuItem.objects.create(
+            name='Other Item', section=other_section,
+            primary_price=1000, listing_position=0,
+        )
+        ordered = [
+            str(self.item_a.id),
+            str(self.item_b.id),
+            str(self.item_c.id),
+            str(other_item.id),  # belongs to a different section
+        ]
+        response = self._put_reorder(self.section.id, ordered)
+        self.assertEqual(response.status_code, 400)
+        # Item C should still have its original position.
+        self.item_c.refresh_from_db()
+        self.assertEqual(self.item_c.listing_position, 2)
+
+    def test_reorder_rejects_unknown_item_id(self):
+        bogus = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+        ordered = [str(self.item_a.id), str(self.item_b.id), bogus]
+        response = self._put_reorder(self.section.id, ordered)
+        self.assertEqual(response.status_code, 400)
+
+    def test_reorder_rejects_unknown_section_id(self):
+        bogus = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+        ordered = [str(self.item_a.id), str(self.item_b.id), str(self.item_c.id)]
+        response = self._put_reorder(bogus, ordered)
+        self.assertEqual(response.status_code, 404)
+
+    def test_reorder_rejects_empty_list(self):
+        response = self._put_reorder(self.section.id, [])
+        self.assertEqual(response.status_code, 400)
+
+    def test_reorder_rejects_duplicate_ids(self):
+        ordered = [str(self.item_a.id), str(self.item_b.id), str(self.item_a.id)]
+        response = self._put_reorder(self.section.id, ordered)
+        self.assertEqual(response.status_code, 400)
+
+    def test_reorder_rejects_partial_set(self):
+        # Section has three items; sending only two is a partial reorder.
+        ordered = [str(self.item_a.id), str(self.item_b.id)]
+        response = self._put_reorder(self.section.id, ordered)
+        self.assertEqual(response.status_code, 400)
+        self.item_a.refresh_from_db()
+        self.assertEqual(self.item_a.listing_position, 0)  # unchanged
+
+    def test_reorder_rejects_unauthorized_user(self):
+        # Create a user with no restaurant role.
+        outsider = User.objects.create(
+            username='outsider_phone', first_name='Out', last_name='Sider',
+        )
+        ordered = [str(self.item_c.id), str(self.item_b.id), str(self.item_a.id)]
+        response = self._put_reorder(self.section.id, ordered, user=outsider)
+        # check_permission gate at the dispatch level rejects users without
+        # owner/manager roles on any restaurant — returns 403.
+        self.assertEqual(response.status_code, 403)
+        self.item_c.refresh_from_db()
+        self.assertEqual(self.item_c.listing_position, 2)  # unchanged
+
+    def test_reorder_allows_owner_role(self):
+        # The admin user seeded by seed_restaurant has the OWNER role.
+        # Just a sanity check that owner-roled users succeed end-to-end.
+        ordered = [str(self.item_b.id), str(self.item_a.id), str(self.item_c.id)]
+        response = self._put_reorder(self.section.id, ordered)
+        self.assertEqual(response.status_code, 200)
+        self.item_b.refresh_from_db()
+        self.assertEqual(self.item_b.listing_position, 0)

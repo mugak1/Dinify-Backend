@@ -37,6 +37,7 @@ from restaurants_app.controllers.tables import (
 )
 from restaurants_app.controllers.dining_areas import create_dining_area
 from restaurants_app.controllers.menu_sections import ConMenuSection
+from restaurants_app.controllers.menu_items import ConMenuItem
 from dinify_backend.configss.required_information import (
     REQUIRED_INFORMATION,
     RI_RESTAURANT_EMPLOYEES,
@@ -703,6 +704,14 @@ class RestaurantSetupEndpoint(APIView):
             ordered_ids = normalize_ordered_section_ids(put_data)
             response = ConMenuSection().reorder_listing(
                 ordered_ids=ordered_ids,
+                user=request.user,
+            )
+            return Response(response, status=response['status'])
+
+        if config_detail == 'reorder-section-items':
+            response = ConMenuItem().reorder_listing(
+                section_id=put_data.get('section_id'),
+                ordered_ids=put_data.get('ordered_ids'),
                 user=request.user,
             )
             return Response(response, status=response['status'])
