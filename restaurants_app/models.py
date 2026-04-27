@@ -224,7 +224,6 @@ class MenuItem(BaseModel):
     section_group = models.ForeignKey(SectionGroup, on_delete=models.CASCADE, null=True, blank=True)
     image = models.ImageField(null=True, blank=True, upload_to='menu_items/')
 
-    listing_position = models.IntegerField(default=0)
     name = models.CharField(max_length=255)
     description = models.TextField(null=True, blank=True)
     calories = models.PositiveIntegerField(null=True, blank=True, help_text="Calorie count (kcal)")
@@ -286,7 +285,7 @@ class MenuItem(BaseModel):
         the metadata for the MenuItem model
         """
         db_table = 'menu_items'
-        ordering = ['section', 'listing_position', 'name']
+        ordering = ['section', 'name']
         unique_together = ['name', 'section']
 
     def save(self, *args, **kwargs):
