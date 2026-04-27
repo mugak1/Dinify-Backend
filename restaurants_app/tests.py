@@ -453,3 +453,71 @@ class NewSectionListingPositionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         created = MenuSection.objects.get(name='Brunch', restaurant=self.restaurant)
         self.assertEqual(created.listing_position, 0)
+
+
+class NewMenuItemListingPositionTests(TestCase):
+    """Tests that a newly-POSTed menu item gets a clean listing_position
+    relative to the section it's added to."""
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant()
+        seed_menu_section()
+        self.admin_user = User.objects.get(username=TEST_PHONE)
+        self.section = MenuSection.objects.get(name=TEST_MENU_SECTION_NAME)
+
+    def _post_item(self, name, section_id=None):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        token = str(RefreshToken.for_user(self.admin_user).access_token)
+        return self.client.post(
+            f'/api/v1/restaurant-setup/menuitems/',
+            data={
+                'name': name,
+                'section': str(section_id or self.section.id),
+                'primary_price': '1000.00',
+            },
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+
+    def test_first_item_in_section_gets_position_zero(self):
+        response = self._post_item('First Item')
+        self.assertEqual(response.status_code, 200)
+        created = MenuItem.objects.get(name='First Item', section=self.section)
+        self.assertEqual(created.listing_position, 0)
+
+    def test_subsequent_items_assigned_next_position(self):
+        MenuItem.objects.create(
+            name='Existing 1', section=self.section,
+            primary_price=1000, listing_position=0,
+        )
+        MenuItem.objects.create(
+            name='Existing 2', section=self.section,
+            primary_price=1000, listing_position=1,
+        )
+        response = self._post_item('Newcomer')
+        self.assertEqual(response.status_code, 200)
+        created = MenuItem.objects.get(name='Newcomer', section=self.section)
+        self.assertEqual(created.listing_position, 2)
+
+    def test_position_is_per_section_not_per_restaurant(self):
+        """A new item in section B should get position 0 even if section A
+        has items at higher positions."""
+        # Create a second section in the same restaurant.
+        restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        section_b = MenuSection.objects.create(
+            name='Second Section', restaurant=restaurant,
+        )
+        # Populate section A with items.
+        MenuItem.objects.create(
+            name='A Item 1', section=self.section,
+            primary_price=1000, listing_position=0,
+        )
+        MenuItem.objects.create(
+            name='A Item 2', section=self.section,
+            primary_price=1000, listing_position=1,
+        )
+        # Post a new item to section B — should get position 0.
+        response = self._post_item('B First Item', section_id=section_b.id)
+        self.assertEqual(response.status_code, 200)
+        created = MenuItem.objects.get(name='B First Item', section=section_b)
+        self.assertEqual(created.listing_position, 0)
