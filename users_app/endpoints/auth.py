@@ -1,6 +1,8 @@
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.exceptions import TokenError
 from users_app.controllers.self_register import self_register
 from users_app.controllers.login import login
 from users_app.controllers.reset_password import reset_password, initiate_password_reset
@@ -8,6 +10,7 @@ from users_app.controllers.change_password import change_password
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from users_app.controllers.otp_manager import OtpManager
 from users_app.throttles import LoginThrottle, OtpThrottle, PasswordResetThrottle
+from dinify_backend.configss.messages import MESSAGES
 
 
 # Map action names to their throttle classes.
@@ -88,6 +91,28 @@ class UsersAuthenticationEndpoint(APIView):
                 user_id=user,
                 otp=request.data.get('otp')
             )
+        elif action == 'logout':
+            # Logout requires JWT auth even though the class permits AllowAny.
+            # JWTAuthentication populates request.user from the access token
+            # before permissions run; if someone later removes it from
+            # DEFAULT_AUTHENTICATION_CLASSES this explicit check stops logout
+            # from silently becoming anonymous-accessible.
+            if not request.user or not request.user.is_authenticated:
+                return Response(
+                    {'status': 401, 'message': 'Authentication required'},
+                    status=401
+                )
+
+            refresh = request.data.get('refresh')
+            if refresh:
+                try:
+                    RefreshToken(refresh).blacklist()
+                except TokenError:
+                    # Invalid / expired / already-blacklisted — logout still
+                    # succeeds from the user's perspective.
+                    pass
+
+            response = {'status': 200, 'message': MESSAGES['OK_LOGOUT']}
 
         return Response(
             response,

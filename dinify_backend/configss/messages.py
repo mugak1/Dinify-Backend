@@ -13,6 +13,7 @@ MESSAGES = {
     'WRONG_PASSWORD': 'The password is incorrect.',
     'ACCOUNT_NOT_ACTIVE': 'Your account is not active.',
     'OK_LOGIN': 'Login successful.',
+    'OK_LOGOUT': 'Logout successful.',
 
     # password change
     'NO_USER_FOUND': 'No user found.',

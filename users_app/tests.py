@@ -1,5 +1,7 @@
 from unittest.mock import patch, MagicMock
 from django.test import TestCase
+from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
 from dinify_backend.configss.messages import MESSAGES
 from users_app.controllers.self_register import self_register
 from users_app.controllers.login import login
@@ -306,3 +308,102 @@ class PasswordResetSecurityTests(TestCase):
                 'password', msg_data,
                 "Notification msg_data should not contain a 'password' key"
             )
+
+
+class RefreshRotationAndLogoutTests(TestCase):
+    """
+    Auth-hardening regression guards:
+      - refresh-token rotation issues a new refresh
+      - the original refresh is blacklisted after rotation
+      - /auth/logout/ blacklists the refresh server-side
+      - /auth/logout/ requires a valid access token
+      - /auth/logout/ is tolerant of missing/invalid refresh in the body
+    """
+
+    REFRESH_URL = '/api/v1/users/auth/token/refresh/'
+    LOGOUT_URL = '/api/v1/users/auth/logout/'
+
+    def setUp(self):
+        seed_regular_user()
+        self.user = User.objects.get(phone_number='9876543210')
+        token = RefreshToken.for_user(self.user)
+        self.access = str(token.access_token)
+        self.refresh = str(token)
+        self.client = APIClient()
+
+    def _auth_client(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.access}')
+        return client
+
+    def test_refresh_returns_new_rotated_refresh(self):
+        response = self.client.post(
+            self.REFRESH_URL, {'refresh': self.refresh}, format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('access', response.data)
+        self.assertIn('refresh', response.data)
+        self.assertNotEqual(response.data['refresh'], self.refresh)
+
+    def test_old_refresh_blacklisted_after_rotation(self):
+        first = self.client.post(
+            self.REFRESH_URL, {'refresh': self.refresh}, format='json'
+        )
+        self.assertEqual(first.status_code, 200)
+
+        # Re-using the original refresh must now fail (blacklisted).
+        second = self.client.post(
+            self.REFRESH_URL, {'refresh': self.refresh}, format='json'
+        )
+        self.assertEqual(second.status_code, 401)
+
+        # The new refresh issued by the first call still works.
+        third = self.client.post(
+            self.REFRESH_URL, {'refresh': first.data['refresh']}, format='json'
+        )
+        self.assertEqual(third.status_code, 200)
+
+    def test_logout_with_valid_refresh_blacklists(self):
+        client = self._auth_client()
+        response = client.post(
+            self.LOGOUT_URL, {'refresh': self.refresh}, format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['message'], MESSAGES['OK_LOGOUT'])
+
+        # The refresh is now blacklisted — using it must 401.
+        retry = APIClient().post(
+            self.REFRESH_URL, {'refresh': self.refresh}, format='json'
+        )
+        self.assertEqual(retry.status_code, 401)
+
+    def test_logout_without_auth_header_returns_401(self):
+        response = self.client.post(
+            self.LOGOUT_URL, {'refresh': self.refresh}, format='json'
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_logout_with_invalid_refresh_returns_200(self):
+        client = self._auth_client()
+        response = client.post(
+            self.LOGOUT_URL, {'refresh': 'not-a-real-token'}, format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['message'], MESSAGES['OK_LOGOUT'])
+
+    def test_logout_with_already_blacklisted_refresh_returns_200(self):
+        # Blacklist once, then call logout again with the same token.
+        RefreshToken(self.refresh).blacklist()
+
+        client = self._auth_client()
+        response = client.post(
+            self.LOGOUT_URL, {'refresh': self.refresh}, format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['message'], MESSAGES['OK_LOGOUT'])
+
+    def test_logout_with_no_refresh_in_body_returns_200(self):
+        client = self._auth_client()
+        response = client.post(self.LOGOUT_URL, {}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['message'], MESSAGES['OK_LOGOUT'])
