@@ -304,7 +304,10 @@ class ConOrder:
                 'status': 'initiated'
             }
 
-            if not extra_item.available:
+            # Mirror the parent-item guard: an out-of-stock extra (in_stock=false)
+            # is zeroed and flagged unavailable so it is neither prepared nor
+            # charged and is surfaced by the existing reconciliation gate.
+            if not extra_item.available or not extra_item.in_stock:
                 extra['quantity'] = 0
                 extra['total_cost'] = 0
                 extra['discounted_cost'] = 0
@@ -402,7 +405,13 @@ class ConOrder:
             'status': 'initiated'
         }
 
-        if not menu_item.available:
+        # in_stock=false (sold out) routes through the same zero-and-flag path
+        # as a genuinely unavailable item: the order item's `available` flag
+        # means "this line is fulfillable", not a mirror of menu_item.available.
+        # Flagging it here stops it being prepared/charged and makes it count in
+        # no_unavailable_items so the existing frontend reconciliation gate
+        # surfaces it before submit. Do not "fix" this back to only `available`.
+        if not menu_item.available or not menu_item.in_stock:
             item_data['quantity'] = 0
             item_data['total_cost'] = 0
             item_data['discounted_cost'] = 0
