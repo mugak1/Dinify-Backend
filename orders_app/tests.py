@@ -121,6 +121,33 @@ class TestOrderFunctions(TestCase):
         }]
         self.assertEqual(ConOrder.check_options_requirements(valid)['status'], 200)
 
+    def test_check_extras_requirements(self):
+        # No fixture is pre-seeded with extras, so configure one inline
+        # (mirrors how the options test reuses a pre-configured option item).
+        mi = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+        mi.has_extras = True
+        mi.extras_min_selections = 1
+        mi.extras_max_selections = 2
+        mi.save()
+        pk = str(mi.pk)
+
+        # check_extras_requirements only counts len(item['extras']),
+        # so placeholder values of the right length are sufficient.
+        under_min = [{'item': pk, 'quantity': 1, 'extras': []}]
+        self.assertEqual(ConOrder.check_extras_requirements(under_min)['status'], 400)
+
+        at_min = [{'item': pk, 'quantity': 1, 'extras': ['x']}]
+        self.assertEqual(ConOrder.check_extras_requirements(at_min)['status'], 200)
+
+        over_max = [{'item': pk, 'quantity': 1, 'extras': ['x', 'y', 'z']}]
+        self.assertEqual(ConOrder.check_extras_requirements(over_max)['status'], 400)
+
+        # Unlimited maximum when extras_max_selections is null.
+        mi.extras_max_selections = None
+        mi.save()
+        unlimited = [{'item': pk, 'quantity': 1, 'extras': ['a', 'b', 'c', 'd']}]
+        self.assertEqual(ConOrder.check_extras_requirements(unlimited)['status'], 200)
+
     def test_con_order_initiate_and_item_lifecycle(self):
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         table = Table.objects.get(number=TEST_TABLE_NUMBER4)

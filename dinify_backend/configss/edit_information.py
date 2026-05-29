@@ -57,6 +57,9 @@ EDIT_INFORMATION = {
         {'key': 'tag_ids', 'label': 'tag ids', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'in_stock', 'label': 'in stock', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'listing_position', 'label': 'listing position', 'type': 'int', 'min_length': 1, 'text_presentation': None},  # noqa
+        {'key': 'age_restricted', 'label': 'age restricted', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
+        {'key': 'extras_min_selections', 'label': 'extras min selections', 'type': 'int', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'extras_max_selections', 'label': 'extras max selections', 'type': 'int', 'min_length': 0, 'text_presentation': None},  # noqa
     ],
     'table': [
         {'key': 'dining_area', 'label': 'dining area', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa

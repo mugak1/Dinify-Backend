@@ -54,6 +54,27 @@ class ConOrder:
         return {'status': 200}
 
     @staticmethod
+    def check_extras_requirements(order_items: list) -> dict:
+        for item in order_items:
+            menu_item = MenuItem.objects.get(pk=item['item'])
+            if not menu_item.has_extras:
+                continue
+            selected_count = len(item.get('extras') or [])
+            min_extras = menu_item.extras_min_selections or 0
+            max_extras = menu_item.extras_max_selections  # None/0 => unlimited
+            if selected_count < min_extras:
+                return {
+                    'status': 400,
+                    'message': f"Item {menu_item.name} requires at least {min_extras} extra selection(s)."
+                }
+            if max_extras and selected_count > max_extras:
+                return {
+                    'status': 400,
+                    'message': f"Item {menu_item.name} allows a maximum of {max_extras} extra selection(s)."
+                }
+        return {'status': 200}
+
+    @staticmethod
     def construct_option_items(item: dict) -> list:
         menu_item = MenuItem.objects.get(pk=item['item'])
         selected_modifiers = item.get('selected_modifiers') or {}
@@ -509,6 +530,11 @@ class ConOrder:
         options_check = ConOrder.check_options_requirements(items)
         if options_check.get('status') != 200:
             return options_check
+
+        # for each order item, check the extras selection limits (min/max)
+        extras_check = ConOrder.check_extras_requirements(items)
+        if extras_check.get('status') != 200:
+            return extras_check
 
         # check that the table does not have any other ongoing order
         table = Table.objects.get(pk=table_id)
