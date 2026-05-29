@@ -2255,6 +2255,52 @@ class SerializerPublicGetMenuItemTagShapeTests(TestCase):
             )
 
 
+class SerializerPublicGetMenuItemExtrasDiscountTests(TestCase):
+    """get_extras must serialize each extra's discount_details so the diner UI
+    can price extras at their discounted figure (same path as the parent item)."""
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant()
+        seed_menu_section()
+
+    def test_extras_include_discount_details(self):
+        from restaurants_app.serializers import SerializerPublicGetMenuItem
+
+        section = MenuSection.objects.get(name=TEST_MENU_SECTION_NAME)
+
+        discount = {
+            'discount_percentage': 20,
+            'discount_amount': 0,
+            'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+            'start_date': '',
+            'end_date': '',
+            'start_time': '',
+            'end_time': '',
+        }
+        discounted_extra = MenuItem.objects.create(
+            name='Discounted Extra', section=section, primary_price=1000,
+            running_discount=True, discount_details=discount,
+        )
+        plain_extra = MenuItem.objects.create(
+            name='Plain Extra', section=section, primary_price=500,
+        )
+        parent = MenuItem.objects.create(
+            name='Parent With Extras', section=section, primary_price=5000,
+            extras_applicable=[str(discounted_extra.id), str(plain_extra.id)],
+        )
+
+        extras = SerializerPublicGetMenuItem(parent).data['extras']
+        self.assertEqual(len(extras), 2)
+        for extra in extras:
+            self.assertIn('discount_details', extra)
+
+        by_name = {e['name']: e for e in extras}
+        self.assertEqual(by_name['Discounted Extra']['discount_details'], discount)
+        # A non-discounted extra serialises as the JSONField default ({}).
+        self.assertEqual(by_name['Plain Extra']['discount_details'], {})
+
+
 class RestaurantTagsEndpointTests(TestCase):
     """CRUD + tenant-isolation tests for /api/v1/restaurant-setup/restaurant-tags/."""
 
