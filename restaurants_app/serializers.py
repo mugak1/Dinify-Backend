@@ -722,12 +722,26 @@ class SerializerGetDiningArea(ModelSerializer):
 
 
 class UpsellItemSerializer(ModelSerializer):
-    """Serializer for individual upsell items — includes basic menu item info."""
+    """Serializer for individual upsell items — includes basic menu item info.
+
+    item_price is the ORIGINAL price (primary_price). When item_running_discount
+    is true, item_discounted_price holds the effective price; the diner UI shows
+    the discounted price with the original struck through and adds the discounted
+    price to the basket. Mirrors the discount projection in MenuItemSerializer.
+    """
     item_id = serializers.UUIDField(source='menu_item.id', read_only=True)
     item_name = serializers.CharField(source='menu_item.name', read_only=True)
     item_price = serializers.DecimalField(
         source='menu_item.primary_price', max_digits=50, decimal_places=2, read_only=True
     )
+    item_discounted_price = serializers.DecimalField(
+        source='menu_item.discounted_price', max_digits=50, decimal_places=2,
+        read_only=True, allow_null=True
+    )
+    item_running_discount = serializers.BooleanField(
+        source='menu_item.running_discount', read_only=True
+    )
+    item_discount_percentage = SerializerMethodField()
     item_image = serializers.ImageField(source='menu_item.image', read_only=True)
     item_available = serializers.BooleanField(source='menu_item.available', read_only=True)
     item_in_stock = serializers.BooleanField(source='menu_item.in_stock', read_only=True)
@@ -736,8 +750,35 @@ class UpsellItemSerializer(ModelSerializer):
         model = UpsellItem
         fields = [
             'id', 'menu_item', 'item_id', 'item_name', 'item_price',
+            'item_discounted_price', 'item_running_discount', 'item_discount_percentage',
             'item_image', 'item_available', 'item_in_stock', 'listing_position'
         ]
+
+    def get_item_discount_percentage(self, upsell_item):
+        # Same precedence as MenuItemSerializer.get_discount_percentage:
+        # discount_details.discount_percentage, then discount_amount, then derive
+        # from discounted_price. Returns a non-negative percentage (0 when no discount).
+        from decimal import Decimal
+        menu_item = upsell_item.menu_item
+        if not menu_item or not menu_item.running_discount:
+            return 0
+        primary = Decimal(str(menu_item.primary_price or 0))
+        if primary == 0:
+            return 0
+        details = menu_item.discount_details or {}
+        if isinstance(details, dict):
+            pct = Decimal(str(details.get('discount_percentage', 0) or 0))
+            amt = Decimal(str(details.get('discount_amount', 0) or 0))
+            if pct > 0:
+                return float(round(pct, 2))
+            if amt > 0:
+                return float(round((amt / primary) * Decimal('100'), 2))
+        if menu_item.discounted_price is not None:
+            diff = primary - Decimal(str(menu_item.discounted_price))
+            if diff <= 0:
+                return 0
+            return float(round((diff / primary) * Decimal('100'), 2))
+        return 0
 
 
 class UpsellConfigSerializer(ModelSerializer):
