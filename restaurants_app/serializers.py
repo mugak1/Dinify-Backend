@@ -391,7 +391,7 @@ class SerializerPublicGetMenuItem(ModelSerializer):
                 continue
             try:
                 record = MenuItem.objects.values(
-                    'id', 'name', 'primary_price'
+                    'id', 'name', 'primary_price', 'discount_details'
                 ).get(id=extra)
                 extras.append(record)
             except MenuItem.DoesNotExist:
