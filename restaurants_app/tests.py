@@ -1,3 +1,4 @@
+import json
 from cgi import test
 from django.db import transaction
 from django.test import TestCase
@@ -2515,6 +2516,58 @@ class MenuItemTagIdsTests(TestCase):
             )
         )
         self.assertEqual(tagged, {vegan.id, spicy.id})
+
+    def test_create_menuitem_with_multipart_tag_ids_string_persists_relation(self):
+        """tag_ids arrives as a JSON-encoded string via multipart/form-data
+        (the shape the frontend sends when an image is attached)."""
+        from restaurants_app.models import RestaurantTag, MenuItemTag
+        vegan = RestaurantTag.objects.get(
+            restaurant=self.restaurant_a, name='Vegan',
+        )
+        spicy = RestaurantTag.objects.get(
+            restaurant=self.restaurant_a, name='Spicy',
+        )
+        response = self.client.post(
+            '/api/v1/restaurant-setup/menuitems/',
+            data={
+                'name': 'Veg Bowl Multipart',
+                'section': str(self.section_a.id),
+                'primary_price': '1200.00',
+                'tag_ids': json.dumps([str(vegan.id), str(spicy.id)]),
+            },
+            **self._auth(self.owner_a),
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        item = MenuItem.objects.get(
+            name='Veg Bowl Multipart', section=self.section_a,
+        )
+        tagged = set(
+            MenuItemTag.objects.filter(menu_item=item).values_list(
+                'tag_id', flat=True
+            )
+        )
+        self.assertEqual(tagged, {vegan.id, spicy.id})
+
+    def test_create_menuitem_with_multipart_empty_tag_ids_string(self):
+        """tag_ids arrives as the string "[]" via multipart/form-data."""
+        from restaurants_app.models import MenuItemTag
+        response = self.client.post(
+            '/api/v1/restaurant-setup/menuitems/',
+            data={
+                'name': 'Empty Bowl Multipart',
+                'section': str(self.section_a.id),
+                'primary_price': '1200.00',
+                'tag_ids': '[]',
+            },
+            **self._auth(self.owner_a),
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        item = MenuItem.objects.get(
+            name='Empty Bowl Multipart', section=self.section_a,
+        )
+        self.assertEqual(
+            MenuItemTag.objects.filter(menu_item=item).count(), 0,
+        )
 
     def test_update_menuitem_with_tag_ids_replaces_relation(self):
         from restaurants_app.models import RestaurantTag, MenuItemTag
