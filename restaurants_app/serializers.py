@@ -237,6 +237,16 @@ class SerializerPutMenuItem(ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+
+        # Light guard: a single global extras selection limit (min <= max).
+        # Runs on every PUT — placed before the tag_ids early-return below so
+        # extras-only updates are still validated.
+        emin = attrs.get('extras_min_selections')
+        emax = attrs.get('extras_max_selections')
+        if emin is not None and emax not in (None, 0) and emin > emax:
+            raise serializers.ValidationError(
+                {'extras_min_selections': 'Minimum extras cannot exceed maximum extras.'})
+
         tag_ids = attrs.get('tag_ids')
         if tag_ids is None:
             return attrs
@@ -324,7 +334,8 @@ class SerializerPublicGetMenuItem(ModelSerializer):
             'available', 'in_stock', 'allergens', 'tags', 'discount_details',
             'has_options', 'options', 'section', 'group', 'extras', 'is_extra',
             'discount_percentage', 'has_extras', 'is_special',
-            'is_featured', 'is_popular', 'is_new'
+            'is_featured', 'is_popular', 'is_new',
+            'age_restricted', 'extras_min_selections', 'extras_max_selections'
         )
 
     def get_tags(self, menu_item):

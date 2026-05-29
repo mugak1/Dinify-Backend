@@ -278,6 +278,9 @@ class MenuItem(BaseModel):
     # }
     has_extras = models.BooleanField(default=False)
     extras_applicable = models.JSONField(default=list)
+    age_restricted = models.BooleanField(default=False)
+    extras_min_selections = models.PositiveIntegerField(default=0)
+    extras_max_selections = models.PositiveIntegerField(null=True, blank=True)  # null/0 = unlimited
 
     # for approvals and enabling items
     approved = models.BooleanField(default=False)
