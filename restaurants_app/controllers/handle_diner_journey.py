@@ -1,4 +1,4 @@
-from restaurants_app.models import Table, MenuSection, UpsellConfig
+from restaurants_app.models import Table, MenuSection, UpsellConfig, Restaurant
 from restaurants_app.serializers import (
     SerializerPublicGetTableDetails, SerializerGetFullMenu, UpsellConfigSerializer
 )
@@ -65,11 +65,22 @@ def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
     except UpsellConfig.DoesNotExist:
         pass
 
+    # Surface the operator's chosen sort mode so the diner frontend can apply
+    # the matching sort. Items themselves stay in listing_position order; the
+    # backend does not re-sort. Defaults to 'manual' if the restaurant is absent.
+    item_sort_mode = (
+        Restaurant.objects
+        .filter(id=restaurant_id)
+        .values_list('menu_item_sort_mode', flat=True)
+        .first()
+    ) or 'manual'
+
     return {
         'status': 200,
         'message': OK_RETRIEVED_FULL_MENU,
         'data': menu_data,
-        'upsell': upsell_data
+        'upsell': upsell_data,
+        'item_sort_mode': item_sort_mode
     }
 
 

@@ -38,6 +38,7 @@ from restaurants_app.controllers.tables import (
 from restaurants_app.controllers.dining_areas import create_dining_area
 from restaurants_app.controllers.menu_sections import ConMenuSection
 from restaurants_app.controllers.menu_items import ConMenuItem
+from restaurants_app.controllers.menu_item_sort_mode import ConMenuItemSortMode
 from dinify_backend.configss.required_information import (
     REQUIRED_INFORMATION,
     RI_RESTAURANT_EMPLOYEES,
@@ -649,6 +650,15 @@ class RestaurantSetupEndpoint(APIView):
         if config_detail == 'subscription-details':
             return RestaurantSubscription().get_details(request)
 
+        # Restaurant-scoped read of the diner-facing item sort mode. The
+        # controller owns the permission check (mirrors the reorder dispatch).
+        if config_detail == 'menu-item-sort-mode':
+            response = ConMenuItemSortMode().get_mode(
+                restaurant_id=request.GET.get('restaurant'),
+                user=request.user,
+            )
+            return Response(response, status=response['status'])
+
         filter_params = request.GET.copy()
         if config_detail == 'orders':
             if 'status' in request.GET:
@@ -866,6 +876,14 @@ class RestaurantSetupEndpoint(APIView):
             response = ConMenuItem().reorder_listing(
                 section_id=put_data.get('section_id'),
                 ordered_ids=put_data.get('ordered_ids'),
+                user=request.user,
+            )
+            return Response(response, status=response['status'])
+
+        if config_detail == 'menu-item-sort-mode':
+            response = ConMenuItemSortMode().set_mode(
+                restaurant_id=put_data.get('restaurant'),
+                mode=put_data.get('mode'),
                 user=request.user,
             )
             return Response(response, status=response['status'])
