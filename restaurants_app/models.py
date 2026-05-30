@@ -73,6 +73,15 @@ class Restaurant(BaseModel):
     preset_tags = models.JSONField(default=list, blank=True)
     country = models.CharField(max_length=5, default="UG")
 
+    # diner-facing menu item sort mode chosen in the portal. The backend only
+    # stores it; the frontend owns the actual sort (shared comparator). Values
+    # must round-trip with the frontend SortMode union.
+    menu_item_sort_mode = models.CharField(
+        max_length=20,
+        choices=[('manual', 'Manual'), ('a-z', 'A–Z'), ('price-low', 'Price low to high'), ('price-high', 'Price high to low')],
+        default='manual',
+    )
+
     # for batch approvals
     first_time_menu_approval_decision = models.CharField(
         max_length=255,

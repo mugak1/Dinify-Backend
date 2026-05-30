@@ -658,6 +658,112 @@ class MenuItemReorderTests(TestCase):
         self.assertEqual(self.item_b.listing_position, 0)
 
 
+class MenuItemSortModeTests(TestCase):
+    """Tests for the per-restaurant menu item sort mode: the
+    menu-item-sort-mode config_detail (GET/PUT via ConMenuItemSortMode) and
+    its surfacing on the diner show-menu. The backend only stores the mode;
+    it never re-sorts items."""
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant()
+        self.admin_user = User.objects.get(username=TEST_PHONE)
+        self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+
+    def _get_mode(self, restaurant_id, user=None):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        actor = user or self.admin_user
+        token = str(RefreshToken.for_user(actor).access_token)
+        return self.client.get(
+            f'/api/v1/restaurant-setup/menu-item-sort-mode/',
+            data={'restaurant': str(restaurant_id)},
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+
+    def _put_mode(self, restaurant_id, mode, user=None):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        actor = user or self.admin_user
+        token = str(RefreshToken.for_user(actor).access_token)
+        return self.client.put(
+            f'/api/v1/restaurant-setup/menu-item-sort-mode/',
+            data={'restaurant': str(restaurant_id), 'mode': mode},
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+
+    def test_default_mode_is_manual(self):
+        # A freshly seeded restaurant inherits the model default.
+        self.assertEqual(self.restaurant.menu_item_sort_mode, 'manual')
+
+    def test_put_persists_valid_mode(self):
+        response = self._put_mode(self.restaurant.id, 'a-z')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json().get('item_sort_mode'), 'a-z')
+        self.restaurant.refresh_from_db()
+        self.assertEqual(self.restaurant.menu_item_sort_mode, 'a-z')
+
+    def test_put_accepts_all_four_modes(self):
+        for mode in ('manual', 'a-z', 'price-low', 'price-high'):
+            response = self._put_mode(self.restaurant.id, mode)
+            self.assertEqual(response.status_code, 200)
+            self.restaurant.refresh_from_db()
+            self.assertEqual(self.restaurant.menu_item_sort_mode, mode)
+
+    def test_put_rejects_invalid_mode(self):
+        response = self._put_mode(self.restaurant.id, 'banana')
+        self.assertEqual(response.status_code, 400)
+        self.restaurant.refresh_from_db()
+        # The bad write must not have touched the stored value.
+        self.assertEqual(self.restaurant.menu_item_sort_mode, 'manual')
+
+    def test_get_returns_current_mode(self):
+        self.restaurant.menu_item_sort_mode = 'price-low'
+        self.restaurant.save(update_fields=['menu_item_sort_mode'])
+        response = self._get_mode(self.restaurant.id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json().get('item_sort_mode'), 'price-low')
+
+    def test_get_defaults_to_manual(self):
+        response = self._get_mode(self.restaurant.id)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json().get('item_sort_mode'), 'manual')
+
+    def test_outsider_cannot_write_mode(self):
+        # A user with no owner/manager role on the restaurant is denied.
+        outsider = User.objects.create(
+            username='outsider_phone', first_name='Out', last_name='Sider',
+        )
+        response = self._put_mode(self.restaurant.id, 'a-z', user=outsider)
+        self.assertEqual(response.status_code, 403)
+        self.restaurant.refresh_from_db()
+        self.assertEqual(self.restaurant.menu_item_sort_mode, 'manual')
+
+    def test_outsider_cannot_read_mode(self):
+        outsider = User.objects.create(
+            username='outsider_phone', first_name='Out', last_name='Sider',
+        )
+        response = self._get_mode(self.restaurant.id, user=outsider)
+        self.assertEqual(response.status_code, 403)
+
+    def test_show_menu_includes_item_sort_mode(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_menu,
+        )
+        self.restaurant.menu_item_sort_mode = 'price-high'
+        self.restaurant.save(update_fields=['menu_item_sort_mode'])
+        response = handle_show_menu(str(self.restaurant.id), 'false')
+        self.assertEqual(response['status'], 200)
+        self.assertIn('item_sort_mode', response)
+        self.assertEqual(response['item_sort_mode'], 'price-high')
+
+    def test_show_menu_defaults_to_manual(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_menu,
+        )
+        response = handle_show_menu(str(self.restaurant.id), 'false')
+        self.assertEqual(response.get('item_sort_mode'), 'manual')
+
+
 class MenuItemDiscountMathTests(TestCase):
     """Regression tests for the canonical discount_details schema and the
     order pipeline's effective-unit-price calculation."""
