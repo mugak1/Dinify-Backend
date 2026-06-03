@@ -111,9 +111,9 @@ class ActiveKitchenOrdersView(APIView):
 
 
 class KitchenOrderFulfilmentStatusView(APIView):
-    """PATCH the server-authoritative fulfilment status of an order."""
+    """PUT the server-authoritative fulfilment status of an order."""
 
-    def patch(self, request, pk):
+    def put(self, request, pk):
         order = _get_order_or_none(pk)
         if order is None:
             return Response({'status': 404, 'message': 'Order not found'}, status=404)
@@ -183,9 +183,9 @@ class KitchenOrderFulfilmentStatusView(APIView):
 
 
 class KitchenOrderPriorityView(APIView):
-    """PATCH (set or toggle) the priority flag of an order."""
+    """PUT (set or toggle) the priority flag of an order."""
 
-    def patch(self, request, pk):
+    def put(self, request, pk):
         order = _get_order_or_none(pk)
         if order is None:
             return Response({'status': 404, 'message': 'Order not found'}, status=404)
