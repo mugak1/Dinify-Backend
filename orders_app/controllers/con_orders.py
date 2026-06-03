@@ -10,11 +10,7 @@ from dinify_backend.configss.messages import MESSAGES
 from django.core.exceptions import ObjectDoesNotExist
 from restaurants_app.models import Restaurant, MenuItem, Table
 from dinify_backend.configss.string_definitions import (
-    OrderStatus_Initiated,
-    OrderStatus_Pending,
-    OrderStatus_Preparing,
-    OrderStatus_Served,
-    PaymentStatus_Pending,
+    OrderStatus_Cancelled,
     TransactionStatus_Success
 )
 from orders_app.models import Order, OrderItem
@@ -104,35 +100,28 @@ class ConOrder:
 
     @staticmethod
     def any_present_ongoing_order(table: Table) -> dict:
-        # TODO check if this is an ongoing order
-        present_orders = Order.objects.values('id', 'eod_record_date').filter(
-            table=table,
-            order_status__in=[
-                OrderStatus_Initiated,
-                OrderStatus_Pending,
-                OrderStatus_Preparing
-            ]
-        ).order_by('-time_created')
-        if present_orders.count() > 0:
-            order = present_orders.first()
-            # if order['eod_record_date'] is None:
+        """
+        Determine whether a table is occupied by an ongoing order.
+
+        A table is occupied iff it has an order that is not deleted, not
+        cancelled, and whose fulfilment_status is not 'served'. Gating keys
+        off the kitchen-owned fulfilment axis (not order_status /
+        payment_status), so a table frees up once the kitchen serves its
+        order. Returns the most recent such order.
+        """
+        ongoing_order = (
+            Order.objects
+            .filter(table=table, deleted=False)
+            .exclude(order_status=OrderStatus_Cancelled)
+            .exclude(fulfilment_status='served')
+            .order_by('-time_created')
+            .values('id')
+            .first()
+        )
+        if ongoing_order is not None:
             return {
                 'present': True,
-                'order_id': order['id']
-            }
-
-        served_unpaid_orders = Order.objects.values('id', 'eod_record_date').filter(
-            table=table,
-            order_status=OrderStatus_Served,
-            payment_status=PaymentStatus_Pending
-        ).order_by('-time_created')
-
-        if served_unpaid_orders.count() > 0:
-            order = served_unpaid_orders.first()
-            # if order['eod_record_date'] is None:
-            return {
-                'present': True,
-                'order_id': order['id']
+                'order_id': ongoing_order['id']
             }
         return {'present': False}
 
