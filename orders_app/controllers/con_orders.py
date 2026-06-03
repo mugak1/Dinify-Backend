@@ -18,9 +18,10 @@ from dinify_backend.configss.string_definitions import (
     TransactionStatus_Success
 )
 from orders_app.models import Order, OrderItem
-from orders_app.serializers import SerializerPutOrder, SerializerPutOrderItem
+from orders_app.serializers import SerializerPutOrderItem
 from finance_app.models import DinifyTransaction
 from orders_app.controllers.orders.serializers import serialize_order_details
+from orders_app.controllers.services.create_order import _create_order
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +310,14 @@ class ConOrder:
                 'item_name': extra_item.name,
                 'quantity': quantity,
 
+                # kitchen snapshots (extras carry no modifiers)
+                'item_name_snapshot': extra_item.name,
+                'modifiers_snapshot': [],
+                'allergen_tags_snapshot': [
+                    {'name': t.name, 'icon': t.icon, 'colour': t.colour}
+                    for t in extra_item.tags.filter(category='allergen')
+                ],
+
                 'unit_price': unit_price,
                 'discounted_price': effective_unit_price,
                 'actual_price': effective_unit_price,
@@ -407,6 +416,14 @@ class ConOrder:
             'item_name': menu_item.name,
             'quantity': item['quantity'],
 
+            # kitchen snapshots: resolved once at creation, immutable thereafter
+            'item_name_snapshot': menu_item.name,
+            'modifiers_snapshot': [f"{o['name']}: {o['choices']}" for o in selected_options],
+            'allergen_tags_snapshot': [
+                {'name': t.name, 'icon': t.icon, 'colour': t.colour}
+                for t in menu_item.tags.filter(category='allergen')
+            ],
+
             'options': selected_options,
             'selected_modifiers': selected_modifiers,
 
@@ -491,7 +508,9 @@ class ConOrder:
         items: list,
         order_remarks: Optional[str] = None,
         customer: Union[User, None] = None,
-        created_by: Union[User, None] = None
+        created_by: Union[User, None] = None,
+        order_source: str = 'diner_self_service',
+        client_order_id: Optional[str] = None
     ):
         # check that the restaurant is not blocked
         try:
@@ -536,57 +555,24 @@ class ConOrder:
         if extras_check.get('status') != 200:
             return extras_check
 
-        # check that the table does not have any other ongoing order
         table = Table.objects.get(pk=table_id)
-        ongoing_orders = ConOrder.any_present_ongoing_order(table)
-        if ongoing_orders.get('present'):
-            return {
-                'status': 400,
-                'message': 'The table has an ongoing order',
-                'data': {
-                    'order_id': ongoing_orders.get('order_id'),
-                }
-            }
 
-        # initiate the order object
-        customer = customer.pk if customer else None
-        order_data = {
-            'restaurant': restaurant_id,
-            'table': table_id,
-            'order_remarks': order_remarks,
+        # idempotency, table-gating, daily numbering and creation are all
+        # handled atomically by the order-creation service.
+        result = _create_order(
+            restaurant=restaurant,
+            table=table,
+            items=items,
+            order_remarks=order_remarks,
+            customer=customer,
+            created_by=created_by,
+            order_source=order_source,
+            client_order_id=client_order_id,
+        )
+        if result.get('status') != 200:
+            return result
 
-            'total_cost': 0,
-            'discounted_cost': 0,
-            'savings': 0,
-            'actual_cost': 0,
-            'prepayment_required': table.prepayment_required,
-
-            'order_status': 'initiated',
-            'payment_status': 'pending',
-
-            'customer': customer,
-            'created_by': created_by
-        }
-
-        order_record = SerializerPutOrder(data=order_data)
-        if not order_record.is_valid():
-            error_message = ""
-            for _, value in order_record.errors.items():
-                error_message += f"{', '.join(value)}\n"
-            return {
-                'status': 400,
-                'message': error_message
-            }
-
-        with transaction.atomic():
-            order_record.save()
-            order_id = order_record.data['id']
-
-            for item in items:
-                ConOrder.add_order_item(item=item, order_id=order_id)
-            order_rec = Order.objects.select_for_update().get(id=order_id)
-            ConOrder.update_order_amounts(order=order_rec)
-
+        order_rec = result['order']
         order_rec.refresh_from_db()
 
         order_details = serialize_order_details(order=order_rec)

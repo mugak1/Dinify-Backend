@@ -3,6 +3,8 @@
 *.py[cod]
 __pycache__/
 env/
+.venv/
+venv/
 .env
 .env.prod
 prod.env

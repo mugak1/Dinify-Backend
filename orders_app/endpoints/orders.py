@@ -166,6 +166,8 @@ class V2OrdersEndpoint(APIView):
             table_id = data.get('table')
             items = data.get('items')
             order_remarks = data.get('order_remarks')
+            # idempotency key supplied by the diner app (Phase 3); absent today
+            client_order_id = data.get('client_order_id')
             if restaurant_id is None or table_id is None:
                 response = {
                     'status': 400,
@@ -179,6 +181,7 @@ class V2OrdersEndpoint(APIView):
                 order_remarks=order_remarks,
                 customer=customer,
                 created_by=created_by,
+                client_order_id=client_order_id,
             )
             return Response(response, status=response.get('status', 200))
 
