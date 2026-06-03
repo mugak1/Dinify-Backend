@@ -1,18 +1,11 @@
 from decimal import Decimal
 
-from django.db.models.signals import pre_save
-from django.dispatch import receiver
 from django.db import models
-from django.db import transaction
-from datetime import datetime
 from users_app.models import User, BaseModel
 from restaurants_app.models import Restaurant, MenuItem, Table
-from django.utils import timezone
 from dinify_backend.configss.string_definitions import (
     PaymentStatus_Pending, OrderStatus_Initiated,
     OrderItemStatus_Initiated,
-    KdsStatus_New, KdsStatus_InPrep, KdsStatus_Ready,
-    KdsStatus_Fulfilled, KdsStatus_Cancelled
 )
 
 
@@ -56,9 +49,60 @@ class Order(BaseModel):
     block_review_reason = models.TextField(null=True, blank=True)
     review_blocked_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='order_review_blocked_by')  # noqa
 
+    # === order provenance + idempotency (Phase 2) ===
+    order_source = models.CharField(
+        max_length=32,
+        choices=[
+            ("diner_self_service", "Diner self-service"),
+            ("server_assisted", "Server assisted"),
+        ],
+        default="diner_self_service",
+        db_index=True,
+    )
+    # idempotency key supplied by the diner app (Phase 3); absent today
+    client_order_id = models.UUIDField(null=True, blank=True, db_index=True)
+
+    # === kitchen-owned fulfilment axis (Phase 2) ===
+    # Kitchen writes ONLY these fields, never order_status / payment_status.
+    fulfilment_status = models.CharField(
+        max_length=20,
+        choices=[
+            ("new", "New"),
+            ("preparing", "Preparing"),
+            ("ready", "Ready"),
+            ("served", "Served"),
+        ],
+        default="new",
+        db_index=True,
+    )
+    fulfilment_status_updated_at = models.DateTimeField(null=True, blank=True)
+    fulfilment_status_updated_by = models.ForeignKey(
+        "users_app.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="orders_fulfilment_updated",
+    )
+    served_at = models.DateTimeField(null=True, blank=True)
+    priority = models.BooleanField(default=False, db_index=True)
+    # local business date the order belongs to; authoritative for daily numbering
+    order_date = models.DateField(null=True, db_index=True)
+
     class Meta:
         db_table = 'orders'
         ordering = ['-time_created']
+        constraints = [
+            models.UniqueConstraint(
+                fields=["restaurant", "client_order_id"],
+                condition=models.Q(client_order_id__isnull=False),
+                name="uniq_order_restaurant_client_order_id",
+            ),
+            models.UniqueConstraint(
+                fields=["restaurant", "order_date", "order_number"],
+                condition=models.Q(order_number__isnull=False),
+                name="uniq_order_restaurant_date_number",
+            ),
+        ]
 
 
 class OrderItem(BaseModel):
@@ -94,6 +138,14 @@ class OrderItem(BaseModel):
     # Stores the diner's grouped modifier selections:
     # { "group_id": ["choice_id", ...], ... }
 
+    # === kitchen snapshots (Phase 2): resolved at creation, immutable ===
+    # item_name_snapshot preserves the name even if the menu item is renamed.
+    item_name_snapshot = models.CharField(max_length=255, blank=True, default="")
+    # modifiers_snapshot holds resolved human-readable labels e.g. ["Size: Large"]
+    modifiers_snapshot = models.JSONField(default=list, blank=True)
+    # allergen_tags_snapshot holds [{name, icon, colour}] from item.tags (allergen)
+    allergen_tags_snapshot = models.JSONField(default=list, blank=True)
+
     total_cost = models.DecimalField(max_digits=50, decimal_places=2)
     discounted_cost = models.DecimalField(max_digits=50, decimal_places=2)
     savings = models.DecimalField(max_digits=50, decimal_places=2)
@@ -114,68 +166,23 @@ class OrderItem(BaseModel):
         ordering = ['-time_created', 'item__name']
 
 
-KDS_STATUS_CHOICES = [
-    (KdsStatus_New, 'New'),
-    (KdsStatus_InPrep, 'In Prep'),
-    (KdsStatus_Ready, 'Ready'),
-    (KdsStatus_Fulfilled, 'Fulfilled'),
-    (KdsStatus_Cancelled, 'Cancelled'),
-]
+class RestaurantDailyOrderCounter(BaseModel):
+    """
+    Per-restaurant, per-day monotonic source of order_number.
 
-
-class KitchenTicket(BaseModel):
-    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='kitchen_tickets')
-    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name='kitchen_tickets_restaurant')
-    table = models.ForeignKey(Table, on_delete=models.CASCADE, null=True, blank=True, related_name='kitchen_tickets_table')
-    ticket_number = models.IntegerField(null=True)
-    status = models.CharField(max_length=50, choices=KDS_STATUS_CHOICES, default=KdsStatus_New, db_index=True)
-    station = models.CharField(max_length=100, null=True, blank=True)
-    items_count = models.PositiveIntegerField(default=0)
-    target_prep_minutes = models.PositiveIntegerField(default=15)
-    placed_at = models.DateTimeField(auto_now_add=True)
-    prep_started_at = models.DateTimeField(null=True, blank=True)
-    ready_at = models.DateTimeField(null=True, blank=True)
-    fulfilled_at = models.DateTimeField(null=True, blank=True)
-    cancelled_at = models.DateTimeField(null=True, blank=True)
+    Replaces the race-prone count()+1 pre_save signal: allocation takes a
+    row lock (select_for_update) on the (restaurant, order_date) row, and the
+    unique constraint is the final guard against the first-of-day race.
+    """
+    restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE)
+    order_date = models.DateField()
+    next_number = models.PositiveIntegerField(default=1)
 
     class Meta:
-        db_table = 'kitchen_tickets'
-        ordering = ['-placed_at']
-
-
-class KitchenTicketItem(BaseModel):
-    ticket = models.ForeignKey(KitchenTicket, on_delete=models.CASCADE, related_name='ticket_items')
-    order_item = models.ForeignKey(OrderItem, on_delete=models.CASCADE, related_name='kitchen_ticket_items')
-    name = models.CharField(max_length=255)
-    quantity = models.PositiveIntegerField()
-    notes = models.TextField(null=True, blank=True)
-    station = models.CharField(max_length=100, null=True, blank=True)
-
-    class Meta:
-        db_table = 'kitchen_ticket_items'
-        ordering = ['ticket', 'name']
-
-
-@receiver(pre_save, sender=Order)
-def create_order_number(sender, instance, **kwargs):
-    if instance.order_number is None:
-        with transaction.atomic():
-            # get the count of today's order for the restaurant
-            date_today = datetime.now().date()
-            count = Order.objects.select_for_update().filter(
-                restaurant=instance.restaurant,
-                time_created__date=date_today
-            ).count()
-            instance.order_number = count+1
-
-
-@receiver(pre_save, sender=KitchenTicket)
-def create_ticket_number(sender, instance, **kwargs):
-    if instance.ticket_number is None:
-        with transaction.atomic():
-            date_today = datetime.now().date()
-            count = KitchenTicket.objects.select_for_update().filter(
-                restaurant=instance.restaurant,
-                time_created__date=date_today
-            ).count()
-            instance.ticket_number = count + 1
+        db_table = 'restaurant_daily_order_counters'
+        constraints = [
+            models.UniqueConstraint(
+                fields=["restaurant", "order_date"],
+                name="uniq_daily_counter",
+            ),
+        ]

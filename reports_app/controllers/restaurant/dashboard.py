@@ -7,7 +7,7 @@ from django.db.models import Count, Sum, Avg, F, Q  # noqa
 from django.db.models.functions import TruncHour, TruncDay, TruncMonth
 from django.utils import timezone
 
-from orders_app.models import Order, OrderItem, KitchenTicket
+from orders_app.models import Order, OrderItem
 from restaurants_app.models import Table
 from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
@@ -15,7 +15,6 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Refunded, OrderStatus_Preparing, OrderStatus_Pending,
     PaymentStatus_Pending,
     TransactionType_OrderPayment, TransactionStatus_Success,
-    KdsStatus_New, KdsStatus_InPrep, KdsStatus_Ready, KdsStatus_Fulfilled,
 )
 
 
@@ -493,43 +492,50 @@ def _build_tables(restaurant_id):
     }
 
 
+# Escalation thresholds (minutes) that replace the retired per-ticket
+# target_prep_minutes when deriving kitchen stats from the Order fulfilment axis.
+KDS_WARNING_MINUTES = 8
+KDS_OVERDUE_MINUTES = 15
+
+
 def _build_kds(restaurant_id):
     now = timezone.now()
     today = now.date()
 
-    open_tickets = KitchenTicket.objects.filter(
+    # Open = orders still moving through the kitchen fulfilment axis.
+    open_orders = Order.objects.filter(
         restaurant=restaurant_id,
-        status__in=[KdsStatus_New, KdsStatus_InPrep, KdsStatus_Ready],
+        fulfilment_status__in=['new', 'preparing', 'ready'],
         deleted=False,
-    )
-    open_count = open_tickets.count()
+    ).exclude(order_status=OrderStatus_Cancelled)
+    open_count = open_orders.count()
 
     over_sla = 0
     at_risk = 0
     oldest_minutes = 0
     oldest_ticket_number = None
 
-    for ticket in open_tickets.only('placed_at', 'target_prep_minutes', 'ticket_number'):
-        age_minutes = (now - ticket.placed_at).total_seconds() / 60
-        if age_minutes > ticket.target_prep_minutes:
+    for order in open_orders.only('time_created', 'order_number'):
+        age_minutes = (now - order.time_created).total_seconds() / 60
+        if age_minutes > KDS_OVERDUE_MINUTES:
             over_sla += 1
-        elif age_minutes > ticket.target_prep_minutes * Decimal('0.8'):
+        elif age_minutes > KDS_WARNING_MINUTES:
             at_risk += 1
         if age_minutes > oldest_minutes:
             oldest_minutes = age_minutes
-            oldest_ticket_number = ticket.ticket_number
+            oldest_ticket_number = order.order_number
 
-    # Avg fulfillment for today's fulfilled tickets
-    fulfilled_today = KitchenTicket.objects.filter(
+    # Avg fulfillment for orders served today (created -> served duration).
+    fulfilled_today = Order.objects.filter(
         restaurant=restaurant_id,
-        status=KdsStatus_Fulfilled,
-        fulfilled_at__date=today,
+        fulfilment_status='served',
+        served_at__date=today,
         deleted=False,
     )
     fulfillment_durations = []
-    for t in fulfilled_today.only('placed_at', 'fulfilled_at'):
-        if t.fulfilled_at and t.placed_at:
-            mins = (t.fulfilled_at - t.placed_at).total_seconds() / 60
+    for o in fulfilled_today.only('time_created', 'served_at'):
+        if o.served_at and o.time_created:
+            mins = (o.served_at - o.time_created).total_seconds() / 60
             fulfillment_durations.append(mins)
 
     avg_fulfillment = None
@@ -549,7 +555,8 @@ def _build_kds(restaurant_id):
         'over_sla': over_sla,
         'at_risk': at_risk,
         'avg_fulfillment_minutes': avg_fulfillment,
-        'oldest_ticket_minutes': int(oldest_minutes) if oldest_ticket_number else 0,
+        # legacy orders may carry order_number=None, so guard on the open count
+        'oldest_ticket_minutes': int(oldest_minutes) if open_count else 0,
         'oldest_ticket_number': oldest_ticket_number,
         'status': kds_status,
     }
