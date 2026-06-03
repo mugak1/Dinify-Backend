@@ -15,6 +15,7 @@ from rest_framework.test import APIClient
 
 from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
 from orders_app.controllers.con_orders import ConOrder
+from orders_app.controllers.initiate_order import any_present_ongoing_order
 from orders_app.controllers.services.create_order import (
     _create_order,
     allocate_daily_order_number,
@@ -358,3 +359,83 @@ class KitchenTransitionTests(KitchenTestBase):
         self.assertEqual(self._patch_status(order, 'preparing').status_code, 403)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'new')
+
+
+class TableGatingTests(KitchenTestBase):
+    """
+    Table-occupancy gating keys off the kitchen-owned fulfilment axis: a table
+    is occupied iff it has an order that is not deleted, not cancelled, and
+    whose fulfilment_status is not 'served'. A kitchen-served order frees the
+    table even though order_status / payment_status are left untouched (diner
+    payment is not wired up). Both copies of any_present_ongoing_order — the
+    ConOrder staticmethod (order-create gating) and the standalone function
+    (restaurant-portal table view) — must behave identically.
+    """
+
+    def _items(self):
+        return [{
+            'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk),
+            'quantity': 1,
+        }]
+
+    def _assert_both(self, table, expected):
+        """Both copies of the gate must agree on `present` (and order_id)."""
+        con = ConOrder.any_present_ongoing_order(table)
+        standalone = any_present_ongoing_order(table)
+        self.assertEqual(con, standalone)
+        self.assertEqual(con['present'], expected['present'])
+        if expected['present']:
+            self.assertEqual(str(con['order_id']), expected['order_id'])
+        return con
+
+    def test_non_served_order_blocks_new_order(self):
+        order = self._make_order(self.table1, fulfilment_status='new')
+        self._assert_both(self.table1, {'present': True, 'order_id': str(order.id)})
+
+        # A genuinely new submission on the same table is gated.
+        result = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+        )
+        self.assertEqual(result['status'], 400)
+        self.assertEqual(result['message'], 'The table has an ongoing order')
+        self.assertEqual(str(result['data']['order_id']), str(order.id))
+
+    def test_served_order_frees_the_same_table(self):
+        order = self._make_order(self.table1, fulfilment_status='new')
+        self._assert_both(self.table1, {'present': True, 'order_id': str(order.id)})
+
+        # Kitchen serves the order — only the fulfilment axis moves.
+        order.fulfilment_status = 'served'
+        order.served_at = timezone.now()
+        order.save(update_fields=['fulfilment_status', 'served_at'])
+
+        # The table is now free, even though order_status / payment_status
+        # are unchanged.
+        self._assert_both(self.table1, {'present': False})
+
+        # And a brand-new order is allowed on the freed table.
+        result = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+        )
+        self.assertEqual(result['status'], 200)
+        self.assertNotEqual(str(result['order'].id), str(order.id))
+
+    def test_cancelled_order_does_not_block(self):
+        self._make_order(
+            self.table1, fulfilment_status='new', order_status=OrderStatus_Cancelled,
+        )
+        self._assert_both(self.table1, {'present': False})
+
+    def test_deleted_order_does_not_block(self):
+        self._make_order(self.table1, fulfilment_status='new', deleted=True)
+        self._assert_both(self.table1, {'present': False})
+
+    def test_returns_most_recent_ongoing_order(self):
+        older = self._make_order(self.table1, fulfilment_status='new')
+        newer = self._make_order(self.table1, fulfilment_status='preparing')
+        # Force distinct creation timestamps so "most recent" is deterministic
+        # (time_created is auto_now_add, so override via .update()).
+        now = timezone.now()
+        Order.objects.filter(id=older.id).update(time_created=now - timedelta(minutes=5))
+        Order.objects.filter(id=newer.id).update(time_created=now)
+        self._assert_both(self.table1, {'present': True, 'order_id': str(newer.id)})
