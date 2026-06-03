@@ -277,7 +277,7 @@ class KitchenTransitionTests(KitchenTestBase):
         self.client.force_authenticate(user=self.kitchen_user)
 
     def _patch_status(self, order, target):
-        return self.client.patch(
+        return self.client.put(
             _fulfilment_url(order.id), {'fulfilment_status': target}, format='json',
         )
 
@@ -331,7 +331,7 @@ class KitchenTransitionTests(KitchenTestBase):
             order_status=OrderStatus_Initiated,
             payment_status=PaymentStatus_Pending,
         )
-        response = self.client.patch(
+        response = self.client.put(
             _fulfilment_url(order.id),
             {'fulfilment_status': 'preparing', 'order_status': 'cancelled', 'payment_status': 'paid'},
             format='json',
@@ -344,11 +344,11 @@ class KitchenTransitionTests(KitchenTestBase):
 
     def test_priority_toggle_and_explicit_set(self):
         order = self._make_order(priority=False)
-        self.assertEqual(self.client.patch(_priority_url(order.id), {}, format='json').status_code, 200)
+        self.assertEqual(self.client.put(_priority_url(order.id), {}, format='json').status_code, 200)
         order.refresh_from_db()
         self.assertTrue(order.priority)
 
-        self.client.patch(_priority_url(order.id), {'priority': False}, format='json')
+        self.client.put(_priority_url(order.id), {'priority': False}, format='json')
         order.refresh_from_db()
         self.assertFalse(order.priority)
 
