@@ -21,8 +21,16 @@ with PostgreSQL on AWS RDS.
 - Tables module: ✅ Backend complete — `reservations`, `waitlist`,
   `table_actions`, `dining_areas`, full QR/floor-plan fields wired through
   EDIT_INFORMATION
-- KDS module: ✅ Backend ready — `KitchenTicket`/`KitchenTicketItem` models,
-  `orders_app/endpoints_kds.py`, mounted at `api/v1/kds/`
+- Kitchen module: ✅ Backend ready — driven by `Order`/`OrderItem` fulfilment
+  fields (`fulfilment_status`, `priority`, `served_at`) via
+  `orders_app/endpoints_kitchen.py`, mounted at `api/v1/kitchen/`
+  (`urls_kitchen.py`). The legacy `KitchenTicket`/`KitchenTicketItem` KDS models
+  were RETIRED (migration `0030_retire_kitchen_tickets`) — do not reintroduce them
+- Restaurant tag catalog: ✅ Per-restaurant tag catalog (migrations 0044–0045) +
+  `restaurant_tags.py` endpoint + `EI_RESTAURANT_TAG`; menu items reference
+  catalog tags via `tag_ids`
+- Menu item extensions: ✅ Per-restaurant `menu_item_sort_mode`, `age_restricted`
+  flag, and extras `extras_min_selections`/`extras_max_selections`
 - Auth: ✅ Refresh-token rotation + blacklist-on-logout + 7-day refresh lifetime
   (SimpleJWT, `JWT_REFRESH_LIFETIME_DAYS`)
 - Login 500 regression: ⚠️ Outstanding — Apache error logs needed
@@ -37,20 +45,20 @@ with PostgreSQL on AWS RDS.
 
 ## URL Structure
 - `api/v1/restaurant-setup/` → RestaurantSetupEndpoint (catch-all) +
-  dedicated endpoints for: preset-tags, upsell-config, reservations,
-  waitlist, table-actions/<action>/
+  dedicated endpoints for: preset-tags, restaurant-tags, upsell-config,
+  upsell-config/items, reservations, waitlist, table-actions/<action>/
 - `api/v1/reports/restaurant/<report_name>/` → RestaurantReportsEndpoint
 - `api/v1/orders/` → v1 orders (urls.py)
 - `api/v2/orders/` → v2 orders (v2_urls.py) — separate file, don't confuse
-- `api/v1/kds/` → KDS endpoints (urls_kds.py) — separate file
+- `api/v1/kitchen/` → Kitchen endpoints (urls_kitchen.py) — separate file
 
 ## Endpoint Pattern — CRITICAL
 New resource types get their own dedicated endpoint file in
 `restaurants_app/endpoints/`, NOT added to the RestaurantSetupEndpoint
 catch-all. Examples already following this pattern:
 - `reservations.py`, `waitlist.py`, `table_actions.py`, `preset_tags.py`,
-  `upsell_config.py`, `manager_actions.py`, `misc_public.py`,
-  `order_journey.py`
+  `restaurant_tags.py`, `upsell_config.py`, `manager_actions.py`,
+  `misc_public.py`, `order_journey.py`
 Always register new endpoint files in `restaurants_app/urls.py` ABOVE
 the catch-all `<str:config_detail>/` route.
 
@@ -63,8 +71,9 @@ the catch-all `<str:config_detail>/` route.
 - If omitted, Secretary silently ignores the field and returns
   "no changes detected"
 - Current sections: `restaurants`, `restaurant_employee`, `menu_section`,
-  `menu_item`, `table` (20+ fields), plus `EI_DINING_AREA` for dining areas
-  and `EI_SECTION_GROUP` for menu section groups
+  `menu_item`, `table` (20+ fields), plus `EI_DINING_AREA` for dining areas,
+  `EI_SECTION_GROUP` for menu section groups, and `EI_RESTAURANT_TAG` for
+  restaurant tag catalog entries
 - Secretary now honours absent-vs-None semantics: omitting a field leaves
   it untouched, sending `null` clears it. The legacy `clear_<field>`
   sentinels are deprecated — do not introduce new ones
@@ -103,8 +112,10 @@ the catch-all `<str:config_detail>/` route.
 - Do not revert these
 
 ## Canonical Data Shapes — CRITICAL
-- `MenuItem.tags` is the dietary-tag field (post-0043). `allergens` was
-  rewired into `tags`; do not reintroduce a separate allergens path
+- `MenuItem.tags` is the dietary-tag field. The `allergens`→`tags` rewire is
+  now fully complete — post-0046 dropped the legacy `_legacy_tags` column. Do
+  not reintroduce a separate allergens path. Menu items additionally reference
+  the restaurant tag catalog via `tag_ids`
 - `MenuItem.discount_details` uses the canonical post-0042 shape. Use
   `get_discount_percentage` (returns positive magnitude) — do not invert
   the sign in callers
@@ -124,12 +135,14 @@ the catch-all `<str:config_detail>/` route.
 - `check_item_data` in `restaurants_app/management/commands/` — debugging
   helper that inspects MenuItem fields and can clean stray empty allergens
   entries (`--clean-allergens`)
+- `reoptimise_menu_images` in `restaurants_app/management/commands/` —
+  re-runs image optimisation across existing MenuItem images. Do not recreate it
 
 ## Database
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove
 - All migrations must be generated and included in PRs when models change
-- Latest migration: `restaurants_app/migrations/0043_migrate_menuitem_allergens_to_tags.py`,
-  `orders_app/migrations/0027_kitchenticket_kitchenticketitem.py`
+- Latest migration: `restaurants_app/migrations/0048_restaurant_menu_item_sort_mode.py`,
+  `orders_app/migrations/0030_retire_kitchen_tickets.py`
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
@@ -137,6 +150,9 @@ the catch-all `<str:config_detail>/` route.
   `makemigrations --check --dry-run` against `dinify_backend.test_settings`
 - Then runs the full Django test suite — a missing migration or a model
   change without a generated migration will fail CI
+- A separate `.github/workflows/deploy-uat.yml` deploys to the UAT host on
+  push to `main` (pull, migrate, restart Apache) — reinforces the deployment
+  rule above: never pull/migrate/restart manually
 
 ## Verification
 Before raising any PR:
