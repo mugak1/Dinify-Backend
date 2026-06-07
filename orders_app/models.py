@@ -21,7 +21,9 @@ class Order(BaseModel):
         related_name='waiter'
     )
     restaurant = models.ForeignKey(Restaurant, on_delete=models.CASCADE, related_name='restaurant')
-    table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name='table')
+    # PROTECT: a table (or, by chain, a restaurant) with orders cannot be hard-deleted,
+    # so financial/order history is never silently destroyed by a cascade.
+    table = models.ForeignKey(Table, on_delete=models.PROTECT, related_name='table')
     order_number = models.IntegerField(null=True)
     order_remarks = models.TextField(null=True, blank=True)
 
