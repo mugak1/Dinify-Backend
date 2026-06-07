@@ -3255,3 +3255,105 @@ class PublicTableScanPresetTagsTests(TestCase):
         names = [t['name'] for t in result['data']['restaurant']['preset_tags']]
         self.assertNotIn('Stale', names)
         self.assertEqual(len(result['data']['restaurant']['preset_tags']), 14)
+
+
+class AreaDeletionBlockTests(TestCase):
+    """
+    Leg 2 of the deletion model: a dining area that still contains a
+    non-deleted table cannot be deleted. The rule lives on
+    DiningArea.deletion_blockers() and is enforced (409) at the
+    restaurant-setup DELETE endpoint, before the soft-delete. The old
+    soft-cascade that silently deleted an area's tables has been removed.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            first_name='Area', last_name='Owner',
+            email='area_owner@test.com', phone_number='256700000210',
+            username='256700000210', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant = Restaurant.objects.create(
+            name='Area Restaurant', location='loc-area',
+            status=RestaurantStatus_Active, owner=self.owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        # Area that still holds a table -> must be undeletable.
+        self.occupied_area = DiningArea.objects.create(
+            name='Occupied Patio', restaurant=self.restaurant,
+        )
+        self.table = Table.objects.create(
+            number=1, str_number='1', restaurant=self.restaurant,
+            dining_area=self.occupied_area,
+        )
+        # Area with no tables -> deletable.
+        self.empty_area = DiningArea.objects.create(
+            name='Empty Balcony', restaurant=self.restaurant,
+        )
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _delete(self, user, config_detail, body):
+        path = f'/api/v1/restaurant-setup/{config_detail}/'
+        token = self._token_for(user)
+        return self.client.delete(
+            path, data=body, content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+
+    # -- model rule ----------------------------------------------------------
+
+    def test_deletion_blockers_present_when_area_has_table(self):
+        blocker = self.occupied_area.deletion_blockers()
+        self.assertIsNotNone(blocker)
+        self.assertIn('1 table', blocker)
+
+    def test_deletion_blockers_none_for_empty_area(self):
+        self.assertIsNone(self.empty_area.deletion_blockers())
+
+    def test_deletion_blockers_ignores_already_deleted_tables(self):
+        self.table.deleted = True
+        self.table.save(update_fields=['deleted'])
+        self.assertIsNone(self.occupied_area.deletion_blockers())
+
+    # -- endpoint enforcement ------------------------------------------------
+
+    def test_delete_area_with_table_is_blocked(self):
+        response = self._delete(
+            self.owner, 'diningareas',
+            {'id': str(self.occupied_area.id), 'deletion_reason': 'test'},
+        )
+        self.assertEqual(response.status_code, 409)
+        # both the area and its table survive the blocked delete
+        self.occupied_area.refresh_from_db()
+        self.table.refresh_from_db()
+        self.assertFalse(self.occupied_area.deleted)
+        self.assertFalse(self.table.deleted)
+
+    def test_delete_empty_area_succeeds(self):
+        response = self._delete(
+            self.owner, 'diningareas',
+            {'id': str(self.empty_area.id), 'deletion_reason': 'test'},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.empty_area.refresh_from_db()
+        self.assertTrue(self.empty_area.deleted)
+
+    # -- vacuum no longer cascades to tables ---------------------------------
+
+    def test_vacuum_does_not_soft_delete_tables_under_deleted_area(self):
+        from misc_app.management.commands.vacuum_deleted_records import (
+            ConVacuumDeletedRecords,
+        )
+        # Simulate an area that ended up soft-deleted while still holding a
+        # table (the pre-block state). The vacuum must NOT cascade-delete it.
+        self.occupied_area.deleted = True
+        self.occupied_area.save(update_fields=['deleted'])
+        ConVacuumDeletedRecords().vacuum()
+        self.table.refresh_from_db()
+        self.assertFalse(self.table.deleted)

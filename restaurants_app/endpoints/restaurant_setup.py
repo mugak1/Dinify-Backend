@@ -1106,6 +1106,18 @@ class RestaurantSetupEndpoint(APIView):
             'diningareas': SerializerPutDiningArea
         }
 
+        # --- deletion-integrity guards (the rule lives on the model) ---
+        # Block the soft-delete up front when the entity still has dependents
+        # that must be dealt with first. Scoped to the relevant resource types
+        # and kept here, NOT inside the generic Secretary, so it survives the
+        # substrate migration. Returns 409 (never 403 — a 403 force-logs-out
+        # the client).
+        if config_detail == 'diningareas':
+            area = DiningArea.objects.filter(id=data.get('id')).first()
+            blocker = area.deletion_blockers() if area else None
+            if blocker:
+                return Response({'status': 409, 'message': blocker}, status=409)
+
         secretary_args = {
             'serializer': serializer[config_detail],
             'data': data,
