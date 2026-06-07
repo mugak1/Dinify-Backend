@@ -8,7 +8,10 @@ from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from users_app.models import BaseModel, User
-from dinify_backend.configss.string_definitions import RestaurantStatus_Pending
+from dinify_backend.configss.string_definitions import (
+    RestaurantStatus_Pending,
+    PaymentStatus_Paid, OrderStatus_Cancelled, OrderStatus_Refunded,
+)
 from rest_framework.serializers import ModelSerializer
 from misc_app.controllers.utils.archive_record import archive_record
 
@@ -565,6 +568,42 @@ class Table(BaseModel):
     floor_width = models.FloatField(default=10.0)
     floor_height = models.FloatField(default=10.0)
     is_active = models.BooleanField(default=True)
+
+    def has_unsettled_orders(self):
+        """
+        True if this table has any order that is still live/unsettled — i.e.
+        not in a terminal state. Terminal means the bill is settled
+        (payment_status == 'paid') or the order is closed out
+        (order_status in {'cancelled', 'refunded'}). Anything else — including
+        a served-but-unpaid order — counts as live, so an open bill can never
+        be orphaned out of settle-up by removing its table.
+
+        Payment-aware on purpose: the fulfilment-based occupancy helper
+        (any_present_ongoing_order) keys off fulfilment_status and would miss a
+        served-but-unpaid order.
+        """
+        from orders_app.models import Order  # local: avoids a circular import
+        return (
+            Order.objects
+            .filter(table=self, deleted=False)
+            .exclude(payment_status=PaymentStatus_Paid)
+            .exclude(order_status__in=[OrderStatus_Cancelled, OrderStatus_Refunded])
+            .exists()
+        )
+
+    def deletion_blockers(self):
+        """
+        Return a human-readable reason this table cannot be deleted, or None if
+        it can. Rule: a table with a live (unsettled) order cannot be removed —
+        settle or void the order first. Lives on the model so the rule survives
+        the endpoint/controller substrate.
+        """
+        if self.has_unsettled_orders():
+            return (
+                "This table has an open order — settle it before "
+                "removing the table."
+            )
+        return None
 
     class Meta:
         """
