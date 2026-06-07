@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from django.test import TestCase
+from django.db.models.deletion import ProtectedError
 
 from orders_app.models import Order, OrderItem
 from orders_app.controllers.con_orders import ConOrder, handle_add_order_items
@@ -244,3 +245,42 @@ class TestOrderFunctions(TestCase):
 
         order_record.refresh_from_db()
         self.assertGreater(order_record.total_cost, old_total_cost)
+
+
+class TestOrderTableProtect(TestCase):
+    """
+    Leg 1 of the deletion model: Order.table is on_delete=PROTECT, so a Table
+    (or, by chain, a Restaurant) that has orders can never be hard-deleted —
+    financial/order history is protected instead of being silently
+    cascade-destroyed.
+    """
+
+    def setUp(self) -> None:
+        seed_user()
+        seed_restaurant(seed_owner=True)
+        seed_menu_section()
+        seed_menu_items()
+        seed_tables()
+        seed_order()  # creates orders on tables 1 and 3
+
+    def test_deleting_table_with_orders_raises_protected_error(self):
+        table_with_order = Table.objects.get(number=TEST_TABLE_NUMBER1)
+        with self.assertRaises(ProtectedError):
+            table_with_order.delete()
+        # the table and its orders survive the blocked delete
+        self.assertTrue(Table.objects.filter(number=TEST_TABLE_NUMBER1).exists())
+        self.assertTrue(Order.objects.filter(table=table_with_order).exists())
+
+    def test_deleting_table_without_orders_succeeds(self):
+        table_without_order = Table.objects.get(number=TEST_TABLE_NUMBER4)
+        self.assertFalse(Order.objects.filter(table=table_without_order).exists())
+        table_without_order.delete()
+        self.assertFalse(Table.objects.filter(number=TEST_TABLE_NUMBER4).exists())
+
+    def test_deleting_restaurant_with_orders_raises_protected_error(self):
+        restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        # PROTECT propagates up the Restaurant -> Table -> Order chain: the
+        # cascade collects the tables, then the Order.table PROTECT blocks.
+        with self.assertRaises(ProtectedError):
+            restaurant.delete()
+        self.assertTrue(Restaurant.objects.filter(name=TEST_RESTAURANT_NAME).exists())
