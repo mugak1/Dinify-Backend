@@ -1,16 +1,23 @@
 import logging
+from typing import Optional
 
 from users_app.models import User
 from restaurants_app.models import RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
     DINIFY_ACCOUNT_MANAGER,
     DINIFY_ADMIN,
-    RESTAURANT_OWNER
+    RESTAURANT_OWNER,
+    RESTAURANT_MANAGER
 )
 
 logger = logging.getLogger(__name__)
 
 dinify_roles = [DINIFY_ACCOUNT_MANAGER, DINIFY_ADMIN]
+
+# Restaurant roles permitted to READ a restaurant's setup data. Mirrors the
+# write-path / dedicated-GET gate (check_restaurant_permission, check_permission):
+# only owners and managers, plus the dinify-admin bypass handled separately.
+READ_ROLES = (RESTAURANT_OWNER, RESTAURANT_MANAGER)
 
 
 def get_user_restaurant_roles(user_id: str, restaurant_id: str) -> list:
@@ -56,3 +63,50 @@ def get_any_restaurant_roles(user: User) -> list:
         }
         for res_role in res_roles
     ]
+
+
+def get_readable_restaurant_ids(user: User) -> Optional[set]:
+    """
+    Return the set of restaurant ids the user may READ, or ``None`` for
+    unrestricted access (a dinify admin / account manager).
+
+    This is the reusable per-restaurant read-authorization primitive. It
+    mirrors the role model of ``check_restaurant_permission`` /
+    ``check_permission`` — a dinify admin reads across every restaurant;
+    everyone else is bound to the restaurants where they hold an active,
+    non-deleted owner/manager employment.
+
+    Returns:
+        ``None``      -> unrestricted (dinify admin); callers must NOT scope.
+        ``set()``     -> deny-all (anonymous, inactive, or no qualifying role).
+        ``{ids...}``  -> the restaurant ids (as strings) the user may read.
+    """
+    if user is None or not getattr(user, 'is_authenticated', False) or not user.is_active:
+        return set()
+    if is_dinify_admin(user):
+        return None
+    rows = RestaurantEmployee.objects.filter(
+        user=user,
+        active=True,
+        deleted=False,
+    ).values_list('restaurant_id', 'roles')
+    return {
+        str(restaurant_id)
+        for restaurant_id, roles in rows
+        if any(role in READ_ROLES for role in (roles or []))
+    }
+
+
+def can_read_restaurant(user: User, restaurant_id) -> bool:
+    """
+    Whether ``user`` may read a single record owned by ``restaurant_id``.
+
+    Built on ``get_readable_restaurant_ids``: a dinify admin (unrestricted
+    set ``None``) may read anything; otherwise the restaurant must be in the
+    user's readable set. A missing/unresolved ``restaurant_id`` is denied for
+    non-admins (fail closed).
+    """
+    allowed = get_readable_restaurant_ids(user)
+    if allowed is None:
+        return True
+    return restaurant_id is not None and str(restaurant_id) in allowed

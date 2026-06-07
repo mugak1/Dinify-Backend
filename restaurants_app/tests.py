@@ -1268,6 +1268,246 @@ class TenantIsolationTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class TenantReadIsolationTests(TestCase):
+    """
+    Cross-restaurant READ isolation for the RestaurantSetupEndpoint GET.
+
+    The analogue of TenantIsolationTests (which covers writes): owner of
+    restaurant A must NOT be able to READ resources belonging to restaurant B
+    by changing the ?restaurant= query param — covering tables, dining areas,
+    menu items, employees (staff PII), menu sections, orders, and order
+    reviews — while its own reads keep working and a dinify admin retains its
+    legitimate cross-restaurant access.
+
+    Headline property: the returned queryset is authoritatively bound to the
+    caller's owner/manager restaurants server-side; the client ?restaurant=
+    can only narrow within that set, never widen it.
+    """
+
+    def setUp(self):
+        from orders_app.models import Order
+
+        self.owner_a = User.objects.create_user(
+            first_name='Owner', last_name='A',
+            email='read_owner_a@test.com', phone_number='256700000110',
+            username='256700000110', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_a = Restaurant.objects.create(
+            name='Read Restaurant A', location='loc-a',
+            status=RestaurantStatus_Active, owner=self.owner_a,
+        )
+        self.employment_a = RestaurantEmployee.objects.create(
+            user=self.owner_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        self.owner_b = User.objects.create_user(
+            first_name='Owner', last_name='B',
+            email='read_owner_b@test.com', phone_number='256700000120',
+            username='256700000120', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_b = Restaurant.objects.create(
+            name='Read Restaurant B', location='loc-b',
+            status=RestaurantStatus_Active, owner=self.owner_b,
+        )
+        self.employment_b = RestaurantEmployee.objects.create(
+            user=self.owner_b, restaurant=self.restaurant_b,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # Restaurant A's own resources (positive controls).
+        self.section_a = MenuSection.objects.create(
+            name='A Mains', restaurant=self.restaurant_a, listing_position=0,
+        )
+        self.item_a = MenuItem.objects.create(
+            name='A Item', section=self.section_a, primary_price=1000,
+            listing_position=0,
+        )
+        self.dining_area_a = DiningArea.objects.create(
+            name='A Patio', restaurant=self.restaurant_a,
+        )
+        self.table_a = Table.objects.create(
+            number=1, str_number='1', restaurant=self.restaurant_a,
+        )
+
+        # Restaurant B's resources (owner_a must never see these).
+        self.section_b = MenuSection.objects.create(
+            name='B Mains', restaurant=self.restaurant_b, listing_position=0,
+        )
+        self.item_b = MenuItem.objects.create(
+            name='B Item', section=self.section_b, primary_price=1000,
+            listing_position=0,
+        )
+        self.dining_area_b = DiningArea.objects.create(
+            name='B Patio', restaurant=self.restaurant_b,
+        )
+        self.table_b = Table.objects.create(
+            number=1, str_number='1', restaurant=self.restaurant_b,
+        )
+        # An order with a review at B — exercises orders + orderreviews.
+        self.order_b = Order.objects.create(
+            restaurant=self.restaurant_b, table=self.table_b,
+            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
+            rating=5, review='B review',
+        )
+
+        # Independent dinify admin with no employment at either restaurant.
+        self.dinify_admin = User.objects.create_user(
+            first_name='Dinify', last_name='Admin',
+            email='read_admin@test.com', phone_number='256700000140',
+            username='256700000140', country='Uganda', password='password',
+            roles=['dinify_admin'],
+        )
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _get(self, user, path):
+        return self.client.get(
+            path, HTTP_AUTHORIZATION=f'Bearer {self._token_for(user)}',
+        )
+
+    def _records(self, response):
+        return response.json().get('data', {}).get('records', [])
+
+    def _record_ids(self, response):
+        return {str(r.get('id')) for r in self._records(response)}
+
+    BASE = '/api/v1/restaurant-setup'
+
+    # -- read isolation: owner_a must not read B via ?restaurant=<B> ----------
+
+    def test_owner_of_a_cannot_read_b_tables(self):
+        r = self._get(self.owner_a, f'{self.BASE}/tables/?restaurant={self.restaurant_b.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(str(self.table_b.id), self._record_ids(r))
+
+    def test_owner_of_a_cannot_read_b_diningareas(self):
+        r = self._get(self.owner_a, f'{self.BASE}/diningareas/?restaurant={self.restaurant_b.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(str(self.dining_area_b.id), self._record_ids(r))
+
+    def test_owner_of_a_cannot_read_b_menuitems(self):
+        r = self._get(self.owner_a, f'{self.BASE}/menuitems/?restaurant={self.restaurant_b.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(str(self.item_b.id), self._record_ids(r))
+
+    def test_owner_of_a_cannot_read_b_menusections(self):
+        r = self._get(self.owner_a, f'{self.BASE}/menusections/?restaurant={self.restaurant_b.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(str(self.section_b.id), self._record_ids(r))
+
+    def test_owner_of_a_cannot_read_b_employees_pii(self):
+        # Staff PII — the most sensitive cross-tenant read.
+        r = self._get(self.owner_a, f'{self.BASE}/employees/?restaurant={self.restaurant_b.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(str(self.employment_b.id), self._record_ids(r))
+
+    def test_owner_of_a_cannot_read_b_orders(self):
+        r = self._get(self.owner_a, f'{self.BASE}/orders/?restaurant={self.restaurant_b.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(str(self.order_b.id), self._record_ids(r))
+
+    def test_owner_of_a_cannot_read_b_orderreviews_or_summary(self):
+        r = self._get(self.owner_a, f'{self.BASE}/orderreviews/?restaurant={self.restaurant_b.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(str(self.order_b.id), self._record_ids(r))
+        # The ratings summary must not leak B's aggregates either.
+        summary = r.json().get('data', {}).get('summary', {})
+        self.assertEqual(summary.get('total_ratings'), 0)
+
+    def test_no_restaurant_param_does_not_leak_other_tenants(self):
+        # Omitting ?restaurant= previously returned every tenant's records.
+        r = self._get(self.owner_a, f'{self.BASE}/menuitems/')
+        self.assertEqual(r.status_code, 200)
+        ids = self._record_ids(r)
+        self.assertNotIn(str(self.item_b.id), ids)
+        self.assertIn(str(self.item_a.id), ids)
+
+    # -- positive controls: owner_a can still read its OWN resources ---------
+
+    def test_owner_of_a_can_read_own_tables(self):
+        r = self._get(self.owner_a, f'{self.BASE}/tables/?restaurant={self.restaurant_a.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(str(self.table_a.id), self._record_ids(r))
+
+    def test_owner_of_a_can_read_own_diningareas(self):
+        r = self._get(self.owner_a, f'{self.BASE}/diningareas/?restaurant={self.restaurant_a.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(str(self.dining_area_a.id), self._record_ids(r))
+
+    def test_owner_of_a_can_read_own_menuitems(self):
+        r = self._get(self.owner_a, f'{self.BASE}/menuitems/?restaurant={self.restaurant_a.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(str(self.item_a.id), self._record_ids(r))
+
+    def test_owner_of_a_can_read_own_employees(self):
+        r = self._get(self.owner_a, f'{self.BASE}/employees/?restaurant={self.restaurant_a.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(str(self.employment_a.id), self._record_ids(r))
+
+    # -- single-record branches: 404 on cross-tenant, 200 on own -------------
+
+    def test_owner_of_a_cannot_read_b_employee_detail(self):
+        r = self._get(
+            self.owner_a,
+            f'{self.BASE}/details/?record=employees&id={self.employment_b.id}',
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_owner_of_a_can_read_own_employee_detail(self):
+        r = self._get(
+            self.owner_a,
+            f'{self.BASE}/details/?record=employees&id={self.employment_a.id}',
+        )
+        self.assertEqual(r.status_code, 200)
+
+    def test_owner_of_a_cannot_read_b_subscription_details(self):
+        r = self._get(
+            self.owner_a,
+            f'{self.BASE}/subscription-details/?restaurant={self.restaurant_b.id}',
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_owner_of_a_can_read_own_subscription_details(self):
+        r = self._get(
+            self.owner_a,
+            f'{self.BASE}/subscription-details/?restaurant={self.restaurant_a.id}',
+        )
+        self.assertEqual(r.status_code, 200)
+
+    def test_owner_of_a_cannot_read_b_tables_grouping(self):
+        r = self._get(
+            self.owner_a,
+            f'{self.BASE}/tables/?grouping=area&restaurant={self.restaurant_b.id}',
+        )
+        self.assertEqual(r.status_code, 404)
+
+    def test_owner_of_a_can_read_own_tables_grouping(self):
+        r = self._get(
+            self.owner_a,
+            f'{self.BASE}/tables/?grouping=area&restaurant={self.restaurant_a.id}',
+        )
+        self.assertEqual(r.status_code, 200)
+
+    # -- role-awareness: dinify admin retains cross-restaurant access ---------
+
+    def test_dinify_admin_can_read_any_restaurant_tables(self):
+        r = self._get(self.dinify_admin, f'{self.BASE}/tables/?restaurant={self.restaurant_b.id}')
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(str(self.table_b.id), self._record_ids(r))
+
+    def test_dinify_admin_can_read_any_restaurant_employee_detail(self):
+        r = self._get(
+            self.dinify_admin,
+            f'{self.BASE}/details/?record=employees&id={self.employment_b.id}',
+        )
+        self.assertEqual(r.status_code, 200)
+
+
 class MenuSectionScheduleTests(TestCase):
     """Tests for is_section_currently_active and the diner show-menu filter."""
 
