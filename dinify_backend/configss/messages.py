@@ -56,6 +56,11 @@ ERR_ORDER_UPDATED = 'Sorry, an error occurred while updating the order.'
 
 
 OK_SCANNED_TABLE = 'The table details have been retrieved successfully.'
+ERR_TABLE_REFERENCE_REQUIRED = 'A table reference is required to view the menu.'
+ERR_TABLE_REFERENCE_INVALID = "That table reference isn't valid."
+ERR_TABLE_UNAVAILABLE = (
+    "This table isn't available right now — please ask a member of staff."
+)
 
 OK_ADDED_SECTION_GROUP = 'The section group has been added successfully.'
 ERR_ADDED_SECTION_GROUP = 'An error occurred while adding the section group.'

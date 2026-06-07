@@ -178,8 +178,10 @@ def get_tables_by_area(restaurant_id: str):
     }
 
 
-def get_table_availability(table_id: str) -> dict:
-    table_record = Table.objects.get(id=table_id)
+def get_table_availability(table_id: str = None, table: Table = None) -> dict:
+    # Callers that already hold the Table instance can pass it directly to
+    # skip a redundant re-fetch; otherwise it is resolved from table_id.
+    table_record = table if table is not None else Table.objects.get(id=table_id)
     if not table_record.enabled:
         return {
             'available': False,

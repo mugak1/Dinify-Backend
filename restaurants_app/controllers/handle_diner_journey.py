@@ -1,24 +1,55 @@
+import uuid
+
 from restaurants_app.models import Table, MenuSection, UpsellConfig, Restaurant
 from restaurants_app.serializers import (
     SerializerPublicGetTableDetails, SerializerGetFullMenu, UpsellConfigSerializer
 )
-from dinify_backend.configss.messages import OK_SCANNED_TABLE, OK_RETRIEVED_FULL_MENU
+from dinify_backend.configss.messages import (
+    OK_SCANNED_TABLE, OK_RETRIEVED_FULL_MENU,
+    ERR_TABLE_REFERENCE_REQUIRED, ERR_TABLE_REFERENCE_INVALID,
+    ERR_TABLE_UNAVAILABLE,
+)
 from orders_app.models import Order
 from orders_app.serializers import SerializerPublicOrderDetails
 from finance_app.models import DinifyTransaction
 
 
 def handle_table_scan(table_id: str) -> dict:
-    table = Table.objects.get(id=table_id)
-    table_data = SerializerPublicGetTableDetails(
-        table, many=False
-    ).data
+    # Public AllowAny endpoint: diners aren't authenticated, so the protection
+    # here is input validation + table-state gating, not authorization.
+    raw = '' if table_id is None else str(table_id).strip()
+    if not raw:
+        return {'status': 400, 'message': ERR_TABLE_REFERENCE_REQUIRED}
+    try:
+        resolved_id = uuid.UUID(raw)
+    except (ValueError, TypeError, AttributeError):
+        return {'status': 400, 'message': ERR_TABLE_REFERENCE_INVALID}
+
+    # select_related collapses the restaurant/dining_area FK lookups the
+    # serializer would otherwise issue lazily, per row.
+    table = (
+        Table.objects
+        .select_related('restaurant', 'dining_area')
+        .filter(id=resolved_id)
+        .first()
+    )
+    # An unknown id or a removed/disabled/inactive/out-of-service table must
+    # not resolve into an orderable session. 404 (not 403) keeps the diner
+    # app's shared 403->logout interceptor out of it and does not confirm the
+    # existence of an unknown id.
+    if table is None or not table.is_available_for_scan():
+        return {'status': 404, 'message': ERR_TABLE_UNAVAILABLE}
+
     # check if the table is reserved
     if table.reserved:
         return {
             'status': 400,
             'message': 'This table is reserved. Please contact the restaurant staff for assistance.', # noqa
         }
+
+    table_data = SerializerPublicGetTableDetails(
+        table, many=False
+    ).data
     return {
         'status': 200,
         'message': OK_SCANNED_TABLE,

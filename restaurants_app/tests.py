@@ -3497,3 +3497,160 @@ class TableDeletionBlockTests(TestCase):
         self.assertEqual(response.status_code, 200)
         table.refresh_from_db()
         self.assertTrue(table.deleted)
+
+
+class DinerTableScanTests(TestCase):
+    """
+    Hardening + perf regression tests for the public diner QR table-scan
+    (handle_table_scan / OrderJourneyEndpoint). The endpoint is AllowAny, so
+    the protections under test are input validation and table-state gating —
+    not authorization — plus the collapsed serializer queries.
+    """
+
+    SCAN_PATH = '/api/v1/orders/journey/table-scan/'
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant()
+        self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        self.table = Table.objects.create(
+            number=101, restaurant=self.restaurant,
+        )
+
+    def _scan(self, table_id):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_table_scan,
+        )
+        return handle_table_scan(table_id)
+
+    # ── input validation: never 500 ───────────────────────
+    def test_missing_param_returns_400_not_500(self):
+        for bad in (None, '', '   '):
+            response = self._scan(bad)
+            self.assertEqual(response['status'], 400, msg=repr(bad))
+            self.assertNotIn('data', response)
+
+    def test_malformed_param_returns_400(self):
+        response = self._scan('not-a-uuid')
+        self.assertEqual(response['status'], 400)
+        self.assertNotIn('data', response)
+
+    def test_endpoint_missing_param_does_not_500(self):
+        response = self.client.get(self.SCAN_PATH)
+        self.assertEqual(response.status_code, 400)
+
+    def test_endpoint_malformed_param_returns_400(self):
+        response = self.client.get(self.SCAN_PATH + '?table=not-a-uuid')
+        self.assertEqual(response.status_code, 400)
+
+    # ── state gating: dead tables must not resolve ────────
+    def test_unknown_uuid_returns_404(self):
+        response = self._scan('00000000-0000-0000-0000-000000000000')
+        self.assertEqual(response['status'], 404)
+        self.assertNotIn('data', response)
+
+    def test_deleted_table_returns_404(self):
+        self.table.deleted = True
+        self.table.save(update_fields=['deleted'])
+        self.assertEqual(self._scan(str(self.table.id))['status'], 404)
+
+    def test_disabled_table_returns_404(self):
+        self.table.enabled = False
+        self.table.save(update_fields=['enabled'])
+        self.assertEqual(self._scan(str(self.table.id))['status'], 404)
+
+    def test_inactive_table_returns_404(self):
+        self.table.is_active = False
+        self.table.save(update_fields=['is_active'])
+        self.assertEqual(self._scan(str(self.table.id))['status'], 404)
+
+    def test_out_of_service_table_returns_404(self):
+        self.table.status = 'out_of_service'
+        self.table.save(update_fields=['status'])
+        self.assertEqual(self._scan(str(self.table.id))['status'], 404)
+
+    def test_endpoint_disabled_table_returns_404(self):
+        self.table.enabled = False
+        self.table.save(update_fields=['enabled'])
+        response = self.client.get(
+            self.SCAN_PATH + '?table=' + str(self.table.id),
+        )
+        self.assertEqual(response.status_code, 404)
+
+    # ── happy path / occupancy / reserved ─────────────────
+    def test_available_table_returns_200(self):
+        response = self._scan(str(self.table.id))
+        self.assertEqual(response['status'], 200)
+        data = response['data']
+        for key in ('id', 'available', 'current_order', 'restaurant'):
+            self.assertIn(key, data)
+        self.assertEqual(
+            data['current_order'], {'ongoing': False, 'order_id': None},
+        )
+        self.assertTrue(data['available']['available'])
+
+    def test_occupied_table_still_scannable(self):
+        # An ongoing order must NOT block a scan — the diner resumes it.
+        from orders_app.models import Order
+        order = Order.objects.create(
+            restaurant=self.restaurant, table=self.table,
+            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
+            payment_status='pending', order_status='initiated',
+            fulfilment_status='new',
+        )
+        response = self._scan(str(self.table.id))
+        self.assertEqual(response['status'], 200)
+        self.assertTrue(response['data']['current_order']['ongoing'])
+        self.assertEqual(
+            str(response['data']['current_order']['order_id']), str(order.id),
+        )
+
+    def test_reserved_table_returns_400(self):
+        self.table.reserved = True
+        self.table.save(update_fields=['reserved'])
+        response = self._scan(str(self.table.id))
+        self.assertEqual(response['status'], 400)
+        self.assertIn('reserved', response['message'].lower())
+
+    # ── model helper ──────────────────────────────────────
+    def test_is_available_for_scan_truth_table(self):
+        self.assertTrue(self.table.is_available_for_scan())
+        variants = [
+            ('deleted', True), ('enabled', False),
+            ('is_active', False), ('status', 'out_of_service'),
+        ]
+        for number, (field, value) in enumerate(variants, start=210):
+            t = Table.objects.create(
+                number=number, restaurant=self.restaurant, **{field: value},
+            )
+            self.assertFalse(
+                t.is_available_for_scan(), msg=f'{field}={value}',
+            )
+
+    # ── perf: collapsed/redundant queries, identical output ──
+    def test_scan_read_query_count(self):
+        from restaurants_app.serializers import (
+            SerializerPublicGetTableDetails,
+        )
+
+        def serialize():
+            table = (
+                Table.objects
+                .select_related('restaurant', 'dining_area')
+                .get(id=self.table.id)
+            )
+            return SerializerPublicGetTableDetails(table, many=False).data
+
+        # Determinism / output snapshot (warm any one-off caches here).
+        baseline = serialize()
+        with self.assertNumQueries(4):
+            data = serialize()
+        self.assertEqual(data, baseline)
+
+    def test_get_table_availability_accepts_instance(self):
+        # Regression: the new table= path matches the legacy table_id= path.
+        from restaurants_app.controllers.tables import get_table_availability
+        by_id = get_table_availability(table_id=str(self.table.id))
+        by_instance = get_table_availability(table=self.table)
+        self.assertEqual(by_id, by_instance)
+        self.assertTrue(by_instance['available'])
