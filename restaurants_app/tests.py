@@ -3628,10 +3628,19 @@ class DinerTableScanTests(TestCase):
             )
 
     # ── perf: collapsed/redundant queries, identical output ──
-    def test_scan_read_query_count(self):
+    def test_scan_read_query_count_and_output(self):
+        # The redundant-query refactor (single .first() in get_current_order,
+        # reuse of the loaded instance in get_available, select_related on the
+        # fetch) must keep the query count low AND leave the serialized output
+        # byte-for-byte identical.
         from restaurants_app.serializers import (
             SerializerPublicGetTableDetails,
         )
+        from restaurants_app.models import RestaurantTag
+
+        # Make preset_tags deterministic for the snapshot (the seed signal adds
+        # a default catalog on restaurant creation).
+        RestaurantTag.objects.filter(restaurant=self.restaurant).update(deleted=True)
 
         def serialize():
             table = (
@@ -3641,11 +3650,46 @@ class DinerTableScanTests(TestCase):
             )
             return SerializerPublicGetTableDetails(table, many=False).data
 
-        # Determinism / output snapshot (warm any one-off caches here).
-        baseline = serialize()
+        # Warm any one-off caches outside the query-count assertion.
+        serialize()
         with self.assertNumQueries(4):
             data = serialize()
-        self.assertEqual(data, baseline)
+
+        self.assertEqual(data, {
+            'id': str(self.table.id),
+            'number': self.table.number,
+            'room_name': self.table.room_name,
+            'prepayment_required': False,
+            'available': {'available': True, 'message': 'Available'},
+            'current_order': {'ongoing': False, 'order_id': None},
+            'restaurant': {
+                'id': str(self.restaurant.id),
+                'name': self.restaurant.name,
+                'logo': None,
+                'cover_photo': None,
+                'branding_configuration': self.restaurant.branding_configuration,
+                'menu_approval_status':
+                    self.restaurant.first_time_menu_approval_decision,
+                'preset_tags': [],
+            },
+            'reserved': False,
+            'dining_area': None,
+            'enabled': True,
+            'display_name': '',
+            'min_capacity': 1,
+            'max_capacity': 4,
+            'shape': 'square',
+            'status': 'available',
+            'tags': [],
+            'has_qr': False,
+            'qr_mode': 'order_pay',
+            'qr_regenerated_at': None,
+            'floor_x': 50.0,
+            'floor_y': 50.0,
+            'floor_width': 10.0,
+            'floor_height': 10.0,
+            'is_active': True,
+        })
 
     def test_get_table_availability_accepts_instance(self):
         # Regression: the new table= path matches the legacy table_id= path.
@@ -3654,3 +3698,139 @@ class DinerTableScanTests(TestCase):
         by_instance = get_table_availability(table=self.table)
         self.assertEqual(by_id, by_instance)
         self.assertTrue(by_instance['available'])
+
+
+class UpdateFloorPlanEndpointTests(TestCase):
+    """
+    Coverage for the atomic floor-plan batch endpoint
+    (table-actions/update-floor-plan): full-geometry persistence, all-or-nothing
+    rollback on a mid-batch failure, and tenant scoping. The frontend now wires
+    onto this endpoint as a single request; these lock in that the server half
+    is genuinely atomic and owner/manager-scoped.
+    """
+
+    PATH = '/api/v1/restaurant-setup/table-actions/update-floor-plan/'
+
+    def setUp(self):
+        self.owner_a = User.objects.create_user(
+            first_name='Owner', last_name='A',
+            email='fp_owner_a@test.com', phone_number='256700000210',
+            username='256700000210', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_a = Restaurant.objects.create(
+            name='Floor A', location='loc-a',
+            status=RestaurantStatus_Active, owner=self.owner_a,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        self.t1 = Table.objects.create(number=1, restaurant=self.restaurant_a)
+        self.t2 = Table.objects.create(number=2, restaurant=self.restaurant_a)
+
+        self.owner_b = User.objects.create_user(
+            first_name='Owner', last_name='B',
+            email='fp_owner_b@test.com', phone_number='256700000220',
+            username='256700000220', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_b = Restaurant.objects.create(
+            name='Floor B', location='loc-b',
+            status=RestaurantStatus_Active, owner=self.owner_b,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_b, restaurant=self.restaurant_b,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        self.t_b = Table.objects.create(number=1, restaurant=self.restaurant_b)
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _post(self, user, body, raise_exception=True):
+        # raise_exception=False lets the test inspect a 500 response (rollback
+        # path) instead of having the test client re-raise.
+        self.client.raise_request_exception = raise_exception
+        return self.client.post(
+            self.PATH, data=json.dumps(body),
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(user)}',
+        )
+
+    def test_persists_full_geometry_in_one_request(self):
+        resp = self._post(self.owner_a, {
+            'restaurant': str(self.restaurant_a.id),
+            'tables': [
+                {'id': str(self.t1.id), 'floor_x': 11, 'floor_y': 22,
+                 'floor_width': 5, 'floor_height': 6},
+                {'id': str(self.t2.id), 'floor_x': 33, 'floor_y': 44,
+                 'floor_width': 7, 'floor_height': 8},
+            ],
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['data']['updated_count'], 2)
+        self.t1.refresh_from_db()
+        self.t2.refresh_from_db()
+        self.assertEqual(
+            [self.t1.floor_x, self.t1.floor_y,
+             self.t1.floor_width, self.t1.floor_height],
+            [11.0, 22.0, 5.0, 6.0],
+        )
+        self.assertEqual(
+            [self.t2.floor_x, self.t2.floor_y,
+             self.t2.floor_width, self.t2.floor_height],
+            [33.0, 44.0, 7.0, 8.0],
+        )
+
+    def test_partial_failure_rolls_back_the_whole_batch(self):
+        # t1 is valid and processed first; t2 carries a non-numeric coord that
+        # raises mid-loop. The transaction.atomic() wrapper must roll back t1's
+        # already-applied write too — no partial desync moved server-side.
+        original_x = self.t1.floor_x
+        resp = self._post(self.owner_a, {
+            'restaurant': str(self.restaurant_a.id),
+            'tables': [
+                {'id': str(self.t1.id), 'floor_x': 99, 'floor_y': 99},
+                {'id': str(self.t2.id), 'floor_x': 'not-a-number'},
+            ],
+        }, raise_exception=False)
+        self.assertEqual(resp.status_code, 500)
+        self.t1.refresh_from_db()
+        self.assertEqual(self.t1.floor_x, original_x)  # rolled back, not 99
+
+    def test_cross_tenant_restaurant_is_forbidden(self):
+        # Owner A cannot target restaurant B at all.
+        original_x = self.t_b.floor_x
+        resp = self._post(self.owner_a, {
+            'restaurant': str(self.restaurant_b.id),
+            'tables': [{'id': str(self.t_b.id), 'floor_x': 77}],
+        })
+        self.assertEqual(resp.status_code, 403)
+        self.t_b.refresh_from_db()
+        self.assertEqual(self.t_b.floor_x, original_x)
+
+    def test_foreign_table_under_own_restaurant_is_skipped(self):
+        # Owner A is authorised for A, but a B-owned table id won't match the
+        # per-table restaurant filter — silently skipped, never written.
+        original_x = self.t_b.floor_x
+        resp = self._post(self.owner_a, {
+            'restaurant': str(self.restaurant_a.id),
+            'tables': [{'id': str(self.t_b.id), 'floor_x': 77}],
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['data']['updated_count'], 0)
+        self.t_b.refresh_from_db()
+        self.assertEqual(self.t_b.floor_x, original_x)
+
+    def test_unauthenticated_request_is_rejected(self):
+        resp = self.client.post(
+            self.PATH,
+            data=json.dumps({
+                'restaurant': str(self.restaurant_a.id),
+                'tables': [{'id': str(self.t1.id), 'floor_x': 1}],
+            }),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 401)
