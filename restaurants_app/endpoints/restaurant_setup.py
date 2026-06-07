@@ -69,6 +69,8 @@ from dinify_backend.configss.string_definitions import (
 
 from users_app.controllers.permissions_check import (
     is_dinify_admin,
+    get_readable_restaurant_ids,
+    can_read_restaurant,
 )
 
 from restaurants_app.models import RestaurantEmployee, DiningArea, Table
@@ -279,6 +281,52 @@ def check_permission(user, record: str, action: str, request_data) -> bool:
         getattr(user, 'id', None), record, action, target_restaurant_id,
     )
     return False
+
+
+# config_detail (URL segment) -> ORM lookup path from the served model to the
+# owning restaurant's id. Used to authoritatively bind the GET read queryset to
+# the caller's restaurants. Mirrors the restaurant paths in FILTER_DEFINITIONS.
+LIST_RESTAURANT_PATH = {
+    'restaurants':      'id',
+    'employees':        'restaurant_id',
+    'menusections':     'restaurant_id',
+    'sectiongroups':    'section__restaurant_id',
+    'menuitems':        'section__restaurant_id',
+    'tables':           'restaurant_id',
+    'orders':           'restaurant_id',
+    'orderreviews':     'restaurant_id',
+    'orderitemreviews': 'order__restaurant_id',
+    'diningareas':      'restaurant_id',
+}
+
+
+def scope_list_filter(user, config_detail, orm_filter):
+    """
+    Authoritatively bind a GET list queryset filter to the caller's readable
+    restaurants. The added ``<path>__in`` clause ANDs with any client-supplied
+    ``restaurant`` param on the same column, so the client can only narrow
+    within the allowed set, never widen it (fail closed) — and a request that
+    omits ``restaurant`` no longer leaks every tenant's records.
+
+    Returns ``(orm_filter, ok)``. ``ok=False`` => deny (resource has no known
+    ownership path). A dinify admin is unrestricted and the filter is left
+    untouched; a non-owner ends up with an empty ``__in`` list (no rows).
+    """
+    readable = get_readable_restaurant_ids(user)
+    if readable is None:
+        return orm_filter, True
+    path = LIST_RESTAURANT_PATH.get(config_detail)
+    if path is None:
+        return orm_filter, False
+    orm_filter[f'{path}__in'] = list(readable)
+    # Neutralise the singular client `restaurant` key if it points outside the
+    # readable set, so anything keyed on it beyond the record filter — notably
+    # the orderreviews ratings summary in Secretary.read() — cannot read another
+    # tenant. A readable value is left intact so own-restaurant summaries work.
+    requested = orm_filter.get('restaurant')
+    if requested is not None and str(requested) not in readable:
+        orm_filter['restaurant'] = None
+    return orm_filter, True
 
 
 class RestaurantSetupEndpoint(APIView):
@@ -648,6 +696,13 @@ class RestaurantSetupEndpoint(APIView):
             return self.get_detail(request)
 
         if config_detail == 'subscription-details':
+            # Tenant isolation: only owners/managers of the requested restaurant
+            # (or a dinify admin) may read its subscription. 404, not 403, so we
+            # don't confirm whether another tenant's restaurant exists.
+            if not can_read_restaurant(request.user, request.GET.get('restaurant')):
+                return Response(
+                    {'status': 404, 'message': 'Not found'}, status=404
+                )
             return RestaurantSubscription().get_details(request)
 
         # Restaurant-scoped read of the diner-facing item sort mode. The
@@ -727,10 +782,29 @@ class RestaurantSetupEndpoint(APIView):
 
         if config_detail == 'tables':
             if request.GET.get('grouping') is not None:
+                # Tenant isolation: this branch builds its own queryset from the
+                # client-supplied ?restaurant=, bypassing the list scoping below.
+                if not can_read_restaurant(request.user, request.GET.get('restaurant')):
+                    return Response(
+                        {'status': 404, 'message': 'Not found'}, status=404
+                    )
                 response = get_tables_by_area(
                     restaurant_id=request.GET.get('restaurant')
                 )
                 return Response(response, status=200)
+
+        # Authoritatively bind the read to the caller's restaurants. A dinify
+        # admin is unrestricted; everyone else is scoped to their owner/manager
+        # restaurants and the client ?restaurant= can only narrow within that set.
+        orm_filter, scope_ok = scope_list_filter(request.user, config_detail, orm_filter)
+        if not scope_ok:
+            return Response(
+                {
+                    'status': 403,
+                    'message': 'You do not have permission to read this resource.'
+                },
+                status=403,
+            )
 
         serializers = {
             'restaurants': SerializerPublicGetRestaurant,
@@ -1064,6 +1138,17 @@ class RestaurantSetupEndpoint(APIView):
                     'message': ERR_UNSPECIFIED_RECORD_DETAILS
                 }
                 return Response(response, status=400)
+
+            # Tenant isolation: resolve the record's owning restaurant via the
+            # write-path resolvers (which walk FK chains from the id) and confirm
+            # the caller may read it. Unknown record types resolve to None and
+            # are denied for non-admins (fail closed). 404, not 403, so we don't
+            # confirm the record exists in another tenant.
+            owner_restaurant_id = _resolve_target_restaurant_id(record, 'detail', {'id': id})
+            if not can_read_restaurant(request.user, owner_restaurant_id):
+                return Response(
+                    {'status': 404, 'message': ERR_GENERAL}, status=404
+                )
 
             serializer = serializers.get(record)
             db_record = serializer.Meta.model.objects.get(
