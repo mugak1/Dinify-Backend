@@ -1,14 +1,15 @@
 from django.core.management.base import BaseCommand
 from .vacuum_configuration import VACUUM_MODELS
-from restaurants_app.models import DiningArea, Table, MenuSection, SectionGroup, MenuItem
+from restaurants_app.models import MenuSection, SectionGroup, MenuItem
 
 
 class ConVacuumDeletedRecords:
     def __init__(self):
         pass
 
-    def soft_cascade_under_dining_areas(self, dining_area):
-        Table.objects.filter(dining_area=dining_area, deleted=False).update(deleted=True)
+    # NOTE: the dining-area -> table soft-cascade was removed deliberately.
+    # Deleting an area that still contains tables is now blocked up front (see
+    # DiningArea.deletion_blockers), so no tables ever remain to cascade.
 
     def soft_cascade_under_sections(self, section):
         SectionGroup.objects.filter(section=section, deleted=False).update(deleted=True)
@@ -25,23 +26,17 @@ class ConVacuumDeletedRecords:
             )
             print(f"{model['model'].__name__}: {records_pending_vacuum.count()}")
 
-            # soft cascade deletes
-            # if the model is dining area, delete the table under it
-            run_soft_cascade_dining_areas = False
+            # soft cascade deletes for menu sections / section groups
             run_soft_cascade_sections = False
             run_soft_cascade_groups = False
 
-            if model['model'] == DiningArea:
-                run_soft_cascade_dining_areas = True
-            elif model['model'] == MenuSection:
+            if model['model'] == MenuSection:
                 run_soft_cascade_sections = True
             elif model['model'] == SectionGroup:
                 run_soft_cascade_groups = True
 
             for rec in records_pending_vacuum:
-                if run_soft_cascade_dining_areas:
-                    self.soft_cascade_under_dining_areas(dining_area=rec)
-                elif run_soft_cascade_sections:
+                if run_soft_cascade_sections:
                     self.soft_cascade_under_sections(section=rec)
                 elif run_soft_cascade_groups:
                     self.soft_cascade_under_groups(group=rec)

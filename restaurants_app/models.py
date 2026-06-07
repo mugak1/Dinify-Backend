@@ -476,6 +476,23 @@ class DiningArea(BaseModel):
     default_server_section = models.CharField(max_length=10, blank=True, default='')
     is_active = models.BooleanField(default=True)
 
+    def deletion_blockers(self):
+        """
+        Return a human-readable reason this dining area cannot be deleted, or
+        None if it can. Rule: an area cannot be deleted while it still contains
+        any non-deleted table — the tables must be moved or removed first.
+
+        Lives on the model (not the generic Secretary) so the rule survives the
+        endpoint/controller substrate.
+        """
+        count = Table.objects.filter(dining_area=self, deleted=False).count()
+        if count:
+            return (
+                f"Move or remove the {count} table(s) in this area "
+                "before deleting it."
+            )
+        return None
+
     class Meta:
         """
         the metadata for the DiningArea model
