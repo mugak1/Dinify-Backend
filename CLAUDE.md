@@ -33,6 +33,13 @@ with PostgreSQL on AWS RDS.
   flag, and extras `extras_min_selections`/`extras_max_selections`
 - Auth: ✅ Refresh-token rotation + blacklist-on-logout + 7-day refresh lifetime
   (SimpleJWT, `JWT_REFRESH_LIFETIME_DAYS`)
+- Tenant isolation: ✅ Restaurant-setup GET reads are authorization-scoped to
+  the caller's restaurant(s) via `get_readable_restaurant_ids` /
+  `can_read_restaurant` (`users_app/controllers/permissions_check.py`)
+- Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
+  `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
+  and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
+  still exists
 - Login 500 regression: ⚠️ Outstanding — Apache error logs needed
 
 ## Deployment Rules — CRITICAL
@@ -78,6 +85,45 @@ the catch-all `<str:config_detail>/` route.
   it untouched, sending `null` clears it. The legacy `clear_<field>`
   sentinels are deprecated — do not introduce new ones
 - Check this file before adding any editable field — it may already be there
+
+## Tenant Isolation / Read Authorization — CRITICAL
+- The shared `RestaurantSetupEndpoint` GET is authorization-scoped to the
+  caller's restaurant(s). Reads MUST go through the read-authorization
+  primitives in `users_app/controllers/permissions_check.py`:
+  - `get_readable_restaurant_ids(user)` → `None` for a dinify admin
+    (unrestricted — callers must NOT scope), `set()` for deny-all, otherwise
+    the set of restaurant id strings the user may read (active, non-deleted
+    owner/manager employment)
+  - `can_read_restaurant(user, restaurant_id)` → single-record check built on
+    the above; fail closed — a missing/unresolved id is denied for non-admins
+- GET list reads are bound server-side via `scope_list_filter` +
+  `LIST_RESTAURANT_PATH` (adds a `<path>__in` clause the client `?restaurant=`
+  param can only narrow, never widen — and closes the no-param full-table leak)
+- Single-record / subscription-details / tables-grouping branches guard with
+  `can_read_restaurant` and return 404 (not 403) on cross-tenant access so
+  existence is not confirmed
+- Any NEW read branch on this endpoint must be scoped the same way — a resource
+  type with no entry in `LIST_RESTAURANT_PATH` fails closed (403)
+
+## Deletion & Referential Integrity — CRITICAL
+- Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns
+  a human-readable reason, or `None` if deletable), NOT in the generic
+  Secretary, so the rule survives the endpoint/controller substrate
+- The restaurant-setup DELETE endpoint calls `deletion_blockers()` before the
+  soft-delete and returns HTTP 409 when blocked — never 403 (a 403
+  force-logs-out the client)
+- Tables-domain deletion model (3 legs):
+  - `Order.table` is `on_delete=PROTECT` (migration `0031`) — order/financial
+    history is never silently destroyed by a cascade
+  - `DiningArea.deletion_blockers()` — cannot delete an area that still
+    contains any non-deleted table (move/remove the tables first)
+  - `Table.has_unsettled_orders()` / `Table.deletion_blockers()` — cannot
+    delete a table with a live order. Terminal = `payment_status == 'paid'`
+    OR `order_status in {cancelled, refunded}`; everything else (incl.
+    served-but-unpaid) is live. Payment-aware on purpose — distinct from the
+    fulfilment-based occupancy helper `any_present_ongoing_order`
+- The `vacuum_deleted_records` dining-area→table soft-cascade was removed (dead
+  code now that empty-area deletion is enforced) — do not reintroduce it
 
 ## Monetary Fields — CRITICAL
 - ALL monetary/financial fields must use `DecimalField`, never `FloatField`
@@ -142,7 +188,7 @@ the catch-all `<str:config_detail>/` route.
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove
 - All migrations must be generated and included in PRs when models change
 - Latest migration: `restaurants_app/migrations/0048_restaurant_menu_item_sort_mode.py`,
-  `orders_app/migrations/0030_retire_kitchen_tickets.py`
+  `orders_app/migrations/0031_alter_order_table.py`
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
