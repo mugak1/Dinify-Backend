@@ -605,6 +605,24 @@ class Table(BaseModel):
             )
         return None
 
+    def is_available_for_scan(self):
+        """
+        True if a diner may scan this table's QR and start/resume an order.
+
+        Gates on the table's lifecycle state only: it must not be soft-deleted,
+        must be enabled and active, and must not be out of service. Occupancy
+        (an ongoing order) deliberately does NOT block a scan — a diner can
+        legitimately join an occupied table and the scan payload's
+        current_order lets them resume it. Lives on the model so the rule
+        survives the endpoint/controller substrate.
+        """
+        return (
+            not self.deleted
+            and self.enabled
+            and self.is_active
+            and self.status != 'out_of_service'
+        )
+
     class Meta:
         """
         the metadata for the Table model

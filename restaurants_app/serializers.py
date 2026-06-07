@@ -495,7 +495,9 @@ class SerializerPublicGetTableDetails(ModelSerializer):
         }
 
     def get_current_order(self, table):
-        orders = Order.objects.values('id').filter(
+        # Single query: fetch the most-recent matching order (or None) instead
+        # of a separate count() + first() on the same queryset.
+        current = Order.objects.values('id').filter(
             table=table,
             order_status__in=[
                 OrderItemStatus_Initiated,
@@ -505,17 +507,11 @@ class SerializerPublicGetTableDetails(ModelSerializer):
             ]
         ).exclude(
             payment_status=PaymentStatus_Paid
-        ).order_by('-time_created')
-
-        present = orders.count() > 0
-        order_id = None
-
-        if present:
-            order_id = orders.first()['id']
+        ).order_by('-time_created').first()
 
         return {
-            'ongoing': present,
-            'order_id': order_id
+            'ongoing': current is not None,
+            'order_id': current['id'] if current else None
         }
 
     def get_restaurant(self, table):
@@ -549,11 +545,9 @@ class SerializerPublicGetTableDetails(ModelSerializer):
         }
 
     def get_available(self, table):
-        return get_table_availability(table_id=str(table.pk))
-        # return {
-        #     'available': True,
-        #     'message': 'Table is available'
-        # }
+        # Reuse the already-loaded instance — avoids a redundant Table re-fetch
+        # inside get_table_availability.
+        return get_table_availability(table=table)
 
 
 class SerializerGetFullMenu(ModelSerializer):
