@@ -1117,6 +1117,11 @@ class RestaurantSetupEndpoint(APIView):
             blocker = area.deletion_blockers() if area else None
             if blocker:
                 return Response({'status': 409, 'message': blocker}, status=409)
+        elif config_detail == 'tables':
+            table = Table.objects.filter(id=data.get('id')).first()
+            blocker = table.deletion_blockers() if table else None
+            if blocker:
+                return Response({'status': 409, 'message': blocker}, status=409)
 
         secretary_args = {
             'serializer': serializer[config_detail],

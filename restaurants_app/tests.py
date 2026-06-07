@@ -3357,3 +3357,143 @@ class AreaDeletionBlockTests(TestCase):
         ConVacuumDeletedRecords().vacuum()
         self.table.refresh_from_db()
         self.assertFalse(self.table.deleted)
+
+
+class TableDeletionBlockTests(TestCase):
+    """
+    Leg 3 of the deletion model: a table with a live (unsettled) order cannot
+    be soft-deleted. 'Live' is payment-aware — terminal means paid, cancelled,
+    or refunded; everything else (pending, failed, served-but-unpaid) blocks,
+    so an open bill is never orphaned out of settle-up. The rule lives on
+    Table.deletion_blockers() / Table.has_unsettled_orders() and is enforced
+    (409) at the restaurant-setup DELETE endpoint.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            first_name='Table', last_name='Owner',
+            email='table_owner@test.com', phone_number='256700000310',
+            username='256700000310', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant = Restaurant.objects.create(
+            name='Table Restaurant', location='loc-table',
+            status=RestaurantStatus_Active, owner=self.owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        self._next_number = 0
+
+    def _make_table(self):
+        self._next_number += 1
+        return Table.objects.create(
+            number=self._next_number, str_number=str(self._next_number),
+            restaurant=self.restaurant,
+        )
+
+    def _make_order(self, table, payment_status='pending',
+                    order_status='initiated', fulfilment_status='new'):
+        from orders_app.models import Order
+        return Order.objects.create(
+            restaurant=self.restaurant, table=table,
+            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
+            payment_status=payment_status, order_status=order_status,
+            fulfilment_status=fulfilment_status,
+        )
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _delete_table(self, table):
+        path = '/api/v1/restaurant-setup/tables/'
+        token = self._token_for(self.owner)
+        return self.client.delete(
+            path,
+            data={'id': str(table.id), 'deletion_reason': 'test'},
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+
+    # -- model rule: live (unsettled) states block ---------------------------
+
+    def test_pending_order_blocks(self):
+        table = self._make_table()
+        self._make_order(table, payment_status='pending')
+        self.assertIsNotNone(table.deletion_blockers())
+
+    def test_served_but_unpaid_order_blocks(self):
+        # the classic postpayment case the fulfilment-based helper would miss
+        table = self._make_table()
+        self._make_order(
+            table, payment_status='pending',
+            order_status='served', fulfilment_status='served',
+        )
+        self.assertTrue(table.has_unsettled_orders())
+        self.assertIsNotNone(table.deletion_blockers())
+
+    def test_failed_payment_blocks(self):
+        table = self._make_table()
+        self._make_order(table, payment_status='failed')
+        self.assertIsNotNone(table.deletion_blockers())
+
+    # -- model rule: terminal states do NOT block ----------------------------
+
+    def test_paid_order_does_not_block(self):
+        table = self._make_table()
+        self._make_order(table, payment_status='paid', order_status='paid')
+        self.assertIsNone(table.deletion_blockers())
+
+    def test_cancelled_order_does_not_block(self):
+        table = self._make_table()
+        self._make_order(table, payment_status='pending', order_status='cancelled')
+        self.assertIsNone(table.deletion_blockers())
+
+    def test_refunded_order_does_not_block(self):
+        table = self._make_table()
+        self._make_order(table, payment_status='paid', order_status='refunded')
+        self.assertIsNone(table.deletion_blockers())
+
+    def test_no_orders_does_not_block(self):
+        self.assertIsNone(self._make_table().deletion_blockers())
+
+    def test_soft_deleted_order_does_not_block(self):
+        table = self._make_table()
+        order = self._make_order(table, payment_status='pending')
+        order.deleted = True
+        order.save(update_fields=['deleted'])
+        self.assertIsNone(table.deletion_blockers())
+
+    # -- endpoint enforcement ------------------------------------------------
+
+    def test_delete_table_with_live_order_blocked(self):
+        table = self._make_table()
+        self._make_order(
+            table, payment_status='pending',
+            order_status='served', fulfilment_status='served',
+        )
+        response = self._delete_table(table)
+        self.assertEqual(response.status_code, 409)
+        table.refresh_from_db()
+        self.assertFalse(table.deleted)
+        # the open order stays reachable for settle-up
+        from orders_app.models import Order
+        self.assertTrue(Order.objects.filter(table=table, deleted=False).exists())
+
+    def test_delete_table_all_terminal_orders_succeeds(self):
+        table = self._make_table()
+        self._make_order(table, payment_status='paid', order_status='paid')
+        self._make_order(table, payment_status='pending', order_status='cancelled')
+        response = self._delete_table(table)
+        self.assertEqual(response.status_code, 200)
+        table.refresh_from_db()
+        self.assertTrue(table.deleted)
+
+    def test_delete_table_with_no_orders_succeeds(self):
+        table = self._make_table()
+        response = self._delete_table(table)
+        self.assertEqual(response.status_code, 200)
+        table.refresh_from_db()
+        self.assertTrue(table.deleted)
