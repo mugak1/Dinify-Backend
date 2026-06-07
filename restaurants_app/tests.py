@@ -3499,6 +3499,98 @@ class TableDeletionBlockTests(TestCase):
         self.assertTrue(table.deleted)
 
 
+class EditInformationTableCleanupTests(TestCase):
+    """
+    Phase-4 hygiene: the `table` block of EDIT_INFORMATION dropped the phantom
+    `available` (its column was removed in migration 0023), the deprecated
+    `room_name`/`smoking_zone`/`outdoor_seating` keys, and the misleading
+    `min_length` on `number`.
+
+    - A PUT that carries only a now-removed key must no longer report a spurious
+      "updated": Secretary sees no editable change and returns 400 "No changes
+      detected". The phantom `available` previously forced a false 200 because a
+      key with no backing column always compared unequal to the serialized
+      (absent) old value.
+    - A legitimate editable field still updates through the same PUT path.
+    - Creating a table with a normal short `number` still succeeds (NV-04): the
+      create path validates against REQUIRED_INFORMATION (min_length 1), never
+      the removed EDIT_INFORMATION value.
+    """
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            first_name='EI', last_name='Owner',
+            email='ei_table_owner@test.com', phone_number='256700000410',
+            username='256700000410', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant = Restaurant.objects.create(
+            name='EI Table Restaurant', location='loc-ei-table',
+            status=RestaurantStatus_Active, owner=self.owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        self.table = Table.objects.create(
+            number=1, str_number='1', restaurant=self.restaurant,
+        )
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _put(self, data):
+        return self.client.put(
+            '/api/v1/restaurant-setup/tables/',
+            data=data,
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(self.owner)}',
+        )
+
+    def _post(self, data):
+        return self.client.post(
+            '/api/v1/restaurant-setup/tables/',
+            data=data,
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(self.owner)}',
+        )
+
+    def test_put_only_removed_available_reports_no_changes(self):
+        # `available` is no longer EDIT_INFORMATION-editable (its column was
+        # dropped in 0023), so a PUT carrying only it must not fake a change.
+        response = self._put({'id': str(self.table.id), 'available': True})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn('No changes detected', response.json().get('message', ''))
+
+    def test_put_only_deprecated_key_reports_no_changes(self):
+        # Same guarantee for a deprecated key removed from the table block.
+        response = self._put({'id': str(self.table.id), 'smoking_zone': True})
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn('No changes detected', response.json().get('message', ''))
+
+    def test_put_legitimate_field_still_updates(self):
+        response = self._put(
+            {'id': str(self.table.id), 'display_name': 'Patio 1'}
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.table.refresh_from_db()
+        self.assertEqual(self.table.display_name, 'Patio 1')
+
+    def test_create_table_with_short_number_succeeds(self):
+        # NV-04: the removed EDIT_INFORMATION min_length never gated create; a
+        # normal short number validates against REQUIRED_INFORMATION (>= 1).
+        response = self._post(
+            {'number': 5, 'restaurant': str(self.restaurant.id)}
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(
+            Table.objects.filter(
+                restaurant=self.restaurant, str_number='5', deleted=False,
+            ).exists()
+        )
+
+
 class DinerTableScanTests(TestCase):
     """
     Hardening + perf regression tests for the public diner QR table-scan

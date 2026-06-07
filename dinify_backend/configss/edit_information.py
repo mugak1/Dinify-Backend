@@ -63,12 +63,8 @@ EDIT_INFORMATION = {
     ],
     'table': [
         {'key': 'dining_area', 'label': 'dining area', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
-        {'key': 'number', 'label': 'number', 'type': 'int', 'min_length': 5, 'text_presentation': None},  # noqa
-        {'key': 'room_name', 'label': 'room name', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
+        {'key': 'number', 'label': 'number', 'type': 'int', 'text_presentation': None},  # noqa
         {'key': 'prepayment_required', 'label': 'prepayment required', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
-        {'key': 'smoking_zone', 'label': 'smoking zone', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
-        {'key': 'outdoor_seating', 'label': 'outdoor seating', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
-        {'key': 'available', 'label': 'available', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'reserved', 'label': 'reserved', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'enabled', 'label': 'enabled', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'display_name', 'label': 'display name', 'type': 'char', 'min_length': 0, 'text_presentation': None},  # noqa
