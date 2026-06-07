@@ -3691,6 +3691,36 @@ class DinerTableScanTests(TestCase):
             'is_active': True,
         })
 
+    def test_scan_read_query_count_flat_with_multiple_orders(self):
+        # Guard against a *future* per-order N+1: get_current_order and
+        # get_available each issue a single .first(), so adding more orders to
+        # the table must NOT add queries. assertNumQueries only catches a
+        # per-item regression when the seed has 2+ of the related row, so seed
+        # several orders here (the snapshot test above runs with zero).
+        from restaurants_app.serializers import (
+            SerializerPublicGetTableDetails,
+        )
+        from orders_app.models import Order
+        for _ in range(3):
+            Order.objects.create(
+                restaurant=self.restaurant, table=self.table,
+                total_cost=1000, discounted_cost=1000, savings=0,
+                actual_cost=1000, payment_status='pending',
+                order_status='initiated', fulfilment_status='new',
+            )
+
+        def serialize():
+            table = (
+                Table.objects
+                .select_related('restaurant', 'dining_area')
+                .get(id=self.table.id)
+            )
+            return SerializerPublicGetTableDetails(table, many=False).data
+
+        serialize()  # warm any one-off caches outside the assertion
+        with self.assertNumQueries(4):
+            serialize()
+
     def test_get_table_availability_accepts_instance(self):
         # Regression: the new table= path matches the legacy table_id= path.
         from restaurants_app.controllers.tables import get_table_availability
