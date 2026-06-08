@@ -40,6 +40,13 @@ with PostgreSQL on AWS RDS.
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
   still exists
+- Support module: ✅ `support_app` — restaurant-facing `SupportIssue`
+  ticketing (supersedes legacy `crm_app.ServiceTicket`), Secretary-pattern
+  endpoints at `api/v1/support/` (`support_app/urls.py`): `issues/`,
+  `issues/<uuid:issue_id>/`, and dinify-admin `admin/issues/`. Reads are
+  authorization-scoped via `get_readable_restaurant_ids` /
+  `can_read_restaurant` (owner/manager only); references are sequential,
+  collision-safe `SUP-000123`. Migration `support_app/0001_initial`
 - Login 500 regression: ⚠️ Outstanding — Apache error logs needed
 
 ## Deployment Rules — CRITICAL
@@ -69,6 +76,8 @@ with PostgreSQL on AWS RDS.
 - `api/v1/orders/` → v1 orders (urls.py)
 - `api/v2/orders/` → v2 orders (v2_urls.py) — separate file, don't confuse
 - `api/v1/kitchen/` → Kitchen endpoints (urls_kitchen.py) — separate file
+- `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
+  `issues/`, `issues/<uuid:issue_id>/`, `admin/issues/` — separate app
 
 ## Endpoint Pattern — CRITICAL
 New resource types get their own dedicated endpoint file in
@@ -140,6 +149,10 @@ the catch-all `<str:config_detail>/` route.
 - ALL monetary/financial fields must use `DecimalField`, never `FloatField`
 - Never use `Decimal(float)` conversions or `int()` truncation in
   payment or financial logic
+- A committed static guard (`scripts/check_money_fields.py`) fails CI if any
+  `models.py` declares a monetary `FloatField`. It scans `models.py` files
+  only — migrations are never scanned (historical money FloatFields there are
+  immutable) — and matches whole underscore-tokens against monetary terms
 
 ## MongoDB — Rules
 - MongoDB Atlas is currently unreachable from EC2
@@ -203,16 +216,20 @@ the catch-all `<str:config_detail>/` route.
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
-- Spins up a real Postgres 15, runs `django check` and
-  `makemigrations --check --dry-run` against `dinify_backend.test_settings`
+- Spins up a real Postgres 15, runs `django check`,
+  `makemigrations --check --dry-run`, then the money-field guard
+  (`scripts/check_money_fields.py`) against `dinify_backend.test_settings`
 - Then runs the full Django test suite — a missing migration or a model
   change without a generated migration will fail CI
+- `scripts/verify.sh` is the committed source of truth that runs the same
+  checks locally in the same order; the `/dinify-check` command defers to it.
+  Run it and paste the output before raising a PR
 - A separate `.github/workflows/deploy-uat.yml` deploys to the UAT host on
   push to `main` (pull, migrate, restart Apache) — reinforces the deployment
   rule above: never pull/migrate/restart manually
 
 ## Verification
-Before raising any PR:
+Before raising any PR, run `./scripts/verify.sh` (mirrors CI) and confirm:
 1. Confirm migrations are generated for any model changes (CI enforces this)
 2. Confirm new editable fields are added to EDIT_INFORMATION
 3. Confirm no synchronous SMS calls introduced (except where return value needed)
