@@ -50,6 +50,17 @@ with PostgreSQL on AWS RDS.
 - Each feature must be on its own branch → PR → merge
 - Never stack work on unmerged branches
 
+## Branch Selection — CRITICAL
+- When the task text (the prompt provided for the task) names a specific
+  branch, ALWAYS develop on and push to THAT branch — the branch named in the
+  task text is authoritative and takes precedence over the session-designated
+  branch
+- Do NOT default to the session-designated branch (the auto-generated
+  `claude/...` branch injected into the session/environment setup) when the
+  task text names a different branch
+- The session-designated branch is only the fallback for when the task text
+  does not name a branch at all
+
 ## URL Structure
 - `api/v1/restaurant-setup/` → RestaurantSetupEndpoint (catch-all) +
   dedicated endpoints for: preset-tags, restaurant-tags, upsell-config,
