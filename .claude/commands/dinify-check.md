@@ -2,20 +2,34 @@
 
 Run this after completing any backend task before opening a PR.
 
-Work through each item below and report the result of each check:
+## 1. Run the mechanical checks — `./scripts/verify.sh`
+`scripts/verify.sh` is the single committed source of truth for the runnable
+checks. It runs the same commands as CI (`.github/workflows/ci.yml`), against
+`dinify_backend.test_settings`:
+- `django check`
+- `makemigrations --check --dry-run`
+- the full Django test suite
 
-## 1. EDIT_INFORMATION Coverage
+Run it from the repo root and confirm every step reports PASS:
+
+    ./scripts/verify.sh
+
+Notes:
+- If `makemigrations --check` fails, you changed a model without a migration —
+  generate it, then confirm the new migration file is committed to this branch
+  (the check passes once the file exists on disk, so verify it is staged).
+- Do not re-list these commands anywhere else; if they change, change
+  `verify.sh`.
+
+The remaining checks are semantic — `verify.sh` cannot perform them. Work
+through each and report PASS or FAIL:
+
+## 2. EDIT_INFORMATION Coverage
 - Read `dinify_backend/configss/edit_information.py`
 - Identify any model fields added or modified in this task
 - Confirm each new editable field has been added to the appropriate
   EDIT_INFORMATION list
 - If any are missing, add them now before proceeding
-
-## 2. Migrations
-- Confirm that `makemigrations --check --dry-run` would pass
-- If any model was changed, confirm a migration file was generated
-  and is included in this branch
-- If missing, generate it now before proceeding
 
 ## 3. SMS Calls
 - Search the files touched in this task for any calls to Yo Uganda
