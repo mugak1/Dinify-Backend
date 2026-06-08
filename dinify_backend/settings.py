@@ -64,7 +64,8 @@ INSTALLED_APPS = [
     'payment_integrations_app',
     'reports_app',
     'notifications_app',
-    'crm_app'
+    'crm_app',
+    'support_app'
 ]
 
 MIDDLEWARE = [

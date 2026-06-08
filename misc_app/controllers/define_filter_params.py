@@ -88,6 +88,13 @@ DINING_AREA_FILTERS = {
     'restaurant': 'restaurant'
 }
 
+SUPPORT_ISSUE_FILTERS = {
+    'status': 'status',
+    'category': 'category',
+    'impact': 'impact',
+    'restaurant': 'restaurant',
+}
+
 FILTER_DEFINITIONS = {
     'restaurants': RESTAURANT_FILTERS,
     'employees': EMPLOYEE_FILTERS,
@@ -99,7 +106,8 @@ FILTER_DEFINITIONS = {
     'orderreviews': ORDERREVIEWS_FILTERS,
     'orderitemreviews': ORDERITEMREVIEWS_FILTERS,
     'servicetickets': SERVICE_TICKET_FILTERS,
-    'diningareas': DINING_AREA_FILTERS
+    'diningareas': DINING_AREA_FILTERS,
+    'supportissues': SUPPORT_ISSUE_FILTERS
 }
 
 
