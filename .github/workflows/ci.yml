@@ -52,6 +52,9 @@ jobs:
           python -m django check --settings=dinify_backend.test_settings
           python -m django makemigrations --check --dry-run --settings=dinify_backend.test_settings
 
+      - name: Money-field guard
+        run: python scripts/check_money_fields.py
+
       - name: Run tests
         env:
           DATABASE_ENGINE: django.db.backends.postgresql

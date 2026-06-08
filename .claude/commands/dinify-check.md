@@ -8,6 +8,7 @@ checks. It runs the same commands as CI (`.github/workflows/ci.yml`), against
 `dinify_backend.test_settings`:
 - `django check`
 - `makemigrations --check --dry-run`
+- the money-field guard (no monetary model field declared as `FloatField`)
 - the full Django test suite
 
 Run it from the repo root and confirm every step reports PASS:
