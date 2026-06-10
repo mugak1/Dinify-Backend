@@ -1,0 +1,31 @@
+name: Backend Dependency Audit
+
+# Weekly pip-audit sweep so the requirements.txt advisory-zero state can't
+# silently erode. Scheduled + manual only — NOT triggered on PRs/pushes, so it
+# never produces a PR check and can't become a required/blocking gate. A
+# failure (advisories found) fires GitHub's scheduled-workflow notification.
+on:
+  schedule:
+    - cron: '30 6 * * 1'   # Mondays 06:30 UTC (09:30 EAT)
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Match the prod/CI interpreter pin (UAT venv runs Python 3.10.12).
+          python-version: '3.10.12'
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      - name: Audit dependencies
+        run: pip-audit -r requirements.txt
