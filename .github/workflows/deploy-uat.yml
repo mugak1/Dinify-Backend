@@ -28,7 +28,7 @@ jobs:
             # BEFORE migrate/check/restart, leaving the running API up.
             python3 -m pip install -r requirements.txt
             # Confirm the bumped versions are live in the deploy log (|| true: never abort).
-            python3 -m pip freeze | grep -Ei '^(certifi|idna|urllib3|requests|sqlparse|pymongo)==' || true
+            python3 -m pip freeze | grep -Ei '^(django|asgiref|django-cors-headers|certifi|idna|urllib3|requests|sqlparse|pymongo)==' || true
             python3 manage.py migrate
             python3 manage.py check --deploy
             sudo systemctl restart apache2
