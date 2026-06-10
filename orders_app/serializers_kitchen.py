@@ -68,7 +68,6 @@ class ActiveKitchenOrderSerializer(serializers.ModelSerializer):
         result = []
         for main in mains:
             line = self._line(main)
-            line['item_note'] = None  # no per-item note captured yet
             line['extras'] = [
                 self._line(child) for child in children_by_parent.get(main.id, [])
             ]

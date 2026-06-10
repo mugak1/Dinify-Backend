@@ -25,7 +25,6 @@ class Order(BaseModel):
     # so financial/order history is never silently destroyed by a cascade.
     table = models.ForeignKey(Table, on_delete=models.PROTECT, related_name='table')
     order_number = models.IntegerField(null=True)
-    order_remarks = models.TextField(null=True, blank=True)
 
     customer_phone = models.CharField(max_length=50, null=True, blank=True)
     customer_email = models.EmailField(max_length=50, null=True, blank=True)

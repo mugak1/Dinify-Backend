@@ -243,9 +243,8 @@ class KitchenActiveEndpointTests(KitchenTestBase):
 
         main = order_row['items'][0]
         for key in ('item_name_snapshot', 'quantity', 'modifiers',
-                    'allergen_tags', 'item_note', 'extras'):
+                    'allergen_tags', 'extras'):
             self.assertIn(key, main)
-        self.assertIsNone(main['item_note'])
         self.assertEqual(main['modifiers'], ['Size: Small'])
         self.assertEqual(len(main['extras']), 1)
 

@@ -84,7 +84,7 @@ class SerializerListGetOrder(ModelSerializer):
             'actual_cost', 'prepayment_required',
             'payment_status', 'order_status',
             'items', 'order_number', 'time_created', 'table_details',
-            'order_remarks', 'count_items_served', 'count_items_considered',
+            'count_items_served', 'count_items_considered',
             'total_paid', 'balance_payable', 'payment_status',
             'time_last_updated'
         )
@@ -123,7 +123,6 @@ class SerializerPublicOrderDetails(ModelSerializer):
             'actual_cost', 'prepayment_required',
             'payment_status', 'order_status',
             'items', 'order_number',
-            'order_remarks',
             'total_paid', 'balance_payable', 'payment_status',
             'time_last_updated'
         )
