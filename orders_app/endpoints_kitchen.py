@@ -17,6 +17,7 @@ from rest_framework.response import Response
 
 from orders_app.models import Order, OrderItem
 from orders_app.serializers_kitchen import ActiveKitchenOrderSerializer
+from restaurants_app.models import MenuItem
 from users_app.controllers.permissions_check import (
     is_dinify_admin,
     get_user_restaurant_roles,
@@ -64,6 +65,17 @@ def _get_order_or_none(pk):
     # Guard against malformed UUIDs so bad input is a 404, never a 500.
     try:
         return Order.objects.filter(id=pk, deleted=False).first()
+    except (ValidationError, ValueError, TypeError):
+        return None
+
+
+def _get_menu_item_or_none(pk):
+    # Same UUID guard as _get_order_or_none; select_related('section') so the
+    # restaurant_id permission check below doesn't trigger a second query.
+    try:
+        return MenuItem.objects.select_related('section').filter(
+            id=pk, deleted=False,
+        ).first()
     except (ValidationError, ValueError, TypeError):
         return None
 
@@ -206,6 +218,41 @@ class KitchenOrderPriorityView(APIView):
                 'status': 200,
                 'message': 'Priority updated',
                 'data': {'id': str(order.id), 'priority': order.priority},
+            },
+            status=200,
+        )
+
+
+class KitchenMenuItemStockView(APIView):
+    """
+    86 a menu item — toggle MenuItem.in_stock (sold-out / back-in-stock).
+
+    Writes the SAME in_stock column the menu module's toggle writes, so the
+    kitchen and the menu module stay in sync by construction. Least-privilege:
+    the kitchen writes in_stock and nothing else.
+    """
+
+    def put(self, request, pk):
+        item = _get_menu_item_or_none(pk)
+        if item is None:
+            return Response({'status': 404, 'message': 'Menu item not found'}, status=404)
+        if not user_can_access_kitchen(request.user, item.section.restaurant_id):
+            return Response(
+                {'status': 403, 'message': 'You do not have permission for this kitchen'},
+                status=403,
+            )
+
+        if 'in_stock' in request.data:
+            item.in_stock = bool(request.data.get('in_stock'))
+        else:
+            item.in_stock = not item.in_stock
+        item.save(update_fields=['in_stock', 'time_last_updated'])
+
+        return Response(
+            {
+                'status': 200,
+                'message': 'Stock updated',
+                'data': {'id': str(item.id), 'in_stock': item.in_stock},
             },
             status=200,
         )
