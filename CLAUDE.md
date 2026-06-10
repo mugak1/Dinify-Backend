@@ -6,7 +6,7 @@ built for Uganda and mobile-money-first markets. Django/DRF backend on AWS EC2
 with PostgreSQL on AWS RDS.
 
 ## Tech Stack
-- Django / Django REST Framework
+- Django 5.2 LTS / Django REST Framework
 - PostgreSQL on AWS RDS (primary database)
 - MongoDB Atlas (action logs and archiving only — currently unreachable from EC2)
 - Apache / mod_wsgi on AWS EC2 (35.177.46.58)
@@ -47,7 +47,15 @@ with PostgreSQL on AWS RDS.
   authorization-scoped via `get_readable_restaurant_ids` /
   `can_read_restaurant` (owner/manager only); references are sequential,
   collision-safe `SUP-000123`. Migration `support_app/0001_initial`
-- Login 500 regression: ⚠️ Outstanding — Apache error logs needed
+- Login 500 regression: ✅ Resolved — not reproducible after the auth-stack work;
+  login → refresh → logout verified working on UAT (closed June 2026)
+- Django 5.2 LTS upgrade: ✅ Complete — Django 4.2.30 → 5.2.15 (PRs #123–#125).
+  Forward-compat deps bumped: `asgiref` 3.11.1, `django-cors-headers` 4.9.0 (DRF
+  3.17.1 / SimpleJWT 5.5.1 / psycopg 3.1.18 already supported 5.2). The
+  deprecation surface was clean — no removed-in-5.x APIs in use, no new
+  migrations generated, `USE_TZ` already explicit. App timezone code now uses
+  stdlib `zoneinfo`; `pytz` was removed from app code (it remains only as a
+  transitive dependency of pandas — do not reintroduce `import pytz`)
 
 ## Deployment Rules — CRITICAL
 - Merging a PR to main automatically triggers GitHub Actions to pull code,
@@ -223,7 +231,9 @@ the catch-all `<str:config_detail>/` route.
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
 - Runs on **Python 3.10.12**, pinned in `ci.yml` to match the prod EC2 runtime
   (the UAT venv is `python3.10`) — keep CI and prod on the same interpreter; any
-  dependency bump must satisfy `requires-python <= 3.10`
+  dependency bump must satisfy `requires-python <= 3.10`. Note: Django 5.2.x is
+  the LAST series supporting Python 3.10/3.11 — a future Django 6.0 upgrade
+  requires bumping the prod interpreter first
 - Spins up a real Postgres 15, runs `django check`,
   `makemigrations --check --dry-run`, then the money-field guard
   (`scripts/check_money_fields.py`) against `dinify_backend.test_settings`
