@@ -11,8 +11,8 @@ Django REST API backend for the Dinify restaurant management and ordering platfo
 | Django REST Framework | 3.14.0 |
 | Auth | `djangorestframework-simplejwt` 5.3.1 (JWT Bearer tokens) |
 | Database (primary) | PostgreSQL via `psycopg` 3.1.18 |
-| Database (document store) | MongoDB via `pymongo` 4.6.1 |
-| HTTP client | `requests` 2.32.3 |
+| Database (document store) | MongoDB via `pymongo` 4.6.3 |
+| HTTP client | `requests` 2.34.2 |
 | Image handling | `Pillow` 10.2.0 |
 | Data processing | `pandas` 2.2.3, `numpy` 2.0.2 |
 | CORS | `django-cors-headers` 4.3.1 |
