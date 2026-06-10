@@ -31,7 +31,8 @@ from restaurants_app.tests import (
     TEST_TABLE_NUMBER3, TEST_TABLE_NUMBER4,
 )
 from restaurants_app.models import (
-    Restaurant, Table, MenuItem, RestaurantEmployee, RestaurantTag, MenuItemTag,
+    Restaurant, Table, MenuItem, MenuSection, RestaurantEmployee, RestaurantTag,
+    MenuItemTag,
 )
 from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN, RESTAURANT_WAITER,
@@ -49,6 +50,10 @@ def _fulfilment_url(pk):
 
 def _priority_url(pk):
     return f'/api/v1/kitchen/orders/{pk}/priority/'
+
+
+def _stock_url(pk):
+    return f'/api/v1/kitchen/menu-items/{pk}/stock/'
 
 
 class KitchenTestBase(TestCase):
@@ -438,3 +443,85 @@ class TableGatingTests(KitchenTestBase):
         Order.objects.filter(id=older.id).update(time_created=now - timedelta(minutes=5))
         Order.objects.filter(id=newer.id).update(time_created=now)
         self._assert_both(self.table1, {'present': True, 'order_id': str(newer.id)})
+
+
+class KitchenMenuItemStockTests(KitchenTestBase):
+    """
+    86 endpoint — toggle MenuItem.in_stock. Mirrors the priority-endpoint tests:
+    set-or-toggle, the owner / manager / kitchen role matrix, 404 on a bad id,
+    and cross-restaurant denial (kitchen staff at A cannot 86 B's item). It writes
+    the same in_stock column the menu module writes, so the two stay in sync.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.item = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+
+    def test_stock_toggle_and_explicit_set(self):
+        self.client.force_authenticate(user=self.kitchen_user)
+
+        # in_stock defaults to True; an empty payload toggles the current value.
+        self.assertTrue(self.item.in_stock)
+        self.assertEqual(
+            self.client.put(_stock_url(self.item.id), {}, format='json').status_code, 200,
+        )
+        self.item.refresh_from_db()
+        self.assertFalse(self.item.in_stock)
+
+        # An explicit value wins over the current state, either direction.
+        self.client.put(_stock_url(self.item.id), {'in_stock': True}, format='json')
+        self.item.refresh_from_db()
+        self.assertTrue(self.item.in_stock)
+
+        self.client.put(_stock_url(self.item.id), {'in_stock': False}, format='json')
+        self.item.refresh_from_db()
+        self.assertFalse(self.item.in_stock)
+
+    def test_stock_permissions(self):
+        # Owner / manager / kitchen / admin may 86 the item; waiter / outsider
+        # (no kitchen role at this restaurant) are denied and change nothing.
+        for user in (self.kitchen_user, self.manager_user, self.owner_user, self.admin_user):
+            self.client.force_authenticate(user=user)
+            response = self.client.put(_stock_url(self.item.id), {'in_stock': True}, format='json')
+            self.assertEqual(response.status_code, 200, msg=f'expected 200 for {user.username}')
+
+        for user in (self.waiter_user, self.outsider_user):
+            self.client.force_authenticate(user=user)
+            response = self.client.put(_stock_url(self.item.id), {'in_stock': False}, format='json')
+            self.assertEqual(response.status_code, 403, msg=f'expected 403 for {user.username}')
+
+        # The denied PUTs must not have flipped the value the allowed ones left.
+        self.item.refresh_from_db()
+        self.assertTrue(self.item.in_stock)
+
+    def test_stock_unknown_or_malformed_id_404(self):
+        self.client.force_authenticate(user=self.kitchen_user)
+        # Unknown-but-valid UUID and a malformed id both resolve to 404, never 500.
+        self.assertEqual(
+            self.client.put(_stock_url(uuid.uuid4()), {}, format='json').status_code, 404,
+        )
+        self.assertEqual(
+            self.client.put(_stock_url('not-a-uuid'), {}, format='json').status_code, 404,
+        )
+
+    def test_stock_denied_cross_restaurant(self):
+        # Build an item under a DIFFERENT restaurant. self.kitchen_user holds a
+        # kitchen role only at self.restaurant, so it must not reach this item.
+        other_restaurant = Restaurant.objects.create(
+            name='Other Seed Restaurant', location='Elsewhere', owner=self.admin_user,
+        )
+        other_restaurant.status = RestaurantStatus_Active
+        other_restaurant.save(update_fields=['status'])
+        other_section = MenuSection.objects.create(
+            name='Other Section', restaurant=other_restaurant,
+        )
+        other_item = MenuItem.objects.create(
+            name='Other Item', section=other_section,
+            primary_price=1000, discounted_price=900, running_discount=False,
+        )
+
+        self.client.force_authenticate(user=self.kitchen_user)
+        response = self.client.put(_stock_url(other_item.id), {'in_stock': False}, format='json')
+        self.assertEqual(response.status_code, 403)
+        other_item.refresh_from_db()
+        self.assertTrue(other_item.in_stock)  # unchanged
