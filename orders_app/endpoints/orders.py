@@ -165,7 +165,6 @@ class V2OrdersEndpoint(APIView):
             restaurant_id = data.get('restaurant')
             table_id = data.get('table')
             items = data.get('items')
-            order_remarks = data.get('order_remarks')
             # idempotency key supplied by the diner app (Phase 3); absent today
             client_order_id = data.get('client_order_id')
             if restaurant_id is None or table_id is None:
@@ -178,7 +177,6 @@ class V2OrdersEndpoint(APIView):
                 restaurant_id=restaurant_id,
                 table_id=table_id,
                 items=items,
-                order_remarks=order_remarks,
                 customer=customer,
                 created_by=created_by,
                 client_order_id=client_order_id,

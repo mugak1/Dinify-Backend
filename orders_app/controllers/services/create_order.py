@@ -67,7 +67,7 @@ def allocate_daily_order_number(restaurant, order_date):
     raise IntegrityError("Could not allocate a daily order number after retry")
 
 
-def _create_order(*, restaurant, table, items, order_remarks=None,
+def _create_order(*, restaurant, table, items,
                   customer=None, created_by=None,
                   order_source=ORDER_SOURCE_DINER, client_order_id=None):
     """
@@ -109,7 +109,6 @@ def _create_order(*, restaurant, table, items, order_remarks=None,
         order = Order.objects.create(
             restaurant=restaurant,
             table=table,
-            order_remarks=order_remarks,
 
             total_cost=0,
             discounted_cost=0,
