@@ -13,7 +13,7 @@ Django REST API backend for the Dinify restaurant management and ordering platfo
 | Database (primary) | PostgreSQL via `psycopg` 3.1.18 |
 | Database (document store) | MongoDB via `pymongo` 4.6.3 |
 | HTTP client | `requests` 2.34.2 |
-| Image handling | `Pillow` 10.2.0 |
+| Image handling | `Pillow` 12.2.0 |
 | Data processing | `pandas` 2.2.3, `numpy` 2.0.2 |
 | CORS | `django-cors-headers` 4.3.1 |
 | Config | `python-decouple` 3.8 |
