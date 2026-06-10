@@ -51,7 +51,12 @@ with PostgreSQL on AWS RDS.
 
 ## Deployment Rules — CRITICAL
 - Merging a PR to main automatically triggers GitHub Actions to pull code,
-  run migrations, and restart Apache
+  install dependencies (`pip install -r requirements.txt`), run migrations,
+  and restart Apache
+- The deploy DOES reinstall dependencies, so a `requirements.txt` change takes
+  effect on the next deploy. The install runs after `git pull`, before
+  `migrate`; with `set -e` a failed install aborts before the Apache restart,
+  leaving the live API up on the old workers
 - NEVER suggest manual `git pull`, `migrate`, or Apache restart — the
   pipeline handles everything
 - Each feature must be on its own branch → PR → merge
@@ -216,6 +221,9 @@ the catch-all `<str:config_detail>/` route.
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
+- Runs on **Python 3.10.12**, pinned in `ci.yml` to match the prod EC2 runtime
+  (the UAT venv is `python3.10`) — keep CI and prod on the same interpreter; any
+  dependency bump must satisfy `requires-python <= 3.10`
 - Spins up a real Postgres 15, runs `django check`,
   `makemigrations --check --dry-run`, then the money-field guard
   (`scripts/check_money_fields.py`) against `dinify_backend.test_settings`
