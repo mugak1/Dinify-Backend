@@ -1521,11 +1521,9 @@ class MenuSectionScheduleTests(TestCase):
 
     @staticmethod
     def _at(year, month, day, hour, minute):
-        import pytz
         from datetime import datetime as real_dt
-        return pytz.timezone('Africa/Nairobi').localize(
-            real_dt(year, month, day, hour, minute)
-        )
+        from zoneinfo import ZoneInfo
+        return real_dt(year, month, day, hour, minute, tzinfo=ZoneInfo('Africa/Nairobi'))
 
     # 2026-01-05 is Monday, 2026-01-06 Tuesday, ..., 2026-01-11 Sunday.
 

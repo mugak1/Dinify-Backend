@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
-import pytz
 from django.conf import settings
 
 
@@ -57,7 +57,7 @@ def is_section_currently_active(section, now: Optional[datetime] = None) -> bool
         return True  # Scheduled mode with no slots: keep section visible.
 
     if now is None:
-        tz = pytz.timezone(settings.TIME_ZONE)
+        tz = ZoneInfo(settings.TIME_ZONE)
         now = datetime.now(tz)
 
     current_code = ISO_WEEKDAY_TO_CODE.get(now.isoweekday())
