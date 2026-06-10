@@ -6,7 +6,7 @@ Django REST API backend for the Dinify restaurant management and ordering platfo
 
 | Component | Version / Package |
 |---|---|
-| Python | 3.11 (CI) — 3.9.6+ may work locally |
+| Python | 3.10.12 (CI, pinned to match the prod EC2 runtime) — 3.10+ locally |
 | Django | 4.2.30 |
 | Django REST Framework | 3.14.0 |
 | Auth | `djangorestframework-simplejwt` 5.3.1 (JWT Bearer tokens) |
@@ -67,7 +67,8 @@ The project uses a single Django settings file (`dinify_backend/settings.py`) wi
 | `payment_integrations_app` | Integrations with external payment providers: Flutterwave, DPO, Yo Uganda (mobile money), and Pesapal. Handles payment initiation, callback processing, and status verification. Has no Django models — uses MongoDB for callback storage. |
 | `notifications_app` | Email and SMS dispatch. Reads unsent notifications from MongoDB and sends them. Has no Django models. |
 | `reports_app` | End-of-day processing and report generation. Has no Django models currently — report logic operates on other apps' data. |
-| `crm_app` | Customer support ticket management (`ServiceTicket` model with status, priority, and assignment tracking). |
+| `support_app` | Restaurant-facing support ticketing (`SupportIssue`, collision-safe `SUP-000123` references). Secretary-pattern endpoints at `api/v1/support/`; supersedes legacy `crm_app`. |
+| `crm_app` | **Legacy** — original `ServiceTicket` support tickets, superseded by `support_app`; retained for historical data. |
 | `misc_app` | System-level configuration via `SysActivityConfig` model (boolean/integer/string/date settings). Also houses soft-delete vacuum utilities. |
 
 ### Third-Party Django Apps
@@ -181,12 +182,14 @@ There is no multi-database router configuration — all models use the `default`
 
 CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-**What CI runs:**
-- Python 3.11 on Ubuntu
-- Installs dependencies from `requirements.txt`
-- Runs: `python -m django test users_app orders_app payment_integrations_app --settings=dinify_backend.test_settings`
+**What CI runs** (Python 3.10.12 on Ubuntu, against a **PostgreSQL 15** service, using `dinify_backend.test_settings`):
+1. `pip install -r requirements.txt`
+2. `django check`
+3. `makemigrations --check --dry-run` — fails on un-generated migrations
+4. `python scripts/check_money_fields.py` — fails if a monetary model field is a `FloatField`
+5. the **full** test suite: `python -m django test --settings=dinify_backend.test_settings`
 
-**Test database:** SQLite in-memory (via `test_settings.py`). MongoDB is mocked with `unittest.mock.MagicMock`.
+**Test database:** PostgreSQL 15 in CI; `test_settings.py` falls back to SQLite in-memory locally when no `DATABASE_*` env vars are set. MongoDB is mocked with `unittest.mock.MagicMock`. `scripts/verify.sh` runs the same checks locally in the same order — run it before opening a PR.
 
 ### Test Coverage by App
 
@@ -194,23 +197,23 @@ CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 |---|---|---|---|
 | `users_app` | Yes | Yes | Auth flows, OTP, password reset, token security |
 | `orders_app` | Yes | Yes | Order initiation, item status, discounts, options |
-| `payment_integrations_app` | Yes | Yes | HTTP timeout safety, network error handling, XML parsing, credential protection |
-| `restaurants_app` | Yes | **No** | Uses `JSONField.__contains` lookups requiring PostgreSQL — cannot run under SQLite CI |
-| `finance_app` | Yes | **No** | Has a bug (`resend_otp` leaves `user=None`) and calls live Yo API — not CI-ready without fixes and mocking |
-| `misc_app` | Yes | **No** | Uses `JSONField.__contains` lookups requiring PostgreSQL — cannot run under SQLite CI |
-| `crm_app` | No | No | No tests written |
+| `payment_integrations_app` | Yes | Yes | HTTP timeout safety, network/XML handling, credential protection |
+| `restaurants_app` | Yes | Yes | Largest suite; exercises PostgreSQL-specific `JSONField` lookups |
+| `finance_app` | Yes | Yes | Transactions, balances, payments |
+| `misc_app` | Yes | Yes | Config; PostgreSQL `JSONField` lookups |
+| `support_app` | Yes | Yes | Support-ticket lifecycle |
+| `crm_app` | No | No | Legacy app (superseded by `support_app`) |
 | `notifications_app` | No | No | No tests written |
 | `reports_app` | No | No | No tests written |
 
-**To run tests locally (against SQLite):**
+**To run the full suite locally** (SQLite in-memory, no Postgres needed):
 ```bash
-python -m django test users_app orders_app payment_integrations_app --settings=dinify_backend.test_settings --verbosity=2
+./scripts/verify.sh
+# …or just the tests:
+python -m django test --settings=dinify_backend.test_settings --verbosity=2
 ```
 
-**To run all tests (requires local PostgreSQL):**
-```bash
-python manage.py test --verbosity=2
-```
+**To run against PostgreSQL** (as CI does), export the `DATABASE_*` env vars first, then run the same test command.
 
 ## Breaking Changes
 
@@ -225,7 +228,7 @@ See [`BREAKING_CHANGES.md`](BREAKING_CHANGES.md) for API contract changes that a
 
 These are issues acknowledged in the codebase as of the current state:
 
-**Money handling:** All 19 monetary fields across `orders_app` and `restaurants_app` use `FloatField` instead of `DecimalField`. Float arithmetic is used throughout order calculations, risking rounding errors. Fixing requires a database migration and serializer audit.
+**Money handling:** Resolved — monetary/financial fields use `DecimalField`, and a committed CI guard (`scripts/check_money_fields.py`) fails the build if any `models.py` declares a monetary `FloatField`. (Non-monetary floats remain where appropriate, e.g. floor-plan coordinates.)
 
 **Serializer file size:** Serializer files are large and monolithic. The codebase acknowledges these need splitting into smaller, more manageable files.
 
@@ -237,6 +240,6 @@ These are issues acknowledged in the codebase as of the current state:
 
 **Permissions:** `OrderPaymentsEndpoint` and `MsisdnLookupEndpoint` use `AllowAny` — intentional for their use cases but warrant review for whether unauthenticated access is appropriate.
 
-**CI gaps:** Three apps with tests (`restaurants_app`, `finance_app`, `misc_app`) cannot run in CI due to SQLite limitations or live API calls. Three apps (`crm_app`, `notifications_app`, `reports_app`) have no tests at all.
+**Test gaps:** Three apps have no tests at all (`crm_app` — legacy, `notifications_app`, `reports_app`). The full suite now runs in CI against PostgreSQL 15, so every app that *does* have tests is exercised there.
 
 **Missing `.env.example` entries:** MongoDB connection variables and all payment integration credentials are required by the code but not listed in `.env.example`.
