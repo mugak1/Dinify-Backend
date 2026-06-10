@@ -19,6 +19,13 @@ jobs:
             set -e
             cd /home/ubuntu/dinify_backend_handover_uat
             source /home/ubuntu/venv_uat_handover/bin/activate
+            # --- PR 1a: read-only deploy diagnostics (temporary; superseded by PR 1b) ---
+            # Guarded with `|| true` so a diagnostic can never abort the deploy.
+            echo "===== EC2 DEPLOY DIAGNOSTICS ====="
+            python3 --version || true
+            python3 -m pip --version || true
+            python3 -m pip freeze || true
+            echo "===== END EC2 DEPLOY DIAGNOSTICS ====="
             git checkout -- .
             git clean -fd
             git pull origin main
