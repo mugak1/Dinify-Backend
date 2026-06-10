@@ -24,8 +24,9 @@ from users_app.models import User
 from users_app.tests import seed_user, TEST_PHONE
 from restaurants_app.tests import (
     seed_restaurant, seed_menu_section, seed_menu_items, seed_tables,
-    TEST_RESTAURANT_NAME,
+    TEST_RESTAURANT_NAME, TEST_MENU_SECTION_NAME,
     TEST_MENU_ITEM1_NAME, TEST_OPTION_MENU_ITEM_NAME,
+    TEST_UNAVAILABLE_MENU_ITEM_NAME,
     TEST_OPTION_GROUP_ID, TEST_OPTION_CHOICE_SMALL_ID,
     TEST_TABLE_NUMBER1, TEST_TABLE_NUMBER2,
     TEST_TABLE_NUMBER3, TEST_TABLE_NUMBER4,
@@ -42,6 +43,7 @@ from dinify_backend.configss.string_definitions import (
 )
 
 ACTIVE_URL = '/api/v1/kitchen/orders/active/'
+MENU_ITEMS_URL = '/api/v1/kitchen/menu-items/'
 
 
 def _fulfilment_url(pk):
@@ -274,6 +276,59 @@ class KitchenActiveEndpointTests(KitchenTestBase):
         self.client.force_authenticate(user=self.kitchen_user)
         response = self.client.get('/api/v1/kds/tickets/')
         self.assertEqual(response.status_code, 404)
+
+
+class KitchenMenuItemsListTests(KitchenTestBase):
+    """The kitchen sold-out panel's read: GET /api/v1/kitchen/menu-items/."""
+
+    def test_list_permissions(self):
+        rid = str(self.restaurant.id)
+        # owner / manager / kitchen / admin can each list
+        for user in (self.kitchen_user, self.manager_user, self.owner_user, self.admin_user):
+            self.client.force_authenticate(user=user)
+            response = self.client.get(MENU_ITEMS_URL, {'restaurant': rid})
+            self.assertEqual(response.status_code, 200, msg=f'expected 200 for {user.username}')
+
+        # a user with no role at the restaurant is denied (cross-tenant denial)
+        for user in (self.waiter_user, self.outsider_user):
+            self.client.force_authenticate(user=user)
+            response = self.client.get(MENU_ITEMS_URL, {'restaurant': rid})
+            self.assertEqual(response.status_code, 403, msg=f'expected 403 for {user.username}')
+
+        # unauthenticated → 401
+        self.client.force_authenticate(user=None)
+        response = self.client.get(MENU_ITEMS_URL, {'restaurant': rid})
+        self.assertEqual(response.status_code, 401)
+
+    def test_lists_available_items_with_stock_state(self):
+        self.client.force_authenticate(user=self.kitchen_user)
+        response = self.client.get(MENU_ITEMS_URL, {'restaurant': str(self.restaurant.id)})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()['data']
+
+        # every row carries the panel's contract and is an on-menu item
+        self.assertTrue(data)
+        for row in data:
+            for key in ('id', 'name', 'in_stock', 'available', 'section_name'):
+                self.assertIn(key, row)
+            self.assertTrue(row['available'])
+            self.assertEqual(row['section_name'], TEST_MENU_SECTION_NAME)
+
+        # a known available item is present with its in_stock state (default True)
+        item1 = next(r for r in data if r['name'] == TEST_MENU_ITEM1_NAME)
+        self.assertTrue(item1['in_stock'])
+
+    def test_unavailable_item_excluded(self):
+        self.client.force_authenticate(user=self.kitchen_user)
+        response = self.client.get(MENU_ITEMS_URL, {'restaurant': str(self.restaurant.id)})
+        self.assertEqual(response.status_code, 200)
+        names = {row['name'] for row in response.json()['data']}
+        self.assertNotIn(TEST_UNAVAILABLE_MENU_ITEM_NAME, names)
+
+    def test_missing_restaurant_param_returns_400(self):
+        self.client.force_authenticate(user=self.kitchen_user)
+        response = self.client.get(MENU_ITEMS_URL)
+        self.assertEqual(response.status_code, 400)
 
 
 class KitchenTransitionTests(KitchenTestBase):

@@ -7,6 +7,7 @@ and the per-item snapshots — never the report/archive serializers.
 from rest_framework import serializers
 
 from orders_app.models import Order
+from restaurants_app.models import MenuItem
 
 
 class ActiveKitchenOrderSerializer(serializers.ModelSerializer):
@@ -73,3 +74,22 @@ class ActiveKitchenOrderSerializer(serializers.ModelSerializer):
             ]
             result.append(line)
         return result
+
+
+class KitchenMenuItemSerializer(serializers.ModelSerializer):
+    """
+    One on-menu item for the kitchen sold-out panel — enough to list, group by
+    section, and toggle in_stock. section_name is read-only (flattened from the
+    related MenuSection).
+    """
+    section_name = serializers.CharField(source='section.name', read_only=True)
+
+    class Meta:
+        model = MenuItem
+        fields = [
+            'id',
+            'name',
+            'in_stock',
+            'available',
+            'section_name',
+        ]
