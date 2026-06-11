@@ -2,6 +2,7 @@ from django.urls import path
 
 from orders_app.endpoints_kitchen import (
     ActiveKitchenOrdersView,
+    CompletedKitchenOrdersView,
     KitchenOrderFulfilmentStatusView,
     KitchenOrderPriorityView,
     KitchenOrderCancelView,
@@ -11,6 +12,7 @@ from orders_app.endpoints_kitchen import (
 
 urlpatterns = [
     path('orders/active/', ActiveKitchenOrdersView.as_view()),
+    path('orders/completed/', CompletedKitchenOrdersView.as_view()),
     path('orders/<str:pk>/fulfilment-status/', KitchenOrderFulfilmentStatusView.as_view()),
     path('orders/<str:pk>/priority/', KitchenOrderPriorityView.as_view()),
     path('orders/<str:pk>/cancel/', KitchenOrderCancelView.as_view()),
