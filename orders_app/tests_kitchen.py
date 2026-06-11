@@ -44,6 +44,7 @@ from dinify_backend.configss.string_definitions import (
 )
 
 ACTIVE_URL = '/api/v1/kitchen/orders/active/'
+COMPLETED_URL = '/api/v1/kitchen/orders/completed/'
 MENU_ITEMS_URL = '/api/v1/kitchen/menu-items/'
 
 
@@ -208,13 +209,12 @@ class KitchenActiveEndpointTests(KitchenTestBase):
         return {row['id'] for row in response.json()['data']}
 
     def test_active_set_filtering(self):
-        now = timezone.now()
         new_order = self._make_order(self.table1, fulfilment_status='new')
-        served_recent = self._make_order(
-            self.table2, fulfilment_status='served', served_at=now,
-        )
-        served_old = self._make_order(
-            self.table3, fulfilment_status='served', served_at=now - timedelta(minutes=11),
+        preparing_order = self._make_order(self.table2, fulfilment_status='preparing')
+        ready_order = self._make_order(self.table3, fulfilment_status='ready')
+        # served leaves the board immediately — it lives in the Completed feed
+        served_just_now = self._make_order(
+            self.table4, fulfilment_status='served', served_at=timezone.now(),
         )
         cancelled = self._make_order(
             self.table4, fulfilment_status='new', order_status=OrderStatus_Cancelled,
@@ -223,8 +223,9 @@ class KitchenActiveEndpointTests(KitchenTestBase):
 
         ids = self._active_ids(self.kitchen_user)
         self.assertIn(str(new_order.id), ids)
-        self.assertIn(str(served_recent.id), ids)
-        self.assertNotIn(str(served_old.id), ids)
+        self.assertIn(str(preparing_order.id), ids)
+        self.assertIn(str(ready_order.id), ids)
+        self.assertNotIn(str(served_just_now.id), ids)
         self.assertNotIn(str(cancelled.id), ids)
         self.assertNotIn(str(deleted.id), ids)
 
@@ -281,6 +282,96 @@ class KitchenActiveEndpointTests(KitchenTestBase):
         self.client.force_authenticate(user=self.kitchen_user)
         response = self.client.get('/api/v1/kds/tickets/')
         self.assertEqual(response.status_code, 404)
+
+
+class KitchenCompletedEndpointTests(KitchenTestBase):
+    """
+    The Completed feed: GET /api/v1/kitchen/orders/completed/ — served tickets
+    from the last COMPLETED_WINDOW, newest-completed first. Recall (served →
+    ready) is initiated from here, so the feed's window is what bounds
+    recallability.
+    """
+
+    def _completed_rows(self, user):
+        self.client.force_authenticate(user=user)
+        response = self.client.get(COMPLETED_URL, {'restaurant': str(self.restaurant.id)})
+        self.assertEqual(response.status_code, 200)
+        return response.json()['data']
+
+    def test_completed_set_filtering_and_ordering(self):
+        now = timezone.now()
+        served_older = self._make_order(
+            self.table1, fulfilment_status='served', served_at=now - timedelta(hours=2),
+        )
+        served_newest = self._make_order(
+            self.table2, fulfilment_status='served', served_at=now,
+        )
+        # outside the 24h rolling window
+        self._make_order(
+            self.table3, fulfilment_status='served', served_at=now - timedelta(hours=25),
+        )
+        self._make_order(
+            self.table4, fulfilment_status='served', served_at=now,
+            order_status=OrderStatus_Cancelled,
+        )
+        self._make_order(
+            self.table1, fulfilment_status='served', served_at=now, deleted=True,
+        )
+        # still active — belongs to the board, not the feed
+        self._make_order(self.table2, fulfilment_status='ready')
+
+        ids = [row['id'] for row in self._completed_rows(self.kitchen_user)]
+        # exactly the in-window served orders, newest-completed first
+        self.assertEqual(ids, [str(served_newest.id), str(served_older.id)])
+
+    def test_completed_scoped_to_restaurant(self):
+        other_restaurant = Restaurant.objects.create(
+            name='Other Completed Restaurant', location='Elsewhere', owner=self.admin_user,
+        )
+        other_table = Table.objects.create(restaurant=other_restaurant, number=1)
+        other_served = self._make_order(
+            other_table, restaurant=other_restaurant,
+            fulfilment_status='served', served_at=timezone.now(),
+        )
+        own_served = self._make_order(
+            self.table1, fulfilment_status='served', served_at=timezone.now(),
+        )
+
+        ids = {row['id'] for row in self._completed_rows(self.kitchen_user)}
+        self.assertIn(str(own_served.id), ids)
+        self.assertNotIn(str(other_served.id), ids)
+
+    def test_completed_serializer_matches_active_cards(self):
+        self._make_order(self.table1, fulfilment_status='served', served_at=timezone.now())
+        rows = self._completed_rows(self.kitchen_user)
+        self.assertEqual(len(rows), 1)
+        for key in ('order_number', 'table_label', 'order_source',
+                    'fulfilment_status', 'priority', 'created_at', 'served_at', 'items'):
+            self.assertIn(key, rows[0])
+        self.assertEqual(rows[0]['fulfilment_status'], 'served')
+        self.assertIsNotNone(rows[0]['served_at'])
+
+    def test_completed_permissions(self):
+        rid = str(self.restaurant.id)
+        for user in (self.kitchen_user, self.manager_user, self.owner_user, self.admin_user):
+            self.client.force_authenticate(user=user)
+            response = self.client.get(COMPLETED_URL, {'restaurant': rid})
+            self.assertEqual(response.status_code, 200, msg=f'expected 200 for {user.username}')
+
+        for user in (self.waiter_user, self.outsider_user):
+            self.client.force_authenticate(user=user)
+            response = self.client.get(COMPLETED_URL, {'restaurant': rid})
+            self.assertEqual(response.status_code, 403, msg=f'expected 403 for {user.username}')
+
+        # unauthenticated → 401
+        self.client.force_authenticate(user=None)
+        response = self.client.get(COMPLETED_URL, {'restaurant': rid})
+        self.assertEqual(response.status_code, 401)
+
+    def test_missing_restaurant_param_returns_400(self):
+        self.client.force_authenticate(user=self.kitchen_user)
+        response = self.client.get(COMPLETED_URL)
+        self.assertEqual(response.status_code, 400)
 
 
 class KitchenMenuItemsListTests(KitchenTestBase):
@@ -368,21 +459,24 @@ class KitchenTransitionTests(KitchenTestBase):
         self.assertEqual(self._patch_status(order, 'served').status_code, 400)
         self.assertEqual(self._patch_status(order, 'banana').status_code, 400)
 
-    def test_recall_served_to_ready_within_window(self):
+    def test_recall_served_to_ready_clears_served_at(self):
         order = self._make_order(fulfilment_status='served', served_at=timezone.now())
         self.assertEqual(self._patch_status(order, 'ready').status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'ready')
         self.assertIsNone(order.served_at)
 
-    def test_recall_served_to_ready_outside_window_rejected(self):
+    def test_recall_served_to_ready_regardless_of_age(self):
+        # no recall age gate — the Completed feed's own window bounds what is
+        # visible/recallable
         order = self._make_order(
             fulfilment_status='served',
-            served_at=timezone.now() - timedelta(minutes=11),
+            served_at=timezone.now() - timedelta(days=2),
         )
-        self.assertEqual(self._patch_status(order, 'ready').status_code, 400)
+        self.assertEqual(self._patch_status(order, 'ready').status_code, 200)
         order.refresh_from_db()
-        self.assertEqual(order.fulfilment_status, 'served')
+        self.assertEqual(order.fulfilment_status, 'ready')
+        self.assertIsNone(order.served_at)
 
     def test_recall_ready_to_preparing_allowed(self):
         order = self._make_order(fulfilment_status='ready')

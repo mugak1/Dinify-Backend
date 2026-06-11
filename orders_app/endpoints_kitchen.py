@@ -35,9 +35,10 @@ from dinify_backend.configss.string_definitions import (
 
 logger = logging.getLogger(__name__)
 
-# Window during which a just-served ticket stays visible and can be recalled
-# (served -> ready).
-RECALL_WINDOW = timedelta(minutes=10)
+# Rolling bound on the Completed feed: a served ticket is visible (and hence
+# recallable) for this long after served_at. Keeps the feed finite — 24h is a
+# sane "this service" window with no timezone math; adjustable.
+COMPLETED_WINDOW = timedelta(hours=24)
 
 # Server-authoritative forward transitions (one step each).
 FORWARD_TRANSITIONS = {
@@ -118,14 +119,16 @@ class ActiveKitchenOrdersView(APIView):
                 status=403,
             )
 
-        now = timezone.now()
-        active_window_q = (
-            ~Q(fulfilment_status="served")
-            | Q(served_at__gte=now - RECALL_WINDOW)
-        )
+        # Served tickets leave the board immediately — they live in the
+        # Completed feed (CompletedKitchenOrdersView) until COMPLETED_WINDOW
+        # lapses. The board only ever shows new / preparing / ready.
         qs = (
             Order.objects
-            .filter(active_window_q, deleted=False, restaurant=restaurant_id)
+            .filter(
+                ~Q(fulfilment_status='served'),
+                deleted=False,
+                restaurant=restaurant_id,
+            )
             .exclude(order_status=OrderStatus_Cancelled)
             .select_related('table')
             .prefetch_related(
@@ -140,6 +143,54 @@ class ActiveKitchenOrdersView(APIView):
         data = ActiveKitchenOrderSerializer(qs, many=True).data
         return Response(
             {'status': 200, 'message': 'Active kitchen orders retrieved', 'data': data},
+            status=200,
+        )
+
+
+class CompletedKitchenOrdersView(APIView):
+    """
+    GET the Completed feed — served tickets from the last COMPLETED_WINDOW,
+    newest-completed first. Mirrors ActiveKitchenOrdersView (same gate, same
+    serializer, same envelope) so the frontend renders identical cards; recall
+    (served -> ready) is initiated from here.
+    """
+
+    def get(self, request):
+        restaurant_id = request.GET.get('restaurant')
+        if not restaurant_id:
+            return Response(
+                {'status': 400, 'message': 'restaurant query param is required'},
+                status=400,
+            )
+        if not user_can_access_kitchen(request.user, restaurant_id):
+            return Response(
+                {'status': 403, 'message': 'You do not have permission to view this kitchen'},
+                status=403,
+            )
+
+        qs = (
+            Order.objects
+            .filter(
+                fulfilment_status='served',
+                deleted=False,
+                restaurant=restaurant_id,
+                served_at__gte=timezone.now() - COMPLETED_WINDOW,
+            )
+            .exclude(order_status=OrderStatus_Cancelled)
+            .select_related('table')
+            .prefetch_related(
+                Prefetch(
+                    'order',
+                    queryset=OrderItem.objects.filter(deleted=False, available=True),
+                    to_attr='active_items',
+                )
+            )
+            .order_by('-served_at')
+        )
+
+        data = ActiveKitchenOrderSerializer(qs, many=True).data
+        return Response(
+            {'status': 200, 'message': 'Completed kitchen orders retrieved', 'data': data},
             status=200,
         )
 
@@ -172,12 +223,8 @@ class KitchenOrderFulfilmentStatusView(APIView):
             if target == 'served':
                 order.served_at = now
         elif current == 'served' and target == 'ready':
-            # recall is only allowed within the recall window of served_at
-            if order.served_at is None or (now - order.served_at) > RECALL_WINDOW:
-                return Response(
-                    {'status': 400, 'message': 'Recall window has expired'},
-                    status=400,
-                )
+            # recall from the Completed feed — no age gate (the feed's own
+            # COMPLETED_WINDOW already bounds what's visible/recallable)
             order.served_at = None
         elif current == 'ready' and target == 'preparing':
             # recall back to preparing is allowed whenever ready (served_at null)
