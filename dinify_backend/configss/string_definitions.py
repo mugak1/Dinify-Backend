@@ -67,6 +67,20 @@ OrderItemStatus_Preparing = 'preparing'
 OrderItemStatus_Unavailable = 'unavailable'
 OrderItemStatus_Served = 'served'
 
+# cancellation reasons
+CancellationReason_CustomerChangedMind = 'customer_changed_mind'
+CancellationReason_ItemUnavailable = 'item_unavailable'
+CancellationReason_KitchenError = 'kitchen_error'
+CancellationReason_Duplicate = 'duplicate'
+CancellationReason_Other = 'other'
+CANCELLATION_REASONS = {
+    CancellationReason_CustomerChangedMind,
+    CancellationReason_ItemUnavailable,
+    CancellationReason_KitchenError,
+    CancellationReason_Duplicate,
+    CancellationReason_Other,
+}
+
 # processing status
 ProcessingStatus_Pending = 'pending'
 ProcessingStatus_PendingRevenueAcknowledgement = 'pending_revenue_acknowledgement'

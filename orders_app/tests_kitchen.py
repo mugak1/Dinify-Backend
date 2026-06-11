@@ -40,6 +40,7 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated, OrderStatus_Cancelled,
     PaymentStatus_Pending,
     RestaurantStatus_Active,
+    CancellationReason_CustomerChangedMind,
 )
 
 ACTIVE_URL = '/api/v1/kitchen/orders/active/'
@@ -52,6 +53,10 @@ def _fulfilment_url(pk):
 
 def _priority_url(pk):
     return f'/api/v1/kitchen/orders/{pk}/priority/'
+
+
+def _cancel_url(pk):
+    return f'/api/v1/kitchen/orders/{pk}/cancel/'
 
 
 def _stock_url(pk):
@@ -580,3 +585,134 @@ class KitchenMenuItemStockTests(KitchenTestBase):
         self.assertEqual(response.status_code, 403)
         other_item.refresh_from_db()
         self.assertTrue(other_item.in_stock)  # unchanged
+
+
+class KitchenCancelTests(KitchenTestBase):
+    """
+    State-aware order cancellation (PUT /api/v1/kitchen/orders/<pk>/cancel/).
+
+      - 'new'                 : any kitchen user may void (base kitchen gate)
+      - 'preparing' / 'ready' : manager/owner only (kitchen-only → 403)
+      - 'served'              : not cancellable (recall it first → 400)
+
+    Cancelling sets order_status='cancelled', which frees the table and drops
+    the ticket from the active set; payment_status and the fulfilment axis are
+    left untouched.
+    """
+
+    VALID_REASON = CancellationReason_CustomerChangedMind
+
+    def _cancel(self, order, user, **payload):
+        self.client.force_authenticate(user=user)
+        return self.client.put(_cancel_url(order.id), payload, format='json')
+
+    def _active_ids(self, user):
+        self.client.force_authenticate(user=user)
+        response = self.client.get(ACTIVE_URL, {'restaurant': str(self.restaurant.id)})
+        self.assertEqual(response.status_code, 200)
+        return {row['id'] for row in response.json()['data']}
+
+    def test_new_order_cancellable_by_each_privileged_role(self):
+        # kitchen, manager and owner can each void a not-yet-started order.
+        for user in (self.kitchen_user, self.manager_user, self.owner_user):
+            order = self._make_order(fulfilment_status='new')
+            response = self._cancel(order, user, cancellation_reason=self.VALID_REASON)
+            self.assertEqual(response.status_code, 200, msg=f'expected 200 for {user.username}')
+            order.refresh_from_db()
+            self.assertEqual(order.order_status, OrderStatus_Cancelled)
+            self.assertEqual(order.cancelled_by_id, user.id)
+            self.assertIsNotNone(order.cancelled_at)
+            self.assertEqual(order.cancellation_reason, self.VALID_REASON)
+            # the fulfilment axis is untouched by a cancellation
+            self.assertEqual(order.fulfilment_status, 'new')
+
+    def test_cancel_frees_table_and_drops_from_active_set(self):
+        order = self._make_order(self.table1, fulfilment_status='new')
+        # occupied and on the board before cancellation
+        self.assertTrue(any_present_ongoing_order(self.table1)['present'])
+        self.assertIn(str(order.id), self._active_ids(self.kitchen_user))
+
+        self.assertEqual(
+            self._cancel(order, self.kitchen_user, cancellation_reason=self.VALID_REASON).status_code,
+            200,
+        )
+
+        # both copies of the occupancy gate now agree the table is free
+        con = ConOrder.any_present_ongoing_order(self.table1)
+        standalone = any_present_ongoing_order(self.table1)
+        self.assertEqual(con, standalone)
+        self.assertFalse(con['present'])
+        # and the ticket has dropped from the active set
+        self.assertNotIn(str(order.id), self._active_ids(self.kitchen_user))
+
+    def test_preparing_or_ready_requires_manager(self):
+        for status in ('preparing', 'ready'):
+            # a kitchen-only user is denied once preparation has started
+            order = self._make_order(fulfilment_status=status)
+            response = self._cancel(order, self.kitchen_user, cancellation_reason=self.VALID_REASON)
+            self.assertEqual(response.status_code, 403, msg=f'kitchen denied for {status}')
+            order.refresh_from_db()
+            self.assertEqual(order.order_status, OrderStatus_Initiated)  # unchanged
+
+            # manager and owner may cancel
+            for user in (self.manager_user, self.owner_user):
+                order = self._make_order(fulfilment_status=status)
+                response = self._cancel(order, user, cancellation_reason=self.VALID_REASON)
+                self.assertEqual(
+                    response.status_code, 200,
+                    msg=f'expected 200 for {user.username} on {status}',
+                )
+                order.refresh_from_db()
+                self.assertEqual(order.order_status, OrderStatus_Cancelled)
+                self.assertEqual(order.cancelled_by_id, user.id)
+
+    def test_served_order_not_cancellable(self):
+        # 'served' is blocked even for a manager with a valid reason; recall first.
+        order = self._make_order(fulfilment_status='served', served_at=timezone.now())
+        response = self._cancel(order, self.manager_user, cancellation_reason=self.VALID_REASON)
+        self.assertEqual(response.status_code, 400)
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, OrderStatus_Initiated)
+
+    def test_already_cancelled_order_returns_400(self):
+        order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Cancelled)
+        response = self._cancel(order, self.manager_user, cancellation_reason=self.VALID_REASON)
+        self.assertEqual(response.status_code, 400)
+
+    def test_missing_or_invalid_reason_returns_400(self):
+        order = self._make_order(fulfilment_status='new')
+        # missing reason
+        self.assertEqual(self._cancel(order, self.kitchen_user).status_code, 400)
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, OrderStatus_Initiated)
+
+        # invalid reason
+        self.assertEqual(
+            self._cancel(order, self.kitchen_user, cancellation_reason='banana').status_code, 400,
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, OrderStatus_Initiated)
+
+    def test_denied_for_user_without_kitchen_role(self):
+        order = self._make_order(fulfilment_status='new')
+        for user in (self.waiter_user, self.outsider_user):
+            response = self._cancel(order, user, cancellation_reason=self.VALID_REASON)
+            self.assertEqual(response.status_code, 403, msg=f'expected 403 for {user.username}')
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, OrderStatus_Initiated)  # unchanged
+
+    def test_unknown_or_malformed_pk_404(self):
+        self.client.force_authenticate(user=self.kitchen_user)
+        # Unknown-but-valid UUID and a malformed id both resolve to 404, never 500.
+        self.assertEqual(
+            self.client.put(
+                _cancel_url(uuid.uuid4()),
+                {'cancellation_reason': self.VALID_REASON}, format='json',
+            ).status_code, 404,
+        )
+        self.assertEqual(
+            self.client.put(
+                _cancel_url('not-a-uuid'),
+                {'cancellation_reason': self.VALID_REASON}, format='json',
+            ).status_code, 404,
+        )

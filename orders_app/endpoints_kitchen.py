@@ -30,6 +30,7 @@ from dinify_backend.configss.string_definitions import (
     RESTAURANT_MANAGER,
     RESTAURANT_KITCHEN,
     OrderStatus_Cancelled,
+    CANCELLATION_REASONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,24 @@ def user_can_access_kitchen(user, restaurant_id) -> bool:
     )
     return any(
         role in (RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN)
+        for role in roles
+    )
+
+
+def user_can_manage_restaurant(user, restaurant_id) -> bool:
+    """
+    Owner / manager of the restaurant, or a Dinify admin. Parallels
+    user_can_access_kitchen but WITHOUT RESTAURANT_KITCHEN — the goodwill gate
+    for cancelling an order once preparation has started.
+    """
+    if is_dinify_admin(user):
+        return True
+    roles = get_user_restaurant_roles(
+        user_id=str(user.id),
+        restaurant_id=str(restaurant_id),
+    )
+    return any(
+        role in (RESTAURANT_OWNER, RESTAURANT_MANAGER)
         for role in roles
     )
 
@@ -299,6 +318,90 @@ class KitchenMenuItemStockView(APIView):
                 'status': 200,
                 'message': 'Stock updated',
                 'data': {'id': str(item.id), 'in_stock': item.in_stock},
+            },
+            status=200,
+        )
+
+
+class KitchenOrderCancelView(APIView):
+    """
+    PUT to cancel/void an order — the ONE kitchen write that sets order_status.
+
+    State-aware authorisation:
+      - 'new'                   : free void (base kitchen permission only)
+      - 'preparing' / 'ready'   : manager/owner-only (the goodwill gate)
+      - 'served'                : not directly cancellable (recall it first)
+
+    Setting order_status='cancelled' frees the table and drops the ticket from
+    the board (both the occupancy gate and the active-set query exclude
+    cancelled orders). Payments are parked — no refund mechanics. The write is
+    deliberately limited to order_status + the cancellation provenance fields;
+    payment_status and the fulfilment axis are never touched.
+    """
+
+    def put(self, request, pk):
+        order = _get_order_or_none(pk)
+        if order is None:
+            return Response({'status': 404, 'message': 'Order not found'}, status=404)
+        if not user_can_access_kitchen(request.user, order.restaurant_id):
+            return Response(
+                {'status': 403, 'message': 'You do not have permission for this kitchen'},
+                status=403,
+            )
+
+        if order.order_status == OrderStatus_Cancelled:
+            return Response(
+                {'status': 400, 'message': 'Order is already cancelled'},
+                status=400,
+            )
+        if order.fulfilment_status == 'served':
+            return Response(
+                {'status': 400, 'message': 'Cannot cancel a served order; recall it first'},
+                status=400,
+            )
+        if order.fulfilment_status in ('preparing', 'ready') and not \
+                user_can_manage_restaurant(request.user, order.restaurant_id):
+            return Response(
+                {
+                    'status': 403,
+                    'message': 'Only a manager can cancel an order once preparation has started',
+                },
+                status=403,
+            )
+
+        reason = request.data.get('cancellation_reason')
+        if reason not in CANCELLATION_REASONS:
+            return Response(
+                {'status': 400, 'message': 'A valid cancellation_reason is required'},
+                status=400,
+            )
+
+        now = timezone.now()
+        order.order_status = OrderStatus_Cancelled
+        order.cancelled_at = now
+        order.cancelled_by = request.user
+        order.cancellation_reason = reason
+        # Deliberately limited to order_status + cancellation provenance, so
+        # payment_status and the fulfilment axis are never clobbered.
+        # time_last_updated is listed so its auto_now fires on this partial save.
+        order.save(update_fields=[
+            'order_status',
+            'cancelled_at',
+            'cancelled_by',
+            'cancellation_reason',
+            'time_last_updated',
+        ])
+
+        return Response(
+            {
+                'status': 200,
+                'message': 'Order cancelled',
+                'data': {
+                    'id': str(order.id),
+                    'order_status': order.order_status,
+                    'cancelled_at': order.cancelled_at,
+                    'cancellation_reason': order.cancellation_reason,
+                },
             },
             status=200,
         )
