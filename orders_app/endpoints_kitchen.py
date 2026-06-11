@@ -16,7 +16,10 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from orders_app.models import Order, OrderItem
-from orders_app.serializers_kitchen import ActiveKitchenOrderSerializer
+from orders_app.serializers_kitchen import (
+    ActiveKitchenOrderSerializer,
+    KitchenMenuItemSerializer,
+)
 from restaurants_app.models import MenuItem
 from users_app.controllers.permissions_check import (
     is_dinify_admin,
@@ -219,6 +222,49 @@ class KitchenOrderPriorityView(APIView):
                 'message': 'Priority updated',
                 'data': {'id': str(order.id), 'priority': order.priority},
             },
+            status=200,
+        )
+
+
+class KitchenMenuItemsView(APIView):
+    """
+    GET the restaurant's on-menu items with their in_stock state — the read
+    behind the kitchen sold-out panel. Mirrors ActiveKitchenOrdersView: required
+    ?restaurant=<id>, the owner/manager/kitchen gate, the {status, message, data}
+    envelope.
+    """
+
+    def get(self, request):
+        restaurant_id = request.GET.get('restaurant')
+        if not restaurant_id:
+            return Response(
+                {'status': 400, 'message': 'restaurant query param is required'},
+                status=400,
+            )
+        if not user_can_access_kitchen(request.user, restaurant_id):
+            return Response(
+                {'status': 403, 'message': 'You do not have permission to view this kitchen'},
+                status=403,
+            )
+
+        # available=True only — these are the items currently ON the menu, the
+        # ones a kitchen can 86. Hidden (available=False) items are already off
+        # it. section__deleted=False defends against orphaned items. The default
+        # model ordering (section, listing_position, name) applies.
+        qs = (
+            MenuItem.objects
+            .filter(
+                section__restaurant=restaurant_id,
+                section__deleted=False,
+                available=True,
+                deleted=False,
+            )
+            .select_related('section')
+        )
+
+        data = KitchenMenuItemSerializer(qs, many=True).data
+        return Response(
+            {'status': 200, 'message': 'Kitchen menu items retrieved', 'data': data},
             status=200,
         )
 
