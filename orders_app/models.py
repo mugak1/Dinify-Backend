@@ -6,6 +6,9 @@ from restaurants_app.models import Restaurant, MenuItem, Table
 from dinify_backend.configss.string_definitions import (
     PaymentStatus_Pending, OrderStatus_Initiated,
     OrderItemStatus_Initiated,
+    CancellationReason_CustomerChangedMind, CancellationReason_ItemUnavailable,
+    CancellationReason_KitchenError, CancellationReason_Duplicate,
+    CancellationReason_Other,
 )
 
 
@@ -88,6 +91,30 @@ class Order(BaseModel):
     priority = models.BooleanField(default=False, db_index=True)
     # local business date the order belongs to; authoritative for daily numbering
     order_date = models.DateField(null=True, db_index=True)
+
+    # === cancellation (order_status='cancelled') — provenance only ===
+    # Cancelling is the ONE kitchen write that sets order_status; these capture
+    # who/when/why. cancelled_by mirrors fulfilment_status_updated_by's FK
+    # signature with its own related_name. payment_status and the fulfilment
+    # axis are deliberately untouched by a cancellation.
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        "users_app.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="orders_cancelled_by",
+    )
+    cancellation_reason = models.CharField(
+        max_length=50, null=True, blank=True,
+        choices=[
+            (CancellationReason_CustomerChangedMind, "Customer changed mind"),
+            (CancellationReason_ItemUnavailable, "Item unavailable"),
+            (CancellationReason_KitchenError, "Kitchen error"),
+            (CancellationReason_Duplicate, "Duplicate"),
+            (CancellationReason_Other, "Other"),
+        ],
+    )
 
     class Meta:
         db_table = 'orders'
