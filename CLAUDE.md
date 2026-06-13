@@ -81,6 +81,19 @@ with PostgreSQL on AWS RDS.
 - The session-designated branch is only the fallback for when the task text
   does not name a branch at all
 
+## Branch Base — CRITICAL
+- Before creating a feature branch, ALWAYS run `git fetch origin main` and
+  branch from `origin/main` (e.g. `git checkout -b <new> origin/main`). NEVER
+  branch from the local `main` ref — in a freshly-cloned Claude Code on the web
+  container the local `main` can be STALE (behind the real `origin/main`),
+  silently basing your work on outdated code
+- The SessionStart hook (`.claude/hooks/session-start.sh`, registered in
+  `.claude/settings.json`) auto-runs `git fetch origin main` at the start of
+  every web session as a backstop — but still branch EXPLICITLY from the fetched
+  `origin/main`, not local `main`
+- If you discover mid-task that your base was stale, `git rebase origin/main`
+  and re-verify (`./scripts/verify.sh`) before pushing
+
 ## URL Structure
 - `api/v1/restaurant-setup/` → RestaurantSetupEndpoint (catch-all) +
   dedicated endpoints for: preset-tags, restaurant-tags, upsell-config,
