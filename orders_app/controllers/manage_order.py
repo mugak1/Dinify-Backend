@@ -44,10 +44,13 @@ def update_order_status(
                     'status': 400,
                     'message': 'This order cannot be submitted.'
                 }
+        # an unauthenticated diner arrives as AnonymousUser (not None); never
+        # assign it to a User FK — normalise to None so attribution stays null.
+        if user is not None and user.is_anonymous:
+            user = None
         order.order_status = new_status
         logger.debug("The submitted user is %s", user)
         if user is not None:
-            # order.last_updated_by = User.objects.get(pk=user)
             order.last_updated_by = user
         if new_status == OrderStatus_Preparing:
             order.waiter = user
@@ -63,8 +66,10 @@ def update_order_status(
             'status': 200,
             'message': OK_ORDER_UPDATED
         }
-    except Exception as error:
-        logger.error("ErrorUpdateOrderStatus: %s", error)
+    except Exception:
+        # log the full traceback so this failure class is diagnosable; keep the
+        # user-facing message generic.
+        logger.exception("ErrorUpdateOrderStatus")
         return {
             'status': 400,
             'message': ERR_ORDER_UPDATED

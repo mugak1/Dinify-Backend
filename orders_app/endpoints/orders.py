@@ -82,15 +82,18 @@ class OrdersEndpoint(APIView):
             # source = data.get('source')
 
             user = request.user
-            if user is None:
-                if action not in ['submit']:
+            # DRF gives unauthenticated requests an AnonymousUser (not None);
+            # treat it as "no user" so diners can submit while prepare/cancel
+            # still require a real login (mirrors the block-review guard above).
+            if user is None or user.is_anonymous:
+                if action == 'submit':
+                    user = None
+                else:
                     response = {
                         'status': 400,
                         'message': 'Please log in'
                     }
                     return Response(response, status=400)
-                else:
-                    user = None
 
             order_statuses = {
                 'submit': OrderStatus_Pending,
