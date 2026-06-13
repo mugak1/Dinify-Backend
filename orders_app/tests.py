@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from django.test import TestCase
 from django.db.models.deletion import ProtectedError
+from rest_framework.test import APIClient
 
 from orders_app.models import Order, OrderItem
 from orders_app.controllers.con_orders import ConOrder, handle_add_order_items
@@ -23,6 +24,10 @@ from restaurants_app.tests import (
     TEST_OPTION_CHOICE_SMALL_COST,
 )
 from restaurants_app.models import Restaurant, Table, MenuItem
+from dinify_backend.configss.messages import OK_ORDER_UPDATED
+from dinify_backend.configss.string_definitions import (
+    OrderStatus_Initiated, OrderStatus_Pending,
+)
 
 
 def seed_order():
@@ -284,3 +289,89 @@ class TestOrderTableProtect(TestCase):
         with self.assertRaises(ProtectedError):
             restaurant.delete()
         self.assertTrue(Restaurant.objects.filter(name=TEST_RESTAURANT_NAME).exists())
+
+
+class TestAnonymousOrderPaths(TestCase):
+    """
+    Regression coverage for the AnonymousUser order-path bug: DRF hands
+    unauthenticated requests an AnonymousUser (not None), which used to slip past
+    `if user is None` guards and get assigned to User FK fields, raising a
+    ValueError that surfaced as a generic failure (submit) or a 500 (delete-item).
+    """
+
+    def setUp(self) -> None:
+        seed_user()
+        seed_restaurant(seed_owner=True)
+        seed_menu_section()
+        seed_menu_items()
+        seed_tables()
+        # APIClient with no force_authenticate → request.user is AnonymousUser,
+        # exactly reproducing an unauthenticated diner.
+        self.client = APIClient()
+        self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        self.table = Table.objects.get(number=TEST_TABLE_NUMBER1)
+        self.menu_item = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+
+    def _initiate_anonymous_order(self) -> str:
+        """Place an order as an anonymous diner and return its id."""
+        response = self.client.post(
+            '/api/v2/orders/initiate/',
+            {
+                'restaurant': str(self.restaurant.pk),
+                'table': str(self.table.pk),
+                'items': [{'item': str(self.menu_item.pk), 'quantity': 1}],
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        return str(response.json()['data']['order_details']['id'])
+
+    def test_anonymous_diner_initiate_then_submit_succeeds(self):
+        order_id = self._initiate_anonymous_order()
+
+        response = self.client.put(
+            '/api/v1/orders/submit/',
+            {'order': order_id},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['message'], OK_ORDER_UPDATED)
+
+        order = Order.objects.get(id=order_id)
+        self.assertEqual(order.order_status, OrderStatus_Pending)
+        # attribution is left null rather than crashing on AnonymousUser
+        self.assertIsNone(order.last_updated_by)
+
+    def test_anonymous_prepare_and_cancel_require_login(self):
+        order_id = self._initiate_anonymous_order()
+
+        for action in ['prepare', 'cancel']:
+            response = self.client.put(
+                f'/api/v1/orders/{action}/',
+                {'order': order_id},
+                format='json',
+            )
+            # auth-gated: rejected cleanly, not a 500 or generic update error
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json()['message'], 'Please log in')
+
+        # the rejected actions never touched the order
+        order = Order.objects.get(id=order_id)
+        self.assertEqual(order.order_status, OrderStatus_Initiated)
+
+    def test_anonymous_delete_item_does_not_500(self):
+        order_id = self._initiate_anonymous_order()
+        item = OrderItem.objects.filter(order__id=order_id).first()
+        self.assertIsNotNone(item)
+
+        response = self.client.delete(
+            '/api/v2/orders/add-items/',
+            {'item': str(item.pk), 'reason': 'changed mind'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+
+        item.refresh_from_db()
+        self.assertTrue(item.deleted)
+        # deleted_by FK is left null instead of raising on AnonymousUser
+        self.assertIsNone(item.deleted_by)
