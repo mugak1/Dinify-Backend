@@ -104,6 +104,8 @@ class Restaurant(BaseModel):
     contact_phone = models.CharField(max_length=50, null=True, blank=True)
     contact_email = models.EmailField(max_length=254, null=True, blank=True)
     landmark = models.CharField(max_length=255, null=True, blank=True)
+    # short public-facing tagline / blurb shown on the diner menu
+    tagline = models.CharField(max_length=255, null=True, blank=True)
     # free-form list of cuisine type strings (no enforced choices yet)
     cuisine_types = models.JSONField(default=list, blank=True)
     # social handles/links: {'instagram', 'facebook', 'x', 'tiktok'}
