@@ -17,6 +17,16 @@ EDIT_INFORMATION = {
         {'key': 'branding_configuration', 'label': 'branding configuration', 'type': 'dict', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'preset_tags', 'label': 'preset tags', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'country', 'label': 'country', 'type': 'char', 'min_length': 2, 'text_presentation': None},  # noqa
+        {'key': 'contact_phone', 'label': 'contact phone', 'type': 'char', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'contact_email', 'label': 'contact email', 'type': 'char', 'min_length': 0, 'text_presentation': str.lower},  # noqa
+        {'key': 'landmark', 'label': 'landmark', 'type': 'char', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'cuisine_types', 'label': 'cuisine types', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'socials', 'label': 'socials', 'type': 'dict', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'accepting_orders', 'label': 'accepting orders', 'type': 'bool', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'vat_registered', 'label': 'vat registered', 'type': 'bool', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'vat_rate', 'label': 'vat rate', 'type': 'decimal', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'tin', 'label': 'tin', 'type': 'char', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'receipt_footer', 'label': 'receipt footer', 'type': 'char', 'min_length': 0, 'text_presentation': None},  # noqa
     ],
     'restaurant_employee': [
         {'key': 'roles', 'label': 'Roles', 'type': 'list', 'min_length': 5, 'text_presentation': None},  # noqa
