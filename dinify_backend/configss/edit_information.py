@@ -20,6 +20,7 @@ EDIT_INFORMATION = {
         {'key': 'contact_phone', 'label': 'contact phone', 'type': 'char', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'contact_email', 'label': 'contact email', 'type': 'char', 'min_length': 0, 'text_presentation': str.lower},  # noqa
         {'key': 'landmark', 'label': 'landmark', 'type': 'char', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'tagline', 'label': 'tagline', 'type': 'char', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'cuisine_types', 'label': 'cuisine types', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'socials', 'label': 'socials', 'type': 'dict', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'accepting_orders', 'label': 'accepting orders', 'type': 'bool', 'min_length': 0, 'text_presentation': None},  # noqa
