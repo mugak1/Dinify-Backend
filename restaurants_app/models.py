@@ -38,6 +38,10 @@ def default_branding_configuration():
     }
 
 
+def default_socials():
+    return {'instagram': '', 'facebook': '', 'x': '', 'tiktok': ''}
+
+
 class Restaurant(BaseModel):
     """
     the model for the restaurant
@@ -95,6 +99,25 @@ class Restaurant(BaseModel):
     # eod processing
     eod_restaurant_last_date = models.DateField(null=True, db_index=True)
     eod_restaurant_status = models.IntegerField(default=0, db_index=True)
+
+    # --- Settings substrate (PR2): identity / contact ---
+    contact_phone = models.CharField(max_length=50, null=True, blank=True)
+    contact_email = models.EmailField(max_length=254, null=True, blank=True)
+    landmark = models.CharField(max_length=255, null=True, blank=True)
+    # free-form list of cuisine type strings (no enforced choices yet)
+    cuisine_types = models.JSONField(default=list, blank=True)
+    # social handles/links: {'instagram', 'facebook', 'x', 'tiktok'}
+    socials = models.JSONField(default=default_socials, blank=True)
+
+    # --- Availability (field only; order-creation kill-switch is a later PR) ---
+    # Independent of `status` (lifecycle). True = currently taking orders.
+    accepting_orders = models.BooleanField(default=True)
+
+    # --- Tax / receipts ---
+    vat_registered = models.BooleanField(default=False)
+    vat_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('18.00'))
+    tin = models.CharField(max_length=50, null=True, blank=True)
+    receipt_footer = models.TextField(null=True, blank=True)
 
     class Meta:
         """
