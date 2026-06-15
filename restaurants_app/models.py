@@ -42,6 +42,18 @@ def default_socials():
     return {'instagram': '', 'facebook': '', 'x': '', 'tiktok': ''}
 
 
+def default_opening_hours():
+    return {
+        'monday':    {'closed': False, 'open': '08:00', 'close': '22:00'},
+        'tuesday':   {'closed': False, 'open': '08:00', 'close': '22:00'},
+        'wednesday': {'closed': False, 'open': '08:00', 'close': '22:00'},
+        'thursday':  {'closed': False, 'open': '08:00', 'close': '22:00'},
+        'friday':    {'closed': False, 'open': '08:00', 'close': '22:00'},
+        'saturday':  {'closed': False, 'open': '08:00', 'close': '22:00'},
+        'sunday':    {'closed': False, 'open': '08:00', 'close': '22:00'},
+    }
+
+
 class Restaurant(BaseModel):
     """
     the model for the restaurant
@@ -114,6 +126,8 @@ class Restaurant(BaseModel):
     # --- Availability (field only; order-creation kill-switch is a later PR) ---
     # Independent of `status` (lifecycle). True = currently taking orders.
     accepting_orders = models.BooleanField(default=True)
+    # weekly opening hours: per-day {'closed': bool, 'open': 'HH:MM', 'close': 'HH:MM'}
+    opening_hours = models.JSONField(default=default_opening_hours, blank=True)
 
     # --- Tax / receipts ---
     vat_registered = models.BooleanField(default=False)

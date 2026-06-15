@@ -24,6 +24,7 @@ EDIT_INFORMATION = {
         {'key': 'cuisine_types', 'label': 'cuisine types', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'socials', 'label': 'socials', 'type': 'dict', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'accepting_orders', 'label': 'accepting orders', 'type': 'bool', 'min_length': 0, 'text_presentation': None},  # noqa
+        {'key': 'opening_hours', 'label': 'opening hours', 'type': 'dict', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'vat_registered', 'label': 'vat registered', 'type': 'bool', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'vat_rate', 'label': 'vat rate', 'type': 'decimal', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'tin', 'label': 'tin', 'type': 'char', 'min_length': 0, 'text_presentation': None},  # noqa
