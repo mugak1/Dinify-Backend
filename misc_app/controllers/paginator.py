@@ -20,12 +20,16 @@ class DinifyPaginator:
         request = self.args.get('request')
         records = self.args.get('records')
 
+        # Floor both params to 1: a 0/negative page_size would otherwise hit
+        # Paginator(per_page=0) -> ZeroDivisionError in num_pages (uncaught ->
+        # 500), and a 0/negative page is a nonsensical request that should
+        # land on page 1 rather than an empty out-of-range page.
         try:
-            page_size = int(request.GET.get('page_size', 25))
+            page_size = max(1, int(request.GET.get('page_size', 25)))
         except (ValueError, TypeError):
             page_size = 25
         try:
-            page_number = int(request.GET.get('page', 1))
+            page_number = max(1, int(request.GET.get('page', 1)))
         except (ValueError, TypeError):
             page_number = 1
 
