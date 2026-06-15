@@ -24,13 +24,25 @@ with PostgreSQL on AWS RDS.
 - Kitchen module: ✅ Backend ready — driven by `Order`/`OrderItem` fulfilment
   fields (`fulfilment_status`, `priority`, `served_at`) via
   `orders_app/endpoints_kitchen.py`, mounted at `api/v1/kitchen/`
-  (`urls_kitchen.py`). The legacy `KitchenTicket`/`KitchenTicketItem` KDS models
-  were RETIRED (migration `0030_retire_kitchen_tickets`) — do not reintroduce them
+  (`urls_kitchen.py`). Endpoints: `orders/active/` + `orders/completed/`
+  (served tickets move to the Completed feed), `orders/<pk>/fulfilment-status/`,
+  `orders/<pk>/priority/`, `orders/<pk>/cancel/` (state-aware cancel writing
+  `Order.cancellation_reason`/`cancelled_at`/`cancelled_by`, migration
+  `0033`), and the sold-out ("86") panel — `menu-items/` (list) +
+  `menu-items/<pk>/stock/` (toggles `MenuItem.in_stock`). The legacy
+  `KitchenTicket`/`KitchenTicketItem` KDS models were RETIRED (migration
+  `0030_retire_kitchen_tickets`) — do not reintroduce them
 - Restaurant tag catalog: ✅ Per-restaurant tag catalog (migrations 0044–0045) +
   `restaurant_tags.py` endpoint + `EI_RESTAURANT_TAG`; menu items reference
   catalog tags via `tag_ids`
 - Menu item extensions: ✅ Per-restaurant `menu_item_sort_mode`, `age_restricted`
   flag, and extras `extras_min_selections`/`extras_max_selections`
+- Restaurant profile & settings fields: ✅ Identity/contact (`contact_email`,
+  `contact_phone`, `landmark`, `tagline`, `cuisine_types`, `socials`),
+  availability (`accepting_orders`), and tax/receipt (`vat_registered`,
+  `vat_rate`, `tin`, `receipt_footer`) fields (migrations 0049–0050) — all
+  editable via Secretary (`EDIT_INFORMATION['restaurants']`). `vat_rate` is a
+  `DecimalField` (default 18.00); `socials` defaults via `default_socials`
 - Auth: ✅ Refresh-token rotation + blacklist-on-logout + 7-day refresh lifetime
   (SimpleJWT, `JWT_REFRESH_LIFETIME_DAYS`)
 - Tenant isolation: ✅ Restaurant-setup GET reads are authorization-scoped to
@@ -220,6 +232,9 @@ the catch-all `<str:config_detail>/` route.
 - `MenuItem.listing_position` and `MenuSection.listing_position` are
   authoritative for ordering; reorder writes go through `ConMenuItem`
   / the section-reorder path, never ad-hoc updates
+- `Order.order_remarks` was REMOVED (migration
+  `0032_remove_order_order_remarks`, dormant field) along with the dead
+  `item_note` emit from the orders API — do not reintroduce either
 
 ## Key Serializer Notes
 - `SerializerPublicGetMenuItem` includes `section` and `in_stock` —
@@ -237,8 +252,8 @@ the catch-all `<str:config_detail>/` route.
 ## Database
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove
 - All migrations must be generated and included in PRs when models change
-- Latest migration: `restaurants_app/migrations/0048_restaurant_menu_item_sort_mode.py`,
-  `orders_app/migrations/0031_alter_order_table.py`
+- Latest migration: `restaurants_app/migrations/0050_restaurant_tagline.py`,
+  `orders_app/migrations/0033_order_cancellation_reason_order_cancelled_at_and_more.py`
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
