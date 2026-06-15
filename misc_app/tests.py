@@ -381,6 +381,38 @@ class BackendTechDebtBundleTests(TestCase):
         self.assertTrue(pagination['paginated'])
         self.assertEqual(pagination['total_records'], 5)
 
+    def test_paginator_handles_zero_page_size(self):
+        # ?page_size=0 previously reached Paginator(per_page=0), whose
+        # num_pages does ceil(hits / 0) -> ZeroDivisionError. That's not an
+        # EmptyPage/InvalidPage, so it escaped the catch and 500'd. The
+        # max(1, ...) floor coerces it to 1 instead of crashing.
+        records = list(range(1, 6))
+        response = self._paginate('page=1&page_size=0', records)
+        pagination = response['pagination']
+        self.assertEqual(list(response['records']), [1])
+        self.assertEqual(pagination['page_size'], 1)
+        self.assertEqual(pagination['number_of_pages'], 5)
+        self.assertTrue(pagination['has_next'])
+
+    def test_paginator_floors_negative_page_size(self):
+        # A negative page_size used to produce odd negative-stride slices.
+        # It is floored to 1 like the zero case.
+        records = list(range(1, 6))
+        response = self._paginate('page=1&page_size=-5', records)
+        pagination = response['pagination']
+        self.assertEqual(list(response['records']), [1])
+        self.assertEqual(pagination['page_size'], 1)
+
+    def test_paginator_floors_zero_and_negative_page(self):
+        # ?page=0 / negative page are nonsensical; floor them to page 1 rather
+        # than returning an empty out-of-range page.
+        records = list(range(1, 6))
+        for query in ('page=0&page_size=5', 'page=-3&page_size=5'):
+            response = self._paginate(query, records)
+            pagination = response['pagination']
+            self.assertEqual(pagination['current_page'], 1, query)
+            self.assertEqual(list(response['records']), [1, 2, 3, 4, 5], query)
+
 
 class MsgBuilderContractTests(TestCase):
     """
