@@ -19,6 +19,10 @@ dinify_roles = [DINIFY_ACCOUNT_MANAGER, DINIFY_ADMIN]
 # only owners and managers, plus the dinify-admin bypass handled separately.
 READ_ROLES = (RESTAURANT_OWNER, RESTAURANT_MANAGER)
 
+# Restaurant roles permitted to WRITE to a restaurant's data — mirrors
+# READ_ROLES (owners + managers); the dinify-admin bypass is handled separately.
+MANAGE_ROLES = (RESTAURANT_OWNER, RESTAURANT_MANAGER)
+
 
 def get_user_restaurant_roles(user_id: str, restaurant_id: str) -> list:
     try:
@@ -110,3 +114,22 @@ def can_read_restaurant(user: User, restaurant_id) -> bool:
     if allowed is None:
         return True
     return restaurant_id is not None and str(restaurant_id) in allowed
+
+
+def can_manage_restaurant(user: User, restaurant_id) -> bool:
+    """
+    Whether ``user`` may WRITE to a single record owned by ``restaurant_id``.
+
+    Write counterpart of ``can_read_restaurant``: a dinify admin may write
+    anywhere; otherwise the user must hold an active owner/manager role in that
+    restaurant. A missing/empty ``restaurant_id`` is denied for non-admins
+    (fail closed).
+    """
+    if is_dinify_admin(user):
+        return True
+    if not restaurant_id:
+        return False
+    return any(
+        role in MANAGE_ROLES
+        for role in get_user_restaurant_roles(user, restaurant_id)
+    )

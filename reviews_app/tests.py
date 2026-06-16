@@ -611,3 +611,86 @@ class ReviewAnalyticsEndpointTests(_ScopingTestsMixin, ReviewAnalyticsTestBase):
         self._review(overall_rating=5)
         period = self._data('&category=monthly')['period']
         self.assertEqual(period['category'], 'weekly')
+
+
+RESOLUTION_URL = '/api/v1/reviews/{review_id}/resolution/'
+
+
+class ReviewResolutionEndpointTests(ReviewApiTestBase):
+    """
+    PATCH /api/v1/reviews/<int:review_id>/resolution/ — owner/manager mark-handled.
+
+    Owners and managers may toggle resolution_status open<->resolved on their own
+    restaurant; outsiders / cross-tenant owners are denied, and bad ids / targets
+    are rejected.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # A manager at restaurant A (distinct from the owner) — also a manage role.
+        self.manager_a = make_user('256700000150')
+        RestaurantEmployee.objects.create(
+            user=self.manager_a, restaurant=self.restaurant_a,
+            roles=[RESTAURANT_MANAGER],
+        )
+
+    def patch_resolution(self, user, review_id, target):
+        return self.client.patch(
+            RESOLUTION_URL.format(review_id=review_id),
+            data=json.dumps({'resolution_status': target}),
+            content_type='application/json',
+            **self.auth(user),
+        )
+
+    def test_owner_can_resolve_and_reopen(self):
+        review = self.make_review(self.make_order(self.restaurant_a, self.table_a))
+        self.assertEqual(review.resolution_status, 'open')
+        # open -> resolved
+        resp = self.patch_resolution(self.owner_a, review.id, 'resolved')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()['data']['resolution_status'], 'resolved')
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_status, 'resolved')
+        # resolved -> open
+        resp = self.patch_resolution(self.owner_a, review.id, 'open')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()['data']['resolution_status'], 'open')
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_status, 'open')
+
+    def test_manager_can_resolve_and_reopen(self):
+        review = self.make_review(self.make_order(self.restaurant_a, self.table_a))
+        resp = self.patch_resolution(self.manager_a, review.id, 'resolved')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()['data']['resolution_status'], 'resolved')
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_status, 'resolved')
+        resp = self.patch_resolution(self.manager_a, review.id, 'open')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()['data']['resolution_status'], 'open')
+
+    def test_outsider_is_forbidden(self):
+        review = self.make_review(self.make_order(self.restaurant_a, self.table_a))
+        resp = self.patch_resolution(self.outsider, review.id, 'resolved')
+        self.assertEqual(resp.status_code, 403)
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_status, 'open')
+
+    def test_cross_tenant_owner_is_forbidden(self):
+        # owner_b owns restaurant B and has no role at restaurant A.
+        review = self.make_review(self.make_order(self.restaurant_a, self.table_a))
+        resp = self.patch_resolution(self.owner_b, review.id, 'resolved')
+        self.assertEqual(resp.status_code, 403)
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_status, 'open')
+
+    def test_unknown_review_id_returns_404(self):
+        resp = self.patch_resolution(self.owner_a, 999999, 'resolved')
+        self.assertEqual(resp.status_code, 404)
+
+    def test_invalid_resolution_status_returns_400(self):
+        review = self.make_review(self.make_order(self.restaurant_a, self.table_a))
+        resp = self.patch_resolution(self.owner_a, review.id, 'archived')
+        self.assertEqual(resp.status_code, 400)
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_status, 'open')
