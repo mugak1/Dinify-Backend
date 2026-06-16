@@ -32,4 +32,5 @@ urlpatterns = [
     path('api/v1/crm/', include('crm_app.urls')),
     path('api/v1/kitchen/', include('orders_app.urls_kitchen')),
     path('api/v1/support/', include('support_app.urls')),
+    path('api/v1/reviews/', include('reviews_app.urls')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
