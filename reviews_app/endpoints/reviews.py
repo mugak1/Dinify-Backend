@@ -16,6 +16,7 @@ from users_app.controllers.permissions_check import get_readable_restaurant_ids
 from reviews_app.models import PUBLIC_RATING_THRESHOLD
 from reviews_app.serializers import ReviewRestaurantReadSerializer
 from reviews_app.controllers.submit_review import submit_review, RATING_FIELDS
+from reviews_app.controllers.resolve_review import resolve_review
 
 
 class ReviewSubmissionEndpoint(APIView):
@@ -74,4 +75,20 @@ class RestaurantReviewsEndpoint(APIView):
             'error_message': 'Sorry, an error occurred while retrieving the reviews. Please try again later.',  # noqa: E501
         }
         response = Secretary(secretary_args).read()
+        return Response(response, status=response['status'])
+
+
+class ReviewResolutionEndpoint(APIView):
+    """
+    Owner/manager mark-handled write: toggle resolution_status between 'open' and
+    'resolved'. A controlled state transition — a direct update, not a Secretary
+    edit. JWT (inherits the project IsAuthenticated default).
+    """
+
+    def patch(self, request, review_id):
+        response = resolve_review(
+            request.user,
+            review_id,
+            request.data.get('resolution_status'),
+        )
         return Response(response, status=response['status'])
