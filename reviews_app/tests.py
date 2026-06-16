@@ -15,17 +15,21 @@ API-level (``ReviewSubmissionTests`` / ``RestaurantReviewListTests``):
   param, and the rating/critical/resolution filters.
 """
 import json
+from datetime import date, timedelta
 
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from users_app.models import User
 from restaurants_app.models import Restaurant, RestaurantEmployee, Table
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active, RESTAURANT_OWNER, OrderStatus_Cancelled,
+    RestaurantStatus_Active, RESTAURANT_OWNER, RESTAURANT_MANAGER,
+    OrderStatus_Cancelled,
 )
 from reviews_app.models import PUBLIC_RATING_THRESHOLD, Review
+from reviews_app.controllers.review_analytics import DEFAULT_ANALYTICS_WINDOW_DAYS
 
 
 def make_user(phone):
@@ -333,3 +337,277 @@ class RestaurantReviewListTests(ReviewApiTestBase):
         # rating 5 AND critical (<4) -> empty.
         resp2 = self.get_reviews(self.owner_a, '?critical=true&rating=5')
         self.assertEqual(resp2.json()['data']['records'], [])
+
+
+SUMMARY_URL = '/api/v1/reviews/summary/'
+ANALYTICS_URL = '/api/v1/reviews/analytics/'
+
+
+class ReviewAnalyticsTestBase(ReviewApiTestBase):
+    """
+    Extends the shared base with a manager fixture (a second read role at
+    restaurant A), request helpers for the two analytics endpoints, and a
+    review factory that backdates created_at deterministically.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # A manager (also a READ role) at restaurant A, distinct from the owner.
+        self.manager_a = make_user('256700000140')
+        RestaurantEmployee.objects.create(
+            user=self.manager_a, restaurant=self.restaurant_a,
+            roles=[RESTAURANT_MANAGER],
+        )
+
+    def get_summary(self, user, query=''):
+        return self.client.get(f'{SUMMARY_URL}{query}', **self.auth(user))
+
+    def get_analytics(self, user, query=''):
+        return self.client.get(f'{ANALYTICS_URL}{query}', **self.auth(user))
+
+    def _review(self, days_ago=0, **kwargs):
+        """
+        Create a review for restaurant A, then pin created_at to noon `days_ago`
+        days back. auto_now_add ignores create-kwargs, so we set it with a
+        queryset .update() (bypasses save()). Noon keeps __date / Trunc bucketing
+        clear of midnight regardless of the active timezone.
+        """
+        review = self.make_review(
+            self.make_order(self.restaurant_a, self.table_a), **kwargs)
+        when = (timezone.now().replace(hour=12, minute=0, second=0, microsecond=0)
+                - timedelta(days=days_ago))
+        Review.objects.filter(id=review.id).update(created_at=when)
+        return review
+
+
+class _ScopingTestsMixin:
+    """
+    Shared scoping assertions for both analytics endpoints. Not a TestCase on its
+    own (so it is never collected standalone); concrete classes mix it in and set
+    ``endpoint_url``.
+    """
+
+    endpoint_url = None
+
+    def _get(self, user, query=''):
+        return self.client.get(f'{self.endpoint_url}{query}', **self.auth(user))
+
+    def test_owner_can_read(self):
+        resp = self._get(self.owner_a, f'?restaurant={self.restaurant_a.id}')
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_manager_can_read(self):
+        resp = self._get(self.manager_a, f'?restaurant={self.restaurant_a.id}')
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+    def test_user_with_no_role_there_is_forbidden(self):
+        resp = self._get(self.outsider, f'?restaurant={self.restaurant_a.id}')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_foreign_restaurant_is_forbidden(self):
+        # owner_a holds no role at restaurant B.
+        resp = self._get(self.owner_a, f'?restaurant={self.restaurant_b.id}')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_missing_restaurant_returns_400(self):
+        self.assertEqual(self._get(self.owner_a).status_code, 400)
+
+    def test_malformed_restaurant_uuid_returns_400(self):
+        # The UUID guard fires before any ORM call (a malformed id would 500 on
+        # Postgres for a dinify admin otherwise).
+        resp = self._get(self.owner_a, '?restaurant=not-a-uuid')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_unauthenticated_rejected(self):
+        resp = self.client.get(
+            f'{self.endpoint_url}?restaurant={self.restaurant_a.id}')
+        self.assertEqual(resp.status_code, 401)
+
+
+class ReviewSummaryEndpointTests(_ScopingTestsMixin, ReviewAnalyticsTestBase):
+    endpoint_url = SUMMARY_URL
+
+    def _data(self):
+        resp = self.get_summary(
+            self.owner_a, f'?restaurant={self.restaurant_a.id}')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()['data']
+
+    def test_aggregates_for_seeded_reviews(self):
+        for rating in (5, 5, 4, 2):
+            self._review(overall_rating=rating)
+        resolved_critical = self._review(overall_rating=1)
+        Review.objects.filter(id=resolved_critical.id).update(
+            resolution_status='resolved')
+
+        data = self._data()
+        self.assertEqual(data['average_rating'], '3.4')   # 17 / 5
+        self.assertEqual(data['total_reviews'], 5)
+        self.assertEqual(data['distribution'], [
+            {'stars': 5, 'count': 2}, {'stars': 4, 'count': 1},
+            {'stars': 3, 'count': 0}, {'stars': 2, 'count': 1},
+            {'stars': 1, 'count': 1},
+        ])
+        self.assertEqual(data['critical_count'], 2)            # ratings 2 and 1
+        self.assertEqual(data['unresolved_critical_count'], 1)  # the 1 is resolved
+
+    def test_recent_reviews_newest_first_with_order_context(self):
+        self._review(days_ago=1, overall_rating=5)
+        self._review(days_ago=2, overall_rating=4)
+        self._review(days_ago=3, overall_rating=3)
+        self._review(days_ago=4, overall_rating=2)   # 4th-newest, excluded
+
+        recent = self._data()['recent_reviews']
+        self.assertEqual(len(recent), 3)
+        self.assertEqual([r['overall_rating'] for r in recent], [5, 4, 3])
+        # order context is joined and serialized.
+        self.assertEqual(recent[0]['table_label'], 'Table 1')
+        self.assertIsNotNone(recent[0]['order_id'])
+        self.assertIn('is_critical', recent[0])
+
+    def test_recent_is_all_time_while_counts_are_windowed(self):
+        self._review(overall_rating=5)
+        self._review(overall_rating=5)
+        self._review(days_ago=40, overall_rating=1)   # outside the 30-day window
+
+        data = self._data()
+        self.assertEqual(data['total_reviews'], 2)        # window excludes it
+        self.assertEqual(data['average_rating'], '5.0')
+        self.assertEqual(data['critical_count'], 0)       # the only critical is out
+        self.assertEqual(len(data['recent_reviews']), 3)  # all-time includes it
+        self.assertIn(1, [r['overall_rating'] for r in data['recent_reviews']])
+
+    def test_zero_reviews_graceful(self):
+        data = self._data()
+        self.assertEqual(data['average_rating'], '0.0')
+        self.assertEqual(data['total_reviews'], 0)
+        self.assertEqual(
+            data['distribution'],
+            [{'stars': s, 'count': 0} for s in range(5, 0, -1)])
+        self.assertEqual(data['critical_count'], 0)
+        self.assertEqual(data['unresolved_critical_count'], 0)
+        self.assertEqual(data['recent_reviews'], [])
+
+
+class ReviewAnalyticsEndpointTests(_ScopingTestsMixin, ReviewAnalyticsTestBase):
+    endpoint_url = ANALYTICS_URL
+
+    def _data(self, query=''):
+        resp = self.get_analytics(
+            self.owner_a, f'?restaurant={self.restaurant_a.id}{query}')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()['data']
+
+    def test_dimensions_and_weakest(self):
+        self._review(overall_rating=5, food_rating=2, speed_rating=5,
+                     service_rating=4)
+        self._review(overall_rating=4, food_rating=2, speed_rating=4)
+        self._review(overall_rating=3, food_rating=2, speed_rating=3)
+
+        data = self._data()
+        dims = data['dimensions']
+        self.assertEqual(dims['food'], {'average': '2.0', 'count': 3})
+        self.assertEqual(dims['speed'], {'average': '4.0', 'count': 3})
+        # service was rated on only one review (null on the others).
+        self.assertEqual(dims['service'], {'average': '4.0', 'count': 1})
+        # value / cleanliness rated by nobody -> null average, not 0.0.
+        self.assertEqual(dims['value'], {'average': None, 'count': 0})
+        self.assertEqual(dims['cleanliness'], {'average': None, 'count': 0})
+        # food (2.0) is the lowest-average dimension with count >= 3.
+        self.assertEqual(
+            data['weakest_dimension'], {'key': 'food', 'average': '2.0'})
+
+    def test_weakest_dimension_null_below_min_count(self):
+        # food rated on only two reviews -> below MIN_DIMENSION_COUNT (3).
+        self._review(overall_rating=5, food_rating=3)
+        self._review(overall_rating=4, food_rating=2)
+
+        data = self._data()
+        self.assertIsNone(data['weakest_dimension'])
+        # the dimension still reports its average + count.
+        self.assertEqual(data['dimensions']['food'], {'average': '2.5', 'count': 2})
+
+    def test_critical_and_unresolved_counts(self):
+        self._review(overall_rating=2)
+        resolved_critical = self._review(overall_rating=1)
+        self._review(overall_rating=5)
+        Review.objects.filter(id=resolved_critical.id).update(
+            resolution_status='resolved')
+
+        data = self._data()
+        self.assertEqual(data['critical_count'], 2)
+        self.assertEqual(data['unresolved_critical_count'], 1)
+
+    def test_window_excludes_out_of_range_reviews(self):
+        self._review(days_ago=5, overall_rating=5)    # inside
+        self._review(days_ago=50, overall_rating=5)   # outside
+
+        today = timezone.now().date()
+        frm = (today - timedelta(days=10)).isoformat()
+        to = (today + timedelta(days=1)).isoformat()
+        data = self._data(f'&from={frm}&to={to}')
+        self.assertEqual(data['total_reviews'], 1)
+
+    def test_trend_weekly_buckets(self):
+        # 14 days apart guarantees three distinct ISO weeks.
+        self._review(days_ago=0, overall_rating=5)
+        self._review(days_ago=14, overall_rating=3)
+        self._review(days_ago=28, overall_rating=2)
+
+        today = timezone.now().date()
+        frm = (today - timedelta(days=35)).isoformat()
+        to = (today + timedelta(days=1)).isoformat()
+        trend = self._data(f'&from={frm}&to={to}&category=weekly')['trend']
+
+        self.assertEqual(len(trend), 3)
+        self.assertEqual([b['count'] for b in trend], [1, 1, 1])
+        # ascending by period -> oldest (2) first, newest (5) last.
+        self.assertEqual([b['average'] for b in trend], ['2.0', '3.0', '5.0'])
+        periods = [b['period'] for b in trend]
+        self.assertEqual(periods, sorted(periods))
+
+    def test_trend_daily_buckets(self):
+        self._review(days_ago=0, overall_rating=5)
+        self._review(days_ago=2, overall_rating=4)
+        self._review(days_ago=4, overall_rating=3)
+
+        today = timezone.now().date()
+        frm = (today - timedelta(days=7)).isoformat()
+        to = (today + timedelta(days=1)).isoformat()
+        trend = self._data(f'&from={frm}&to={to}&category=daily')['trend']
+
+        self.assertEqual(len(trend), 3)
+        self.assertEqual([b['count'] for b in trend], [1, 1, 1])
+        self.assertEqual([b['average'] for b in trend], ['3.0', '4.0', '5.0'])
+
+    def test_invalid_dates_return_400(self):
+        resp = self.get_analytics(
+            self.owner_a, f'?restaurant={self.restaurant_a.id}&from=not-a-date')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_zero_reviews_graceful(self):
+        data = self._data()
+        self.assertEqual(data['total_reviews'], 0)
+        self.assertEqual(data['average_rating'], '0.0')
+        self.assertEqual(
+            data['distribution'],
+            [{'stars': s, 'count': 0} for s in range(5, 0, -1)])
+        self.assertEqual(data['dimensions']['food'], {'average': None, 'count': 0})
+        self.assertEqual(
+            data['dimensions']['cleanliness'], {'average': None, 'count': 0})
+        self.assertIsNone(data['weakest_dimension'])
+        self.assertEqual(data['critical_count'], 0)
+        self.assertEqual(data['unresolved_critical_count'], 0)
+        self.assertEqual(data['trend'], [])
+
+    def test_default_window_is_90_days_weekly(self):
+        self._review(overall_rating=5)
+        period = self._data()['period']
+        self.assertEqual(period['category'], 'weekly')
+        span = date.fromisoformat(period['to']) - date.fromisoformat(period['from'])
+        self.assertEqual(span, timedelta(days=DEFAULT_ANALYTICS_WINDOW_DAYS))
+
+    def test_unknown_category_collapses_to_weekly(self):
+        self._review(overall_rating=5)
+        period = self._data('&category=monthly')['period']
+        self.assertEqual(period['category'], 'weekly')
