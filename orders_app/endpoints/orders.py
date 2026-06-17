@@ -8,9 +8,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from orders_app.models import Order
 from orders_app.serializers import SerializerListGetOrder
-from orders_app.controllers.rate import rate_and_review
 from orders_app.controllers.manage_order import update_order_status, update_item_status
-from orders_app.controllers.rate import block_review
 from dinify_backend.configss.string_definitions import (
     OrderItemStatus_Initiated,
     OrderStatus_Pending,
@@ -33,49 +31,6 @@ class OrdersEndpoint(APIView):
     """
     permission_classes = [AllowAny]
 
-    def post(self, request, action):
-        if action == 'review':
-            data = request.data
-            try:
-                response = rate_and_review(
-                    order=data.get('order'),
-                    order_item=data.get('order_item'),
-                    rating=data.get('rating'),
-                    review=data.get('review')
-                )
-                return Response(response, status=response.get('status', 200))
-            except Exception as error:
-                logger.error("Error while reviewing order: %s", error)
-                response = {
-                    'status': 400,
-                    'message': 'Sorry, an error occurred.'
-                }
-                return Response(response, status=400)
-        elif action == 'block-review':
-            # check that the token is provided
-            if request.user is None or request.user.is_anonymous:
-                response = {
-                    'status': 400,
-                    'message': 'Please log in'
-                }
-                return Response(response, status=400)
-            data = request.data
-            try:
-                response = block_review(
-                    user=request.user,
-                    order=data.get('order'),
-                    order_item=data.get('order_item'),
-                    block_reason=data.get('block_reason')
-                )
-                return Response(response, status=response.get('status', 200))
-            except Exception as error:
-                logger.error("Error while blocking review: %s", error)
-                response = {
-                    'status': 400,
-                    'message': 'Sorry, an error occurred while blocking the review.'
-                }
-                return Response(response, status=400)
-
     def put(self, request, action):
         if action in ['submit', 'prepare', 'cancel']:
             data = request.data
@@ -84,7 +39,7 @@ class OrdersEndpoint(APIView):
             user = request.user
             # DRF gives unauthenticated requests an AnonymousUser (not None);
             # treat it as "no user" so diners can submit while prepare/cancel
-            # still require a real login (mirrors the block-review guard above).
+            # still require a real login.
             if user is None or user.is_anonymous:
                 if action == 'submit':
                     user = None

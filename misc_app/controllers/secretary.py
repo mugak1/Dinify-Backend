@@ -23,9 +23,7 @@ from restaurants_app.models import Restaurant, MenuItem
 from users_app.models import User
 from misc_app.controllers.notifications.notification import Notification
 from misc_app.controllers.con_class_utils import ConMiscUtils
-from restaurants_app.serializers import SerializerAdminGetOrderReview
 from restaurants_app.serializers import SerializerPutRestaurant
-from restaurants_app.controllers.get_review_summary import get_review_summary
 
 
 RECIPIENT_GREETED_MSG_TYPES = frozenset({'new-restaurant-employee'})
@@ -294,12 +292,6 @@ class Secretary:
             filter_information=self.args.get('filter')
         )
 
-        # include the summary of the reviews
-        if self.serializer == SerializerAdminGetOrderReview:
-            reviews_summary = get_review_summary(
-                restaurant_id=self.args.get('filter').get('restaurant')
-            )
-
         if not self.args.get('paginate'):
             data = {
                 'records': self.serializer(
@@ -311,8 +303,6 @@ class Secretary:
                     'total_records': len(records),
                 }
             }
-            if self.serializer == SerializerAdminGetOrderReview:
-                data['summary'] = reviews_summary
 
             return {
                 'status': 200,
@@ -336,8 +326,6 @@ class Secretary:
             'records': serialized_records,
             'pagination': pagination_response.get('pagination')
         }
-        if self.serializer == SerializerAdminGetOrderReview:
-            data['summary'] = reviews_summary
         return {
             'status': 200,
             'message': self.ok_message,

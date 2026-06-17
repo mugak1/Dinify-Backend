@@ -54,21 +54,6 @@ ORDER_FILTERS = {
     'payment_status': 'payment_status'
 }
 
-ORDERREVIEWS_FILTERS = {
-    'restaurant': 'restaurant',
-    'from': 'time_created__gte',
-    'to': 'time_created__lte',
-}
-
-ORDERITEMREVIEWS_FILTERS = {
-    'restaurant': 'order__restaurant',
-    'order': 'order',
-    'item': 'item',
-    'from': 'time_created__gte',
-    'to': 'time_created__lte',
-}
-
-
 SERVICE_TICKET_FILTERS = {
     'ticket_type': 'ticket_type',
     'ticket_title': 'ticket_title__icontains',
@@ -103,8 +88,6 @@ FILTER_DEFINITIONS = {
     'menuitems': MENU_ITEM_FILTERS,
     'tables': TABLE_FILTERS,
     'orders': ORDER_FILTERS,
-    'orderreviews': ORDERREVIEWS_FILTERS,
-    'orderitemreviews': ORDERITEMREVIEWS_FILTERS,
     'servicetickets': SERVICE_TICKET_FILTERS,
     'diningareas': DINING_AREA_FILTERS,
     'supportissues': SUPPORT_ISSUE_FILTERS
@@ -128,7 +111,4 @@ def define_filter_params(get_params, model) -> dict:
             filter_params[
                 filter_considerations[key.lower()]
             ] = value
-    # for reviews, exclude where the details are not available
-    if model in ['orderreviews', 'orderitemreviews']:
-        filter_params['review__isnull'] = False
     return filter_params

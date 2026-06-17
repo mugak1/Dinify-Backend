@@ -25,7 +25,6 @@ from restaurants_app.serializers import (
     SerializerPutTable, SerializerPublicGetTable,
 
     SerializerPutSectionGroup, SerializerPublicGetSectionGroup,
-    SerializerAdminGetOrderReview, SerializerAdminGetOrderItemReview,
 
     SerializerPutDiningArea, SerializerGetDiningArea
 )
@@ -294,8 +293,6 @@ LIST_RESTAURANT_PATH = {
     'menuitems':        'section__restaurant_id',
     'tables':           'restaurant_id',
     'orders':           'restaurant_id',
-    'orderreviews':     'restaurant_id',
-    'orderitemreviews': 'order__restaurant_id',
     'diningareas':      'restaurant_id',
 }
 
@@ -319,10 +316,6 @@ def scope_list_filter(user, config_detail, orm_filter):
     if path is None:
         return orm_filter, False
     orm_filter[f'{path}__in'] = list(readable)
-    # Neutralise the singular client `restaurant` key if it points outside the
-    # readable set, so anything keyed on it beyond the record filter — notably
-    # the orderreviews ratings summary in Secretary.read() — cannot read another
-    # tenant. A readable value is left intact so own-restaurant summaries work.
     requested = orm_filter.get('restaurant')
     if requested is not None and str(requested) not in readable:
         orm_filter['restaurant'] = None
@@ -814,8 +807,6 @@ class RestaurantSetupEndpoint(APIView):
             'menuitems': SerializerPublicGetMenuItem,
             'tables': SerializerPublicGetTable,
             'orders': SerializerListGetOrder,
-            'orderreviews': SerializerAdminGetOrderReview,
-            'orderitemreviews': SerializerAdminGetOrderItemReview,
             'diningareas': SerializerGetDiningArea
         }
 
@@ -827,8 +818,6 @@ class RestaurantSetupEndpoint(APIView):
             'menuitems': 'Successfully retrieved the menu items',
             'tables': 'Successfully retrieved the tables',
             'orders': 'Successfully retrieved the orders',
-            'orderreviews': 'Successfully retrieved the order reviews',
-            'orderitemreviews': 'Successfully retrieved the order item reviews',
             'diningareas': 'Successfully retrieved the dining areas'
         }
 
@@ -840,8 +829,6 @@ class RestaurantSetupEndpoint(APIView):
             'menuitems': 'Error while retrieving menu items',
             'tables': 'Error while retrieving the tables',
             'orders': 'Error while retrieving the orders',
-            'orderreviews': 'Error while retrieving the order reviews',
-            'orderitemreviews': 'Error while retrieving the order item reviews',
             'diningareas': 'Error while retrieving the dining areas'
         }
 

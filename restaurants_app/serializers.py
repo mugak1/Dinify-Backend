@@ -8,7 +8,7 @@ import uuid
 logger = logging.getLogger(__name__)
 
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
-from orders_app.models import Order, OrderItem
+from orders_app.models import Order
 from rest_framework import serializers
 from restaurants_app.models import (
     Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table,
@@ -619,65 +619,6 @@ class SerializerGetFullMenu(ModelSerializer):
             filters.pop('approved')
             filters.pop('enabled')
         return MenuItem.objects.filter(**filters).count()
-
-
-class SerializerAdminGetOrderReview(ModelSerializer):
-    customer = SerializerMethodField()
-
-    class Meta:
-        model = Order
-        fields = (
-            'id', 'rating', 'review',
-            'block_review', 'customer',
-            'order_number', 'time_created'
-        )
-
-    def get_customer(self, order):
-        if order.customer is None:
-            return ''
-        return f'{order.customer.first_name}'
-
-
-class SerializerAdminGetOrderItemReview(ModelSerializer):
-    customer = SerializerMethodField()
-
-    class Meta:
-        model = OrderItem
-        fields = (
-            'id', 'order', 'rating', 'review',
-            'block_review', 'customer'
-        )
-
-    def get_customer(self, order_item):
-        if order_item.order is None or order_item.order.customer is None:
-            return ''
-        return f'{order_item.order.customer.first_name}'
-
-
-class SerializerPublicGetOrderReview(ModelSerializer):
-    customer = SerializerMethodField()
-
-    class Meta:
-        model = Order
-        fields = ('rating', 'review', 'customer', 'time_created', 'order_number')
-
-    def get_customer(self, order):
-        if order.customer is None:
-            return 'Anonymous'
-        return f'{order.customer.first_name}'
-
-
-class SerializerPublicGetOrderItemReview(ModelSerializer):
-    customer = SerializerMethodField()
-
-    class Meta:
-        model = OrderItem
-        fields = ('rating', 'review', 'customer')
-
-    def get_customer(self, order_item):
-        if order_item.order is None or order_item.order.customer is None:
-            return ''
-        return f'{order_item.order.customer.first_name}'
 
 
 class SerializerPutDiningArea(ModelSerializer):
