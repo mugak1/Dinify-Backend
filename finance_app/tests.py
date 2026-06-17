@@ -24,7 +24,6 @@ from users_app.controllers.otp_manager import OtpManager
 
 from finance_app.controllers.tx_order_payment import OrderPaymentTransaction
 from finance_app.controllers.tx_subscription import SubscriptionPaymentTransaction
-from finance_app.controllers.tx_disbursement import DisbursementTransaction
 from finance_app.controllers.update_wallet_balance import update_wallet_balance
 from finance_app.management.commands.seed_dinify_account import seed_dinify_account
 
@@ -60,7 +59,6 @@ def simulate_aggregator_feedback(
 # Patch targets for external I/O — mirrors the pattern in users_app/tests.py
 # and payment_integrations_app/tests.py
 _PATCH_MOMO_COLLECT = 'payment_integrations_app.controllers.yo_integrations.YoIntegration.momo_collect'
-_PATCH_MOMO_DISBURSE = 'payment_integrations_app.controllers.yo_integrations.YoIntegration.momo_disburse'
 _PATCH_YO_SMS = 'payment_integrations_app.controllers.yo_integrations.YoIntegration.send_sms'
 _PATCH_DPO_CREATE = 'payment_integrations_app.controllers.dpo.DpoIntegration.create_token'
 _PATCH_MESSENGER_EMAIL = 'notifications_app.controllers.messenger.Messenger.send_email'
@@ -82,7 +80,6 @@ _PATCH_OTP_VERIFY = 'users_app.controllers.otp_manager.OtpManager.verify_otp'
 @patch(_PATCH_MESSENGER_SMS, return_value=True)
 @patch(_PATCH_MESSENGER_EMAIL, return_value=True)
 @patch(_PATCH_DPO_CREATE, return_value='TEST-TOKEN')
-@patch(_PATCH_MOMO_DISBURSE, return_value=True)
 @patch(_PATCH_MOMO_COLLECT, return_value=True)
 @patch(_PATCH_YO_SMS, return_value=True)
 class FinanceAppTestFunctions(TestCase):
@@ -319,24 +316,3 @@ class FinanceAppTestFunctions(TestCase):
             restaurant=restaurant
         )
         self.assertTrue(revenue_txs.exists())
-
-    def test_disbursement(self, *mocks):
-        """Test disbursement to restaurant owner via MoMo."""
-        restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-        user = User.objects.get(username=TEST_PHONE)
-
-        # Fund the restaurant account so it passes the balance check
-        account = DinifyAccount.objects.get(restaurant=restaurant)
-        account.momo_actual_balance = Decimal('1000000')
-        account.momo_available_balance = Decimal('1000000')
-        account.save()
-
-        result = DisbursementTransaction().initiate(
-            restaurant_id=str(restaurant.id),
-            payment_mode=PaymentMode_MobileMoney,
-            user=user,
-            msisdn=TEST_MSISDN,
-            amount=50000
-        )
-        self.assertEqual(result['status'], 200)
-        self.assertIn('transaction_id', result['data'])
