@@ -1346,11 +1346,10 @@ class TenantReadIsolationTests(TestCase):
         self.table_b = Table.objects.create(
             number=1, str_number='1', restaurant=self.restaurant_b,
         )
-        # An order with a review at B — exercises orders + orderreviews.
+        # An order at B — exercises the orders read-isolation test.
         self.order_b = Order.objects.create(
             restaurant=self.restaurant_b, table=self.table_b,
             total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
-            rating=5, review='B review',
         )
 
         # Independent dinify admin with no employment at either restaurant.
@@ -1410,14 +1409,6 @@ class TenantReadIsolationTests(TestCase):
         r = self._get(self.owner_a, f'{self.BASE}/orders/?restaurant={self.restaurant_b.id}')
         self.assertEqual(r.status_code, 200)
         self.assertNotIn(str(self.order_b.id), self._record_ids(r))
-
-    def test_owner_of_a_cannot_read_b_orderreviews_or_summary(self):
-        r = self._get(self.owner_a, f'{self.BASE}/orderreviews/?restaurant={self.restaurant_b.id}')
-        self.assertEqual(r.status_code, 200)
-        self.assertNotIn(str(self.order_b.id), self._record_ids(r))
-        # The ratings summary must not leak B's aggregates either.
-        summary = r.json().get('data', {}).get('summary', {})
-        self.assertEqual(summary.get('total_ratings'), 0)
 
     def test_no_restaurant_param_does_not_leak_other_tenants(self):
         # Omitting ?restaurant= previously returned every tenant's records.

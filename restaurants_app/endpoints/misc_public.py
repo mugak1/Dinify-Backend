@@ -10,7 +10,6 @@ from misc_app.controllers.secretary import Secretary
 from restaurants_app.serializers import (
     SerializerPublicGetRestaurant,
     SerializerPublicGetTable,
-    SerializerPublicGetOrderReview, SerializerPublicGetOrderItemReview
 )
 
 
@@ -34,32 +33,22 @@ class MiscPublicEndpoint(APIView):
         orm_filter = define_filter_params(request.GET, config_detail)
 
         # update the filter based on the config_detail
-        if config_detail in ['orderreviews', 'orderitemreviews']:
-            orm_filter['block_review'] = False
-            orm_filter['restaurant__expose_order_ratings'] = True
-
         if config_detail in ['restaurants']:
             orm_filter['status'] = 'active'
 
         serializers = {
             'restaurants': SerializerPublicGetRestaurant,
             'tables': SerializerPublicGetTable,
-            'orderreviews': SerializerPublicGetOrderReview,
-            'orderitemreviews': SerializerPublicGetOrderItemReview
         }
 
         success_messages = {
             'restaurants': 'Successfully retrieved the restaurants',
             'tables': 'Successfully retrieved the tables',
-            'orderreviews': 'Successfully retrieved the order reviews',
-            'orderitemreviews': 'Successfully retrieved the order item reviews'
         }
 
         error_messages = {
             'restaurants': 'Error while retrieving restaurants',
             'tables': 'Error while retrieving the tables',
-            'orderreviews': 'Error while retrieving the order reviews',
-            'orderitemreviews': 'Error while retrieving the order item reviews'
         }
 
         serializer = serializers.get(config_detail)
