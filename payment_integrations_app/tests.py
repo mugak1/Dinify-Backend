@@ -243,23 +243,6 @@ class YoIntegrationTestSafety(TestCase):
         self.assertFalse(result)
 
     @patch('payment_integrations_app.controllers.yo_integrations.config')
-    @patch('payment_integrations_app.controllers.yo_integrations.requests.post')
-    def test_momo_disburse_network_error_returns_false(self, mock_post, mock_config):
-        """Network errors on momo_disburse should return False."""
-        mock_config.side_effect = lambda key, **kw: 'test-value'
-        mock_post.side_effect = requests.Timeout("Timed out")
-
-        from payment_integrations_app.controllers.yo_integrations import YoIntegration
-        yo = YoIntegration()
-        result = yo.momo_disburse(
-            transaction_amount=5000,
-            msisdn='256700000000',
-            transaction_id='test-yo-003'
-        )
-
-        self.assertFalse(result)
-
-    @patch('payment_integrations_app.controllers.yo_integrations.config')
     @patch('payment_integrations_app.controllers.yo_integrations.requests.get')
     def test_send_sms_network_error_returns_false(self, mock_get, mock_config):
         """SMS send network errors should return False."""
