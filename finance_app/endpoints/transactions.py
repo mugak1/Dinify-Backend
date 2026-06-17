@@ -3,7 +3,6 @@ endpoints to handle order
 """
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from finance_app.controllers.initiate_transaction import initiate_transaction
 from finance_app.controllers.tx_subscription import SubscriptionPaymentTransaction
 from finance_app.controllers.tx_disbursement import DisbursementTransaction
 
@@ -14,15 +13,6 @@ class TransactionsEndpoint(APIView):
 
     def post(self, request):
         data = request.data
-        # response = initiate_transaction(
-        #     transaction_type=data.get('transaction_type'),
-        #     transaction_platform=data.get('transaction_platform'),
-        #     actor=request.user,
-        #     amount=data.get('amount'),
-        #     otp=data.get('otp'),
-        #     bank_account=data.get('bank_account'),
-        # )
-        # return Response(response, status=200)
 
         transaction_type = data.get('transaction_type')
 
