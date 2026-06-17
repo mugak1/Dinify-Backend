@@ -299,39 +299,6 @@ class YoIntegrationTestSafety(TestCase):
         mock_mongo.__getitem__().insert_one.assert_called_once()
 
 
-class PesapalTestSafety(TestCase):
-    """Test Pesapal integration safety."""
-
-    @patch('payment_integrations_app.controllers.pesapal.config')
-    @patch('payment_integrations_app.controllers.pesapal.requests.post')
-    def test_authenticate_timeout(self, mock_post, mock_config):
-        """Verify timeout on authenticate."""
-        mock_config.side_effect = lambda key, **kw: 'test-value'
-        mock_post.return_value = MagicMock(
-            json=MagicMock(return_value={'token': 'test-token'})
-        )
-
-        from payment_integrations_app.controllers.pesapal import Pesapal
-        result = Pesapal().authenticate()
-
-        call_kwargs = mock_post.call_args
-        self.assertIn('timeout', call_kwargs.kwargs)
-        self.assertEqual(result['status'], 200)
-
-    @patch('payment_integrations_app.controllers.pesapal.config')
-    @patch('payment_integrations_app.controllers.pesapal.requests.post')
-    def test_authenticate_network_error(self, mock_post, mock_config):
-        """Network errors should return error dict with status 500."""
-        mock_config.side_effect = lambda key, **kw: 'test-value'
-        mock_post.side_effect = requests.ConnectionError("Connection refused")
-
-        from payment_integrations_app.controllers.pesapal import Pesapal
-        result = Pesapal().authenticate()
-
-        self.assertEqual(result['status'], 500)
-        self.assertIn('message', result)
-
-
 class MessengerTestSafety(TestCase):
     """Test Messenger SMS safety."""
 

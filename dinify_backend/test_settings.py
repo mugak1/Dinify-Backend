@@ -42,8 +42,6 @@ os.environ.setdefault('YO_API_USERNAME', 'test-yo-username')
 os.environ.setdefault('YO_API_PASSWORD', 'test-yo-password')
 os.environ.setdefault('YO_SMS_ACCOUNT_NO', 'test-yo-sms-account')
 os.environ.setdefault('YO_SMS_PASSWORD', 'test-yo-sms-password')
-os.environ.setdefault('PESAPAL_CONSUMER_KEY', 'test-pesapal-key')
-os.environ.setdefault('PESAPAL_CONSUMER_SECRET', 'test-pesapal-secret')
 os.environ.setdefault('TEST_MSISDN', '256700000000')
 
 from unittest.mock import MagicMock  # noqa: E402
