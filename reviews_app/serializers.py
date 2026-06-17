@@ -75,7 +75,8 @@ class ReviewRestaurantReadSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'overall_rating', 'food_rating', 'speed_rating',
             'service_rating', 'value_rating', 'cleanliness_rating', 'comment',
-            'is_public', 'resolution_status', 'submission_channel',
+            'is_public', 'resolution_status', 'resolution_note',
+            'submission_channel',
             'created_at', 'updated_at',
             'is_critical', 'order_id', 'order_number', 'table_label',
             'served_at', 'spend',

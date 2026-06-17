@@ -90,5 +90,6 @@ class ReviewResolutionEndpoint(APIView):
             request.user,
             review_id,
             request.data.get('resolution_status'),
+            note=request.data.get('resolution_note'),
         )
         return Response(response, status=response['status'])

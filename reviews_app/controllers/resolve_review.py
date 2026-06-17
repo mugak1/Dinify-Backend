@@ -21,13 +21,17 @@ logger = logging.getLogger(__name__)
 VALID_RESOLUTION_STATUSES = ('open', 'resolved')
 
 
-def resolve_review(user, review_id, target_status):
+def resolve_review(user, review_id, target_status, note=None):
     """
     Toggle a review's resolution_status to ``target_status``.
 
     ``user``          : the requesting user (owner/manager or dinify admin).
     ``review_id``     : the Review PK (an integer).
     ``target_status`` : 'open' or 'resolved'.
+    ``note``          : optional resolution note. ``None`` (absent) leaves any
+                        existing note untouched; a provided value is stored
+                        (stripped, empty -> ``None``). Independent of status, so
+                        a reopen keeps the note and a re-resolve can update it.
     """
     # 1. Validate the target first — pure input validation, no DB hit, and it
     #    leaks nothing about whether the review exists.
@@ -56,9 +60,15 @@ def resolve_review(user, review_id, target_status):
         }
 
     # 4. Apply the transition. updated_at is auto_now, so it must be listed in
-    #    update_fields for Django to refresh it.
+    #    update_fields for Django to refresh it. The note is only touched when
+    #    provided (note is not None) — so resolving/reopening without a note
+    #    never wipes an existing one.
     review.resolution_status = target_status
-    review.save(update_fields=['resolution_status', 'updated_at'])
+    update_fields = ['resolution_status', 'updated_at']
+    if note is not None:
+        review.resolution_note = note.strip() or None
+        update_fields.append('resolution_note')
+    review.save(update_fields=update_fields)
     return {
         'status': 200,
         'message': f'The review has been marked {target_status}.',
