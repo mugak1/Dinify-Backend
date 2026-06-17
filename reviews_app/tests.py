@@ -29,6 +29,7 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Cancelled,
 )
 from reviews_app.models import PUBLIC_RATING_THRESHOLD, Review
+from reviews_app.serializers import ReviewRestaurantReadSerializer
 from reviews_app.controllers.review_analytics import DEFAULT_ANALYTICS_WINDOW_DAYS
 
 
@@ -634,10 +635,15 @@ class ReviewResolutionEndpointTests(ReviewApiTestBase):
             roles=[RESTAURANT_MANAGER],
         )
 
-    def patch_resolution(self, user, review_id, target):
+    def patch_resolution(self, user, review_id, target, note=None):
+        # ``note`` is only added to the payload when explicitly passed, so the
+        # existing tests (which omit it) keep exercising the note-absent path.
+        payload = {'resolution_status': target}
+        if note is not None:
+            payload['resolution_note'] = note
         return self.client.patch(
             RESOLUTION_URL.format(review_id=review_id),
-            data=json.dumps({'resolution_status': target}),
+            data=json.dumps(payload),
             content_type='application/json',
             **self.auth(user),
         )
@@ -694,3 +700,69 @@ class ReviewResolutionEndpointTests(ReviewApiTestBase):
         self.assertEqual(resp.status_code, 400)
         review.refresh_from_db()
         self.assertEqual(review.resolution_status, 'open')
+
+    # --- resolution_note -------------------------------------------------
+    def test_resolve_with_note_saves_it_and_response_carries_it(self):
+        review = self.make_review(self.make_order(self.restaurant_a, self.table_a))
+        resp = self.patch_resolution(
+            self.owner_a, review.id, 'resolved',
+            note='Comped the meal and called the guest.',
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            resp.json()['data']['resolution_note'],
+            'Comped the meal and called the guest.',
+        )
+        review.refresh_from_db()
+        self.assertEqual(
+            review.resolution_note, 'Comped the meal and called the guest.',
+        )
+
+    def test_note_is_stripped_and_blank_clears_to_none(self):
+        review = self.make_review(self.make_order(self.restaurant_a, self.table_a))
+        # Surrounding whitespace is trimmed on save.
+        resp = self.patch_resolution(
+            self.owner_a, review.id, 'resolved', note='  Refunded the order.  ',
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_note, 'Refunded the order.')
+        # A whitespace-only note clears it back to None (strip() or None).
+        resp = self.patch_resolution(self.owner_a, review.id, 'resolved', note='   ')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        review.refresh_from_db()
+        self.assertIsNone(review.resolution_note)
+
+    def test_resolving_without_a_note_leaves_existing_note_untouched(self):
+        review = self.make_review(self.make_order(self.restaurant_a, self.table_a))
+        # Seed a note via a resolve-with-note.
+        self.patch_resolution(
+            self.owner_a, review.id, 'resolved', note='Spoke to the chef.',
+        )
+        # Reopen WITHOUT a note — the note survives (independent of status).
+        resp = self.patch_resolution(self.owner_a, review.id, 'open')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()['data']['resolution_note'], 'Spoke to the chef.')
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_status, 'open')
+        self.assertEqual(review.resolution_note, 'Spoke to the chef.')
+        # Re-resolve WITHOUT a note — still untouched (not wiped).
+        self.patch_resolution(self.owner_a, review.id, 'resolved')
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_note, 'Spoke to the chef.')
+
+    def test_re_resolving_with_a_new_note_updates_it(self):
+        review = self.make_review(self.make_order(self.restaurant_a, self.table_a))
+        self.patch_resolution(self.owner_a, review.id, 'resolved', note='First note.')
+        self.patch_resolution(self.owner_a, review.id, 'resolved', note='Updated note.')
+        review.refresh_from_db()
+        self.assertEqual(review.resolution_note, 'Updated note.')
+
+    def test_resolution_note_round_trips_through_read_serializer(self):
+        review = self.make_review(
+            self.make_order(self.restaurant_a, self.table_a),
+            resolution_status='resolved', resolution_note='Issued a voucher.',
+        )
+        data = ReviewRestaurantReadSerializer(review).data
+        self.assertIn('resolution_note', data)
+        self.assertEqual(data['resolution_note'], 'Issued a voucher.')

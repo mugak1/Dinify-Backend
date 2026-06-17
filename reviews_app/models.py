@@ -75,6 +75,11 @@ class Review(models.Model):
         choices=[('open', 'Open'), ('resolved', 'Resolved')],
         default='open',
     )
+    # Optional free-text record of the corrective action taken when an owner
+    # marks a review resolved. Independent of resolution_status — it persists
+    # across reopen/re-resolve (a reopen never wipes it; re-resolving with a new
+    # note updates it).
+    resolution_note = models.TextField(null=True, blank=True)
 
     # === forward-looking (dormant; defined now to avoid a re-migration when
     # later phases land — no behaviour is attached to them yet) ===
