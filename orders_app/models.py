@@ -47,12 +47,6 @@ class Order(BaseModel):
     order_status = models.CharField(max_length=50, default=OrderStatus_Initiated, db_index=True)
     last_updated_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='last_updated_by')  # noqa
 
-    rating = models.IntegerField(null=True, blank=True)
-    review = models.TextField(null=True, blank=True)
-    block_review = models.BooleanField(default=False)
-    block_review_reason = models.TextField(null=True, blank=True)
-    review_blocked_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='order_review_blocked_by')  # noqa
-
     # === order provenance + idempotency (Phase 2) ===
     order_source = models.CharField(
         max_length=32,
@@ -179,12 +173,6 @@ class OrderItem(BaseModel):
     savings = models.DecimalField(max_digits=50, decimal_places=2)
     cost_of_options = models.DecimalField(max_digits=50, decimal_places=2, default=Decimal('0'))
     actual_cost = models.DecimalField(max_digits=50, decimal_places=2)
-
-    rating = models.IntegerField(null=True, blank=True)
-    review = models.TextField(null=True, blank=True)
-    block_review = models.BooleanField(default=False)
-    block_review_reason = models.TextField(null=True, blank=True)
-    review_blocked_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='order_item_review_blocked_by')  # noqa
 
     status = models.CharField(max_length=50, default=OrderItemStatus_Initiated)
     last_updated_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name='order_item_last_updated_by')  # noqa

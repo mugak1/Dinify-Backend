@@ -2,11 +2,10 @@
 Models for the reviews_app.
 
 `Review` is the visit-level review — one per `Order` — that becomes the
-order-join behind the reviews analytics built in later phases. It is a
-ground-up replacement for the legacy inline review fields on
-`Order`/`OrderItem` (`rating`, `review`, `block_review`, ...), which remain
-fully functional during this build-new-then-retire window and are removed in a
-later teardown PR.
+order-join behind the reviews analytics built in later phases. It is the
+system of record for order reviews, having fully replaced the legacy inline
+review fields that previously lived on `Order`/`OrderItem`; those columns were
+dropped in the teardown PR.
 """
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
