@@ -162,13 +162,6 @@ There is no multi-database router configuration — all models use the `default`
 |---|---|
 | `process_aggregator_responses` | Accepts an aggregator argument (`yo` or `dpo`), reads unprocessed payment callback responses from MongoDB, and processes each through the corresponding integration handler. |
 
-### reports_app
-
-| Command | Description |
-|---|---|
-| `execute_eod` | Runs end-of-day procedure: blocks new orders, advances the business date, initiates per-restaurant EOD processing, and generates daily reports. |
-| `prepare_records` | Intended for record archival (user archiving code is commented out); currently calls `transform_amounts()` to transform report amount data. |
-
 ### misc_app
 
 | Command | Description |

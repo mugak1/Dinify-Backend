@@ -146,32 +146,6 @@ One exception: `vacuum_deleted_records` is also called inline (not scheduled) fr
 
 ---
 
-### reports_app
-
-#### `execute_eod`
-
-| | |
-|---|---|
-| **Run** | `python manage.py execute_eod` |
-| **Arguments** | None |
-| **What it does** | Runs the End-of-Day procedure: records EOD start time in `SysActivityConfig`, sets global EOD status to "running", bulk-updates **all** Restaurant records to block new orders (`eod_restaurant_status=1`), calls `initiate_restaurant_eod(eod_date)` (where `eod_date` is yesterday), updates the system business date to today, and calls `generate_daily_reports(eod_date)`. Several planned steps (reconciliation, notifications, archiving) are commented out or TODO. |
-| **External services** | PostgreSQL (bulk updates across multiple tables via delegated functions) |
-| **Idempotency** | **Not idempotent.** No guard against running EOD twice for the same date. Always computes `eod_date` as yesterday and runs unconditionally. Running it twice would re-block all restaurants and re-trigger EOD processing and report generation. |
-| **Error handling** | **None.** No try/except, no `transaction.atomic()`. If any step fails, the system can be left in a broken state: restaurants blocked from accepting orders with EOD incomplete. No rollback mechanism. |
-
-#### `prepare_records`
-
-| | |
-|---|---|
-| **Run** | `python manage.py prepare_records` |
-| **Arguments** | None |
-| **What it does** | Transforms string-typed monetary values to rounded floats across three MongoDB archive collections (`archive_transactions`, `archive_accounts`, `archive_orders`). The originally intended user-archiving logic is entirely commented out. |
-| **External services** | MongoDB only |
-| **Idempotency** | **Good.** Each transform function filters for documents where `transformed_amounts` is false or missing, and sets it to true after processing. Safe to re-run. |
-| **Error handling** | Mixed. `transform_account_amounts()` has per-field try/except that logs errors and continues. `transform_transaction_amounts()` and `transform_order_amounts()` have **no** try/except — a single non-numeric value will crash the command. |
-
----
-
 ### misc_app
 
 #### `vacuum_deleted_records`
@@ -205,8 +179,6 @@ This is **not a runnable command**. It is a configuration module that defines `V
 | `determine-customers` | orders | PG | Good | Partial | Atomic rollback risk |
 | `send_messages` | notifications | MongoDB, SMTP, Yo SMS | Partial | None | Re-send risk on crash |
 | `process_aggregator_responses` | payments | MongoDB, PG, APIs | Partial | None | — |
-| `execute_eod` | reports | PG (bulk) | **None** | **None** | Can leave system in broken state |
-| `prepare_records` | reports | MongoDB | Good | Mixed | — |
 | `vacuum_deleted_records` | misc | PG | Good | Minimal | — |
 
 ---
@@ -223,7 +195,7 @@ No command implements retry logic. If an external API call fails (DPO, Yo, SMTP)
 
 ### No per-item error isolation
 
-With the exception of `vacuum_deleted_records` (partial) and `prepare_records` (partial), every command that loops over items and calls external services will crash on the first failure. Items after the failure point are never processed until the next run. For `execute_eod`, a mid-process crash leaves the system in a partially-completed EOD state with no automated recovery.
+With the exception of `vacuum_deleted_records` (partial), every command that loops over items and calls external services will crash on the first failure. Items after the failure point are never processed until the next run.
 
 ### No monitoring or alerting
 
@@ -242,7 +214,6 @@ All commands use `print()` instead of Python's `logging` module or Django's `sel
 
 ### Idempotency gaps
 
-- `execute_eod` has **no** idempotency protection — running it twice for the same date will re-process everything
 - `send_messages` can re-send emails if the command crashes after sending but before marking as sent in MongoDB
 - `createaccountswithyo` can create duplicate Yo accounts if the command crashes after the API call but before persisting the reference
 - `check_dpo_transactions` and `verify-dpo-tokens` can call the DPO API multiple times for the same token across concurrent runs
