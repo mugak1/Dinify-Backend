@@ -5,7 +5,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from orders_app.models import Order
-from finance_app.controllers.initiate_order_payment import initiate_order_payment
 from finance_app.controllers.tx_order_payment import OrderPaymentTransaction
 from dinify_backend.configss.string_definitions import TransactionPlatform_Web
 

@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 from django.test import TestCase
@@ -9,17 +8,16 @@ from restaurants_app.models import Restaurant, Table
 from dinify_backend.configss.string_definitions import (
     AccountType_Restaurant,
     AccountType_DinifyRevenue,
-    ProcessingStatus_Confirmed,
+    ProcessingStatus_Pending,
     PaymentMode_MobileMoney,
+    PaymentMode_Card,
 )
 from orders_app.tests import seed_order
 from orders_app.models import Order
 from restaurants_app.tests import (
     seed_restaurant, seed_menu_section, seed_menu_items, seed_tables,
-    TEST_RESTAURANT_NAME, TEST_TABLE_NUMBER1, TEST_TABLE_NUMBER4
+    TEST_RESTAURANT_NAME, TEST_TABLE_NUMBER4
 )
-from finance_app.controllers.initiate_order_payment import initiate_order_payment
-from finance_app.controllers.process_payment_feedback import process_payment_feedback
 from users_app.controllers.otp_manager import OtpManager
 
 from finance_app.controllers.tx_order_payment import OrderPaymentTransaction
@@ -42,24 +40,10 @@ def seed_account():
     )
 
 
-def simulate_aggregator_feedback(
-    desired_aggregator: str,
-    desired_aggregator_status: str,
-    desired_status: str
-) -> dict:
-    return {
-        "aggregator": desired_aggregator,
-        "aggregator_reference": "123456789",
-        "aggregator_status": desired_aggregator_status,
-        "status": desired_status
-    }
-
-
 # Patch targets for external I/O — mirrors the pattern in users_app/tests.py
-# and payment_integrations_app/tests.py
-_PATCH_MOMO_COLLECT = 'payment_integrations_app.controllers.yo_integrations.YoIntegration.momo_collect'
+# and payment_integrations_app/tests.py. The payment aggregators (Yo momo / DPO)
+# were retired in 8a; only the SMS gateway and OTP mocks remain.
 _PATCH_YO_SMS = 'payment_integrations_app.controllers.yo_integrations.YoIntegration.send_sms'
-_PATCH_DPO_CREATE = 'payment_integrations_app.controllers.dpo.DpoIntegration.create_token'
 _PATCH_MESSENGER_EMAIL = 'notifications_app.controllers.messenger.Messenger.send_email'
 _PATCH_MESSENGER_SMS = 'notifications_app.controllers.messenger.Messenger.send_sms'
 # OTP mocks — resend_otp is mocked to avoid the user=None crash where
@@ -78,14 +62,13 @@ _PATCH_OTP_VERIFY = 'users_app.controllers.otp_manager.OtpManager.verify_otp'
 @patch(_PATCH_OTP_MAKE, return_value=True)
 @patch(_PATCH_MESSENGER_SMS, return_value=True)
 @patch(_PATCH_MESSENGER_EMAIL, return_value=True)
-@patch(_PATCH_DPO_CREATE, return_value='TEST-TOKEN')
-@patch(_PATCH_MOMO_COLLECT, return_value=True)
 @patch(_PATCH_YO_SMS, return_value=True)
 class FinanceAppTestFunctions(TestCase):
     """
     Test functions for the Finance app.
-    All external service calls (Yo Uganda, DPO, Flutterwave, Messenger SMS/email)
-    and OTP methods are mocked at class level to prevent real API hits.
+    The payment-initiation flows are aggregator-free stubs (8a): initiate
+    records a pending DinifyTransaction and returns a pending response with no
+    aggregator call. SMS/OTP and Messenger calls are mocked at class level.
     """
     def setUp(self):
         seed_account()
@@ -95,48 +78,8 @@ class FinanceAppTestFunctions(TestCase):
         seed_order()
         seed_dinify_account()
 
-    def test_order_payment(self, *mocks):
-        """Test order payment initiation and processing via aggregator feedback."""
-        restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-        table = Table.objects.get(number=TEST_TABLE_NUMBER1)
-        user = User.objects.get(username=TEST_PHONE)
-
-        order = Order.objects.get(
-            restaurant=restaurant,
-            table=table,
-            customer=user
-        )
-
-        result = initiate_order_payment(
-            order=order,
-            tip_amount=0,
-            payment_mode=PaymentMode_MobileMoney,
-            msisdn=TEST_MSISDN,
-            user=user,
-            otp='1234'
-        )
-        self.assertEqual(result['status'], 200)
-        transaction_id = result['data']['transaction_id']
-
-        feedback = simulate_aggregator_feedback(
-            desired_aggregator='flutterwave',
-            desired_aggregator_status='success',
-            desired_status='success'
-        )
-        result = process_payment_feedback(
-            transaction_id=transaction_id,
-            aggregator=feedback['aggregator'],
-            aggregator_reference=feedback['aggregator_reference'],
-            aggregator_status=feedback['aggregator_status'],
-            status=feedback['status']
-        )
-        # Verify the aggregator details were saved
-        tx = DinifyTransaction.objects.get(id=transaction_id)
-        self.assertEqual(tx.aggregator, 'flutterwave')
-        self.assertEqual(tx.aggregator_reference, '123456789')
-
     def test_momo_payment_full_no_tip(self, *mocks):
-        """Test MoMo payment with full amount, no tip, including OTP flow."""
+        """MoMo initiate now stubs to a pending transaction (no aggregator call)."""
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         table = Table.objects.get(number=TEST_TABLE_NUMBER4)
         user = User.objects.get(username=TEST_PHONE)
@@ -153,7 +96,7 @@ class FinanceAppTestFunctions(TestCase):
             order_status='served'
         )
 
-        # Without OTP — should be rejected (msisdn not registered as a user)
+        # Without OTP/amount — should be rejected
         result = OrderPaymentTransaction().initiate(
             order=order,
             payment_mode=PaymentMode_MobileMoney,
@@ -169,7 +112,8 @@ class FinanceAppTestFunctions(TestCase):
             identifier=TEST_MSISDN
         )
 
-        # With OTP — should succeed (verify_otp is mocked to return valid)
+        # With OTP — initiate returns a plain pending response and records the
+        # transaction; the aggregator collection call was retired in 8a.
         result = OrderPaymentTransaction().initiate(
             order=order,
             payment_mode=PaymentMode_MobileMoney,
@@ -180,22 +124,22 @@ class FinanceAppTestFunctions(TestCase):
         self.assertEqual(result['status'], 200)
         self.assertIn('transaction_id', result['data'])
 
-        # Simulate the aggregator confirming the transaction
         tx = DinifyTransaction.objects.get(id=result['data']['transaction_id'])
-        tx.processing_status = ProcessingStatus_Confirmed
-        tx.save()
+        self.assertEqual(tx.processing_status, ProcessingStatus_Pending)
 
-        # Processing advances the order state to paid. The custodial balance
-        # ledger has been decoupled, so no wallet balance is asserted here.
-        OrderPaymentTransaction().process(
-            transaction_id=str(tx.id),
+        # Card path now returns the same plain pending response — no DPO
+        # redirect/token (deliberate contract change; frontend follow-up).
+        card_result = OrderPaymentTransaction().initiate(
+            order=order,
+            payment_mode=PaymentMode_Card,
+            amount=100000
         )
-
-        order.refresh_from_db()
-        self.assertEqual(order.order_status, 'paid')
+        self.assertEqual(card_result['status'], 200)
+        self.assertNotIn('redirect_url', card_result['data'])
+        self.assertNotIn('dpo_token', card_result['data'])
 
     def test_subscription_payment(self, *mocks):
-        """Test subscription payment via MoMo."""
+        """Subscription initiate now stubs to a pending transaction (no aggregator call)."""
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         restaurant.subscription_validity = False
         restaurant.save()
@@ -215,7 +159,7 @@ class FinanceAppTestFunctions(TestCase):
         restaurant.flat_fee = Decimal('50000')
         restaurant.save()
 
-        # Monthly MoMo subscription payment
+        # Monthly MoMo subscription payment — pending stub
         result = SubscriptionPaymentTransaction().initiate(
             restaurant_id=restaurant.id,
             transaction_platform='web',
@@ -224,25 +168,12 @@ class FinanceAppTestFunctions(TestCase):
             msisdn=TEST_MSISDN
         )
         self.assertEqual(result['status'], 200)
+        self.assertIn('transaction_id', result['data'])
 
         txs = DinifyTransaction.objects.get(id=result['data']['transaction_id'])
-        txs.processing_status = ProcessingStatus_Confirmed
-        txs.save()
+        self.assertEqual(txs.processing_status, ProcessingStatus_Pending)
 
-        SubscriptionPaymentTransaction().process(
-            transaction_id=result['data']['transaction_id']
-        )
-        restaurant.refresh_from_db()
-        # Expiry is based on txs_record.time_created + 30 days (since it was None)
-        txs.refresh_from_db()
-        expected_expiry_date = txs.time_created + timedelta(days=30)
-        self.assertEqual(
-            restaurant.subscription_expiry_date.date(),
-            expected_expiry_date.date()
-        )
-        self.assertEqual(restaurant.subscription_validity, True)
-
-        # Verify the dinify revenue subscription transaction was recorded
+        # The transaction is recorded against the Dinify revenue account.
         dinify_account = DinifyAccount.objects.get(
             account_type=AccountType_DinifyRevenue
         )
