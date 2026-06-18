@@ -1,7 +1,6 @@
 import logging
 from typing import Optional
-from decimal import Decimal, ROUND_HALF_UP
-from django.db import transaction
+from decimal import Decimal
 from finance_app.models import DinifyAccount, DinifyTransaction
 from users_app.models import User
 from orders_app.models import Order
@@ -11,23 +10,12 @@ from dinify_backend.configss.string_definitions import (
     TransactionType_OrderPayment,
     TransactionPlatform_Web,
     PaymentForm_Split, PaymentForm_Full,
-    TransactionStatus_Success, TransactionStatus_Initiated,
-    PaymentStatus_Paid,
-    OrderStatus_Paid,
-    OrderStatus_Served,
-    OrderItemStatus_Served,
-    ProcessingStatus_Done, ProcessingStatus_Pending,
+    TransactionStatus_Initiated,
+    ProcessingStatus_Pending,
     ProcessingStatus_Confirmed,
-    ProcessingStatus_Failed,
-    PaymentMode_Cash, PaymentMode_Card, PaymentMode_MobileMoney
+    PaymentMode_MobileMoney
 )
 from users_app.controllers.otp_manager import OtpManager
-from payment_integrations_app.controllers.yo_integrations import YoIntegration
-from payment_integrations_app.controllers.dpo import DpoIntegration
-from dinify_backend.configss.messages import (
-    OK_ORDER_PAYMENT_INITIATED,
-    ERR_ORDER_PAYMENT_INITIATION
-)
 
 logger = logging.getLogger(__name__)
 
@@ -156,57 +144,7 @@ class OrderPaymentTransaction:
             manual_payment_details=manual_payment_details
         )
 
-        if payment_mode == PaymentMode_MobileMoney and not manual_payment:
-            collection = YoIntegration().momo_collect(
-                # UGX has no subunits; round to whole units for the gateway
-                transaction_amount=int(amount_collectable.quantize(Decimal('1'), rounding=ROUND_HALF_UP)),
-                msisdn=msisdn,
-                transaction_id=str(order_payment.id)
-            )
-            if collection:
-                return {
-                    'status': 200,
-                    'message': OK_ORDER_PAYMENT_INITIATED,
-                    'data': {
-                        "transaction_id": str(order_payment.id)
-                    }
-                }
-            else:
-                return {
-                    'status': 400,
-                    'message': ERR_ORDER_PAYMENT_INITIATION,
-                    'data': {
-                        "transaction_id": str(order_payment.id)
-                    }
-                }
-
-        if payment_mode == PaymentMode_Card and not manual_payment:
-            dpo_token = DpoIntegration().create_token(
-                # UGX has no subunits; round to whole units for the gateway
-                amount=int(amount_collectable.quantize(Decimal('1'), rounding=ROUND_HALF_UP)),
-                currency=account.account_currency,
-                transaction_reference=str(order_payment.id),
-                timestamp=str(order_payment.time_created),
-            )
-
-            if dpo_token is not None:
-                return {
-                    'status': 200,
-                    'message': 'The payment has been initiated successfully.',
-                    'data': {
-                        "transaction_id": str(order_payment.id),
-                        "dpo_token": dpo_token,
-                        "redirect_url": dpo_token
-                    }
-                }
-            else:
-                return {
-                    'status': 400,
-                    'message': 'Sorry, an error occurred while initiating the payment. Please try again.',  # noqa
-                    'data': {
-                        "transaction_id": str(order_payment.id)
-                    }
-                }
+        # [8b] provider collection call goes here
 
         message = 'The order payment has been initiated.'
         return {
@@ -216,34 +154,3 @@ class OrderPaymentTransaction:
                 "transaction_id": str(order_payment.id)
             }
         }
-
-    def process(self, transaction_id: str):
-        with transaction.atomic():
-            txs_record = DinifyTransaction.objects.select_for_update().get(id=transaction_id)
-            order = Order.objects.select_for_update().get(id=txs_record.order.id)
-
-            if txs_record.processing_status == ProcessingStatus_Confirmed:
-                txs_record.transaction_status = TransactionStatus_Success
-                txs_record.processing_status = ProcessingStatus_Done
-                txs_record.save()
-
-                # TODO check if the cumulative amount paid is equal to the order amount
-                total_paid = order.total_paid
-                total_paid += txs_record.transaction_amount
-                balance_payable = clean_amount(Decimal(str(order.total_cost))) - total_paid
-                order.total_paid = total_paid
-                order.balance_payable = balance_payable
-
-                if order.balance_payable <= clean_amount(Decimal('1.00')):
-                    order.payment_status = PaymentStatus_Paid
-                    if order.order_status == OrderStatus_Served:
-                        order.order_status = OrderStatus_Paid
-                order.save()
-
-                return True
-
-            elif txs_record.processing_status == ProcessingStatus_Failed:
-                txs_record.transaction_status = ProcessingStatus_Failed
-                txs_record.processing_status = ProcessingStatus_Done
-                txs_record.save()
-                return False
