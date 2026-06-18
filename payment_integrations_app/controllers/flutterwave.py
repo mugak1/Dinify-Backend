@@ -76,28 +76,3 @@ class Flutterwave:
         logger.info("Flutterwave MoMo Collection: tx_ref=%s status=%s",
                      self.transaction_id, response.get("status"))
         return response
-
-    def send_mobile_money(self):
-        req_body = {
-            "account_bank": "MPS",
-            "account_number": self.msisdn,
-            "amount": self.amount,
-            "narration": "Dinify Refund",
-            "currency": "UGX",
-            "reference": self.transaction_id,
-            "beneficiary_name": self.customer_name
-        }
-        try:
-            response = requests.post(
-                self.momo_payout_endpoint,
-                json=req_body,
-                headers=self.HEADERS,
-                timeout=REQUEST_TIMEOUT,
-            )
-            response = response.json()
-        except requests.RequestException as exc:
-            logger.error("Flutterwave MoMo payout failed: %s", exc)
-            return {"status": "error", "message": "Payout provider request failed"}
-        logger.info("Flutterwave MoMo Payout: ref=%s status=%s",
-                     self.transaction_id, response.get("status"))
-        return response

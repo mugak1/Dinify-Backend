@@ -15,7 +15,7 @@ class TransactionsEndpoint(APIView):
 
         transaction_type = data.get('transaction_type')
 
-        if transaction_type not in ['subscription', 'order_refund']:
+        if transaction_type not in ['subscription']:
             return Response({
                 'status': 400,
                 'message': 'Invalid transaction type'
