@@ -24,7 +24,6 @@ from users_app.controllers.otp_manager import OtpManager
 
 from finance_app.controllers.tx_order_payment import OrderPaymentTransaction
 from finance_app.controllers.tx_subscription import SubscriptionPaymentTransaction
-from finance_app.controllers.update_wallet_balance import update_wallet_balance
 from finance_app.management.commands.seed_dinify_account import seed_dinify_account
 
 TEST_MSISDN = '256700000000'
@@ -136,39 +135,6 @@ class FinanceAppTestFunctions(TestCase):
         self.assertEqual(tx.aggregator, 'flutterwave')
         self.assertEqual(tx.aggregator_reference, '123456789')
 
-    def test_update_wallet_balance(self, *mocks):
-        """Test wallet balance credit and debit operations."""
-        restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-        account = DinifyAccount.objects.get(restaurant=restaurant)
-
-        # Starting balances should be zero
-        self.assertEqual(account.momo_actual_balance, Decimal('0'))
-        self.assertEqual(account.momo_available_balance, Decimal('0'))
-
-        # Credit the momo wallet
-        result = update_wallet_balance(
-            id=str(account.id),
-            mode=PaymentMode_MobileMoney,
-            credit=Decimal('50000')
-        )
-        account.refresh_from_db()
-        self.assertEqual(account.momo_actual_balance, Decimal('50000'))
-        self.assertEqual(account.momo_available_balance, Decimal('50000'))
-        self.assertEqual(account.momo_cumulative_in, Decimal('50000'))
-        self.assertIn('before', result)
-        self.assertIn('after', result)
-
-        # Debit from the momo wallet
-        result = update_wallet_balance(
-            id=str(account.id),
-            mode=PaymentMode_MobileMoney,
-            debit=Decimal('20000')
-        )
-        account.refresh_from_db()
-        self.assertEqual(account.momo_actual_balance, Decimal('30000'))
-        self.assertEqual(account.momo_available_balance, Decimal('30000'))
-        self.assertEqual(account.momo_cumulative_out, Decimal('20000'))
-
     def test_momo_payment_full_no_tip(self, *mocks):
         """Test MoMo payment with full amount, no tip, including OTP flow."""
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
@@ -218,16 +184,12 @@ class FinanceAppTestFunctions(TestCase):
         tx = DinifyTransaction.objects.get(id=result['data']['transaction_id'])
         tx.processing_status = ProcessingStatus_Confirmed
         tx.save()
-        old_momo_balance = tx.account.momo_actual_balance
 
-        result = OrderPaymentTransaction().process(
+        # Processing advances the order state to paid. The custodial balance
+        # ledger has been decoupled, so no wallet balance is asserted here.
+        OrderPaymentTransaction().process(
             transaction_id=str(tx.id),
         )
-        account = DinifyAccount.objects.get(restaurant=restaurant)
-        new_momo_balance = account.momo_actual_balance
-
-        expected_balance = old_momo_balance + order.actual_cost
-        self.assertEqual(expected_balance, new_momo_balance)
 
         order.refresh_from_db()
         self.assertEqual(order.order_status, 'paid')

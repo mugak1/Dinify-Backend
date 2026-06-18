@@ -1,8 +1,4 @@
 from django.db import models
-from django.db.models.signals import post_save
-from django.dispatch import receiver
-from rest_framework.serializers import ModelSerializer
-from misc_app.controllers.utils.archive_record import archive_record
 from django.core.exceptions import ValidationError
 from users_app.models import BaseModel, User
 from restaurants_app.models import Restaurant
@@ -195,41 +191,3 @@ class BankAccountRecord(BaseModel):
     class Meta:
         db_table = 'bank_account_records'
         unique_together = ['restaurant', 'bank_name', 'account_number']
-
-
-class SerArcDinifyAccount(ModelSerializer):
-    class Meta:
-        model = DinifyAccount
-        fields = '__all__'
-
-
-@receiver(post_save, sender=DinifyAccount)
-def archive_dinify_account(sender, instance, **kwargs):
-    record_data = SerArcDinifyAccount(instance).data
-    record_data['transformed_amounts'] = False  # to indicate that the amounts have not been transformed
-    archive_record(record_data, 'archive_accounts')
-
-
-class SerArcDinifyTransaction(ModelSerializer):
-    class Meta:
-        model = DinifyTransaction
-        fields = '__all__'
-
-
-@receiver(post_save, sender=DinifyTransaction)
-def archive_dinify_transaction(sender, instance, **kwargs):
-    record_data = SerArcDinifyTransaction(instance).data
-    record_data['transformed_amounts'] = False  # to indicate that the amounts have not been transformed
-    archive_record(record_data, 'archive_transactions')
-
-
-class SerArcBankAccountRecord(ModelSerializer):
-    class Meta:
-        model = BankAccountRecord
-        fields = '__all__'
-
-
-@receiver(post_save, sender=BankAccountRecord)
-def archive_bank_account_record(sender, instance, **kwargs):
-    record_data = SerArcBankAccountRecord(instance).data
-    archive_record(record_data, 'archive_bank_account_records')

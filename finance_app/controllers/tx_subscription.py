@@ -15,7 +15,6 @@ from dinify_backend.configss.string_definitions import (
 )
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
 from payment_integrations_app.controllers.dpo import DpoIntegration
-from finance_app.controllers.update_wallet_balance import update_wallet_balance
 
 logger = logging.getLogger(__name__)
 
@@ -134,13 +133,6 @@ class SubscriptionPaymentTransaction:
             if txs_record.processing_status == ProcessingStatus_Confirmed:
                 logger.debug("Payment mode: %s", txs_record.payment_mode)
                 if txs_record.payment_mode in [PaymentMode_MobileMoney, PaymentMode_Card]:
-                    # TODO update account balances
-                    balance_update = update_wallet_balance(
-                        id=str(txs_record.account.id),
-                        mode=txs_record.payment_mode,
-                        credit=txs_record.transaction_amount
-                    )
-                    txs_record.account_balances = balance_update
                     txs_record.transaction_status = TransactionStatus_Success
                     txs_record.processing_status = ProcessingStatus_Done
                     txs_record.amount_in = txs_record.transaction_amount
@@ -163,13 +155,6 @@ class SubscriptionPaymentTransaction:
                 else:
                     logger.debug("Payment mode not supported yet")
             elif txs_record.processing_status == ProcessingStatus_Failed:
-                # TODO update account balances
-                balance_update = update_wallet_balance(
-                    id=str(txs_record.account.id),
-                    mode=txs_record.payment_mode,
-                    credit=Decimal('0.00')
-                )
-                txs_record.account_balances = balance_update
                 txs_record.transaction_status = TransactionStatus_Success
                 txs_record.processing_status = ProcessingStatus_Done
                 txs_record.save()
