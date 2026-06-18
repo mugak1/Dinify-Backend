@@ -4,9 +4,7 @@ from users_app.models import BaseModel, User
 from restaurants_app.models import Restaurant
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
-    AccountType_Restaurant, AccountType_DinifyRevenue, AccountType_User,
     PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card,
-    AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked,
     TransactionType_OrderPayment, TransactionType_OrderRefund, TransactionType_OrderCharge, TransactionType_Disbursement, TransactionType_Subscription,  # noqa
     TransactionStatus_Success, TransactionStatus_Failed, TransactionStatus_Pending, TransactionStatus_Initiated,  # noqa
     TransactionPlatform_Web,
@@ -14,17 +12,15 @@ from dinify_backend.configss.string_definitions import (
     PaymentForm_Full
 )
 
-ACCOUNT_TYPES = [AccountType_Restaurant, AccountType_DinifyRevenue, AccountType_User]
 PAYMENT_MODES = [PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card]  # noqa
-ACCOUNT_STATUSES = [AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked]
 TRANSACTION_TYPES = [TransactionType_OrderPayment, TransactionType_OrderRefund, TransactionType_OrderCharge, TransactionType_Disbursement, TransactionType_Subscription]  # noqa
 TRANSACTION_STATUSES = [TransactionStatus_Success, TransactionStatus_Failed, TransactionStatus_Pending, TransactionStatus_Initiated]  # noqa
 TRANSACTION_PLATFORMS = [TransactionPlatform_Web]
 
 
+# Retained as no-ops solely because finance_app/migrations/0001_initial.py references them by path; no model uses them anymore.
 def validate_account_type(value):
-    if value not in ACCOUNT_TYPES:
-        raise ValidationError(f"{value} is not a valid account type.")
+    return None
 
 
 def validate_payment_mode(value):
@@ -32,9 +28,9 @@ def validate_payment_mode(value):
         raise ValidationError(f"{value} is not a valid payment mode.")
 
 
+# Retained as no-ops solely because finance_app/migrations/0001_initial.py references them by path; no model uses them anymore.
 def validate_account_status(value):
-    if value not in ACCOUNT_STATUSES:
-        raise ValidationError(f"{value} is not a valid account status.")
+    return None
 
 
 def validate_transaction_type(value):
@@ -53,37 +49,10 @@ def validate_transaction_platform(value):
 
 
 # Create your models here.
-class DinifyAccount(BaseModel):
-    """
-    the accounts held at Dinify
-    """
-    restaurant = models.ForeignKey(
-        Restaurant,
-        on_delete=models.CASCADE,
-        null=True
-    )
-    user = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        null=True
-    )  # to facilitate waiter tips
-
-    account_currency = models.CharField(default="UGX", max_length=10, db_index=True)
-    account_type = models.CharField(validators=[validate_account_type], max_length=255, db_index=True)  # noqa
-    account_status = models.CharField(validators=[validate_account_status], default=AccountStatus_Active, max_length=20)  # noqa
-
-    class Meta:
-        """
-        the metadata for the DinifyAccount model
-        """
-        db_table = 'accounts'
-
-
 class DinifyTransaction(BaseModel):
     """
     the transactions on the platform
     """
-    account = models.ForeignKey(DinifyAccount, on_delete=models.CASCADE)
     # for direct subscriptions
     restaurant = models.ForeignKey(Restaurant, on_delete=models.SET_NULL, null=True, blank=True)
     order = models.ForeignKey(Order, on_delete=models.SET_NULL, null=True, blank=True)

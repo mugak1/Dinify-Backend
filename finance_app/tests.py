@@ -3,11 +3,9 @@ from unittest.mock import patch
 from django.test import TestCase
 from users_app.models import User
 from users_app.tests import TEST_PHONE, seed_user
-from finance_app.models import DinifyAccount, DinifyTransaction
+from finance_app.models import DinifyTransaction
 from restaurants_app.models import Restaurant, Table
 from dinify_backend.configss.string_definitions import (
-    AccountType_Restaurant,
-    AccountType_DinifyRevenue,
     ProcessingStatus_Pending,
     PaymentMode_MobileMoney,
     PaymentMode_Card,
@@ -22,22 +20,8 @@ from users_app.controllers.otp_manager import OtpManager
 
 from finance_app.controllers.tx_order_payment import OrderPaymentTransaction
 from finance_app.controllers.tx_subscription import SubscriptionPaymentTransaction
-from finance_app.management.commands.seed_dinify_account import seed_dinify_account
 
 TEST_MSISDN = '256700000000'
-
-
-def seed_account():
-    """
-    seed the account for the test
-    """
-    seed_user()
-    seed_restaurant(seed_owner=True)
-    restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-    DinifyAccount.objects.create(
-        account_type=AccountType_Restaurant,
-        restaurant=restaurant
-    )
 
 
 # Patch targets for external I/O — mirrors the pattern in users_app/tests.py
@@ -71,12 +55,12 @@ class FinanceAppTestFunctions(TestCase):
     aggregator call. SMS/OTP and Messenger calls are mocked at class level.
     """
     def setUp(self):
-        seed_account()
+        seed_user()
+        seed_restaurant(seed_owner=True)
         seed_menu_section()
         seed_menu_items()
         seed_tables()
         seed_order()
-        seed_dinify_account()
 
     def test_momo_payment_full_no_tip(self, *mocks):
         """MoMo initiate now stubs to a pending transaction (no aggregator call)."""
@@ -173,12 +157,9 @@ class FinanceAppTestFunctions(TestCase):
         txs = DinifyTransaction.objects.get(id=result['data']['transaction_id'])
         self.assertEqual(txs.processing_status, ProcessingStatus_Pending)
 
-        # The transaction is recorded against the Dinify revenue account.
-        dinify_account = DinifyAccount.objects.get(
-            account_type=AccountType_DinifyRevenue
-        )
+        # The transaction is recorded against the restaurant (record-only
+        # DinifyTransaction; the dinify_revenue account was removed in 8a).
         revenue_txs = DinifyTransaction.objects.filter(
-            account=dinify_account,
             restaurant=restaurant
         )
         self.assertTrue(revenue_txs.exists())

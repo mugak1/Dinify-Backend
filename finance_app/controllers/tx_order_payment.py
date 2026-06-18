@@ -1,12 +1,11 @@
 import logging
 from typing import Optional
 from decimal import Decimal
-from finance_app.models import DinifyAccount, DinifyTransaction
+from finance_app.models import DinifyTransaction
 from users_app.models import User
 from orders_app.models import Order
 from misc_app.controllers.clean_amount import clean_amount
 from dinify_backend.configss.string_definitions import (
-    AccountType_Restaurant,
     TransactionType_OrderPayment,
     TransactionPlatform_Web,
     PaymentForm_Split, PaymentForm_Full,
@@ -37,14 +36,6 @@ class OrderPaymentTransaction:
         manual_payment_details: Optional[dict] = None,
         otp: Optional[str] = None
     ) -> dict:
-        try:
-            account = DinifyAccount.objects.get(restaurant=order.restaurant)
-        except DinifyAccount.DoesNotExist:
-            account = DinifyAccount.objects.create(
-                account_type=AccountType_Restaurant,
-                restaurant=order.restaurant
-            )
-
         transaction_amount = clean_amount(Decimal(str(order.actual_cost))) if payment_form is PaymentForm_Full else clean_amount(Decimal(str(amount))) # noqa
         if transaction_amount is None:
             return {
@@ -127,7 +118,6 @@ class OrderPaymentTransaction:
 
         # make a transaction record for the payment
         order_payment = DinifyTransaction.objects.create(
-            account=account,
             order=order,
             restaurant=order.restaurant,
             transaction_type=TransactionType_OrderPayment,

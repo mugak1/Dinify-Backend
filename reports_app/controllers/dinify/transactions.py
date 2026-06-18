@@ -16,7 +16,7 @@ def generate_dinify_transaction_report(
     if date_to is not None:
         filters['time_created__date__lte'] = date_to
     if restaurant_id is not None:
-        filters['account__restaurant'] = restaurant_id
+        filters['restaurant'] = restaurant_id
     if transaction_status is not None:
         filters['transaction_status'] = transaction_status
     if transaction_type is not None:

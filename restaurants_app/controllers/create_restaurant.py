@@ -14,8 +14,6 @@ from dinify_backend.configss.messages import MESSAGES
 from dinify_backend.configss.required_information import REQUIRED_INFORMATION
 from restaurants_app.serializers import SerializerPutRestaurant, SerializerPutRestaurantEmployee
 from misc_app.controllers.check_required_information import check_required_information
-from dinify_backend.configss.string_definitions import AccountType_Restaurant
-from finance_app.serializers import SerializerPutAccount
 from users_app.controllers.self_register import self_register
 from users_app.models import User
 from misc_app.controllers.notifications.notification import Notification
@@ -57,55 +55,46 @@ def create_restaurant(data: dict, auth_info: dict) -> dict:
     if record.is_valid():
         with transaction.atomic():
             record.save()
-            # create the restaurant account
-            account_data = {
-                'account_type': AccountType_Restaurant,
-                'restaurant': record.data['id']
+
+            # save the restaurant-employee mapping
+            employee = {
+                'user': record.data['owner'],
+                'restaurant': record.data['id'],
+                'roles': [ROLES.get('RESTAURANT_OWNER')],
+                'created_by': auth_info['user_id']
             }
-            account_record = SerializerPutAccount(data=account_data)
-            if account_record.is_valid():
-                account_record.save()
 
-                # save the restaurant-employee mapping
-                employee = {
-                    'user': record.data['owner'],
-                    'restaurant': record.data['id'],
-                    'roles': [ROLES.get('RESTAURANT_OWNER')],
-                    'created_by': auth_info['user_id']
+            employee_record = SerializerPutRestaurantEmployee(data=employee)
+            if employee_record.is_valid():
+                employee_record.save()
+
+                # create the notification for the restaurant
+                Notification(msg_data={
+                    'msg_type': 'new-restaurant',
+                    'first_name': auth_info['first_name'],
+                    'restaurant_name': record.data['name'],
+                    'recipient_email': auth_info['email'],
+                    'restaurant_id': record.data['id']
+                }).create_notification()
+                # save to the action log, i.e. creating a restaurant
+                save_action(
+                    affected_model='Restaurant',
+                    affected_record=str(record.data['id']),
+                    action='created-restaurant',
+                    narration='Created a new restaurant record',
+                    result=ACTION_LOG_STATUSES.get('success'),
+                    user_id=auth_info['user_id'],
+                    username=auth_info['email'],
+                    submitted_data=data,
+                    changes=None,
+                    filter_information=None
+                )
+                return {
+                    'status': 200,
+                    'message': MESSAGES.get('OK_CREATE_RESTAURANT'),
+                    'data': record.data
                 }
-
-                employee_record = SerializerPutRestaurantEmployee(data=employee)
-                if employee_record.is_valid():
-                    employee_record.save()
-
-                    # create the notification for the restaurant
-                    Notification(msg_data={
-                        'msg_type': 'new-restaurant',
-                        'first_name': auth_info['first_name'],
-                        'restaurant_name': record.data['name'],
-                        'recipient_email': auth_info['email'],
-                        'restaurant_id': record.data['id']
-                    }).create_notification()
-                    # save to the action log, i.e. creating a restaurant
-                    save_action(
-                        affected_model='Restaurant',
-                        affected_record=str(record.data['id']),
-                        action='created-restaurant',
-                        narration='Created a new restaurant record',
-                        result=ACTION_LOG_STATUSES.get('success'),
-                        user_id=auth_info['user_id'],
-                        username=auth_info['email'],
-                        submitted_data=data,
-                        changes=None,
-                        filter_information=None
-                    )
-                    return {
-                        'status': 200,
-                        'message': MESSAGES.get('OK_CREATE_RESTAURANT'),
-                        'data': record.data
-                    }
-                raise Exception('Failed to create restaurant employee')
-            raise Exception('Failed to create restaurant account')
+            raise Exception('Failed to create restaurant employee')
     else:
         logger.error("RestaurantError-Create: %s", record.errors)
         error_message = ""
@@ -198,71 +187,60 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
         with transaction.atomic():
             record.save()
 
-            # create the restaurant account
-            account_data = {
-                'account_type': AccountType_Restaurant,
-                'restaurant': record.data['id']
+            # save the restaurant-employee mapping
+            employee = {
+                'user': user_creation_result['user_id'],
+                'restaurant': record.data['id'],
+                'roles': [ROLES.get('RESTAURANT_OWNER')],
+                'created_by': auth_info['user_id']
             }
 
-            account_record = SerializerPutAccount(data=account_data)
-            if account_record.is_valid():
-                account_record.save()
+            employee_record = SerializerPutRestaurantEmployee(data=employee)
+            if employee_record.is_valid():
+                employee_record.save()
 
-                # save the restaurant-employee mapping
-                employee = {
-                    'user': user_creation_result['user_id'],
-                    'restaurant': record.data['id'],
-                    'roles': [ROLES.get('RESTAURANT_OWNER')],
-                    'created_by': auth_info['user_id']
+                # create the notification for the restaurant
+                Notification(msg_data={
+                    'msg_type': 'admin-new-restaurant',
+                    'first_name': user_profile.first_name,
+                    'restaurant_name': data['name'],
+                    'restaurant_id': record.data['id']
+                }).create_notification()
+
+                # save action for creating a restaurant
+                save_action(
+                    affected_model='Restaurant',
+                    affected_record=str(record.data['id']),
+                    action='created-restaurant',
+                    narration='Created a new restaurant record',
+                    result=ACTION_LOG_STATUSES.get('success'),
+                    user_id=auth_info['user_id'],
+                    username=auth_info['email'],
+                    submitted_data=data,
+                    changes=None,
+                    filter_information=None
+                )
+
+                # save action for creating employee mapping
+                save_action(
+                    affected_model='RestaurantEmployee',
+                    affected_record=str(record.data['id']),
+                    action='added-employee-to-restaurant',
+                    narration='Added restaurant owner as an employee to the restaurant',
+                    result=ACTION_LOG_STATUSES.get('success'),
+                    user_id=auth_info['user_id'],
+                    username=auth_info['email'],
+                    submitted_data=data,
+                    changes=None,
+                    filter_information=None
+                )
+
+                return {
+                    'status': 200,
+                    'message': MESSAGES.get('OK_CREATE_RESTAURANT'),
+                    'data': record.data
                 }
-
-                employee_record = SerializerPutRestaurantEmployee(data=employee)
-                if employee_record.is_valid():
-                    employee_record.save()
-
-                    # create the notification for the restaurant
-                    Notification(msg_data={
-                        'msg_type': 'admin-new-restaurant',
-                        'first_name': user_profile.first_name,
-                        'restaurant_name': data['name'],
-                        'restaurant_id': record.data['id']
-                    }).create_notification()
-
-                    # save action for creating a restaurant
-                    save_action(
-                        affected_model='Restaurant',
-                        affected_record=str(record.data['id']),
-                        action='created-restaurant',
-                        narration='Created a new restaurant record',
-                        result=ACTION_LOG_STATUSES.get('success'),
-                        user_id=auth_info['user_id'],
-                        username=auth_info['email'],
-                        submitted_data=data,
-                        changes=None,
-                        filter_information=None
-                    )
-
-                    # save action for creating employee mapping
-                    save_action(
-                        affected_model='RestaurantEmployee',
-                        affected_record=str(record.data['id']),
-                        action='added-employee-to-restaurant',
-                        narration='Added restaurant owner as an employee to the restaurant',
-                        result=ACTION_LOG_STATUSES.get('success'),
-                        user_id=auth_info['user_id'],
-                        username=auth_info['email'],
-                        submitted_data=data,
-                        changes=None,
-                        filter_information=None
-                    )
-
-                    return {
-                        'status': 200,
-                        'message': MESSAGES.get('OK_CREATE_RESTAURANT'),
-                        'data': record.data
-                    }
-                raise Exception('Failed to create restaurant employee')
-            raise Exception('Failed to create restaurant account')
+            raise Exception('Failed to create restaurant employee')
     else:
         logger.error("RestaurantError-Create: %s", record.errors)
         error_message = ""

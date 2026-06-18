@@ -2,9 +2,8 @@ import logging
 from typing import Optional
 from restaurants_app.models import Restaurant
 from users_app.models import User
-from finance_app.models import DinifyAccount, DinifyTransaction
+from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
-    AccountType_DinifyRevenue,
     ProcessingStatus_Pending,
     TransactionType_Subscription,
 )
@@ -32,22 +31,12 @@ class SubscriptionPaymentTransaction:
                 'message': 'Subscription payment not supported for per order subscription'
             }
 
-        account = None
         transaction_amount = restaurant.flat_fee
-
-        account = DinifyAccount.objects.get(account_type=AccountType_DinifyRevenue)
-
-        if account is None:
-            return {
-                'status': 400,
-                'message': 'An error occurred while determining the account'
-            }
 
         # TODO require OTP if the number used is new to the platform
         # make a transaction record for the payment
         processing_status = ProcessingStatus_Pending
         subscription_payment = DinifyTransaction.objects.create(
-            account=account,
             restaurant=restaurant,
             transaction_type=TransactionType_Subscription,
             transaction_platform=transaction_platform,
