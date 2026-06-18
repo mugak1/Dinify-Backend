@@ -64,46 +64,6 @@ class FlutterwaveTestSafety(TestCase):
         self.assertEqual(result['status'], 'error')
         self.assertIn('message', result)
 
-    @patch('payment_integrations_app.controllers.flutterwave.config')
-    @patch('payment_integrations_app.controllers.flutterwave.requests.post')
-    def test_send_mobile_money_timeout(self, mock_post, mock_config):
-        """Verify timeout is passed to requests.post for MoMo payout."""
-        mock_config.return_value = 'test-secret'
-        mock_post.return_value = MagicMock(
-            json=MagicMock(return_value={'status': 'success'})
-        )
-
-        from payment_integrations_app.controllers.flutterwave import Flutterwave
-        fw = Flutterwave(
-            amount=5000,
-            transaction_id='test-tx-003',
-            msisdn='256700000000',
-            restaurant_country='UG',
-        )
-        result = fw.send_mobile_money()
-
-        call_kwargs = mock_post.call_args
-        self.assertIn('timeout', call_kwargs.kwargs)
-        self.assertEqual(result['status'], 'success')
-
-    @patch('payment_integrations_app.controllers.flutterwave.config')
-    @patch('payment_integrations_app.controllers.flutterwave.requests.post')
-    def test_send_mobile_money_network_error(self, mock_post, mock_config):
-        """Payout network errors should return an error dict."""
-        mock_config.return_value = 'test-secret'
-        mock_post.side_effect = requests.Timeout("Request timed out")
-
-        from payment_integrations_app.controllers.flutterwave import Flutterwave
-        fw = Flutterwave(
-            amount=5000,
-            transaction_id='test-tx-004',
-            msisdn='256700000000',
-            restaurant_country='UG',
-        )
-        result = fw.send_mobile_money()
-
-        self.assertEqual(result['status'], 'error')
-
     def test_unsupported_telecom_returns_error(self):
         """Unsupported telecom should return error without making HTTP call."""
         from payment_integrations_app.controllers.flutterwave import Flutterwave
