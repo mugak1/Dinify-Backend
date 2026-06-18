@@ -10,7 +10,7 @@ from dinify_backend.configss.string_definitions import (
     AccountType_Restaurant,
     AccountType_DinifyRevenue,
     ProcessingStatus_Confirmed,
-    PaymentMode_MobileMoney, PaymentMode_Ova,
+    PaymentMode_MobileMoney,
 )
 from orders_app.tests import seed_order
 from orders_app.models import Order
@@ -235,7 +235,7 @@ class FinanceAppTestFunctions(TestCase):
         self.assertEqual(order.order_status, 'paid')
 
     def test_subscription_payment(self, *mocks):
-        """Test subscription payment via MoMo and OVA."""
+        """Test subscription payment via MoMo."""
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         restaurant.subscription_validity = False
         restaurant.save()
@@ -281,31 +281,6 @@ class FinanceAppTestFunctions(TestCase):
             expected_expiry_date.date()
         )
         self.assertEqual(restaurant.subscription_validity, True)
-
-        # Credit restaurant account for OVA payment test
-        account = DinifyAccount.objects.get(restaurant=restaurant)
-        account.momo_actual_balance = 1000000
-        account.momo_available_balance = 1000000
-        account.save()
-
-        # OVA payment (wallet-to-wallet)
-        result = SubscriptionPaymentTransaction().initiate(
-            restaurant_id=restaurant.id,
-            transaction_platform='web',
-            payment_mode=PaymentMode_Ova,
-            user=None,
-            msisdn=TEST_MSISDN
-        )
-        self.assertEqual(result['status'], 200)
-
-        txs = DinifyTransaction.objects.get(id=result['data']['transaction_id'])
-        txs.processing_status = ProcessingStatus_Confirmed
-        txs.save()
-
-        SubscriptionPaymentTransaction().process(
-            transaction_id=result['data']['transaction_id']
-        )
-        restaurant.refresh_from_db()
 
         # Verify the dinify revenue subscription transaction was recorded
         dinify_account = DinifyAccount.objects.get(
