@@ -32,7 +32,6 @@ class SerializerGetRestaurantTransactionListing(ModelSerializer):
             'id', 'time_created', 'transaction_type',
             'order_number', 'amount_in', 'amount_out',
             'transaction_status', 'transaction_platform',
-            'account_balances'
         )
 
     def get_order_number(self, record):
@@ -75,7 +74,6 @@ class SerializerGetDinifyTransactionListing(ModelSerializer):
             'transaction_status', 'transaction_platform',
             'manual_payment', 'manual_payment_details',
             'payment_mode', 'aggregator', 'aggregator_reference',
-            'account_balances'
         )
 
     def get_transaction_type(self, record):
