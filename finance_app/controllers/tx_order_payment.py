@@ -16,14 +16,11 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Paid,
     OrderStatus_Served,
     OrderItemStatus_Served,
-    AccountType_User,
-    TransactionType_Tip,
     ProcessingStatus_Done, ProcessingStatus_Pending,
     ProcessingStatus_Confirmed,
     ProcessingStatus_Failed,
     PaymentMode_Cash, PaymentMode_Card, PaymentMode_MobileMoney
 )
-from finance_app.controllers.tx_tip import TipTransaction
 from users_app.controllers.otp_manager import OtpManager
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
 from payment_integrations_app.controllers.dpo import DpoIntegration
@@ -43,7 +40,6 @@ class OrderPaymentTransaction:
     def initiate(
         self,
         order: Order,
-        tip_amount: int,
         payment_mode: str,
         transaction_platform=TransactionPlatform_Web,
         payment_form=PaymentForm_Full,
@@ -68,7 +64,6 @@ class OrderPaymentTransaction:
                 'status': 400,
                 'message': 'Invalid transaction amount'
             }
-        tip_amount = clean_amount(Decimal(str(tip_amount)))
 
         if payment_form == PaymentForm_Split:
             logger.debug("inside split payment form, amount: %s", amount)
@@ -137,9 +132,7 @@ class OrderPaymentTransaction:
                 }
 
         # determine the amount to collect based on the aggregator charges
-        amount_collectable = transaction_amount + tip_amount
-        if payment_mode is PaymentMode_MobileMoney:
-            amount_collectable = transaction_amount
+        amount_collectable = transaction_amount
 
         processing_status = ProcessingStatus_Pending
         if manual_payment:
@@ -155,7 +148,6 @@ class OrderPaymentTransaction:
             transaction_platform=transaction_platform,
             processing_status=processing_status,
             transaction_amount=transaction_amount,
-            tip_amount=tip_amount,
             transaction_collected_amount=amount_collectable,
             msisdn=msisdn,
             payment_mode=payment_mode,
@@ -257,12 +249,6 @@ class OrderPaymentTransaction:
                         order.order_status = OrderStatus_Paid
                 order.save()
 
-                if txs_record.tip_amount > Decimal('0.00'):
-                    return TipTransaction().initiate(
-                        waiter=order.waiter,
-                        order_payment=txs_record,
-                        amount=txs_record.tip_amount
-                    )
                 return True
 
             elif txs_record.processing_status == ProcessingStatus_Failed:

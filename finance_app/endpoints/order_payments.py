@@ -30,7 +30,6 @@ class OrderPaymentsEndpoint(APIView):
 
         response = OrderPaymentTransaction().initiate(
             order=Order.objects.get(id=data.get('order')),
-            tip_amount=data.get('tip_amount', 0),
             payment_mode=data.get('payment_mode'),
             transaction_platform=data.get('platform', TransactionPlatform_Web),
             payment_form=data.get('payment_form'),

@@ -190,7 +190,6 @@ class FinanceAppTestFunctions(TestCase):
         # Without OTP — should be rejected (msisdn not registered as a user)
         result = OrderPaymentTransaction().initiate(
             order=order,
-            tip_amount=0,
             payment_mode=PaymentMode_MobileMoney,
             msisdn=TEST_MSISDN
         )
@@ -207,7 +206,6 @@ class FinanceAppTestFunctions(TestCase):
         # With OTP — should succeed (verify_otp is mocked to return valid)
         result = OrderPaymentTransaction().initiate(
             order=order,
-            tip_amount=0,
             payment_mode=PaymentMode_MobileMoney,
             msisdn=TEST_MSISDN,
             otp='1234',
