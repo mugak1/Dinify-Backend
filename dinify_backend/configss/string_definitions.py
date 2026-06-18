@@ -7,11 +7,6 @@ RestaurantStatus_Inactive = 'inactive'
 RestaurantStatus_Blocked = 'blocked'
 RestaurantStatus_Rejected = 'rejected'
 
-# account types
-AccountType_Restaurant = 'restaurant'
-AccountType_DinifyRevenue = 'dinify_revenue'
-AccountType_User = 'user'
-
 # payment modes
 PaymentMode_Cash = 'cash'
 PaymentMode_MobileMoney = 'momo'
@@ -21,11 +16,6 @@ PaymentMode_Bank = 'bank'
 
 PaymentForm_Split = 'split'
 PaymentForm_Full = 'full'
-
-# account status
-AccountStatus_Active = 'active'
-AccountStatus_Inactive = 'inactive'
-AccountStatus_Blocked = 'blocked'
 
 # transaction types
 TransactionType_OrderPayment = 'order_payment'
