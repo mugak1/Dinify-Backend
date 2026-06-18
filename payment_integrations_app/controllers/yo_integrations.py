@@ -7,7 +7,7 @@ from bson import ObjectId
 from django.db import transaction
 from dinify_backend.mongo_db import MONGO_DB, COL_YO_RESPONSES
 from finance_app.endpoints import bank_account
-from finance_app.models import BankAccountRecord, DinifyTransaction
+from finance_app.models import DinifyTransaction
 from misc_app.controllers.flag_doc_as_processed import flag_doc_as_processed
 from dinify_backend.configss.string_definitions import (
     ProcessingStatus_Pending,

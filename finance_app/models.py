@@ -5,7 +5,7 @@ from restaurants_app.models import Restaurant
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
     AccountType_Restaurant, AccountType_DinifyRevenue, AccountType_User,
-    PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card, PaymentMode_Ova, PaymentMode_Bank,
+    PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card,
     AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked,
     TransactionType_OrderPayment, TransactionType_OrderRefund, TransactionType_OrderCharge, TransactionType_Disbursement, TransactionType_Subscription,  # noqa
     TransactionStatus_Success, TransactionStatus_Failed, TransactionStatus_Pending, TransactionStatus_Initiated,  # noqa
@@ -15,7 +15,7 @@ from dinify_backend.configss.string_definitions import (
 )
 
 ACCOUNT_TYPES = [AccountType_Restaurant, AccountType_DinifyRevenue, AccountType_User]
-PAYMENT_MODES = [PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card, PaymentMode_Ova, PaymentMode_Bank]  # noqa
+PAYMENT_MODES = [PaymentMode_Cash, PaymentMode_MobileMoney, PaymentMode_Card]  # noqa
 ACCOUNT_STATUSES = [AccountStatus_Active, AccountStatus_Inactive, AccountStatus_Blocked]
 TRANSACTION_TYPES = [TransactionType_OrderPayment, TransactionType_OrderRefund, TransactionType_OrderCharge, TransactionType_Disbursement, TransactionType_Subscription]  # noqa
 TRANSACTION_STATUSES = [TransactionStatus_Success, TransactionStatus_Failed, TransactionStatus_Pending, TransactionStatus_Initiated]  # noqa
@@ -99,16 +99,6 @@ class DinifyTransaction(BaseModel):
     msisdn = models.CharField(max_length=255, null=True, blank=True)
     payment_form = models.CharField(max_length=20, default=PaymentForm_Full)
     amount_in = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    amount_out = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    transaction_notes = models.TextField(null=True, blank=True)
-
-    # for orders and revenue collection
-    parent_transaction = models.ForeignKey(
-        'self',
-        on_delete=models.SET_NULL,
-        null=True,
-        related_name='ref_parent_transaction'
-    )
 
     # aggregator details
     aggregator = models.CharField(max_length=255, null=True, blank=True, db_index=True)
@@ -117,20 +107,9 @@ class DinifyTransaction(BaseModel):
     aggregator_status = models.CharField(max_length=255, null=True, blank=True)
     aggregator_misc_details = models.JSONField(default=dict)
 
-    # the account balances/amounts will be tracked using a json
-    account_balances = models.JSONField(default=dict)
-
     # for manual payments
     manual_payment = models.BooleanField(default=False)
     manual_payment_details = models.JSONField(null=True)
-    gross_amount_paid = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    customer_balance = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-
-    # to track the processing of the transaction
-    processed = models.CharField(max_length=25, default=ProcessingStatus_Pending)  # i.e. accounts updated, revenue collected, etc.  # noqa
-
-    # for restaurants where Dinify has surcharge
-    revenue_collected = models.BooleanField(default=False, db_index=True)  # i.e. revenue collected from the transaction  # noqa
 
     class Meta:
         db_table = 'transactions'
