@@ -39,10 +39,12 @@ with PostgreSQL on AWS RDS.
   flag, and extras `extras_min_selections`/`extras_max_selections`
 - Restaurant profile & settings fields: ✅ Identity/contact (`contact_email`,
   `contact_phone`, `landmark`, `tagline`, `cuisine_types`, `socials`),
-  availability (`accepting_orders`), and tax/receipt (`vat_registered`,
-  `vat_rate`, `tin`, `receipt_footer`) fields (migrations 0049–0050) — all
-  editable via Secretary (`EDIT_INFORMATION['restaurants']`). `vat_rate` is a
-  `DecimalField` (default 18.00); `socials` defaults via `default_socials`
+  availability (`accepting_orders`, `opening_hours`), and tax/receipt
+  (`vat_registered`, `vat_rate`, `tin`, `receipt_footer`) fields (migrations
+  0049–0051) — all editable via Secretary (`EDIT_INFORMATION['restaurants']`).
+  `vat_rate` is a `DecimalField` (default 18.00); `socials` defaults via
+  `default_socials`, `opening_hours` via `default_opening_hours` (per-weekday
+  `{closed, open, close}` shape)
 - Auth: ✅ Refresh-token rotation + blacklist-on-logout + 7-day refresh lifetime
   (SimpleJWT, `JWT_REFRESH_LIFETIME_DAYS`)
 - Tenant isolation: ✅ Restaurant-setup GET reads are authorization-scoped to
@@ -59,6 +61,33 @@ with PostgreSQL on AWS RDS.
   authorization-scoped via `get_readable_restaurant_ids` /
   `can_read_restaurant` (owner/manager only); references are sequential,
   collision-safe `SUP-000123`. Migration `support_app/0001_initial`
+- Reviews module: ✅ `reviews_app` — visit-level `Review` model (one per
+  `Order`, `OneToOneField` via `related_name='review_record'`,
+  `db_table='reviews'`), Secretary-pattern endpoints at `api/v1/reviews/`
+  (`reviews_app/urls.py`): `submit/` (diner submission, AllowAny),
+  `summary/` + `analytics/` (owner/manager analytics),
+  `<int:review_id>/resolution/` (owner/manager mark-handled write, optional
+  `resolution_note` that persists across reopen/re-resolve), and `` root
+  (owner/manager retrieval). `overall_rating` mandatory (1–5) + five optional
+  dimension ratings; `is_public` seeded from `PUBLIC_RATING_THRESHOLD` (≥4 →
+  public-eligible) but stays owner-overridable. Reads authorization-scoped via
+  `get_readable_restaurant_ids` / `can_read_restaurant`. Migrations
+  `reviews_app/0001_initial`, `0002_review_resolution_note`. `Review` is the
+  system of record — the legacy inline-review fields on `Order`/`OrderItem`
+  were dropped (orders_app migration `0034`)
+- Payments — non-custodial migration: 🚧 In progress. Dinify must operate as a
+  software vendor, NOT a custodial payment institution (Uganda NPS Act 2020 —
+  see `REGULATORY_AUDIT.md`). The custodial money-flow has been REMOVED across
+  stages 1–6 (PRs #149–#155): dead payment code; the fund-disbursement/payout
+  path (`tx_disbursement.py`, Yo `momo_disburse`/`bank_disburse`); the
+  Dinify-initiated refund payout (`initiate_refund.py`, Flutterwave
+  `send_mobile_money`); the OVA subscription fee-netting; tips (`tx_tip.py`);
+  and the custodial balance ledger (`update_wallet_balance.py` + the
+  EOD daily-reporting machinery in `reports_app`). `DinifyAccount`'s 24
+  balance/cumulative fields were dropped (finance_app migration `0024`);
+  `DinifyAccount` / `DinifyTransaction` survive as record-only structures.
+  Funds must settle restaurant-direct — do NOT reintroduce held balances,
+  disbursement, Dinify-initiated refunds, the OVA wallet, or tip wallets
 - Login 500 regression: ✅ Resolved — not reproducible after the auth-stack work;
   login → refresh → logout verified working on UAT (closed June 2026)
 - Django 5.2 LTS upgrade: ✅ Complete — Django 4.2.30 → 5.2.15 (PRs #123–#125).
@@ -116,6 +145,9 @@ with PostgreSQL on AWS RDS.
 - `api/v1/kitchen/` → Kitchen endpoints (urls_kitchen.py) — separate file
 - `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
   `issues/`, `issues/<uuid:issue_id>/`, `admin/issues/` — separate app
+- `api/v1/reviews/` → reviews_app endpoints (`reviews_app/urls.py`):
+  `submit/`, `summary/`, `analytics/`, `<int:review_id>/resolution/`,
+  `` (root) — separate app
 
 ## Endpoint Pattern — CRITICAL
 New resource types get their own dedicated endpoint file in
@@ -235,6 +267,10 @@ the catch-all `<str:config_detail>/` route.
 - `Order.order_remarks` was REMOVED (migration
   `0032_remove_order_order_remarks`, dormant field) along with the dead
   `item_note` emit from the orders API — do not reintroduce either
+- The legacy inline-review fields on `Order`/`OrderItem` (`rating`, `review`,
+  `block_review`, `block_review_reason`, `review_blocked_by`) were REMOVED
+  (orders_app migration `0034`). `reviews_app.Review` is now the system of
+  record for order reviews — do not reintroduce inline review columns
 
 ## Key Serializer Notes
 - `SerializerPublicGetMenuItem` includes `section` and `in_stock` —
@@ -252,8 +288,10 @@ the catch-all `<str:config_detail>/` route.
 ## Database
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove
 - All migrations must be generated and included in PRs when models change
-- Latest migration: `restaurants_app/migrations/0050_restaurant_tagline.py`,
-  `orders_app/migrations/0033_order_cancellation_reason_order_cancelled_at_and_more.py`
+- Latest migration: `restaurants_app/migrations/0051_restaurant_opening_hours.py`,
+  `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
+  `finance_app/migrations/0024_remove_dinifyaccount_card_actual_balance_and_more.py`,
+  `reviews_app/migrations/0002_review_resolution_note.py`
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
@@ -273,6 +311,10 @@ the catch-all `<str:config_detail>/` route.
 - A separate `.github/workflows/deploy-uat.yml` deploys to the UAT host on
   push to `main` (pull, migrate, restart Apache) — reinforces the deployment
   rule above: never pull/migrate/restart manually
+- A scheduled `.github/workflows/audit.yml` runs a weekly `pip-audit` sweep
+  (Mondays 06:30 UTC) + manual `workflow_dispatch` — NOT triggered on
+  PRs/pushes, so it never becomes a blocking PR check; a failure (advisories
+  found) fires GitHub's scheduled-workflow notification
 
 ## Verification
 Before raising any PR, run `./scripts/verify.sh` (mirrors CI) and confirm:
