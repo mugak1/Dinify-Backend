@@ -72,40 +72,6 @@ class DinifyAccount(BaseModel):
     account_type = models.CharField(validators=[validate_account_type], max_length=255, db_index=True)  # noqa
     account_status = models.CharField(validators=[validate_account_status], default=AccountStatus_Active, max_length=20)  # noqa
 
-    # account amounts
-    # mobile money
-    momo_actual_balance = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    momo_available_balance = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    momo_cumulative_in = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    momo_cumulative_out = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-
-    momo_cumulative_in_charges = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    momo_cumulative_out_charges = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    momo_cumulative_refunds = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    momo_cumulative_disbursements = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)  # noqa
-
-    # card i.e. bank
-    card_actual_balance = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    card_available_balance = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    card_cumulative_in = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    card_cumulative_out = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-
-    card_cumulative_in_charges = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    card_cumulative_out_charges = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    card_cumulative_refunds = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    card_cumulative_disbursements = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)  # noqa
-
-    # cash collections
-    cash_actual_balance = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    cash_available_balance = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    cash_cumulative_in = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    cash_cumulative_out = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-
-    cash_cumulative_in_charges = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    cash_cumulative_out_charges = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    cash_cumulative_refunds = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)
-    cash_cumulative_disbursements = models.DecimalField(default=0.0, max_digits=100, decimal_places=2)  # noqa
-
     class Meta:
         """
         the metadata for the DinifyAccount model
