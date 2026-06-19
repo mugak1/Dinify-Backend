@@ -1,5 +1,5 @@
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
-from finance_app.models import DinifyTransaction, BankAccountRecord
+from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
     TransactionType_OrderPayment
 )
@@ -74,10 +74,3 @@ class SerializerGetDinifyTransactionListing(ModelSerializer):
         if record.transaction_platform == 'momo':
             return 'MoMo'
         return record.transaction_platform.replace('_', ' ').title()
-
-
-
-class SerializerPutBankAccountRecord(ModelSerializer):
-    class Meta:
-        model = BankAccountRecord
-        fields = '__all__'
