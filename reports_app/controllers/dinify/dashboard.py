@@ -6,7 +6,6 @@ from users_app.models import User
 from django.db.models import Sum
 from dinify_backend.configss.string_definitions import (
     TransactionType_Subscription,
-    TransactionType_OrderCharge,
 
     RestaurantStatus_Pending, RestaurantStatus_Active,
     RestaurantStatus_Inactive, RestaurantStatus_Blocked,
@@ -77,7 +76,7 @@ def summarize_users():
 
 def summarize_dinify_earnings():
     dinify_revenue = DinifyTransaction.objects.filter(
-        transaction_type__in=[TransactionType_Subscription, TransactionType_OrderCharge]
+        transaction_type__in=[TransactionType_Subscription]
     )
 
     cum_dinify_revenue = dinify_revenue.aggregate(Sum('transaction_amount'))['transaction_amount__sum']
@@ -92,11 +91,7 @@ def summarize_dinify_earnings():
     cum_subscriptions = dinify_revenue.filter(
         transaction_type=TransactionType_Subscription
     ).aggregate(Sum('transaction_amount'))['transaction_amount__sum']
-    cum_surcharge = dinify_revenue.filter(
-        transaction_type=TransactionType_OrderCharge
-    ).aggregate(Sum('transaction_amount'))['transaction_amount__sum']
     summary['subscriptions'] = cum_subscriptions if cum_subscriptions else 0.0
-    summary['surcharge'] = cum_surcharge if cum_surcharge else 0.0
 
     outstanding_subscriptions = Restaurant.objects.filter(
         status=RestaurantStatus_Blocked,
@@ -124,32 +119,12 @@ def get_top_restaurants():
 
 
 def generate_dinify_dashboard() -> dict:
-    # restaurants = Restaurant.objects.all()
-    # orders = Order.objects.all()
-    # dinify_revenue = DinifyTransaction.objects.filter(
-    #     transaction_type__in=[TransactionType_Subscription, TransactionType_OrderCharge]
-    # ).aggregate(Sum('transaction_amount'))['transaction_amount__sum']
-
-    # cum_num_orders = orders.count()
-    # cum_order_amount = orders.aggregate(Sum('total_cost'))['total_cost__sum']
-
-    # no_diners = orders.values('customer').distinct().count()
-    # monthly_active_diners = orders.filter(
-    #     time_created__gte=datetime.now() - timedelta(days=30)
-    # ).values('customer').distinct().count()
-
     stats = {
         'restaurant_summary': summarize_restaurants(),
         'orders_summary': summarize_orders(),
         'users_summary': summarize_users(),
         'dinify_earnings': summarize_dinify_earnings(),
         'top_restaurants': get_top_restaurants(),
-
-        # 'cum_num_orders': cum_num_orders,
-        # 'cum_order_amount': cum_order_amount,
-        # 'dinify_revenue': dinify_revenue if dinify_revenue else 0.0,
-        # 'no_diners': no_diners,
-        # 'monthly_active_diners': monthly_active_diners
     }
     return {
         'status': 200,
@@ -206,7 +181,7 @@ def generate_dinify_dashboard_trend() -> dict:
 
         revenue = DinifyTransaction.objects.filter(
             time_created__date=day,
-            transaction_type__in=[TransactionType_Subscription, TransactionType_OrderCharge]
+            transaction_type__in=[TransactionType_Subscription]
         ).aggregate(Sum('transaction_amount'))['transaction_amount__sum']
         if revenue is None:
             revenue = 0.0
