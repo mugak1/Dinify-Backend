@@ -7,9 +7,6 @@ from dinify_backend.configss.string_definitions import (
     TransactionStatus_Pending,
     TransactionStatus_Initiated,
     TransactionType_OrderPayment,
-    TransactionType_OrderRefund,
-    TransactionType_OrderCharge,
-    TransactionType_Disbursement,
     TransactionType_Subscription
 )
 from django.db.models import Sum
@@ -24,9 +21,6 @@ TRANSACTION_STATUSES = [
 
 TRANSACTION_TYPES = [
     TransactionType_OrderPayment,
-    TransactionType_OrderRefund,
-    TransactionType_OrderCharge,
-    TransactionType_Disbursement,
     TransactionType_Subscription
 ]
 
