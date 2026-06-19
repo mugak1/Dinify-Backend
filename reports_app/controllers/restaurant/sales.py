@@ -1,33 +1,63 @@
-import logging
-from datetime import timedelta
+"""
+Restaurant Sales reports — summary, listing, and trends.
 
-logger = logging.getLogger(__name__)
+Built on the PR3 reporting foundations so the three panes agree:
+  * the "sale" set is ``SALE_STATUSES`` ({served, paid}) via ``sale_orders``,
+  * revenue is ``Sum('actual_cost')`` and discount is ``Sum('savings')`` via
+    ``revenue_sum`` / ``discount_sum`` — never ``total_cost`` (gross) or
+    ``discounted_cost`` (post-discount total),
+  * trends are ONE grouped query via ``bucket_sales`` (no per-period loop).
 
-from misc_app.controllers.clean_dates import clean_dates
-from misc_app.controllers.report_support_functions import (
-    make_graph_series_data,
-    make_month_range,
-    make_quarter_range,
-    make_annual_range
+The ``{status, message, data}`` envelope and the three public entrypoints
+(``generate_restaurant_sales_summary`` / ``_listing`` / ``_trends``) are kept so
+the endpoint dispatch (``reports_app/endpoints/restaurant_reports.py``) is
+unchanged.
+"""
+import calendar
+from decimal import Decimal, ROUND_HALF_UP
+
+from django.db.models import (
+    Count, Sum, Avg, Max, Min, Subquery, OuterRef, IntegerField,
 )
-from django.db.models import Count, Sum, Avg, Max, Min
-from orders_app.models import Order
+from django.db.models.functions import Coalesce
+
+from orders_app.models import OrderItem
 from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
     TransactionType_OrderPayment,
-    OrderStatus_Served,
-    TransactionStatus_Success
+    TransactionStatus_Success,
 )
+from misc_app.controllers.clean_dates import clean_dates
+from misc_app.controllers.report_support_functions import make_graph_series_data
+from reports_app.controllers.common.sale_filters import (
+    sale_orders, revenue_sum, discount_sum, SALE_STATUSES,
+)
+from reports_app.controllers.common.bucketing import bucket_sales, LOCAL_TZ
 from reports_app.serializers import SerializerOrderListingReport
 
-# Number of sales
-# Gross sales amount
-# Number of sales by payment channel e.g. mobile money, visa, cash
-# Gross sales amount by payment channel
-# Average order amount
-# Maximum order amount
-# Minimum order amount
-# Total discounts offered
+
+# trend_category (the public API param) -> bucketing period granularity.
+TREND_PERIODS = {
+    'daily': 'day',
+    'monthly': 'month',
+    'quarterly': 'quarter',
+    'annual': 'year',
+}
+# Per-category date-range caps (retained from the legacy controller). The daily
+# cap also bounds the listing; the wider caps bound the number of buckets.
+TREND_CAPS = {
+    'daily': (31, 'Date range should not be greater than 31 days.'),
+    'monthly': (731, 'Date range should not be greater than 2 years.'),
+    'quarterly': (731, 'Date range should not be greater than 2 years.'),
+    'annual': (1850, 'Date range should not be greater than 5 years.'),
+}
+# x-axis title for the graph series, keyed by bucketing period.
+TREND_AXIS_TITLES = {
+    'day': 'Days',
+    'month': 'Months',
+    'quarter': 'Quarters',
+    'year': 'Years',
+}
 
 
 def generate_restaurant_sales_summary(
@@ -38,99 +68,129 @@ def generate_restaurant_sales_summary(
     dates = clean_dates(date_from=date_from, date_to=date_to)
     if dates.get('status') != 200:
         return dates
-    date_from = dates.get('date_from')
-    date_to = dates.get('date_to')
+    date_from = dates['date_from']
+    date_to = dates['date_to']
 
-    orders = None
-    transactions = None
+    orders = sale_orders(restaurant_id, date_from, date_to)
 
-    if date_from == date_to:
-        orders = Order.objects.filter(
-            restaurant=restaurant_id,
-            time_created__date=date_to,
-            order_status__in=[OrderStatus_Served]
+    # ONE aggregate row. revenue/discount use the canonical bases; avg/max/min
+    # are over actual_cost (net order value), NOT total_cost.
+    agg = orders.aggregate(
+        number_of_sales=Count('id'),
+        revenue=revenue_sum(),
+        gross_sales=Sum('total_cost'),
+        total_discounts=discount_sum(),
+        average_order_value=Avg('actual_cost'),
+        max_order_value=Max('actual_cost'),
+        min_order_value=Min('actual_cost'),
+    )
+
+    average_order_value = agg['average_order_value']
+    if average_order_value is not None:
+        # Avg over a numeric column can carry extra places; money is 2dp.
+        average_order_value = average_order_value.quantize(
+            Decimal('0.01'), rounding=ROUND_HALF_UP,
         )
-        transactions = DinifyTransaction.objects.filter(
+
+    # Payment channels: successful order-payment transactions over the SAME sale
+    # set, grouped by the real payment_mode. Genuinely sparse until 8b — not
+    # fabricated, and (different lens) it need not reconcile with the order
+    # count/revenue above (a served order may have no on-system transaction).
+    channel_rows = (
+        DinifyTransaction.objects
+        .filter(
             transaction_type=TransactionType_OrderPayment,
+            transaction_status=TransactionStatus_Success,
             order__restaurant=restaurant_id,
-            order__time_created__date=date_to,
-            order__order_status__in=[OrderStatus_Served],
-            transaction_status=TransactionStatus_Success
+            order__order_status__in=SALE_STATUSES,
+            order__time_created__date__gte=date_from,
+            order__time_created__date__lte=date_to,
         )
-    else:
-        orders = Order.objects.filter(
-            restaurant=restaurant_id,
-            time_created__gte=date_from,
-            time_created__lte=date_to,
-            order_status__in=[OrderStatus_Served]
-        )
-        transactions = DinifyTransaction.objects.filter(
-            transaction_type=TransactionType_OrderPayment,
-            order__restaurant=restaurant_id,
-            order__time_created__gte=date_from,
-            order__time_created__lte=date_to,
-            order__order_status__in=[OrderStatus_Served],
-            transaction_status=TransactionStatus_Success
-        )
+        .values('payment_mode')
+        .annotate(count=Count('id'), amount=Sum('transaction_amount'))
+        .order_by('payment_mode')
+    )
+    payment_channels = [
+        {
+            'channel': row['payment_mode'],
+            'count': row['count'],
+            'amount': row['amount'] if row['amount'] is not None else 0,
+        }
+        for row in channel_rows
+    ]
 
-    num_sales = orders.count()
-    sales_amount = orders.aggregate(total_cost=Sum('total_cost'))['total_cost']
-
-    sales_by_payment_channel = transactions.values('payment_mode').annotate(num_sales=Count('id')).order_by('payment_mode') # noqa
-    amount_by_payment_channel = transactions.values('payment_mode').annotate(total_amount=Sum('transaction_amount')).order_by('payment_mode') # noqa
-
-    avg_order_amount = orders.aggregate(avg_amount=Avg('total_cost'))['avg_amount']
-    max_order_amount = orders.aggregate(max_amount=Max('total_cost'))['max_amount']
-    min_order_amount = orders.aggregate(max_amount=Min('total_cost'))['max_amount']
-    total_discounts = orders.aggregate(total_discount=Sum('discounted_cost'))['total_discount']
-
-    stats = {
-        "number_of_sales": num_sales,
-        "gross_sales_amount": sales_amount if sales_amount is not None else 0,
-        "sales_by_payment_channel": {item['payment_mode']: item['num_sales'] for item in sales_by_payment_channel}, # noqa
-        "sales_amount_by_payment_channel": {item['payment_mode']: item['total_amount'] for item in amount_by_payment_channel}, # noqa
-        "average_order_amount": avg_order_amount if avg_order_amount is not None else 0,
-        "maximum_order_amount": max_order_amount if max_order_amount is not None else 0,
-        "minimum_order_amount": min_order_amount if min_order_amount is not None else 0,
-        "total_discounts_offered": total_discounts if total_discounts is not None else 0,
+    data = {
+        'number_of_sales': agg['number_of_sales'] or 0,
+        'revenue': agg['revenue'] if agg['revenue'] is not None else 0,
+        'gross_sales': agg['gross_sales'] if agg['gross_sales'] is not None else 0,
+        'total_discounts': agg['total_discounts'] if agg['total_discounts'] is not None else 0,
+        'average_order_value': average_order_value if average_order_value is not None else 0,
+        'max_order_value': agg['max_order_value'] if agg['max_order_value'] is not None else 0,
+        'min_order_value': agg['min_order_value'] if agg['min_order_value'] is not None else 0,
+        'payment_channels': payment_channels,
     }
-
     return {
         'status': 200,
         'message': 'Successfully retrieved the sales summary',
-        'data': stats
+        'data': data,
     }
 
 
 def generate_restaurant_sales_listing(
     restaurant_id: str,
     date_from: str,
-    date_to: str
+    date_to: str,
 ) -> dict:
     dates = clean_dates(date_from=date_from, date_to=date_to)
     if dates.get('status') != 200:
         return dates
-
-    date_from = dates.get('date_from')
-    date_to = dates.get('date_to')
+    date_from = dates['date_from']
+    date_to = dates['date_to']
 
     if (date_to - date_from).days > 31:
         return {
             'status': 400,
-            'message': 'Date range cannot be greater than 31 days.'
+            'message': 'Date range cannot be greater than 31 days.',
         }
 
-    orders = Order.objects.filter(
-        restaurant=restaurant_id,
-        time_created__gte=date_from,
-        time_created__lte=date_to
-    ).order_by('time_created')
+    # item_count as a correlated COUNT subquery (no JOIN/GROUP BY, so the row's
+    # own money columns can never be fan-out-inflated); 0 for an item-less order.
+    item_count_subquery = (
+        OrderItem.objects
+        .filter(order=OuterRef('pk'))
+        .values('order')
+        .annotate(c=Count('id'))
+        .values('c')
+    )
+    # The order's latest successful order-payment mode (real value, or NULL) —
+    # replaces the hardcoded 'MoMo' and the per-row query.
+    payment_mode_subquery = (
+        DinifyTransaction.objects
+        .filter(
+            order=OuterRef('pk'),
+            transaction_type=TransactionType_OrderPayment,
+            transaction_status=TransactionStatus_Success,
+        )
+        .order_by('-time_created')
+        .values('payment_mode')[:1]
+    )
+
+    orders = (
+        sale_orders(restaurant_id, date_from, date_to)
+        .annotate(
+            item_count=Coalesce(
+                Subquery(item_count_subquery, output_field=IntegerField()), 0,
+            ),
+            payment_mode=Subquery(payment_mode_subquery),
+        )
+        .order_by('time_created')
+    )
 
     records = SerializerOrderListingReport(orders, many=True)
     return {
         'status': 200,
         'message': 'Successfully retrieved the sales listings',
-        'data': records.data
+        'data': records.data,
     }
 
 
@@ -139,315 +199,83 @@ def generate_restaurant_sales_trends(
     date_from: str,
     date_to: str,
     trend_category: str,
-    trend_result: str
+    trend_result: str,
 ) -> dict:
     dates = clean_dates(date_from=date_from, date_to=date_to)
     if dates.get('status') != 200:
         return dates
+    date_from = dates['date_from']
+    date_to = dates['date_to']
 
-    date_from = dates.get('date_from')
-    date_to = dates.get('date_to')
-
-    if trend_category == 'daily':
-        if (date_to - date_from).days > 31:
-            return {
-                'status': 400,
-                'message': 'Date range should not be greater than 31 days.'
-            }
-        return get_daily_trends(
-            restaurant_id=restaurant_id,
-            date_from=date_from,
-            date_to=date_to,
-            trend_result=trend_result
-        )
-    if trend_category == 'monthly':
-        if (date_to - date_from).days > 731:
-            return {
-                'status': 400,
-                'message': 'Date range should not be greater than 2 years.'
-            }
-        return get_monthly_trends(
-            restaurant_id=restaurant_id,
-            date_from=date_from,
-            date_to=date_to,
-            trend_result=trend_result
-        )
-    if trend_category == 'quarterly':
-        if (date_to - date_from).days > 731:
-            return {
-                'status': 400,
-                'message': 'Date range should not be greater than 2 years.'
-            }
-        return get_quarterly_trends(
-            restaurant_id=restaurant_id,
-            date_from=date_from,
-            date_to=date_to,
-            trend_result=trend_result
-        )
-
-    if trend_category == 'annual':
-        logger.debug("Annual trend date range days: %s", (date_to - date_from).days)
-        if (date_to - date_from).days > 1850:
-            return {
-                'status': 400,
-                'message': 'Date range should not be greater than 5 years.'
-            }
-        return get_annual_trends(
-            restaurant_id=restaurant_id,
-            date_from=date_from,
-            date_to=date_to,
-            trend_result=trend_result
-        )
-
-
-def get_daily_trends(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-    trend_result: str
-) -> dict:
-
-    x_categories = []
-    days = []
-    trend_table = []
-    trend_graph = []
-
-    day0 = date_from
-    while day0 <= date_to:
-        days.append(day0)
-        x_categories.append(str(day0))
-        day0 += timedelta(days=1)
-
-    def get_tabular_trend_data(days: list):
-        for day in days:
-            summary = generate_restaurant_sales_summary(
-                restaurant_id=restaurant_id,
-                date_from=day,
-                date_to=day
-            ).get('data')
-            summary['date'] = str(day)
-            trend_table.append(summary)
-
-    def get_graph_trend_data(days: list):
-        for day in days:
-            summary = generate_restaurant_sales_summary(
-                restaurant_id=restaurant_id,
-                date_from=day,
-                date_to=day
-            ).get('data')
-            summary['date'] = str(day)
-            for key, value in summary.get('sales_by_payment_channel').items():
-                summary[f'NoSales_{key.title()}'] = value
-            for key, value in summary.get('sales_amount_by_payment_channel').items():
-                summary[f'SalesAmount_{key.title()}'] = value
-            del summary['sales_by_payment_channel']
-            del summary['sales_amount_by_payment_channel']
-            trend_graph.append(summary)
-
-    if trend_result == 'table':
-        get_tabular_trend_data(days)
+    period = TREND_PERIODS.get(trend_category)
+    if period is None:
         return {
-            'status': 200,
-            'message': 'Successfully retrieved the daily trend data in tabular format.',
-            'data': trend_table
-        }
-    if trend_result == 'graph':
-        get_graph_trend_data(days)
-        data = make_graph_series_data(
-            x_title='Days',
-            y_values=trend_graph,
-            x_detail='date'
-        )
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the daily trend data in graph series.',
-            'data': data
+            'status': 400,
+            'message': 'Invalid trend category',
         }
 
+    max_days, cap_message = TREND_CAPS[trend_category]
+    if (date_to - date_from).days > max_days:
+        return {
+            'status': 400,
+            'message': cap_message,
+        }
 
-def get_monthly_trends(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-    trend_result: str
-) -> dict:
-    trend_table = []
-    trend_graph = []
-    month_range = make_month_range(
-        start=date_from,
-        end=date_to
+    # ONE grouped query — replaces the legacy per-period summary loop.
+    buckets = bucket_sales(
+        sale_orders(restaurant_id, date_from, date_to), period,
     )
-
-    def get_tabular_trend_data():
-        for month in month_range:
-            summary = generate_restaurant_sales_summary(
-                restaurant_id=restaurant_id,
-                date_from=month['sd'],
-                date_to=month['ed']
-            ).get('data')
-            name = month['month_name'][:3]
-            year = str(month['year'])[2:]
-            summary['month'] = f"{name}-{year}"
-            trend_table.append(summary)
-
-    def get_graph_trend_data():
-        for month in month_range:
-            summary = generate_restaurant_sales_summary(
-                restaurant_id=restaurant_id,
-                date_from=month['sd'],
-                date_to=month['ed']
-            ).get('data')
-            name = month['month_name'][:3]
-            year = str(month['year'])[2:]
-            summary['month'] = f"{name}-{year}"
-            for key, value in summary.get('sales_by_payment_channel').items():
-                summary[f'NoSales_{key.title()}'] = value
-            for key, value in summary.get('sales_amount_by_payment_channel').items():
-                summary[f'SalesAmount_{key.title()}'] = value
-            del summary['sales_by_payment_channel']
-            del summary['sales_amount_by_payment_channel']
-            trend_graph.append(summary)
-
-    if trend_result == 'table':
-        get_tabular_trend_data()
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the monthly trend data in tabular format.',
-            'data': trend_table
+    table = [
+        {
+            'period': _period_label(row['period'], period),
+            'count': row['count'],
+            'revenue': row['revenue'] if row['revenue'] is not None else 0,
+            'discount': row['discount'] if row['discount'] is not None else 0,
         }
+        for row in buckets
+    ]
+
     if trend_result == 'graph':
-        get_graph_trend_data()
+        graph_input = [
+            {
+                'period': row['period'],
+                'revenue': row['revenue'],
+                'count': row['count'],
+            }
+            for row in table
+        ]
         data = make_graph_series_data(
-            x_title='Months',
-            y_values=trend_graph,
-            x_detail='month'
+            x_title=TREND_AXIS_TITLES[period],
+            y_values=graph_input,
+            x_detail='period',
         )
         return {
             'status': 200,
-            'message': 'Successfully retrieved the monthly trend data in graph series.',
-            'data': data
+            'message': 'Successfully retrieved the sales trend graph series.',
+            'data': data,
         }
 
-
-def get_quarterly_trends(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-    trend_result: str
-) -> dict:
-    trend_table = []
-    trend_graph = []
-    quarter_range = make_quarter_range(
-        start=date_from.year,
-        end=date_to.year
-    )
-
-    def get_tabular_trend_data():
-        for quarter in quarter_range:
-            summary = generate_restaurant_sales_summary(
-                restaurant_id=restaurant_id,
-                date_from=quarter['start'],
-                date_to=quarter['end']
-            ).get('data')
-            summary['quarter'] = quarter['quarter']
-            trend_table.append(summary)
-
-    def get_graph_trend_data():
-        for quarter in quarter_range:
-            summary = generate_restaurant_sales_summary(
-                restaurant_id=restaurant_id,
-                date_from=quarter['start'],
-                date_to=quarter['end']
-            ).get('data')
-            summary['quarter'] = quarter['quarter']
-
-            for key, value in summary.get('sales_by_payment_channel').items():
-                summary[f'NoSales_{key.title()}'] = value
-            for key, value in summary.get('sales_amount_by_payment_channel').items():
-                summary[f'SalesAmount_{key.title()}'] = value
-            del summary['sales_by_payment_channel']
-            del summary['sales_amount_by_payment_channel']
-            trend_graph.append(summary)
-
-    if trend_result == 'table':
-        get_tabular_trend_data()
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the quarterly trend data in tabular format.',
-            'data': trend_table
-        }
-
-    if trend_result == 'graph':
-        get_graph_trend_data()
-        data = make_graph_series_data(
-            x_title='Quarters',
-            y_values=trend_graph,
-            x_detail='quarter'
-        )
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the quarterly trend data in graph series.',
-            'data': data
-        }
+    return {
+        'status': 200,
+        'message': 'Successfully retrieved the sales trend table.',
+        'data': table,
+    }
 
 
-def get_annual_trends(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-    trend_result: str
-) -> dict:
-    trend_table = []
-    trend_graph = []
-    annual_range = make_annual_range(
-        start=date_from.year,
-        end=date_to.year
-    )
+def _period_label(period_dt, period: str) -> str:
+    """Human label for a bucket's period boundary, on the EAT calendar.
 
-    def get_tabular_trend_data():
-        for year in annual_range:
-            summary = generate_restaurant_sales_summary(
-                restaurant_id=restaurant_id,
-                date_from=year['start'],
-                date_to=year['end']
-            ).get('data')
-            summary['year'] = year['year']
-            trend_table.append(summary)
-
-    def get_graph_trend_data():
-        for year in annual_range:
-            summary = generate_restaurant_sales_summary(
-                restaurant_id=restaurant_id,
-                date_from=year['start'],
-                date_to=year['end']
-            ).get('data')
-            summary['year'] = year['year']
-
-            for key, value in summary.get('sales_by_payment_channel').items():
-                summary[f'NoSales_{key.title()}'] = value
-            for key, value in summary.get('sales_amount_by_payment_channel').items():
-                summary[f'SalesAmount_{key.title()}'] = value
-            del summary['sales_by_payment_channel']
-            del summary['sales_amount_by_payment_channel']
-            trend_graph.append(summary)
-
-    if trend_result == 'table':
-        get_tabular_trend_data()
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the annual trend data in tabular format.',
-            'data': trend_table
-        }
-
-    if trend_result == 'graph':
-        get_graph_trend_data()
-        data = make_graph_series_data(
-            x_title='Years',
-            y_values=trend_graph,
-            x_detail='year'
-        )
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the annual trend data in graph series.',
-            'data': data
-        }
+    day      -> 'YYYY-MM-DD'   (2024-03-01)
+    month    -> 'Mon-YY'       (Mar-24)
+    quarter  -> 'Qn-YYYY'      (Q1-2024)
+    year     -> 'YYYY'         (2024)
+    """
+    local_date = period_dt.astimezone(LOCAL_TZ).date()
+    if period == 'day':
+        return local_date.strftime('%Y-%m-%d')
+    if period == 'month':
+        return f"{calendar.month_abbr[local_date.month]}-{local_date.year % 100:02d}"
+    if period == 'quarter':
+        quarter = (local_date.month - 1) // 3 + 1
+        return f"Q{quarter}-{local_date.year}"
+    return str(local_date.year)
