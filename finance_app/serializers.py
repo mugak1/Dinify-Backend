@@ -1,52 +1,41 @@
+from rest_framework import serializers
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from finance_app.models import DinifyTransaction
-from dinify_backend.configss.string_definitions import (
-    TransactionType_OrderPayment
-)
 
 
 class SerializerGetRestaurantTransactionListing(ModelSerializer):
-    order_number = SerializerMethodField()
-    amount_in = SerializerMethodField()
-    amount_out = SerializerMethodField()
+    """One row per restaurant transaction in the transactions-listing report.
 
-    transaction_type = SerializerMethodField()
-    transaction_status = SerializerMethodField()
-    transaction_platform = SerializerMethodField()
+    Output-only, RAW enums — transaction_type / transaction_status /
+    transaction_platform / payment_mode are emitted as stored (no Title-casing,
+    no 'momo'->'MoMo'); the frontend owns display formatting. Direction (money
+    in vs out) is derivable from transaction_type, so a single ``amount`` is
+    emitted, not amount_in / amount_out. The queryset MUST be
+    ``select_related('order')`` (see ``generate_restaurant_transaction_listing``)
+    so ``order_number`` costs no per-row query.
+    """
+    order_number = SerializerMethodField()
+    # Money as a JSON number (coerce_to_string=False), matching the sales-listing
+    # serializer; a single neutral amount replaces the custodial amount_in/out.
+    amount = serializers.DecimalField(
+        source='transaction_amount', max_digits=50, decimal_places=2,
+        coerce_to_string=False, read_only=True,
+    )
 
     class Meta:
         model = DinifyTransaction
         fields = (
-            'id', 'time_created', 'transaction_type',
-            'order_number', 'amount_in', 'amount_out',
-            'transaction_status', 'transaction_platform',
+            'id', 'transaction_type', 'transaction_status', 'order_number',
+            'amount', 'payment_mode', 'transaction_platform', 'time_created',
         )
 
     def get_order_number(self, record):
-        if record.order:
-            return record.order.order_number
-        return None
-
-    def get_amount_in(self, record):
-        if record.transaction_type in [TransactionType_OrderPayment]:
-            return record.transaction_amount
-        return 0
-
-    def get_amount_out(self, record):
-        if record.transaction_type not in [TransactionType_OrderPayment]:
-            return record.transaction_amount
-        return 0
-
-    def get_transaction_type(self, record):
-        return record.transaction_type.replace('_', ' ').title()
-
-    def get_transaction_status(self, record):
-        return record.transaction_status.replace('_', ' ').title()
-
-    def get_transaction_platform(self, record):
-        if record.transaction_platform == 'momo':
-            return 'MoMo'
-        return record.transaction_platform.replace('_', ' ').title()
+        # order is NULL for subscription transactions; the contract wants the
+        # number as a string when present.
+        if record.order is None:
+            return None
+        number = record.order.order_number
+        return str(number) if number is not None else None
 
 
 class SerializerGetDinifyTransactionListing(ModelSerializer):
