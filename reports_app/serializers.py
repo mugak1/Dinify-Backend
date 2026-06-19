@@ -1,33 +1,48 @@
-from rest_framework.serializers import ModelSerializer, SerializerMethodField
-from orders_app.models import Order, OrderItem
+from rest_framework import serializers
+
+from orders_app.models import Order
 
 
-class SerializerOrderListingReport(ModelSerializer):
-    no_items = SerializerMethodField()
-    payment_mode = SerializerMethodField()
-    last_updated_by = SerializerMethodField()
-    payment_status = SerializerMethodField()
+class SerializerOrderListingReport(serializers.ModelSerializer):
+    """
+    One row per sale order in the sales-listing report.
+
+    Output-only. The queryset passed in MUST be annotated with ``item_count``
+    (Count of the order's OrderItems) and ``payment_mode`` (the order's latest
+    successful order-payment transaction's mode, or NULL) — see
+    ``generate_restaurant_sales_listing`` — so the whole listing serialises in a
+    single query with no per-row N+1.
+
+    Money fields are emitted as JSON numbers (``coerce_to_string=False``) to
+    stay consistent with the sales-summary dict, which renders raw Decimals as
+    numbers via DRF's JSON encoder.
+    """
+    # order_number is an IntegerField(null=True) on the model; the contract
+    # wants it as a string. CharField coerces int -> str on output and passes
+    # null through.
+    order_number = serializers.CharField(allow_null=True, read_only=True)
+    item_count = serializers.IntegerField(read_only=True)
+    gross = serializers.DecimalField(
+        source='total_cost', max_digits=50, decimal_places=2,
+        coerce_to_string=False, read_only=True,
+    )
+    discount = serializers.DecimalField(
+        source='savings', max_digits=50, decimal_places=2,
+        coerce_to_string=False, read_only=True,
+    )
+    revenue = serializers.DecimalField(
+        source='actual_cost', max_digits=50, decimal_places=2,
+        coerce_to_string=False, read_only=True,
+    )
+    # Real payment mode from the annotation (no hardcoded 'MoMo'); NULL when the
+    # order has no successful order-payment transaction.
+    payment_mode = serializers.CharField(allow_null=True, read_only=True)
 
     class Meta:
         model = Order
+        # payment_status is emitted raw (e.g. 'paid'), matching the raw
+        # payment_mode; time_created is rendered ISO 8601 by DRF's DateTimeField.
         fields = (
-            'id', 'order_number', 'no_items',
-            'total_cost', 'discounted_cost',
-            'payment_mode', 'payment_status',
-            'time_created', 'last_updated_by'
+            'order_number', 'item_count', 'gross', 'discount',
+            'revenue', 'payment_mode', 'payment_status', 'time_created',
         )
-
-    def get_no_items(self, order):
-        items = OrderItem.objects.values('id').filter(order=order)
-        return items.count()
-
-    def get_payment_mode(self, order):
-        return 'MoMo'
-
-    def get_last_updated_by(self, order):
-        if order.last_updated_by is not None:
-            return f"{order.last_updated_by.first_name} {order.last_updated_by.last_name}"
-        return ''
-
-    def get_payment_status(self, order):
-        return order.payment_status.replace('_', ' ').title()
