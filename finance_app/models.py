@@ -63,7 +63,6 @@ class DinifyTransaction(BaseModel):
     processing_status = models.CharField(default=ProcessingStatus_Pending, max_length=255, db_index=True)  # noqa
 
     transaction_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
-    tip_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     transaction_collected_amount = models.DecimalField(default=0.0, max_digits=50, decimal_places=2)
     msisdn = models.CharField(max_length=255, null=True, blank=True)
     payment_form = models.CharField(max_length=20, default=PaymentForm_Full)
