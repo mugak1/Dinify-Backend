@@ -1,13 +1,58 @@
-from datetime import timedelta
-from django.db.models import Count, Avg, Sum
+"""
+Restaurant Diners reports — summary and listing.
+
+Diners is Order-based, so it shares the PR3 reporting foundations with the Sales
+reports: the "sale" set is ``SALE_STATUSES`` ({served, paid}) via ``sale_orders``
+and per-diner spend is ``Sum('actual_cost')`` (net revenue) — the SAME basis the
+Sales report uses, so the panes agree.
+
+NULL-customer handling is the whole point of this rebuild. Dinify is
+anonymous-QR-first, so ``Order.customer`` is a nullable FK and MOST sale orders
+are guests (``customer IS NULL``). Identified-diner metrics therefore operate
+strictly on ``sale_orders(...).exclude(customer__isnull=True)``: the NULL bucket
+is never collapsed into one phantom "diner" and never counted as a repeat diner
+(the old inflation bug). Guests are surfaced honestly as a separate
+``guest_orders`` count.
+
+The ``{status, message, data}`` envelope and the two public entrypoints
+(``generate_restaurant_diners_summary`` / ``_listing``) are kept so the endpoint
+dispatch (``reports_app/endpoints/restaurant_reports.py``) is unchanged. The
+legacy ``diners-trends`` report was dropped: on anonymous-QR data it is dominated
+by guest volume and adds nothing over the Sales trend (a clean
+distinct-diners-per-period series can be added later if ever wanted).
+"""
+from decimal import Decimal, ROUND_HALF_UP
+
+from django.db.models import Count, Avg, Max
+
 from misc_app.controllers.clean_dates import clean_dates
-from orders_app.models import Order
-from misc_app.controllers.report_support_functions import (
-    make_graph_series_data,
-    make_month_range,
-    make_quarter_range,
-    make_annual_range
+from reports_app.controllers.common.sale_filters import (
+    sale_orders, revenue_sum, REVENUE_FIELD,
 )
+
+
+TWO_PLACES = Decimal('0.01')
+
+
+def _money_2dp(value):
+    """Quantize a Decimal money value to 2dp (HALF_UP); ``None`` -> ``0``.
+
+    A ``Sum`` of 2dp columns is already exact, but an ``Avg`` or a division can
+    carry extra places — money is 2dp on the wire.
+    """
+    if value is None:
+        return 0
+    return value.quantize(TWO_PLACES, rounding=ROUND_HALF_UP)
+
+
+def _diner_name(first_name, last_name, phone_number):
+    """Build a display name from the (both-nullable) identity fields.
+
+    Falls back to the phone number (always present on an identified User) and
+    finally the empty string, so an unnamed diner never renders as ``'None'``.
+    """
+    name = ' '.join(part for part in (first_name, last_name) if part)
+    return name or phone_number or ''
 
 
 def generate_restaurant_diners_summary(
@@ -18,43 +63,76 @@ def generate_restaurant_diners_summary(
     dates = clean_dates(date_from=date_from, date_to=date_to)
     if dates.get('status') != 200:
         return dates
-    date_from = dates.get('date_from')
-    date_to = dates.get('date_to')
+    date_from = dates['date_from']
+    date_to = dates['date_to']
 
-    orders = None
+    sales = sale_orders(restaurant_id, date_from, date_to)
 
-    if date_from == date_to:
-        orders = Order.objects.filter(
-            restaurant=restaurant_id,
-            time_created__date=date_from
+    # ONE grouped row per IDENTIFIED diner (NULL customers excluded up front) —
+    # grouped by the customer PK (NOT first_name, which would merge distinct
+    # diners and fold every guest into a single None group) and ordered by sale
+    # count so row[0] is the most active diner.
+    per_diner = list(
+        sales
+        .exclude(customer__isnull=True)
+        .values(
+            'customer',
+            'customer__first_name',
+            'customer__last_name',
+            'customer__phone_number',
         )
-    else:
-        orders = Order.objects.filter(
-            restaurant=restaurant_id,
-            time_created__gte=date_from,
-            time_created__lte=date_to
+        .annotate(
+            order_count=Count('id'),
+            total_spend=revenue_sum(),
         )
+        .order_by('-order_count')
+    )
 
-    new_diners = orders.values('customer').distinct().count()
-    repeat_diners = orders.values('customer').annotate(order_count=Count('id')).filter(order_count__gt=1).count()  # noqa
-    most_active_diner = orders.values('customer__first_name').annotate(order_count=Count('id')).order_by('-total_cost').first()  # noqa
-    # exclude orders with no customer
-    customer_orders = orders.exclude(customer__isnull=True)
-    average_sales_amount_per_diner = customer_orders.exclude(
-        customer__isnull=True
-    ).aggregate(Avg('total_cost'))  # noqa
+    identified_diners = len(per_diner)
+    # >1 sale in range == a repeat diner. The NULL bucket is not in per_diner, so
+    # the anonymous majority can never inflate this (the whole point).
+    repeat_diners = sum(1 for row in per_diner if row['order_count'] > 1)
 
-    stats = {
-        'new_diners': new_diners,
+    # Average spend PER DINER: total net spend over identified sale orders divided
+    # by the number of identified diners (not per order); 0 with no diners.
+    total_identified_spend = sum(
+        (row['total_spend'] for row in per_diner), Decimal('0.00'),
+    )
+    average_spend_per_identified_diner = (
+        _money_2dp(total_identified_spend / identified_diners)
+        if identified_diners else 0
+    )
+
+    # Most active == most sales in range (by COUNT, never by spend); null when
+    # there are no identified diners.
+    most_active_diner = None
+    if per_diner:
+        top = per_diner[0]
+        most_active_diner = {
+            'name': _diner_name(
+                top['customer__first_name'],
+                top['customer__last_name'],
+                top['customer__phone_number'],
+            ),
+            'order_count': top['order_count'],
+            'total_spend': top['total_spend'],
+        }
+
+    # Guests (anonymous QR) are the honest majority — their own count, NOT folded
+    # into the identified-diner metrics above.
+    guest_orders = sales.filter(customer__isnull=True).count()
+
+    data = {
+        'identified_diners': identified_diners,
         'repeat_diners': repeat_diners,
+        'guest_orders': guest_orders,
+        'average_spend_per_identified_diner': average_spend_per_identified_diner,
         'most_active_diner': most_active_diner,
-        'average_sales_amount_per_diners': average_sales_amount_per_diner
     }
-
     return {
         'status': 200,
-        'message': 'Diners summary generated successfully',
-        'data': stats
+        'message': 'Successfully retrieved the diners summary',
+        'data': data,
     }
 
 
@@ -66,317 +144,56 @@ def generate_restaurant_diners_listing(
     dates = clean_dates(date_from=date_from, date_to=date_to)
     if dates.get('status') != 200:
         return dates
-
-    date_from = dates.get('date_from')
-    date_to = dates.get('date_to')
+    date_from = dates['date_from']
+    date_to = dates['date_to']
 
     if (date_to - date_from).days > 31:
         return {
             'status': 400,
-            'message': 'Date range cannot be greater than 31 days.'
+            'message': 'Date range cannot be greater than 31 days.',
         }
 
-    # get the list of diners
-    orders = Order.objects.filter(
-        restaurant=restaurant_id,
-        time_created__date__gte=date_from,
-        time_created__date__lte=date_to
-    ).exclude(customer__isnull=True).values('customer').distinct()
-
-    diners = []
-    for order in orders:
-        customer = order.get('customer')
-        customer_orders = Order.objects.filter(
-            restaurant=restaurant_id,
-            customer=customer
+    # ONE grouped+joined query — replaces the legacy per-row loop that (a) did
+    # ``UUID.first_name`` (the customer value is the PK, not a User) and crashed,
+    # (b) ran a per-customer N+1, and (c) aggregated all-time instead of the date
+    # range. Identified diners only; the User identity fields come through the
+    # ORM join and the money is ``actual_cost`` over the date-bounded sale set.
+    rows = (
+        sale_orders(restaurant_id, date_from, date_to)
+        .exclude(customer__isnull=True)
+        .values(
+            'customer',
+            'customer__first_name',
+            'customer__last_name',
+            'customer__phone_number',
         )
-        diner = {
-            'id': customer,
-            'name': f"{customer.first_name} {customer.last_name}",
-            'phone_number': customer.phone_number,
-            'email': customer.email,
-            'no_orders': customer_orders.count(),
-            'total_spend': customer_orders.aggregate(total_spend=Sum('total_cost')).get('total_spend'),
-            'average_spend': customer_orders.aggregate(average_spend=Avg('total_cost')).get('average_spend'),
-        }
-        diners.append(diner)
+        .annotate(
+            no_orders=Count('id'),
+            total_spend=revenue_sum(),
+            average_spend=Avg(REVENUE_FIELD),
+            last_order_date=Max('time_created'),
+        )
+        .order_by('-no_orders')
+    )
 
+    diners = [
+        {
+            'customer_id': row['customer'],
+            'name': _diner_name(
+                row['customer__first_name'],
+                row['customer__last_name'],
+                row['customer__phone_number'],
+            ),
+            'phone_number': row['customer__phone_number'],
+            'no_orders': row['no_orders'],
+            'total_spend': row['total_spend'],
+            'average_spend': _money_2dp(row['average_spend']),
+            'last_order_date': row['last_order_date'],
+        }
+        for row in rows
+    ]
     return {
         'status': 200,
-        'message': 'Diners listing generated successfully',
-        'data': diners
+        'message': 'Successfully retrieved the diners listing',
+        'data': diners,
     }
-
-
-def generate_restaurant_diners_trends(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-    trend_category: str,
-    trend_result: str
-) -> dict:
-    dates = clean_dates(date_from=date_from, date_to=date_to)
-    if dates.get('status') != 200:
-        return dates
-
-    date_from = dates.get('date_from')
-    date_to = dates.get('date_to')
-
-    if trend_category == 'daily':
-        return get_daily_trends(
-            restaurant_id=restaurant_id,
-            date_from=date_from,
-            date_to=date_to,
-            trend_result=trend_result
-        )
-    if trend_category == 'monthly':
-        return get_monthly_trends(
-            restaurant_id=restaurant_id,
-            date_from=date_from,
-            date_to=date_to,
-            trend_result=trend_result
-        )
-    if trend_category == 'quarterly':
-        return get_quarterly_trends(
-            restaurant_id=restaurant_id,
-            date_from=date_from,
-            date_to=date_to,
-            trend_result=trend_result
-        )
-    if trend_category == 'annual':
-        return get_annual_trends(
-            restaurant_id=restaurant_id,
-            date_from=date_from,
-            date_to=date_to,
-            trend_result=trend_result
-        )
-
-
-def get_daily_trends(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-    trend_result: str
-) -> dict:
-    x_categories = []
-    days = []
-    trend_table = []
-    trend_graph = []
-
-    day0 = date_from
-    while day0 <= date_to:
-        days.append(day0)
-        x_categories.append(str(day0))
-        day0 += timedelta(days=1)
-
-    def get_tabular_trend_data(days: list):
-        for day in days:
-            summary = generate_restaurant_diners_summary(
-                restaurant_id=restaurant_id,
-                date_from=day,
-                date_to=day
-            ).get('data')
-            summary['date'] = str(day)
-            # remove the most active diner
-            summary.pop('most_active_diner')
-            trend_table.append(summary)
-
-    def get_graph_trend_data(days: list):
-        for day in days:
-            summary = generate_restaurant_diners_summary(
-                restaurant_id=restaurant_id,
-                date_from=day,
-                date_to=day
-            ).get('data')
-            summary['date'] = str(day)
-            # remove the most active diner
-            summary.pop('most_active_diner')
-            trend_graph.append(summary)
-
-    if trend_result == 'table':
-        get_tabular_trend_data(days)
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the daily trend data in tabular format.',
-            'data': trend_table
-        }
-    if trend_result == 'graph':
-        get_graph_trend_data(days)
-        data = make_graph_series_data(
-            x_title='Days',
-            y_values=trend_graph,
-            x_detail='date'
-        )
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the daily trend data in graph series.',
-            'data': data
-        }
-
-
-def get_monthly_trends(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-    trend_result: str
-) -> dict:
-    trend_table = []
-    trend_graph = []
-    month_range = make_month_range(
-        start=date_from,
-        end=date_to
-    )
-
-    def get_tabular_trend_data():
-        for month in month_range:
-            summary = generate_restaurant_diners_summary(
-                restaurant_id=restaurant_id,
-                date_from=month.get('start'),
-                date_to=month.get('end')
-            ).get('data')
-            summary['month'] = month.get('month')
-            trend_table.append(summary)
-
-    def get_graph_trend_data():
-        for month in month_range:
-            summary = generate_restaurant_diners_summary(
-                restaurant_id=restaurant_id,
-                date_from=month.get('start'),
-                date_to=month.get('end')
-            ).get('data')
-            summary['month'] = month.get('month')
-            # remove the most active diner
-            summary.pop('most_active_diner')
-            trend_graph.append(summary)
-
-    if trend_result == 'table':
-        get_tabular_trend_data()
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the monthly trend data in tabular format.',
-            'data': trend_table
-        }
-    if trend_result == 'graph':
-        get_graph_trend_data()
-        data = make_graph_series_data(
-            x_title='Months',
-            y_values=trend_graph,
-            x_detail='month'
-        )
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the monthly trend data in graph series.',
-            'data': data
-        }
-
-
-def get_quarterly_trends(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-    trend_result: str
-) -> dict:
-    trend_table = []
-    trend_graph = []
-    quarter_range = make_quarter_range(
-        start=date_from,
-        end=date_to
-    )
-
-    def get_tabular_trend_data():
-        for quarter in quarter_range:
-            summary = generate_restaurant_diners_summary(
-                restaurant_id=restaurant_id,
-                date_from=quarter.get('start'),
-                date_to=quarter.get('end')
-            ).get('data')
-            summary['quarter'] = quarter.get('quarter')
-            trend_table.append(summary)
-
-    def get_graph_trend_data():
-        for quarter in quarter_range:
-            summary = generate_restaurant_diners_summary(
-                restaurant_id=restaurant_id,
-                date_from=quarter.get('start'),
-                date_to=quarter.get('end')
-            ).get('data')
-            summary['quarter'] = quarter.get('quarter')
-            # remove the most active diner
-            summary.pop('most_active_diner')
-            trend_graph.append(summary)
-
-    if trend_result == 'table':
-        get_tabular_trend_data()
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the quarterly trend data in tabular format.',
-            'data': trend_table
-        }
-    if trend_result == 'graph':
-        get_graph_trend_data()
-        data = make_graph_series_data(
-            x_title='Quarters',
-            y_values=trend_graph,
-            x_detail='quarter'
-        )
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the quarterly trend data in graph series.',
-            'data': data
-        }
-
-
-def get_annual_trends(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-    trend_result: str
-) -> dict:
-    trend_table = []
-    trend_graph = []
-    annual_range = make_annual_range(
-        start=date_from,
-        end=date_to
-    )
-
-    def get_tabular_trend_data():
-        for year in annual_range:
-            summary = generate_restaurant_diners_summary(
-                restaurant_id=restaurant_id,
-                date_from=year.get('start'),
-                date_to=year.get('end')
-            ).get('data')
-            summary['year'] = year.get('year')
-            trend_table.append(summary)
-
-    def get_graph_trend_data():
-        for year in annual_range:
-            summary = generate_restaurant_diners_summary(
-                restaurant_id=restaurant_id,
-                date_from=year.get('start'),
-                date_to=year.get('end')
-            ).get('data')
-            summary['year'] = year.get('year')
-            # remove the most active diner
-            summary.pop('most_active_diner')
-            trend_graph.append(summary)
-
-    if trend_result == 'table':
-        get_tabular_trend_data()
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the annual trend data in tabular format.',
-            'data': trend_table
-        }
-    if trend_result == 'graph':
-        get_graph_trend_data()
-        data = make_graph_series_data(
-            x_title='Years',
-            y_values=trend_graph,
-            x_detail='year'
-        )
-        return {
-            'status': 200,
-            'message': 'Successfully retrieved the annual trend data in graph series.',
-            'data': data
-        }

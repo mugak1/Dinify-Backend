@@ -17,8 +17,7 @@ from reports_app.controllers.restaurant.sales import (
 )
 from reports_app.controllers.restaurant.diners import (
     generate_restaurant_diners_summary,
-    generate_restaurant_diners_listing,
-    generate_restaurant_diners_trends
+    generate_restaurant_diners_listing
 )
 from reports_app.controllers.restaurant.menu import generate_restaurant_menu_summary
 from reports_app.controllers.restaurant.transactions import (
@@ -84,14 +83,6 @@ class RestaurantReportsEndpoint(APIView):
                 restaurant_id=request.GET.get('restaurant', None),
                 date_from=request.GET.get('from', str(date_today)),
                 date_to=request.GET.get('to', str(date_today))
-            )
-        elif report_name == 'diners-trends':
-            response = generate_restaurant_diners_trends(
-                restaurant_id=request.GET.get('restaurant', None),
-                date_from=request.GET.get('from', str(date_today)),
-                date_to=request.GET.get('to', str(date_today)),
-                trend_category=request.GET.get('category', 'daily'),
-                trend_result=request.GET.get('result', 'table')
             )
         elif report_name == 'menu-summary':
             response = generate_restaurant_menu_summary(
