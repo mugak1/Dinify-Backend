@@ -1,81 +1,115 @@
+"""
+Restaurant Transactions reports — summary and listing.
+
+Transactions are ``DinifyTransaction``-based, so the axis here is
+``transaction_status`` / ``transaction_type`` — NOT the Order-based
+``sale_filters`` / ``SALE_STATUSES`` used by the sales reports. The
+``{status, message, data}`` envelope and the two public entrypoints
+(``generate_restaurant_transaction_summary`` / ``_listing``) are kept so the
+endpoint dispatch (``reports_app/endpoints/restaurant_reports.py``) is unchanged.
+
+Corrected over the legacy bugs:
+  * the summary runs in TWO grouped queries (group-by status, group-by type),
+    then 0-fills onto the complete known sets so the shape is stable even when a
+    bucket is empty — no per-status / per-type loop,
+  * the listing emits RAW enum values (the frontend owns formatting), a single
+    ``amount`` (direction is derivable from ``transaction_type``), the real
+    ``payment_mode``, and ``select_related('order')`` so ``order_number`` adds no
+    per-row query,
+  * the date filter always uses ``time_created__date__gte/__lte`` (EAT-aligned
+    under USE_TZ) — no single-day ``==`` special case.
+"""
 from typing import Optional
-from misc_app.controllers.clean_dates import clean_dates
+
+from django.db.models import Count, Sum
+
 from finance_app.models import DinifyTransaction
+from finance_app.serializers import SerializerGetRestaurantTransactionListing
+from misc_app.controllers.clean_dates import clean_dates
 from dinify_backend.configss.string_definitions import (
     TransactionStatus_Success,
     TransactionStatus_Failed,
     TransactionStatus_Pending,
     TransactionStatus_Initiated,
     TransactionType_OrderPayment,
-    TransactionType_Subscription
+    TransactionType_Subscription,
 )
-from django.db.models import Sum
-from finance_app.serializers import SerializerGetRestaurantTransactionListing
 
-TRANSACTION_STATUSES = [
+# The summary 0-fills onto these known sets so the shape is stable even when a
+# bucket has no rows. Statuses are the full transaction_status domain; types are
+# the live set after the 8a non-custodial trim (order_payment + subscription) —
+# any legacy type still present in the data is intentionally not surfaced here.
+SUMMARY_STATUSES = [
     TransactionStatus_Success,
     TransactionStatus_Failed,
     TransactionStatus_Pending,
-    TransactionStatus_Initiated
+    TransactionStatus_Initiated,
 ]
-
-TRANSACTION_TYPES = [
+SUMMARY_TYPES = [
     TransactionType_OrderPayment,
-    TransactionType_Subscription
+    TransactionType_Subscription,
 ]
 
 
 def generate_restaurant_transaction_summary(
     restaurant_id: str,
     date_from: str,
-    date_to: str
+    date_to: str,
 ) -> dict:
     dates = clean_dates(date_from=date_from, date_to=date_to)
     if dates.get('status') != 200:
         return dates
-    date_from = dates.get('date_from')
-    date_to = dates.get('date_to')
+    date_from = dates['date_from']
+    date_to = dates['date_to']
 
-    transactions = None
-    filters = {
-        'restaurant_id': restaurant_id
+    base = DinifyTransaction.objects.filter(
+        restaurant_id=restaurant_id,
+        time_created__date__gte=date_from,
+        time_created__date__lte=date_to,
+    )
+
+    # TWO grouped queries — replaces the legacy per-status and per-type loops.
+    status_rows = {
+        row['transaction_status']: row
+        for row in base.values('transaction_status').annotate(
+            count=Count('id'), amount=Sum('transaction_amount'),
+        )
     }
-    if date_to == date_from:
-        filters['time_created__date'] = date_from
-    else:
-        filters['time_created__date__gte'] = date_from
-        filters['time_created__date__lte'] = date_to
+    type_rows = {
+        row['transaction_type']: row
+        for row in base.values('transaction_type').annotate(
+            count=Count('id'), amount=Sum('transaction_amount'),
+        )
+    }
 
-    transactions = DinifyTransaction.objects.filter(**filters)
-
-    # get the transaction count by status
-    transaction_status_overview = []
-    transaction_type_overview = []
-
-    for status in TRANSACTION_STATUSES:
-        status_transactions = transactions.filter(transaction_status=status)
-        amount = status_transactions.aggregate(
-                Sum('transaction_amount')
-            )['transaction_amount__sum']
-        transaction_status_overview.append({
+    by_status = [
+        {
             'status': status,
-            'count': status_transactions.count(),
-            'amount': amount if amount else 0
-        })
-    for transaction_type in TRANSACTION_TYPES:
-        type_transactions = transactions.filter(transaction_type=transaction_type)
-        transaction_type_overview.append({
-            'transaction_type': transaction_type,
-            'count': type_transactions.count()
-        })
+            'count': (status_rows.get(status) or {}).get('count', 0),
+            'amount': (status_rows.get(status) or {}).get('amount') or 0,
+        }
+        for status in SUMMARY_STATUSES
+    ]
+    by_type = [
+        {
+            'type': txn_type,
+            'count': (type_rows.get(txn_type) or {}).get('count', 0),
+            'amount': (type_rows.get(txn_type) or {}).get('amount') or 0,
+        }
+        for txn_type in SUMMARY_TYPES
+    ]
+    # Sum of the status counts — no extra count query. (Different lens from
+    # by_type, which projects only the live set, so the two need not reconcile.)
+    total_transactions = sum(bucket['count'] for bucket in by_status)
+
     return {
         'status': 200,
         'message': 'Transaction summary generated successfully',
         'data': {
-            'no_of_transactions': transactions.count(),
-            'transaction_status_overview': transaction_status_overview,
-            'transaction_type_overview': transaction_type_overview,
-        }
+            'total_transactions': total_transactions,
+            'by_status': by_status,
+            'by_type': by_type,
+        },
     }
 
 
@@ -84,42 +118,41 @@ def generate_restaurant_transaction_listing(
     date_from: str,
     date_to: str,
     transaction_type: Optional[str] = None,
-    transaction_status: Optional[str] = None
+    transaction_status: Optional[str] = None,
 ) -> dict:
     dates = clean_dates(date_from=date_from, date_to=date_to)
     if dates.get('status') != 200:
         return dates
-    date_from = dates.get('date_from')
-    date_to = dates.get('date_to')
+    date_from = dates['date_from']
+    date_to = dates['date_to']
 
-    if (date_to - date_from).days > 31:
-        if transaction_type != 'subscription':
-            return {
-                'status': 400,
-                'message': 'Date range should not exceed 31 days'
-            }
+    # 31-day cap, exempting subscriptions (sparse, worth viewing over long ranges).
+    if (date_to - date_from).days > 31 and \
+            transaction_type != TransactionType_Subscription:
+        return {
+            'status': 400,
+            'message': 'Date range should not exceed 31 days',
+        }
 
-    transactions = None
     filters = {
-        'restaurant_id': restaurant_id
+        'restaurant_id': restaurant_id,
+        'time_created__date__gte': date_from,
+        'time_created__date__lte': date_to,
     }
-    if date_to == date_from:
-        filters['time_created__date'] = date_from
-    else:
-        filters['time_created__date__gte'] = date_from
-        filters['time_created__date__lte'] = date_to
     if transaction_type is not None:
         filters['transaction_type'] = transaction_type
     if transaction_status is not None:
         filters['transaction_status'] = transaction_status
 
-    transactions = DinifyTransaction.objects.filter(**filters)
-    transactions = SerializerGetRestaurantTransactionListing(
-        transactions,
-        many=True
-    ).data
+    transactions = (
+        DinifyTransaction.objects
+        .filter(**filters)
+        .select_related('order')
+        .order_by('time_created')
+    )
+    records = SerializerGetRestaurantTransactionListing(transactions, many=True)
     return {
         'status': 200,
         'message': 'Transaction listing generated successfully',
-        'data': transactions
+        'data': records.data,
     }

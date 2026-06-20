@@ -88,6 +88,27 @@ with PostgreSQL on AWS RDS.
   `DinifyAccount` / `DinifyTransaction` survive as record-only structures.
   Funds must settle restaurant-direct — do NOT reintroduce held balances,
   disbursement, Dinify-initiated refunds, the OVA wallet, or tip wallets
+- Reports module — rebuild on the clean contract: 🚧 In progress. Restaurant
+  reports (`api/v1/reports/restaurant/<name>/` → `RestaurantReportsEndpoint`,
+  `{status, message, data}` envelope) are being rebuilt on shared foundations in
+  `reports_app/controllers/common/`: `sale_filters.py` (the canonical "what is a
+  sale / what is revenue" — `SALE_STATUSES` {served, paid}, revenue =
+  `Sum('actual_cost')`, discount = `Sum('savings')`; Order-based) and
+  `bucketing.py` (single grouped-query, EAT-aligned period bucketing — no
+  per-period loop). Rebuild contract: RAW enum values (the frontend owns display
+  formatting — NO backend `.title()`-casing), a stable 0-filled shape, and
+  grouped queries (no per-bucket / per-row N+1). Rebuilt so far: Sales
+  summary/listing/trends (PR #165, `sales.py` + `tests_sales_report.py`) and
+  Transactions summary/listing (`transactions.py` + `tests_transactions_report.py`).
+  Transactions is `DinifyTransaction`-based, so its axis is `transaction_status`
+  / `transaction_type` (statuses success/failed/pending/initiated; live types
+  order_payment/subscription) — NOT the Order-based `sale_filters` /
+  `SALE_STATUSES`; its listing serializer
+  `SerializerGetRestaurantTransactionListing` emits raw enums + a single `amount`
+  + `payment_mode`, and the controller uses `select_related('order')`. Still on
+  the LEGACY path (not yet rebuilt): Diners (`diners.py`) and Menu (`menu.py`).
+  The Dashboard endpoint and the admin `reports_app/controllers/dinify/` path
+  (incl. `SerializerGetDinifyTransactionListing`) are separate and untouched
 - Login 500 regression: ✅ Resolved — not reproducible after the auth-stack work;
   login → refresh → logout verified working on UAT (closed June 2026)
 - Django 5.2 LTS upgrade: ✅ Complete — Django 4.2.30 → 5.2.15 (PRs #123–#125).
