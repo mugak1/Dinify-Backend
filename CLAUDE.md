@@ -75,39 +75,52 @@ with PostgreSQL on AWS RDS.
   `reviews_app/0001_initial`, `0002_review_resolution_note`. `Review` is the
   system of record — the legacy inline-review fields on `Order`/`OrderItem`
   were dropped (orders_app migration `0034`)
-- Payments — non-custodial migration: 🚧 In progress. Dinify must operate as a
-  software vendor, NOT a custodial payment institution (Uganda NPS Act 2020 —
-  see `REGULATORY_AUDIT.md`). The custodial money-flow has been REMOVED across
-  stages 1–6 (PRs #149–#155): dead payment code; the fund-disbursement/payout
+- Payments — non-custodial migration: 🚧 In progress (custodial teardown
+  essentially complete). Dinify must operate as a software vendor, NOT a
+  custodial payment institution (Uganda NPS Act 2020 — see
+  `REGULATORY_AUDIT.md`). The custodial money-flow has been REMOVED across
+  stages 1–8a (PRs #149–#162): dead payment code; the fund-disbursement/payout
   path (`tx_disbursement.py`, Yo `momo_disburse`/`bank_disburse`); the
   Dinify-initiated refund payout (`initiate_refund.py`, Flutterwave
   `send_mobile_money`); the OVA subscription fee-netting; tips (`tx_tip.py`);
-  and the custodial balance ledger (`update_wallet_balance.py` + the
-  EOD daily-reporting machinery in `reports_app`). `DinifyAccount`'s 24
-  balance/cumulative fields were dropped (finance_app migration `0024`);
-  `DinifyAccount` / `DinifyTransaction` survive as record-only structures.
-  Funds must settle restaurant-direct — do NOT reintroduce held balances,
-  disbursement, Dinify-initiated refunds, the OVA wallet, or tip wallets
-- Reports module — rebuild on the clean contract: 🚧 In progress. Restaurant
-  reports (`api/v1/reports/restaurant/<name>/` → `RestaurantReportsEndpoint`,
-  `{status, message, data}` envelope) are being rebuilt on shared foundations in
-  `reports_app/controllers/common/`: `sale_filters.py` (the canonical "what is a
-  sale / what is revenue" — `SALE_STATUSES` {served, paid}, revenue =
-  `Sum('actual_cost')`, discount = `Sum('savings')`; Order-based) and
+  the custodial balance ledger (`update_wallet_balance.py` + the EOD
+  daily-reporting machinery in `reports_app`); the payment-aggregator
+  integration layer (the DPO and Flutterwave controllers DELETED, Yo's payment
+  paths stripped — its SMS dispatch remains — and the `initiate_*` order-payment
+  flows stubbed aggregator-free, PR #158); and the custodial models themselves —
+  `DinifyAccount` (with its 24 balance/cumulative fields) and `BankAccountRecord`
+  are now DELETED, and `DinifyTransaction`'s `account` FK and `tip_amount` column
+  are dropped (finance_app migrations `0024`–`0028`); dead
+  surcharge/transaction-type figures were trimmed from reports (PR #162). Only
+  `DinifyTransaction` survives, as a record-only structure. Funds must settle
+  restaurant-direct — do NOT reintroduce held balances, disbursement,
+  Dinify-initiated refunds, the OVA wallet, tip wallets, or the
+  `DinifyAccount` / `BankAccountRecord` custodial models
+- Reports module — rebuilt on the clean contract: ✅ Complete. All four
+  restaurant reports (`api/v1/reports/restaurant/<name>/` →
+  `RestaurantReportsEndpoint`, `{status, message, data}` envelope) are rebuilt on
+  shared foundations in `reports_app/controllers/common/`: `sale_filters.py` (the
+  canonical "what is a sale / what is revenue" — `SALE_STATUSES` {served, paid},
+  revenue = `Sum('actual_cost')`, discount = `Sum('savings')`; Order-based) and
   `bucketing.py` (single grouped-query, EAT-aligned period bucketing — no
   per-period loop). Rebuild contract: RAW enum values (the frontend owns display
   formatting — NO backend `.title()`-casing), a stable 0-filled shape, and
-  grouped queries (no per-bucket / per-row N+1). Rebuilt so far: Sales
-  summary/listing/trends (PR #165, `sales.py` + `tests_sales_report.py`) and
-  Transactions summary/listing (`transactions.py` + `tests_transactions_report.py`).
-  Transactions is `DinifyTransaction`-based, so its axis is `transaction_status`
-  / `transaction_type` (statuses success/failed/pending/initiated; live types
+  grouped queries (no per-bucket / per-row N+1). Rebuilt: Sales
+  summary/listing/trends (PR #165, `sales.py`), Transactions summary/listing
+  (PR #166, `transactions.py`), Diners summary/listing (PR #167, `diners.py`),
+  and Menu summary/listing (PR #168, `menu.py`; the menu-summary date-range cap
+  was later relaxed in PR #169) — each with its own `tests_*_report.py`.
+  Sales/Diners/Menu are Order-based and share `sale_filters`; Diners operates
+  strictly on non-NULL-customer sale orders so anonymous-QR guests are never
+  collapsed into a phantom repeat diner (guests are surfaced as a separate count,
+  and the legacy `diners-trends` report was dropped). Transactions is
+  `DinifyTransaction`-based, so its axis is `transaction_status` /
+  `transaction_type` (statuses success/failed/pending/initiated; live types
   order_payment/subscription) — NOT the Order-based `sale_filters` /
   `SALE_STATUSES`; its listing serializer
   `SerializerGetRestaurantTransactionListing` emits raw enums + a single `amount`
-  + `payment_mode`, and the controller uses `select_related('order')`. Still on
-  the LEGACY path (not yet rebuilt): Diners (`diners.py`) and Menu (`menu.py`).
-  The Dashboard endpoint and the admin `reports_app/controllers/dinify/` path
+  + `payment_mode`, and the controller uses `select_related('order')`. The
+  Dashboard endpoint and the admin `reports_app/controllers/dinify/` path
   (incl. `SerializerGetDinifyTransactionListing`) are separate and untouched
 - Login 500 regression: ✅ Resolved — not reproducible after the auth-stack work;
   login → refresh → logout verified working on UAT (closed June 2026)
@@ -311,7 +324,7 @@ the catch-all `<str:config_detail>/` route.
 - All migrations must be generated and included in PRs when models change
 - Latest migration: `restaurants_app/migrations/0051_restaurant_opening_hours.py`,
   `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
-  `finance_app/migrations/0024_remove_dinifyaccount_card_actual_balance_and_more.py`,
+  `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0002_review_resolution_note.py`
 
 ## CI — `.github/workflows/ci.yml`
