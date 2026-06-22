@@ -83,6 +83,10 @@ def create_employee(
         if response['status'] != 200:
             # delete the user account that was created
             User.objects.get(id=create_user['user_id']).delete()
+        else:
+            # surface the one-time credential to the (owner-only, HTTPS) caller;
+            # it is also emailed to the new user via self_register(send_credentials=True)
+            response['data']['temp_password'] = password
 
         Notification(msg_data={
             'msg_type': 'new-restaurant-employee',

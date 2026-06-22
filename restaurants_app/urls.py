@@ -10,6 +10,7 @@ from restaurants_app.endpoints.restaurant_tags import (
 from restaurants_app.endpoints.reservations import ReservationsEndpoint
 from restaurants_app.endpoints.waitlist import WaitlistEndpoint
 from restaurants_app.endpoints.table_actions import TableActionsEndpoint
+from restaurants_app.endpoints.role_permissions import RolePermissionsEndpoint
 
 
 urlpatterns = [
@@ -27,6 +28,8 @@ urlpatterns = [
     path('waitlist/', WaitlistEndpoint.as_view()),
     # Table lifecycle actions (must be before the catch-all)
     path('table-actions/<str:action>/', TableActionsEndpoint.as_view()),
+    # Role-permissions management (must be before the catch-all)
+    path('role-permissions/', RolePermissionsEndpoint.as_view()),
     # Existing patterns
     path('<str:config_detail>/', RestaurantSetupEndpoint.as_view()),
     path('manager-actions/<str:action>/', RestaurantManagerActionsEndpoint.as_view()),
