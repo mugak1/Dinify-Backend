@@ -3,7 +3,6 @@ serializers for the users_app
 """
 from rest_framework.serializers import SerializerMethodField, ModelSerializer
 from users_app.models import User
-from restaurants_app.models import RestaurantEmployee
 
 
 class SerGetUserProfile(ModelSerializer):
@@ -26,19 +25,12 @@ class SerGetUserProfile(ModelSerializer):
     def get_restaurant_roles(self, user):
         if 'restaurant_roles' in self.context:
             return self.context['restaurant_roles']
-        res_roles = RestaurantEmployee.objects.select_related('restaurant').filter(
-            restaurant__status__in=['active'],
-            user=user,
-            deleted=False
-        )
-        return [
-            {
-                'restaurant_id': str(res_role.restaurant.id),
-                'restaurant': res_role.restaurant.name,
-                'roles': res_role.roles
-            }
-            for res_role in res_roles
-        ]
+        # Delegate to the canonical builder so the login path (which feeds its
+        # output in via context) and this profile-fetch path cannot diverge —
+        # including the resolved `permissions` map on each entry. Lazy import
+        # avoids any module-load coupling.
+        from users_app.controllers.permissions_check import get_any_restaurant_roles
+        return get_any_restaurant_roles(user)
 
 
 class SerPutUserProfile(ModelSerializer):

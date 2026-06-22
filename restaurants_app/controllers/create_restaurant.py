@@ -13,6 +13,7 @@ from dinify_backend.configs import ROLES, ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from dinify_backend.configss.required_information import REQUIRED_INFORMATION
 from restaurants_app.serializers import SerializerPutRestaurant, SerializerPutRestaurantEmployee
+from restaurants_app.controllers.role_permissions import ensure_role_permissions
 from misc_app.controllers.check_required_information import check_required_information
 from users_app.controllers.self_register import self_register
 from users_app.models import User
@@ -67,6 +68,9 @@ def create_restaurant(data: dict, auth_info: dict) -> dict:
             employee_record = SerializerPutRestaurantEmployee(data=employee)
             if employee_record.is_valid():
                 employee_record.save()
+
+                # seed the default role-permission grid for the new restaurant
+                ensure_role_permissions(record.data['id'])
 
                 # create the notification for the restaurant
                 Notification(msg_data={
@@ -198,6 +202,9 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
             employee_record = SerializerPutRestaurantEmployee(data=employee)
             if employee_record.is_valid():
                 employee_record.save()
+
+                # seed the default role-permission grid for the new restaurant
+                ensure_role_permissions(record.data['id'])
 
                 # create the notification for the restaurant
                 Notification(msg_data={

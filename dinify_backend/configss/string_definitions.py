@@ -94,6 +94,29 @@ RESTAURANT_FINANCE = 'finance'
 DINER = 'diner'
 
 
+# portal module registry (role-based access grid)
+MODULE_DASHBOARD = 'dashboard'
+MODULE_KITCHEN = 'kitchen'
+MODULE_TABLES = 'tables'
+MODULE_MENU = 'menu'
+MODULE_REVIEWS = 'reviews'
+MODULE_REPORTS = 'reports'
+MODULE_SETTINGS = 'settings'
+# editable grid set (order is the canonical display order)
+GRID_MODULES = [
+    MODULE_DASHBOARD, MODULE_KITCHEN, MODULE_TABLES, MODULE_MENU,
+    MODULE_REVIEWS, MODULE_REPORTS, MODULE_SETTINGS,
+]
+# off-grid owner/admin-only keys (NEVER grid keys) — granted only by the
+# resolver's owner/admin short-circuit, never from a role's grid
+MODULE_BILLING = 'billing'
+MODULE_TEAM = 'team'
+OWNER_ONLY_MODULES = [MODULE_BILLING, MODULE_TEAM]
+# ungated module — enforcement always allows it; never a grid key and never
+# represented in the resolved permissions map
+MODULE_SUPPORT = 'support'
+
+
 SysConfig_EodStartTime = 'eod_start_time'
 SysConfig_EodEndTime = 'eod_end_time'
 SysConfig_EodLastDate = 'eod_last_date'
