@@ -184,10 +184,25 @@ class MenuSummaryShapeTests(MenuReportBase):
         self.assertEqual(result['status'], 400)
         self.assertEqual(result['message'], 'Invalid grouping')
 
-    def test_31_day_cap(self):
-        result = self.summary('sections',
-                              date_from='2024-01-01', date_to='2024-03-01')
-        self.assertEqual(result['status'], 400)
+    def test_range_over_31_days_is_allowed(self):
+        # The 31-day cap was relaxed: this aggregate-only report must render at
+        # any range (e.g. a full year). One served order mid-range gives every
+        # grouping a row, proving data still aggregates over the long span and
+        # the output stays bounded by menu size, not range length.
+        order = self.make_order(OrderStatus_Served, when=utc(2024, 6, 15))
+        self.add_item(order, self.burger, quantity=2)  # Mains / Combos / Burger
+
+        expected_name = {
+            'sections': 'Mains', 'groups': 'Combos', 'items': 'Burger',
+        }
+        for grouping, name in expected_name.items():
+            result = self.summary(grouping,
+                                  date_from='2024-01-01', date_to='2024-12-31')
+            self.assertEqual(result['status'], 200)
+            rows = result['data']['rows']
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['name'], name)
+            self.assertEqual(rows[0]['quantity_sold'], 2)
 
 
 class MenuSummarySaleSetTests(MenuReportBase):

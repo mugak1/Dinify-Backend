@@ -59,12 +59,6 @@ def generate_restaurant_menu_summary(
     date_from = dates['date_from']
     date_to = dates['date_to']
 
-    if (date_to - date_from).days > 31:
-        return {
-            'status': 400,
-            'message': 'Date range should not be greater than 31 days.',
-        }
-
     if grouping not in GROUPINGS:
         return {
             'status': 400,
