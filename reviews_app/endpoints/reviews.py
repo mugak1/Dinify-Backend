@@ -4,7 +4,7 @@ Reviews endpoints.
 Two endpoint classes on two paths so the public/authenticated boundary is
 explicit:
 - ``ReviewSubmissionEndpoint``  -> diner submission, AllowAny.
-- ``RestaurantReviewsEndpoint`` -> owner/manager retrieval, JWT (inherits the
+- ``RestaurantReviewsEndpoint`` -> reviews-module retrieval, JWT (inherits the
   project IsAuthenticated default). Mirrors ``RestaurantIssuesEndpoint.get``.
 """
 from rest_framework.views import APIView
@@ -12,7 +12,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 
 from misc_app.controllers.secretary import Secretary
-from users_app.controllers.permissions_check import get_readable_restaurant_ids
+from users_app.controllers.permissions_check import get_module_restaurant_ids
+from dinify_backend.configss.string_definitions import MODULE_REVIEWS
 from reviews_app.models import PUBLIC_RATING_THRESHOLD
 from reviews_app.serializers import ReviewRestaurantReadSerializer
 from reviews_app.controllers.submit_review import submit_review, RATING_FIELDS
@@ -36,7 +37,7 @@ class ReviewSubmissionEndpoint(APIView):
 
 class RestaurantReviewsEndpoint(APIView):
     def get(self, request):
-        allowed = get_readable_restaurant_ids(request.user)
+        allowed = get_module_restaurant_ids(request.user, MODULE_REVIEWS)
         # Review has NO soft-delete column, so (unlike support issues) the filter
         # starts empty — never add {'deleted': False} or it would FieldError.
         orm_filter = {}

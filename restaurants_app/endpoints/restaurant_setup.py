@@ -63,13 +63,18 @@ from dinify_backend.configss.string_definitions import (
     PaymentStatus_Paid,
     PaymentStatus_Pending,
     RESTAURANT_OWNER,
-    RESTAURANT_MANAGER, OrderStatus_Initiated
+    OrderStatus_Initiated,
+    MODULE_SETTINGS,
+    MODULE_TEAM,
+    MODULE_MENU,
+    MODULE_TABLES,
+    MODULE_REPORTS,
 )
 
 from users_app.controllers.permissions_check import (
     is_dinify_admin,
-    get_readable_restaurant_ids,
-    can_read_restaurant,
+    can_user_access_module,
+    get_module_restaurant_ids,
 )
 
 from restaurants_app.models import RestaurantEmployee, DiningArea, Table
@@ -98,9 +103,6 @@ def normalize_ordered_section_ids(put_data) -> list:
     if legacy and isinstance(legacy[0], str):
         return legacy
     return None
-
-
-_PRIVILEGED_RESTAURANT_ROLES = (RESTAURANT_OWNER, RESTAURANT_MANAGER)
 
 
 def _as_str_id(value):
@@ -233,22 +235,44 @@ def _resolve_target_restaurant_id(record, action, data):
         return None
 
 
+# record / config_detail (URL segment) -> the permission MODULE that gates it.
+# ONE mapping drives the catch-all write gate (check_permission), the GET list
+# scoping (scope_list_filter) and the single-record detail read (get_detail).
+# Per Decision 1, employees -> team (owner-only). `orders` is read-only via this
+# endpoint (no write resolver/serializer); it is mapped for the list path. A
+# record absent here fails closed.
+_RECORD_MODULE = {
+    'restaurants':   MODULE_SETTINGS,
+    'employee':      MODULE_TEAM,   # alias used by handle_create_employee
+    'employees':     MODULE_TEAM,
+    'menusections':  MODULE_MENU,
+    'sectiongroups': MODULE_MENU,
+    'menuitems':     MODULE_MENU,
+    'tables':        MODULE_TABLES,
+    'diningareas':   MODULE_TABLES,
+    'orders':        MODULE_REPORTS,
+}
+
+
 def check_permission(user, record: str, action: str, request_data) -> bool:
     """
-    Authorize a write against a restaurant-scoped resource.
+    Authorize a write against a restaurant-scoped resource via MODULE access.
 
     Returns True iff:
       - the user is authenticated and active, AND
-      - the user is a dinify admin (bypass), OR has an active, non-deleted
-        RestaurantEmployee row at the *target* restaurant with role owner
-        or manager.
+      - the user is a dinify admin (bypass), OR may access the record's
+        permission module (``_RECORD_MODULE``) at the *target* restaurant
+        (``can_user_access_module``).
 
     Resolution of the target restaurant is server-side (see
     _RESTAURANT_RESOLVERS): for create it reads the payload, for
     update/delete it walks FK chains from the record's id. This blocks the
-    spoof payload `{id: <victim's record>, restaurant: <attacker's own>}`.
+    spoof payload `{id: <victim's record>, restaurant: <attacker's own>}` —
+    the module check runs against the SERVER-resolved restaurant, never a
+    client-supplied one.
 
-    Returns False if the target restaurant cannot be resolved.
+    Fails closed: returns False if the target restaurant cannot be resolved
+    (e.g. a nonexistent id) or the record type has no module mapping.
     """
     if user is None or not getattr(user, 'is_authenticated', False):
         return False
@@ -265,19 +289,21 @@ def check_permission(user, record: str, action: str, request_data) -> bool:
         )
         return False
 
-    employments = RestaurantEmployee.objects.filter(
-        user=user,
-        restaurant_id=target_restaurant_id,
-        active=True,
-        deleted=False,
-    ).values_list('roles', flat=True)
-    for roles in employments:
-        if any(role in _PRIVILEGED_RESTAURANT_ROLES for role in (roles or [])):
-            return True
+    module = _RECORD_MODULE.get(record)
+    if module is None:
+        logger.warning(
+            "check_permission denied: unmapped record. user=%s record=%s action=%s",
+            getattr(user, 'id', None), record, action,
+        )
+        return False
+
+    if can_user_access_module(user, target_restaurant_id, module):
+        return True
 
     logger.warning(
-        "check_permission denied: insufficient role. user=%s record=%s action=%s restaurant=%s",
-        getattr(user, 'id', None), record, action, target_restaurant_id,
+        "check_permission denied: no module access. user=%s record=%s action=%s "
+        "restaurant=%s module=%s",
+        getattr(user, 'id', None), record, action, target_restaurant_id, module,
     )
     return False
 
@@ -299,25 +325,30 @@ LIST_RESTAURANT_PATH = {
 
 def scope_list_filter(user, config_detail, orm_filter):
     """
-    Authoritatively bind a GET list queryset filter to the caller's readable
-    restaurants. The added ``<path>__in`` clause ANDs with any client-supplied
-    ``restaurant`` param on the same column, so the client can only narrow
-    within the allowed set, never widen it (fail closed) — and a request that
-    omits ``restaurant`` no longer leaks every tenant's records.
+    Authoritatively bind a GET list queryset filter to the restaurants where the
+    caller may access the resource's permission MODULE (``_RECORD_MODULE``). The
+    added ``<path>__in`` clause ANDs with any client-supplied ``restaurant`` param
+    on the same column, so the client can only narrow within the allowed set,
+    never widen it (fail closed) — and a request that omits ``restaurant`` no
+    longer leaks every tenant's records.
 
-    Returns ``(orm_filter, ok)``. ``ok=False`` => deny (resource has no known
-    ownership path). A dinify admin is unrestricted and the filter is left
-    untouched; a non-owner ends up with an empty ``__in`` list (no rows).
+    Returns ``(orm_filter, ok)``. ``ok=False`` => deny (resource has no module
+    mapping or no known ownership path). A dinify admin is unrestricted and the
+    filter is left untouched; a caller without the module ends up with an empty
+    ``__in`` list (no rows).
     """
-    readable = get_readable_restaurant_ids(user)
-    if readable is None:
+    module = _RECORD_MODULE.get(config_detail)
+    if module is None:
+        return orm_filter, False
+    allowed = get_module_restaurant_ids(user, module)
+    if allowed is None:
         return orm_filter, True
     path = LIST_RESTAURANT_PATH.get(config_detail)
     if path is None:
         return orm_filter, False
-    orm_filter[f'{path}__in'] = list(readable)
+    orm_filter[f'{path}__in'] = list(allowed)
     requested = orm_filter.get('restaurant')
-    if requested is not None and str(requested) not in readable:
+    if requested is not None and str(requested) not in allowed:
         orm_filter['restaurant'] = None
     return orm_filter, True
 
@@ -689,10 +720,13 @@ class RestaurantSetupEndpoint(APIView):
             return self.get_detail(request)
 
         if config_detail == 'subscription-details':
-            # Tenant isolation: only owners/managers of the requested restaurant
-            # (or a dinify admin) may read its subscription. 404, not 403, so we
-            # don't confirm whether another tenant's restaurant exists.
-            if not can_read_restaurant(request.user, request.GET.get('restaurant')):
+            # Tenant isolation: gate the subscription read on the `settings`
+            # module at the requested restaurant (a dinify admin reads any).
+            # 404, not 403, so we don't confirm whether another tenant's
+            # restaurant exists.
+            if not can_user_access_module(
+                request.user, request.GET.get('restaurant'), MODULE_SETTINGS,
+            ):
                 return Response(
                     {'status': 404, 'message': 'Not found'}, status=404
                 )
@@ -777,7 +811,10 @@ class RestaurantSetupEndpoint(APIView):
             if request.GET.get('grouping') is not None:
                 # Tenant isolation: this branch builds its own queryset from the
                 # client-supplied ?restaurant=, bypassing the list scoping below.
-                if not can_read_restaurant(request.user, request.GET.get('restaurant')):
+                # Gate on the `tables` module at that restaurant.
+                if not can_user_access_module(
+                    request.user, request.GET.get('restaurant'), MODULE_TABLES,
+                ):
                     return Response(
                         {'status': 404, 'message': 'Not found'}, status=404
                     )
@@ -1144,12 +1181,20 @@ class RestaurantSetupEndpoint(APIView):
                 return Response(response, status=400)
 
             # Tenant isolation: resolve the record's owning restaurant via the
-            # write-path resolvers (which walk FK chains from the id) and confirm
-            # the caller may read it. Unknown record types resolve to None and
-            # are denied for non-admins (fail closed). 404, not 403, so we don't
+            # write-path resolvers (which walk FK chains from the id) and gate
+            # the read on the record's permission module. A nonexistent id or
+            # unknown record type resolves to None -> 404 BEFORE the module check
+            # (never passed into the gate as None). 404, not 403, so we don't
             # confirm the record exists in another tenant.
             owner_restaurant_id = _resolve_target_restaurant_id(record, 'detail', {'id': id})
-            if not can_read_restaurant(request.user, owner_restaurant_id):
+            module = _RECORD_MODULE.get(record)
+            if (
+                not owner_restaurant_id
+                or module is None
+                or not can_user_access_module(
+                    request.user, owner_restaurant_id, module,
+                )
+            ):
                 return Response(
                     {'status': 404, 'message': ERR_GENERAL}, status=404
                 )

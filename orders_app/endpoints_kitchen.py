@@ -51,8 +51,9 @@ FULFILMENT_STATUSES = {'new', 'preparing', 'ready', 'served'}
 
 def user_can_access_kitchen(user, restaurant_id) -> bool:
     """
-    Owner / manager / kitchen of the restaurant, or a Dinify admin. Mirrors
-    ConMenuItemSortMode._user_can_manage_restaurant with RESTAURANT_KITCHEN added.
+    Owner / manager / kitchen of the restaurant, or a Dinify admin. The kitchen
+    module-access gate — kept role-based here (equivalent to the `kitchen`
+    module for the seeded defaults).
     """
     if is_dinify_admin(user):
         return True

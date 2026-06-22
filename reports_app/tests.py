@@ -3,11 +3,13 @@ Tests for reports_app — tenant isolation on RestaurantReportsEndpoint.
 
 Every restaurant report is single-target (scoped by the client ``?restaurant=``).
 ``RestaurantReportsEndpoint.get`` authorizes that one restaurant via
-``can_read_restaurant`` before dispatching, returning 404 (not 403) on a
-cross-tenant / non-member / missing-id read so a restaurant's existence is never
-confirmed to an outsider. A dinify admin is unrestricted; unauthenticated callers
-are stopped by the global IsAuthenticated default (401). The guard is
-report-name agnostic, so a single report name (``sales-summary``) exercises it.
+``can_user_access_module(.., MODULE_REPORTS)`` before dispatching, returning 404
+(not 403) on a cross-tenant / non-member / missing-id read so a restaurant's
+existence is never confirmed to an outsider. A dinify admin is unrestricted;
+unauthenticated callers are stopped by the global IsAuthenticated default (401).
+The guard is report-name agnostic, so a single report name (``sales-summary``)
+exercises it. Owner/manager hold the ``reports`` module by default (these tests);
+roles without it are covered in users_app/tests_permission_enforcement.py.
 """
 from django.test import TestCase
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -34,7 +36,7 @@ def make_user(phone, roles=None):
 
 class ReportsTenantScopeTests(TestCase):
     def setUp(self):
-        # Restaurant A: an owner and a manager (both READ_ROLES).
+        # Restaurant A: an owner and a manager (both hold the reports module).
         self.owner_a = make_user('256700000210')
         self.restaurant_a = Restaurant.objects.create(
             name='Restaurant A', location='loc-a',

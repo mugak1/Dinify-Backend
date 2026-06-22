@@ -5,14 +5,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from misc_app.controllers.decode_auth_token import decode_jwt_token
-from users_app.controllers.permissions_check import (
-    get_user_restaurant_roles,
-    is_dinify_admin
-)
-from dinify_backend.configss.string_definitions import (
-    RESTAURANT_OWNER,
-    RESTAURANT_MANAGER
-)
+from users_app.controllers.permissions_check import can_user_access_module
+from dinify_backend.configss.string_definitions import MODULE_MENU
 from restaurants_app.models import (
     Restaurant, MenuItem, UpsellConfig, UpsellItem
 )
@@ -21,17 +15,6 @@ from restaurants_app.serializers import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def check_restaurant_permission(user, restaurant_id):
-    """Check if user is a dinify admin or owner/manager of the given restaurant."""
-    if is_dinify_admin(user):
-        return True
-    roles = get_user_restaurant_roles(
-        user_id=str(user.id),
-        restaurant_id=str(restaurant_id)
-    )
-    return any(role in [RESTAURANT_OWNER, RESTAURANT_MANAGER] for role in roles)
 
 
 def get_config_response(config):
@@ -59,7 +42,7 @@ class UpsellConfigEndpoint(APIView):
                 status=400
             )
 
-        if not check_restaurant_permission(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_MENU):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         try:
@@ -95,7 +78,7 @@ class UpsellConfigEndpoint(APIView):
             )
 
         restaurant_id = str(config.restaurant_id)
-        if not check_restaurant_permission(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_MENU):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         serializer = UpsellConfigUpdateSerializer(config, data=request.data, partial=True)
@@ -134,7 +117,9 @@ class UpsellItemsEndpoint(APIView):
                 status=404
             )
 
-        if not check_restaurant_permission(request.user, str(config.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(config.restaurant_id), MODULE_MENU,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         if action == 'reorder':
@@ -225,7 +210,9 @@ class UpsellItemsEndpoint(APIView):
                 status=404
             )
 
-        if not check_restaurant_permission(request.user, str(item.config.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(item.config.restaurant_id), MODULE_MENU,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         config = item.config

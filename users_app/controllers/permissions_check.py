@@ -20,13 +20,10 @@ logger = logging.getLogger(__name__)
 
 dinify_roles = [DINIFY_ACCOUNT_MANAGER, DINIFY_ADMIN]
 
-# Restaurant roles permitted to READ a restaurant's setup data. Mirrors the
-# write-path / dedicated-GET gate (check_restaurant_permission, check_permission):
-# only owners and managers, plus the dinify-admin bypass handled separately.
-READ_ROLES = (RESTAURANT_OWNER, RESTAURANT_MANAGER)
-
-# Restaurant roles permitted to WRITE to a restaurant's data — mirrors
-# READ_ROLES (owners + managers); the dinify-admin bypass is handled separately.
+# Restaurant roles permitted to WRITE to a restaurant's data (owners + managers);
+# the dinify-admin bypass is handled separately. Used by ``can_manage_restaurant``
+# for the manage-level elevation gates (review resolution, kitchen goodwill-cancel)
+# that sit ABOVE module access and are intentionally NOT module-granular.
 MANAGE_ROLES = (RESTAURANT_OWNER, RESTAURANT_MANAGER)
 
 
@@ -167,61 +164,96 @@ def can_user_access_module(user: User, restaurant_id, module: str) -> bool:
     return bool(resolve_module_permissions(user, restaurant_id).get(module, False))
 
 
-def get_readable_restaurant_ids(user: User) -> Optional[set]:
+def get_employed_restaurant_ids(user: User) -> Optional[set]:
     """
-    Return the set of restaurant ids the user may READ, or ``None`` for
-    unrestricted access (a dinify admin / account manager).
+    Return the set of restaurant ids where ``user`` holds ANY active,
+    non-deleted employment, or ``None`` for unrestricted access (a dinify
+    admin / account manager).
 
-    This is the reusable per-restaurant read-authorization primitive. It
-    mirrors the role model of ``check_restaurant_permission`` /
-    ``check_permission`` — a dinify admin reads across every restaurant;
-    everyone else is bound to the restaurants where they hold an active,
-    non-deleted owner/manager employment.
+    Role-agnostic on purpose: it powers the ungated ``support`` module's list
+    scoping, where EVERY employee — not just owners/managers — may see their
+    own restaurants' issues. Unlike the module path it does NOT filter on
+    restaurant status, so support stays reachable during onboarding.
 
     Returns:
         ``None``      -> unrestricted (dinify admin); callers must NOT scope.
-        ``set()``     -> deny-all (anonymous, inactive, or no qualifying role).
-        ``{ids...}``  -> the restaurant ids (as strings) the user may read.
+        ``set()``     -> deny-all (anonymous, inactive, or no employment).
+        ``{ids...}``  -> the restaurant ids (as strings) the user is employed at.
     """
     if user is None or not getattr(user, 'is_authenticated', False) or not user.is_active:
         return set()
     if is_dinify_admin(user):
         return None
-    rows = RestaurantEmployee.objects.filter(
-        user=user,
-        active=True,
-        deleted=False,
-    ).values_list('restaurant_id', 'roles')
     return {
         str(restaurant_id)
-        for restaurant_id, roles in rows
-        if any(role in READ_ROLES for role in (roles or []))
+        for restaurant_id in RestaurantEmployee.objects.filter(
+            user=user,
+            active=True,
+            deleted=False,
+        ).values_list('restaurant_id', flat=True)
     }
 
 
-def can_read_restaurant(user: User, restaurant_id) -> bool:
+def get_module_restaurant_ids(user: User, module: str) -> Optional[set]:
     """
-    Whether ``user`` may read a single record owned by ``restaurant_id``.
+    Return the set of restaurant ids where ``user`` may access ``module``, or
+    ``None`` for unrestricted access (a dinify admin / account manager).
 
-    Built on ``get_readable_restaurant_ids``: a dinify admin (unrestricted
-    set ``None``) may read anything; otherwise the restaurant must be in the
-    user's readable set. A missing/unresolved ``restaurant_id`` is denied for
-    non-admins (fail closed).
+    The list-scoping counterpart of ``can_user_access_module`` (the single-record
+    check): a GET list is authoritatively bound to exactly the restaurants where
+    the caller's resolved module grid grants ``module``. ``support`` is ungated,
+    so it maps to every restaurant the caller is employed at. Mirrors the
+    resolver's active-restaurant scope (employment at an ``active`` restaurant)
+    and batches the override rows in one query (no N+1).
+
+    Returns:
+        ``None``      -> unrestricted (dinify admin); callers must NOT scope.
+        ``set()``     -> deny-all.
+        ``{ids...}``  -> the restaurant ids (as strings) whose grid grants ``module``.
     """
-    allowed = get_readable_restaurant_ids(user)
-    if allowed is None:
-        return True
-    return restaurant_id is not None and str(restaurant_id) in allowed
+    if user is None or not getattr(user, 'is_authenticated', False) or not user.is_active:
+        return set()
+    if is_dinify_admin(user):
+        return None
+    if module == MODULE_SUPPORT:
+        return get_employed_restaurant_ids(user)
+    employments = list(
+        RestaurantEmployee.objects.filter(
+            restaurant__status__in=['active'],
+            user=user,
+            active=True,
+            deleted=False,
+        ).values_list('restaurant_id', 'roles')
+    )
+    if not employments:
+        return set()
+    # One query for every override row across these restaurants (avoid N+1).
+    overrides_by_restaurant = {}
+    for row in RestaurantRolePermission.objects.filter(
+        restaurant_id__in=[restaurant_id for restaurant_id, _ in employments],
+        deleted=False,
+    ).values('restaurant_id', 'role', 'modules'):
+        overrides_by_restaurant.setdefault(
+            str(row['restaurant_id']), {}
+        )[row['role']] = row['modules']
+    return {
+        str(restaurant_id)
+        for restaurant_id, roles in employments
+        if _resolve_from_roles(
+            roles, False, overrides_by_restaurant.get(str(restaurant_id), {})
+        ).get(module)
+    }
 
 
 def can_manage_restaurant(user: User, restaurant_id) -> bool:
     """
     Whether ``user`` may WRITE to a single record owned by ``restaurant_id``.
 
-    Write counterpart of ``can_read_restaurant``: a dinify admin may write
-    anywhere; otherwise the user must hold an active owner/manager role in that
-    restaurant. A missing/empty ``restaurant_id`` is denied for non-admins
-    (fail closed).
+    The manage-level elevation check that sits ABOVE module access (review
+    resolution, kitchen goodwill-cancel) — intentionally NOT module-granular:
+    a dinify admin may write anywhere; otherwise the user must hold an active
+    owner/manager role in that restaurant. A missing/empty ``restaurant_id`` is
+    denied for non-admins (fail closed).
     """
     if is_dinify_admin(user):
         return True

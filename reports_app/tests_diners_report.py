@@ -70,7 +70,7 @@ class DinersReportBase(TestCase):
         self.diner_c = self.make_diner('256700000603', 'Cara', 'Casual')
         self.unnamed_diner = self.make_diner('256700000604', None, None)
 
-        # A dinify admin — passes can_read_restaurant for the endpoint test.
+        # A dinify admin — unrestricted module access for the endpoint test.
         self.admin = self.make_diner('256700000699', 'Admin', 'User',
                                      roles=[DINIFY_ADMIN])
 

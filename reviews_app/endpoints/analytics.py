@@ -11,7 +11,8 @@ import uuid
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
-from users_app.controllers.permissions_check import can_read_restaurant
+from users_app.controllers.permissions_check import can_user_access_module
+from dinify_backend.configss.string_definitions import MODULE_REVIEWS
 from reviews_app.controllers.review_analytics import (
     review_analytics,
     review_summary,
@@ -24,8 +25,8 @@ def _resolve_restaurant(request):
 
     Returns ``(restaurant_id, None)`` on success, or ``(None, error_dict)``. The
     checks run require -> well-formed -> authorized, and crucially the UUID-format
-    check precedes ``can_read_restaurant``: a dinify admin is authorized for any
-    id, so without it a malformed ``?restaurant=`` would reach the ORM and 500 on
+    check precedes the module gate: a dinify admin is authorized for any id, so
+    without it a malformed ``?restaurant=`` would reach the ORM and 500 on
     Postgres (the Restaurant PK is a UUID). Failing closed with a uniform 400
     mirrors submit_review's malformed-id handling.
     """
@@ -36,7 +37,7 @@ def _resolve_restaurant(request):
         uuid.UUID(str(restaurant_id))
     except (ValueError, TypeError):
         return None, {'status': 400, 'message': 'restaurant is invalid'}
-    if not can_read_restaurant(request.user, restaurant_id):
+    if not can_user_access_module(request.user, restaurant_id, MODULE_REVIEWS):
         return None, {
             'status': 403,
             'message': 'You do not have permission to view analytics for this restaurant.',

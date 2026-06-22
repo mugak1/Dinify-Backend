@@ -3,9 +3,9 @@ CRUD endpoints for the per-restaurant tag catalog (RestaurantTag).
 
 Tenant isolation: every read and write resolves the target restaurant
 from the authenticated user's caller-supplied restaurant id (for list
-and create) or from the tag row's FK (for patch and delete). Cross-
-restaurant access is rejected by check_restaurant_permission, which
-walks RestaurantEmployee rows for the *target* restaurant.
+and create) or from the tag row's FK (for patch and delete), then gates
+on the `menu` module at that restaurant via can_user_access_module —
+cross-restaurant / insufficient-module access is rejected.
 
 Catch-all placement note: this endpoint MUST be registered before the
 restaurant-setup catch-all (`<str:config_detail>/`) in
@@ -17,31 +17,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from dinify_backend.configss.edit_information import EI_RESTAURANT_TAG
-from dinify_backend.configss.string_definitions import (
-    RESTAURANT_OWNER,
-    RESTAURANT_MANAGER,
-)
+from dinify_backend.configss.string_definitions import MODULE_MENU
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from misc_app.controllers.secretary import Secretary
 from restaurants_app.models import Restaurant, RestaurantTag
 from restaurants_app.serializers import SerializerRestaurantTag
-from users_app.controllers.permissions_check import (
-    get_user_restaurant_roles,
-    is_dinify_admin,
-)
+from users_app.controllers.permissions_check import can_user_access_module
 
 
 logger = logging.getLogger(__name__)
-
-
-def _check_restaurant_permission(user, restaurant_id):
-    if is_dinify_admin(user):
-        return True
-    roles = get_user_restaurant_roles(
-        user_id=str(user.id),
-        restaurant_id=str(restaurant_id),
-    )
-    return any(role in [RESTAURANT_OWNER, RESTAURANT_MANAGER] for role in roles)
 
 
 def _serialize_tags(restaurant):
@@ -67,7 +51,7 @@ class RestaurantTagsEndpoint(APIView):
                 status=400,
             )
 
-        if not _check_restaurant_permission(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_MENU):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         try:
@@ -102,7 +86,7 @@ class RestaurantTagsEndpoint(APIView):
                 status=400,
             )
 
-        if not _check_restaurant_permission(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_MENU):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         try:
@@ -154,7 +138,9 @@ class RestaurantTagDetailEndpoint(APIView):
                 {'status': 404, 'message': 'Restaurant tag not found'}, status=404,
             )
 
-        if not _check_restaurant_permission(request.user, str(tag.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(tag.restaurant_id), MODULE_MENU,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         data = request.data
@@ -192,7 +178,9 @@ class RestaurantTagDetailEndpoint(APIView):
                 {'status': 404, 'message': 'Restaurant tag not found'}, status=404,
             )
 
-        if not _check_restaurant_permission(request.user, str(tag.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(tag.restaurant_id), MODULE_MENU,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         # Hard delete so dependent MenuItemTag rows cascade away. The

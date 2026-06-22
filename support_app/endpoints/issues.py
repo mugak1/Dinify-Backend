@@ -1,19 +1,17 @@
 """
 Restaurant-facing support issue endpoints (Secretary pattern).
 
-Authorization is OWNER/MANAGER-only and bound SERVER-SIDE via the canonical
-read-authorization primitives (`get_readable_restaurant_ids` /
-`can_read_restaurant`) — a client-sent restaurant/issue id can only narrow
-within the caller's own restaurants, never widen.
+Support is an UNGATED module, so authorization is ANY-active-employee (not
+owner/manager-only) and bound SERVER-SIDE via `get_employed_restaurant_ids`
+— a client-sent restaurant/issue id can only narrow within the caller's own
+restaurants, never widen. A dinify admin is unrestricted; issue CREATE stays
+admin-excluded (an admin doesn't raise issues on a restaurant's behalf).
 """
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from misc_app.controllers.secretary import Secretary
-from users_app.controllers.permissions_check import (
-    get_readable_restaurant_ids,
-    can_read_restaurant,
-)
+from users_app.controllers.permissions_check import get_employed_restaurant_ids
 from support_app.models import SupportIssue
 from support_app.serializers import (
     SupportIssueWriteSerializer,
@@ -42,9 +40,10 @@ ALLOWED_CREATE_FIELDS = (
 class RestaurantIssuesEndpoint(APIView):
     def post(self, request):
         restaurant_id = request.data.get('restaurant')
-        allowed = get_readable_restaurant_ids(request.user)
+        allowed = get_employed_restaurant_ids(request.user)
         # `not allowed` rejects both the dinify-admin (None) and deny-all (set())
-        # cases — support issues are reported by restaurant owners/managers only.
+        # cases — an admin doesn't raise issues on a restaurant's behalf, while
+        # ANY active employee of the restaurant may (support is ungated).
         if not allowed or restaurant_id is None or str(restaurant_id) not in allowed:
             return Response(
                 {
@@ -77,10 +76,10 @@ class RestaurantIssuesEndpoint(APIView):
         return Response(response, status=response['status'])
 
     def get(self, request):
-        allowed = get_readable_restaurant_ids(request.user)
+        allowed = get_employed_restaurant_ids(request.user)
         orm_filter = {'deleted': False}
         if allowed is not None:
-            # Non-admin: bind to the caller's own restaurants. A client
+            # Non-admin: bind to the caller's own (employed) restaurants. A client
             # ?restaurant= may only narrow within that set, never widen it.
             client_restaurant = request.GET.get('restaurant')
             if client_restaurant is not None and str(client_restaurant) in allowed:
@@ -112,7 +111,10 @@ class RestaurantIssueDetailEndpoint(APIView):
                 status=404,
             )
         # 404 (not 403) on cross-tenant access so existence is not confirmed.
-        if not can_read_restaurant(request.user, issue.restaurant_id):
+        # Any active employee of the issue's restaurant may read it (support is
+        # ungated); a dinify admin -> None -> unrestricted.
+        allowed = get_employed_restaurant_ids(request.user)
+        if allowed is not None and str(issue.restaurant_id) not in allowed:
             return Response(
                 {'status': 404, 'message': 'Support issue not found.'},
                 status=404,
