@@ -136,7 +136,9 @@ class CreateTests(SupportAppTestBase):
         })
         self.assertEqual(resp.status_code, 200, resp.content)
 
-    def test_non_owner_manager_role_cannot_create(self):
+    def test_non_owner_manager_employee_can_create(self):
+        # Support is an UNGATED module: any ACTIVE employee (not just
+        # owner/manager) may raise an issue for their own restaurant.
         waiter = make_user('256700000070', [])
         RestaurantEmployee.objects.create(
             user=waiter, restaurant=self.restaurant_a, roles=['waiter'],
@@ -144,9 +146,9 @@ class CreateTests(SupportAppTestBase):
         resp = self.post_issue(waiter, {
             'restaurant': str(self.restaurant_a.id),
             'category': 'menu', 'impact': 'non_urgent',
-            'title': 'x', 'description': 'xxxxxx',
+            'title': 'waiter issue', 'description': 'Reported by a waiter.',
         })
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 200, resp.content)
 
     def test_create_for_unaffiliated_restaurant_is_rejected(self):
         resp = self.post_issue(self.owner_a, {

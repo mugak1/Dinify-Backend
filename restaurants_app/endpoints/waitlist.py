@@ -2,7 +2,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from misc_app.controllers.decode_auth_token import decode_jwt_token
-from restaurants_app.endpoints.upsell_config import check_restaurant_permission
+from users_app.controllers.permissions_check import can_user_access_module
+from dinify_backend.configss.string_definitions import MODULE_TABLES
 from restaurants_app.models import WaitlistEntry, Restaurant
 from restaurants_app.serializers import (
     SerializerGetWaitlistEntry, SerializerPutWaitlistEntry
@@ -25,7 +26,7 @@ class WaitlistEndpoint(APIView):
                 status=400
             )
 
-        if not check_restaurant_permission(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_TABLES):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         entries = WaitlistEntry.objects.filter(
@@ -59,7 +60,7 @@ class WaitlistEndpoint(APIView):
                 status=400
             )
 
-        if not check_restaurant_permission(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_TABLES):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         guest_name = post_data.get('guest_name')
@@ -115,7 +116,9 @@ class WaitlistEndpoint(APIView):
                 {'status': 404, 'message': 'Waitlist entry not found'}, status=404
             )
 
-        if not check_restaurant_permission(request.user, str(entry.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(entry.restaurant_id), MODULE_TABLES,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         serializer = SerializerPutWaitlistEntry(
@@ -155,7 +158,9 @@ class WaitlistEndpoint(APIView):
                 {'status': 404, 'message': 'Waitlist entry not found'}, status=404
             )
 
-        if not check_restaurant_permission(request.user, str(entry.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(entry.restaurant_id), MODULE_TABLES,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         entry.deleted = True

@@ -3,15 +3,9 @@ import logging
 from django.db import transaction
 
 from restaurants_app.models import MenuItem, MenuSection
-from users_app.controllers.permissions_check import (
-    is_dinify_admin,
-    get_user_restaurant_roles,
-)
+from users_app.controllers.permissions_check import can_user_access_module
 from users_app.models import User
-from dinify_backend.configss.string_definitions import (
-    RESTAURANT_OWNER,
-    RESTAURANT_MANAGER,
-)
+from dinify_backend.configss.string_definitions import MODULE_MENU
 
 
 logger = logging.getLogger(__name__)
@@ -66,7 +60,7 @@ class ConMenuItem:
 
         restaurant_id = str(section.restaurant_id)
 
-        if not self._user_can_manage_restaurant(user, restaurant_id):
+        if not can_user_access_module(user, restaurant_id, MODULE_MENU):
             return {
                 'status': 403,
                 'message': 'You do not have permission to reorder items in this section'
@@ -104,13 +98,3 @@ class ConMenuItem:
             'status': 200,
             'message': 'Menu items reordered successfully'
         }
-
-    @staticmethod
-    def _user_can_manage_restaurant(user: User, restaurant_id: str) -> bool:
-        if is_dinify_admin(user):
-            return True
-        roles = get_user_restaurant_roles(
-            user_id=str(user.id),
-            restaurant_id=restaurant_id,
-        )
-        return any(role in (RESTAURANT_OWNER, RESTAURANT_MANAGER) for role in roles)

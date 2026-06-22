@@ -8,41 +8,16 @@ from restaurants_app.models import (
     MenuSection,
     SectionGroup,
     MenuItem,
-    RestaurantEmployee
 )
 from misc_app.controllers.save_action_log import save_action
-from dinify_backend.configss.string_definitions import(
-    RESTAURANT_OWNER,
-    RESTAURANT_MANAGER
-)
+from dinify_backend.configss.string_definitions import MODULE_MENU
 from dinify_backend.mongo_db import MONGO_DB, ACTION_LOGS
 from users_app.models import User
 from users_app.controllers.permissions_check import (
-    is_dinify_admin,
+    can_user_access_module,
     is_dinify_superuser,
     is_restaurant_owner
 )
-
-
-def check_permissions(
-    restaurant_id: str,
-    user_id: str,
-) -> dict:
-    try:
-        employee_record = RestaurantEmployee.objects.get(
-            user_id=user_id,
-            restaurant_id=restaurant_id,
-            deleted=False,
-            active=True,
-        )
-        accepted_roles = [RESTAURANT_OWNER, RESTAURANT_MANAGER]
-        if any(role in accepted_roles for role in employee_record.roles):
-            return True
-        else:
-            return False
-    except Exception as error:
-        logger.error("FirstTimeBatchApprovalPermissionError: %s", error)
-        return False
 
 
 def first_time_batch_approval(
@@ -60,17 +35,13 @@ def first_time_batch_approval(
         'message': 'Sorry an occurred. Please try again later.'
     }
 
-    # check that the user has the necessary rights
-    has_permission = check_permissions(
-        restaurant_id=restaurant_id,
-        user_id=auth.get('user_id')
-    )
-    if not has_permission:
-        if not is_dinify_admin(user):
-            return {
-                'status': 401,
-                'message': 'You do not have the necessary permissions to perform this action.'
-            }
+    # check that the user has the necessary rights — the `menu` module at this
+    # restaurant (a dinify admin passes via the resolver's admin short-circuit).
+    if not can_user_access_module(user, restaurant_id, MODULE_MENU):
+        return {
+            'status': 401,
+            'message': 'You do not have the necessary permissions to perform this action.'
+        }
 
     # check if the person is not the one who created the menu
     # pick a random menu section and check who created it

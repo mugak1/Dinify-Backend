@@ -47,9 +47,10 @@ with PostgreSQL on AWS RDS.
   `{closed, open, close}` shape)
 - Auth: ✅ Refresh-token rotation + blacklist-on-logout + 7-day refresh lifetime
   (SimpleJWT, `JWT_REFRESH_LIFETIME_DAYS`)
-- Tenant isolation: ✅ Restaurant-setup GET reads are authorization-scoped to
-  the caller's restaurant(s) via `get_readable_restaurant_ids` /
-  `can_read_restaurant` (`users_app/controllers/permissions_check.py`)
+- Tenant isolation / role-permission ENFORCEMENT: ✅ Portal gates enforce
+  per-module access via `can_user_access_module` / `get_module_restaurant_ids`
+  (`users_app/controllers/permissions_check.py`) — see the "Tenant Isolation /
+  Role-Permission ENFORCEMENT" section below (PR C)
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -57,10 +58,11 @@ with PostgreSQL on AWS RDS.
 - Support module: ✅ `support_app` — restaurant-facing `SupportIssue`
   ticketing (supersedes legacy `crm_app.ServiceTicket`), Secretary-pattern
   endpoints at `api/v1/support/` (`support_app/urls.py`): `issues/`,
-  `issues/<uuid:issue_id>/`, and dinify-admin `admin/issues/`. Reads are
-  authorization-scoped via `get_readable_restaurant_ids` /
-  `can_read_restaurant` (owner/manager only); references are sequential,
-  collision-safe `SUP-000123`. Migration `support_app/0001_initial`
+  `issues/<uuid:issue_id>/`, and dinify-admin `admin/issues/`. Support is an
+  UNGATED module: list/detail/create are widened to ANY active employee of the
+  restaurant via `get_employed_restaurant_ids` (dinify-admin excluded from
+  create); references are sequential, collision-safe `SUP-000123`. Migration
+  `support_app/0001_initial`
 - Reviews module: ✅ `reviews_app` — visit-level `Review` model (one per
   `Order`, `OneToOneField` via `related_name='review_record'`,
   `db_table='reviews'`), Secretary-pattern endpoints at `api/v1/reviews/`
@@ -70,8 +72,9 @@ with PostgreSQL on AWS RDS.
   `resolution_note` that persists across reopen/re-resolve), and `` root
   (owner/manager retrieval). `overall_rating` mandatory (1–5) + five optional
   dimension ratings; `is_public` seeded from `PUBLIC_RATING_THRESHOLD` (≥4 →
-  public-eligible) but stays owner-overridable. Reads authorization-scoped via
-  `get_readable_restaurant_ids` / `can_read_restaurant`. Migrations
+  public-eligible) but stays owner-overridable. List/analytics gate on the
+  `reviews` module (`get_module_restaurant_ids` / `can_user_access_module`);
+  resolution stays manage-level (`can_manage_restaurant`). Migrations
   `reviews_app/0001_initial`, `0002_review_resolution_note`. `Review` is the
   system of record — the legacy inline-review fields on `Order`/`OrderItem`
   were dropped (orders_app migration `0034`)
@@ -210,24 +213,49 @@ the catch-all `<str:config_detail>/` route.
   sentinels are deprecated — do not introduce new ones
 - Check this file before adding any editable field — it may already be there
 
-## Tenant Isolation / Read Authorization — CRITICAL
-- The shared `RestaurantSetupEndpoint` GET is authorization-scoped to the
-  caller's restaurant(s). Reads MUST go through the read-authorization
-  primitives in `users_app/controllers/permissions_check.py`:
-  - `get_readable_restaurant_ids(user)` → `None` for a dinify admin
-    (unrestricted — callers must NOT scope), `set()` for deny-all, otherwise
-    the set of restaurant id strings the user may read (active, non-deleted
-    owner/manager employment)
-  - `can_read_restaurant(user, restaurant_id)` → single-record check built on
-    the above; fail closed — a missing/unresolved id is denied for non-admins
-- GET list reads are bound server-side via `scope_list_filter` +
-  `LIST_RESTAURANT_PATH` (adds a `<path>__in` clause the client `?restaurant=`
-  param can only narrow, never widen — and closes the no-param full-table leak)
-- Single-record / subscription-details / tables-grouping branches guard with
-  `can_read_restaurant` and return 404 (not 403) on cross-tenant access so
-  existence is not confirmed
-- Any NEW read branch on this endpoint must be scoped the same way — a resource
-  type with no entry in `LIST_RESTAURANT_PATH` fails closed (403)
+## Tenant Isolation / Role-Permission ENFORCEMENT — CRITICAL
+- Portal gates ENFORCE per-module access (PR C): every restaurant-scoped read
+  and write routes through the resolver primitives in
+  `users_app/controllers/permissions_check.py`. The seeded owner/manager
+  defaults hold every grid module, so this is behaviour-neutral for them — it
+  only constrains non-owner/manager roles (kitchen, staff) and custom
+  `RestaurantRolePermission` overrides.
+  - `can_user_access_module(user, restaurant_id, module)` → single-record /
+    single-restaurant gate (A's resolver — do NOT modify). Dinify admin → all
+    True; owner → all; otherwise the role grid. `support` is ungated (always
+    True). Fail closed — a None/unknown restaurant denies for non-admins.
+  - `get_module_restaurant_ids(user, module)` → list-scoping counterpart:
+    `None` for a dinify admin (unrestricted — callers must NOT scope), `set()`
+    deny-all, otherwise the restaurant ids whose grid grants `module` (active
+    restaurant + active, non-deleted employment). `support` → every employed
+    restaurant.
+  - `get_employed_restaurant_ids(user)` → role-agnostic employed set (no
+    restaurant-status filter); powers the ungated `support` module's scoping.
+  - The legacy `get_readable_restaurant_ids` / `can_read_restaurant` /
+    `READ_ROLES` (owner/manager-only) were DELETED — do not reintroduce them.
+    `can_manage_restaurant` / `MANAGE_ROLES` REMAIN, but only for the
+    manage-level elevation gates ABOVE module access (review resolution,
+    kitchen goodwill-cancel) — these are intentionally NOT module-granular and
+    short-circuit dinify-admin.
+- The `RestaurantSetupEndpoint` catch-all maps each record/`config_detail` →
+  module via `_RECORD_MODULE` (restaurants→settings, employees→team
+  [owner-only, per Decision 1], menu*→menu, tables/diningareas→tables,
+  orders→reports). ONE map drives the write gate (`check_permission`), the GET
+  list scoping (`scope_list_filter` + `LIST_RESTAURANT_PATH`), and the
+  single-record detail read. The client `?restaurant=` can only narrow within
+  the allowed set, never widen.
+- Single-record / subscription-details (→settings) / tables-grouping (→tables)
+  / detail branches gate on the resolved restaurant and return 404 (not 403) on
+  cross-tenant access so existence is not confirmed. A nonexistent resource PK
+  404s BEFORE the gate (never passed into the gate as None).
+- Writes resolve the target restaurant SERVER-SIDE from the resource FK (by PK)
+  via `_RESTAURANT_RESOLVERS`, then module-gate that resolved id — the spoof
+  `{id: <victim record>, restaurant: <attacker own>}` cannot smuggle access.
+- Portal module access requires an ACTIVE restaurant (the resolver filters
+  `restaurant__status='active'`, consistent with the login permission grid);
+  pending restaurants are admin-managed until activated.
+- Any NEW read/write branch must map its resource to a module and route through
+  these primitives — an unmapped resource fails closed (403/404)
 
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns

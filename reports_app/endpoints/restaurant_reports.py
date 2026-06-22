@@ -4,7 +4,8 @@ endpoints to handle order
 from datetime import datetime
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from users_app.controllers.permissions_check import can_read_restaurant
+from users_app.controllers.permissions_check import can_user_access_module
+from dinify_backend.configss.string_definitions import MODULE_REPORTS
 from reports_app.controllers.restaurant.dashboard import (
     generate_restaurant_dashboard_details,
     get_restaurant_dashboard_1,
@@ -33,12 +34,14 @@ class RestaurantReportsEndpoint(APIView):
 
     def get(self, request, report_name):
         # Tenant isolation: every restaurant report is single-target, scoped by
-        # the client-supplied ?restaurant=. Authorize that one restaurant before
-        # dispatching — a dinify admin reads any; an owner/manager only their own;
-        # cross-tenant / non-member / missing id (non-admin) is denied. 404, not
+        # the client-supplied ?restaurant=. Gate that one restaurant on the
+        # `reports` module before dispatching — a dinify admin reads any; a role
+        # without `reports` (or a cross-tenant / missing id) is denied. 404, not
         # 403, so we don't confirm another tenant's restaurant exists, and the
         # guard runs before the invalid-name 400 so report validity isn't leaked.
-        if not can_read_restaurant(request.user, request.GET.get('restaurant')):
+        if not can_user_access_module(
+            request.user, request.GET.get('restaurant'), MODULE_REPORTS,
+        ):
             return Response({'status': 404, 'message': 'Not found'}, status=404)
 
         date_today = datetime.now().date()

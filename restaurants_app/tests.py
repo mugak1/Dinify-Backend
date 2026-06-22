@@ -1868,9 +1868,10 @@ class DedicatedEndpointAuthorizationTests(TestCase):
     on the two permission helpers used outside the catch-all PUT path:
 
     - users_app.controllers.permissions_check.get_user_restaurant_roles
-    - restaurants_app.controllers.first_time_batch_approval.check_permissions
+    - users_app.controllers.permissions_check.can_user_access_module (the module
+      gate the dedicated endpoints + first-time-menu-review now route through)
 
-    These helpers gate every dedicated endpoint (preset_tags, upsell_config,
+    These gate every dedicated endpoint (preset_tags, upsell_config,
     reservations, waitlist, table_actions) and the first-time-menu-review
     manager action. The catch-all PUT path is already covered by
     TenantIsolationTests; this class is its analogue for the dedicated
@@ -1968,28 +1969,29 @@ class DedicatedEndpointAuthorizationTests(TestCase):
         )
         self.assertEqual(roles, [])
 
-    # -- unit: first_time_batch_approval.check_permissions --------------
+    # -- unit: can_user_access_module (the `menu` gate first-time-menu-review
+    #    and the dedicated endpoints now route through) -------------------
 
-    def test_first_time_batch_check_excludes_deactivated_employee(self):
-        from restaurants_app.controllers.first_time_batch_approval import (
-            check_permissions,
+    def test_module_gate_excludes_deactivated_employee(self):
+        from users_app.controllers.permissions_check import (
+            can_user_access_module,
         )
+        from dinify_backend.configss.string_definitions import MODULE_MENU
         self.employment_a.active = False
         self.employment_a.save(update_fields=['active'])
-        self.assertFalse(check_permissions(
-            restaurant_id=str(self.restaurant_a.id),
-            user_id=str(self.owner_a.id),
+        self.assertFalse(can_user_access_module(
+            self.owner_a, str(self.restaurant_a.id), MODULE_MENU,
         ))
 
-    def test_first_time_batch_check_excludes_soft_deleted_employee(self):
-        from restaurants_app.controllers.first_time_batch_approval import (
-            check_permissions,
+    def test_module_gate_excludes_soft_deleted_employee(self):
+        from users_app.controllers.permissions_check import (
+            can_user_access_module,
         )
+        from dinify_backend.configss.string_definitions import MODULE_MENU
         self.employment_a.deleted = True
         self.employment_a.save(update_fields=['deleted'])
-        self.assertFalse(check_permissions(
-            restaurant_id=str(self.restaurant_a.id),
-            user_id=str(self.owner_a.id),
+        self.assertFalse(can_user_access_module(
+            self.owner_a, str(self.restaurant_a.id), MODULE_MENU,
         ))
 
     # -- integration: preset_tags ---------------------------------------

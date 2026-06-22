@@ -4,7 +4,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from misc_app.controllers.decode_auth_token import decode_jwt_token
-from restaurants_app.endpoints.upsell_config import check_restaurant_permission
+from users_app.controllers.permissions_check import can_user_access_module
+from dinify_backend.configss.string_definitions import MODULE_TABLES
 from restaurants_app.models import Table, Reservation
 from restaurants_app.serializers import SerializerPublicGetTable
 
@@ -65,7 +66,9 @@ class TableActionsEndpoint(APIView):
         if err:
             return err
 
-        if not check_restaurant_permission(request.user, str(table.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(table.restaurant_id), MODULE_TABLES,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         table.status = 'seated'
@@ -106,7 +109,9 @@ class TableActionsEndpoint(APIView):
         if err:
             return err
 
-        if not check_restaurant_permission(request.user, str(table.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(table.restaurant_id), MODULE_TABLES,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         mark_as = data.get('mark_as', 'dirty')
@@ -151,7 +156,9 @@ class TableActionsEndpoint(APIView):
                 status=400
             )
 
-        if not check_restaurant_permission(request.user, str(source.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(source.restaurant_id), MODULE_TABLES,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         with transaction.atomic():
@@ -198,7 +205,9 @@ class TableActionsEndpoint(APIView):
         if err:
             return err
 
-        if not check_restaurant_permission(request.user, str(table.restaurant_id)):
+        if not can_user_access_module(
+            request.user, str(table.restaurant_id), MODULE_TABLES,
+        ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         old_status = table.status
@@ -234,7 +243,7 @@ class TableActionsEndpoint(APIView):
                 {'status': 400, 'message': 'tables array is required'}, status=400
             )
 
-        if not check_restaurant_permission(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_TABLES):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
         updated = 0
