@@ -182,6 +182,35 @@ class RestaurantEmployee(BaseModel):
         unique_together = ['user', 'restaurant']
 
 
+class RestaurantRolePermission(BaseModel):
+    """
+    Per-(restaurant, role) module-access OVERRIDE.
+
+    A row exists only when an owner customizes a role's module grid; the
+    permission resolver (users_app.controllers.permissions_check
+    .resolve_module_permissions) falls back to DEFAULT_ROLE_MODULES
+    (restaurants_app.configs.role_defaults) when no row exists, so the system
+    is correct even before any rows are seeded. Follows the
+    RestaurantEmployee.roles JSON convention — ``modules`` is a
+    ``{module_key: bool}`` map over the editable grid modules.
+    """
+    restaurant = models.ForeignKey(
+        Restaurant,
+        on_delete=models.CASCADE,
+        related_name='role_permissions'
+    )
+    role = models.CharField(max_length=50)
+    modules = models.JSONField(default=dict)
+
+    class Meta:
+        """
+        the metadata for the RestaurantRolePermission model
+        """
+        db_table = 'restaurant_role_permissions'
+        ordering = ['restaurant', 'role']
+        unique_together = ['restaurant', 'role']
+
+
 class MenuSection(BaseModel):
     """
     the sections of the menu
