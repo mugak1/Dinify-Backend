@@ -51,6 +51,22 @@ with PostgreSQL on AWS RDS.
   per-module access via `can_user_access_module` / `get_module_restaurant_ids`
   (`users_app/controllers/permissions_check.py`) — see the "Tenant Isolation /
   Role-Permission ENFORCEMENT" section below (PR C)
+- Role-permission MANAGEMENT surface: ✅ Owner-only GET/PUT
+  `api/v1/restaurant-setup/role-permissions/` (`RolePermissionsEndpoint`,
+  `restaurants_app/endpoints/role_permissions.py`) reads all four role grids and
+  writes a non-owner role's grid for the team-settings screen. Backed by the
+  `RestaurantRolePermission` override model (migration `0052`) + idempotent
+  default-row backfill (`0053`); coded defaults live in
+  `restaurants_app/configs/role_defaults.py` (`DEFAULT_ROLE_MODULES`: owner &
+  manager all-True, kitchen → kitchen-only, staff → tables-only) over the 7
+  `GRID_MODULES` (dashboard, kitchen, tables, menu, reviews, reports, settings;
+  `billing`/`team` are off-grid owner-only, `support` ungated). Controllers
+  (`restaurants_app/controllers/role_permissions.py`): `ensure_role_permissions`
+  (seeder), `get_role_permissions`, `update_role_permission` — explicit
+  validation (NOT Secretary/EDIT_INFORMATION), owner row immutable & all-True
+  (`editable:false`), partial PUT merges over the effective grid under
+  `select_for_update`. `create_employee` also surfaces the one-time
+  `temp_password` in its owner-only response (PR #173)
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -175,7 +191,8 @@ with PostgreSQL on AWS RDS.
 ## URL Structure
 - `api/v1/restaurant-setup/` → RestaurantSetupEndpoint (catch-all) +
   dedicated endpoints for: preset-tags, restaurant-tags, upsell-config,
-  upsell-config/items, reservations, waitlist, table-actions/<action>/
+  upsell-config/items, reservations, waitlist, table-actions/<action>/,
+  role-permissions
 - `api/v1/reports/restaurant/<report_name>/` → RestaurantReportsEndpoint
 - `api/v1/orders/` → v1 orders (urls.py)
 - `api/v2/orders/` → v2 orders (v2_urls.py) — separate file, don't confuse
@@ -192,7 +209,7 @@ New resource types get their own dedicated endpoint file in
 catch-all. Examples already following this pattern:
 - `reservations.py`, `waitlist.py`, `table_actions.py`, `preset_tags.py`,
   `restaurant_tags.py`, `upsell_config.py`, `manager_actions.py`,
-  `misc_public.py`, `order_journey.py`
+  `misc_public.py`, `order_journey.py`, `role_permissions.py`
 Always register new endpoint files in `restaurants_app/urls.py` ABOVE
 the catch-all `<str:config_detail>/` route.
 
@@ -237,6 +254,14 @@ the catch-all `<str:config_detail>/` route.
     manage-level elevation gates ABOVE module access (review resolution,
     kitchen goodwill-cancel) — these are intentionally NOT module-granular and
     short-circuit dinify-admin.
+  - The per-(restaurant, role) grids have an owner-only MANAGEMENT surface —
+    `RolePermissionsEndpoint` (GET/PUT `restaurant-setup/role-permissions/`,
+    `team`-gated) over the `RestaurantRolePermission` override model, seeded by
+    `ensure_role_permissions` (backfill migration `0053`). It reuses the
+    constants/defaults (`configs/role_defaults.DEFAULT_ROLE_MODULES`) but
+    deliberately NOT the resolver function. The owner row is read-only/all-True;
+    writes validate explicitly (NOT Secretary) and partial-merge over the
+    effective grid — do NOT route this through EDIT_INFORMATION.
 - The `RestaurantSetupEndpoint` catch-all maps each record/`config_detail` →
   module via `_RECORD_MODULE` (restaurants→settings, employees→team
   [owner-only, per Decision 1], menu*→menu, tables/diningareas→tables,
@@ -350,7 +375,7 @@ the catch-all `<str:config_detail>/` route.
 ## Database
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove
 - All migrations must be generated and included in PRs when models change
-- Latest migration: `restaurants_app/migrations/0051_restaurant_opening_hours.py`,
+- Latest migration: `restaurants_app/migrations/0053_backfill_role_permissions.py`,
   `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0002_review_resolution_note.py`
