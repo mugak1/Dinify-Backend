@@ -23,6 +23,24 @@ def _rating_validators():
     return [MinValueValidator(1), MaxValueValidator(5)]
 
 
+class ReviewTag(models.TextChoices):
+    """
+    The fixed set of diner review quick-chip tags.
+
+    Stored as STABLE KEYS (never display labels) so the frontend owns
+    presentation and Reports can aggregate on a stable axis. This enum is the
+    single source of truth for the allowed set — ``Review.tags`` holds a JSON
+    list of these ``.value`` strings, and the write serializer validates every
+    submitted tag against ``ReviewTag.values``. Add a new chip ONLY by adding a
+    member here.
+    """
+    GREAT_FLAVOUR = 'great_flavour', 'Great flavour'
+    QUICK_SERVICE = 'quick_service', 'Quick service'
+    FRIENDLY_STAFF = 'friendly_staff', 'Friendly staff'
+    GOOD_VALUE = 'good_value', 'Good value'
+    SPOTLESS = 'spotless', 'Spotless'
+
+
 class Review(models.Model):
     """
     A single diner's review of one order/visit.
@@ -61,6 +79,12 @@ class Review(models.Model):
 
     # === content ===
     comment = models.TextField(null=True, blank=True)
+    # Diner quick-chip tags: a JSON list of stable ``ReviewTag`` keys (never
+    # display labels). JSONField (not ArrayField) to match the codebase's small-
+    # string-list convention. Empty by default; the write serializer filters
+    # every element against ``ReviewTag.values`` (unknown keys are dropped, not
+    # stored) so an arbitrary string can never persist.
+    tags = models.JSONField(default=list, blank=True)
 
     # === public visibility (per-review, overridable) ===
     # Seeded from the rating band on creation (see save()); stays overridable so

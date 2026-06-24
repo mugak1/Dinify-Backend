@@ -11,9 +11,13 @@ Every order-context helper is NULL-SAFE: a saved review always has an order, but
 the joined columns (``order_number``, ``served_at``, ...) are themselves nullable
 and we never assume the relation resolves.
 """
+import logging
+
 from rest_framework import serializers
 
-from reviews_app.models import Review
+from reviews_app.models import Review, ReviewTag
+
+logger = logging.getLogger(__name__)
 
 
 def _table_label(order):
@@ -45,7 +49,9 @@ class ReviewWriteSerializer(serializers.ModelSerializer):
     ``resolution_status`` / ``themes`` / ``invite_sent_at`` / ``reminder_sent_at``
     are server-owned — none are writable here. DRF auto-attaches the model's 1-5
     validators on the rating fields and a uniqueness validator on the OneToOne
-    ``order`` (the controller also does a friendly pre-check).
+    ``order`` (the controller also does a friendly pre-check). ``tags`` is the one
+    additive diner field beyond the ratings/comment; ``validate_tags`` filters it
+    to the ``ReviewTag`` allowed set without ever blocking the submission.
     """
 
     class Meta:
@@ -53,7 +59,44 @@ class ReviewWriteSerializer(serializers.ModelSerializer):
         fields = [
             'order', 'overall_rating', 'food_rating', 'speed_rating',
             'service_rating', 'value_rating', 'cleanliness_rating', 'comment',
+            'tags',
         ]
+
+    def validate_tags(self, value):
+        """
+        Filter submitted quick-chip tags down to the ``ReviewTag`` allowed set.
+
+        Tags must never block a submission: the stars and comment always save.
+        So unknown keys are DROPPED (not rejected) and only the valid subset is
+        stored — an arbitrary string can never persist. Order is preserved and
+        duplicates collapsed. Empty/absent is allowed (returns ``[]``).
+
+        The one 400 here is a malformed payload — ``tags`` that is not a list.
+        Dropped keys are logged via standard application logging (NOT the
+        MongoDB action-log pipeline, which is unreachable from EC2) so frontend
+        bugs or stale-client version skew stay visible.
+        """
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError(
+                'Tags must be a list of tag keys.'
+            )
+        allowed = set(ReviewTag.values)
+        cleaned = []
+        dropped = []
+        for tag in value:
+            if tag not in allowed:
+                dropped.append(tag)
+                continue
+            if tag not in cleaned:
+                cleaned.append(tag)
+        if dropped:
+            logger.warning(
+                'Dropped %d unknown review tag(s): %s. Allowed tags: %s.',
+                len(dropped), dropped, list(ReviewTag.values),
+            )
+        return cleaned
 
 
 class ReviewRestaurantReadSerializer(serializers.ModelSerializer):
@@ -75,6 +118,7 @@ class ReviewRestaurantReadSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'overall_rating', 'food_rating', 'speed_rating',
             'service_rating', 'value_rating', 'cleanliness_rating', 'comment',
+            'tags',
             'is_public', 'resolution_status', 'resolution_note',
             'submission_channel',
             'created_at', 'updated_at',

@@ -41,13 +41,15 @@ def _shape_errors(errors):
     return ' '.join(parts) or 'The review could not be validated.'
 
 
-def submit_review(order_id, rating_fields, comment=None):
+def submit_review(order_id, rating_fields, comment=None, tags=None):
     """
     Submit a diner review for an order.
 
     ``order_id``      : the Order PK (a UUID) being reviewed.
     ``rating_fields`` : dict of overall_rating + optional dimension ratings.
     ``comment``       : optional free text.
+    ``tags``          : optional list of quick-chip tag keys (validated against
+                        the ``ReviewTag`` allowed set by the write serializer).
     """
     # 1. Order existence (404). The Order PK is a UUID — a malformed id raises
     #    ValueError/ValidationError on the lookup; treat that as not-found so a
@@ -87,6 +89,10 @@ def submit_review(order_id, rating_fields, comment=None):
             payload[field] = value
     if comment is not None:
         payload['comment'] = comment
+    # Forward tags only when supplied; absent leaves the model's [] default.
+    # The serializer's validate_tags constrains them to the allowed set.
+    if tags is not None:
+        payload['tags'] = tags
 
     serializer = ReviewWriteSerializer(data=payload)
     if not serializer.is_valid():
