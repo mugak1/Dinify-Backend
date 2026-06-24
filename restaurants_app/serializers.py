@@ -4,6 +4,7 @@ the serializers for the restaurant app
 import json
 import logging
 import uuid
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +233,26 @@ class SerializerPutMenuItem(ModelSerializer):
         if emin is not None and emax not in (None, 0) and emin > emax:
             raise serializers.ValidationError(
                 {'extras_min_selections': 'Minimum extras cannot exceed maximum extras.'})
+
+        # Defense-in-depth contract parity with the admin discounts form (PR #480):
+        # reject a clearly-inverted date window. Placed before the tag_ids
+        # early-return so a discount-only PUT is still validated. end == start is
+        # a valid one-day window (strict '<'). Only fires on a well-formed window —
+        # unparseable dates are left to is_discount_active() (which treats them as
+        # no bound). A fully-past window is NOT rejected (the form only warns).
+        discount_details = attrs.get('discount_details')
+        if isinstance(discount_details, dict):
+            start_raw = discount_details.get('start_date') or ''
+            end_raw = discount_details.get('end_date') or ''
+            if start_raw and end_raw:
+                try:
+                    start_date = datetime.strptime(start_raw, '%Y-%m-%d').date()
+                    end_date = datetime.strptime(end_raw, '%Y-%m-%d').date()
+                except (ValueError, TypeError):
+                    start_date = end_date = None
+                if start_date and end_date and end_date < start_date:
+                    raise serializers.ValidationError(
+                        {'discount_details': 'End date must be on or after the start date.'})
 
         tag_ids = attrs.get('tag_ids')
         if tag_ids is None:

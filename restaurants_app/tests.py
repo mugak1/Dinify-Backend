@@ -829,6 +829,55 @@ class MenuItemDiscountMathTests(TestCase):
             'end_time': '',
         }
 
+    def _put_serializer(self, item, start_date, end_date):
+        from restaurants_app.serializers import SerializerPutMenuItem
+        details = {
+            'discount_type': 'percentage',
+            'discount_percentage': 20.0,
+            'discount_amount': 0.0,
+            'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+            'start_date': start_date,
+            'end_date': end_date,
+            'start_time': '',
+            'end_time': '',
+        }
+        return SerializerPutMenuItem(
+            instance=item, data={'discount_details': details}, partial=True)
+
+    def _window_item(self, name):
+        from decimal import Decimal
+        return self._make_item(
+            name, Decimal('10000'),
+            {**self._always_active_temporal(),
+             'discount_type': 'percentage',
+             'discount_percentage': 20.0,
+             'discount_amount': 0.0},
+            Decimal('8000.00'))
+
+    def test_put_rejects_inverted_window(self):
+        # Defense-in-depth parity with the admin form: end strictly before start
+        # is rejected (surfaced as a 'discount_details' error → HTTP 400).
+        serializer = self._put_serializer(self._window_item('Inverted Win'), '2026-06-24', '2026-06-19')
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('discount_details', serializer.errors)
+
+    def test_put_accepts_equal_start_end(self):
+        # end == start is a valid one-day window (strict '<', never '<=').
+        serializer = self._put_serializer(self._window_item('Equal Win'), '2026-06-24', '2026-06-24')
+        serializer.is_valid()
+        self.assertNotIn('discount_details', serializer.errors)
+
+    def test_put_accepts_normal_window(self):
+        serializer = self._put_serializer(self._window_item('Normal Win'), '2026-06-19', '2026-06-24')
+        serializer.is_valid()
+        self.assertNotIn('discount_details', serializer.errors)
+
+    def test_put_accepts_empty_dates(self):
+        # No window set → the guard must not fire.
+        serializer = self._put_serializer(self._window_item('Empty Win'), '', '')
+        serializer.is_valid()
+        self.assertNotIn('discount_details', serializer.errors)
+
     def test_percentage_discount_serializer_and_pipeline(self):
         from decimal import Decimal
         from orders_app.controllers.con_orders import ConOrder
