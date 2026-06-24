@@ -310,6 +310,8 @@ class SerializerPublicGetMenuItem(ModelSerializer):
     group = SerializerMethodField()
     extras = SerializerMethodField()
     discount_percentage = SerializerMethodField()
+    is_discount_active = SerializerMethodField()
+    current_price = SerializerMethodField()
     tags = SerializerMethodField()
 
     class Meta:
@@ -319,7 +321,8 @@ class SerializerPublicGetMenuItem(ModelSerializer):
             'discounted_price', 'running_discount', 'image',
             'available', 'in_stock', 'allergens', 'tags', 'discount_details',
             'has_options', 'options', 'section', 'group', 'extras', 'is_extra',
-            'discount_percentage', 'has_extras', 'is_special',
+            'discount_percentage', 'is_discount_active', 'current_price',
+            'has_extras', 'is_special',
             'is_featured', 'is_popular', 'is_new',
             'age_restricted', 'extras_min_selections', 'extras_max_selections'
         )
@@ -389,7 +392,7 @@ class SerializerPublicGetMenuItem(ModelSerializer):
         # Source-of-truth precedence: discount_details.discount_percentage,
         # then discount_details.discount_amount, then derive from discounted_price.
         from decimal import Decimal
-        if not menu_item.running_discount:
+        if not menu_item.is_discount_active():
             return 0
         primary = Decimal(str(menu_item.primary_price or 0))
         if primary == 0:
@@ -410,6 +413,16 @@ class SerializerPublicGetMenuItem(ModelSerializer):
                 return 0
             return float(round((diff / primary) * Decimal('100'), 2))
         return 0
+
+    def get_is_discount_active(self, menu_item):
+        return menu_item.is_discount_active()
+
+    def get_current_price(self, menu_item):
+        # Effective BASE price (no modifiers): discounted when the discount is
+        # active, else primary_price. Serialized as a string to match the
+        # Decimal money convention of primary_price/discounted_price here.
+        from decimal import Decimal
+        return str(menu_item.effective_base_price().quantize(Decimal('0.01')))
 
 
 class SerializerPutTable(ModelSerializer):

@@ -2,11 +2,13 @@
 models for the restaurant app
 """
 import logging
+from datetime import datetime
 from decimal import Decimal
 
 from django.db import models
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.utils import timezone
 from users_app.models import BaseModel, User
 from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Pending,
@@ -423,6 +425,85 @@ class MenuItem(BaseModel):
                     MenuItemTag(menu_item=self, tag_id=tid)
                     for tid in unique_ids
                 ])
+
+    def is_discount_active(self):
+        """Single, timezone-aware (EAT) source of truth for whether this item's
+        discount is live right now. Read purely from the canonical post-0042
+        ``discount_details`` shape — the stored ``discounted_price`` column is
+        deliberately NOT consulted. Active requires ALL of:
+          (a) a real magnitude: discount_percentage > 0 OR discount_amount > 0
+          (b) today within [start_date, end_date] INCLUSIVE ('' = unbounded)
+          (c) today's ISO weekday in recurring_days ([] = every day)
+          (d) now within [start_time, end_time] ('' = unbounded)
+        """
+        details = self.discount_details if isinstance(self.discount_details, dict) else {}
+        pct = Decimal(str(details.get('discount_percentage', 0) or 0))
+        amt = Decimal(str(details.get('discount_amount', 0) or 0))
+        if pct <= 0 and amt <= 0:
+            return False
+
+        today = timezone.localdate()
+        start_date = details.get('start_date') or ''
+        end_date = details.get('end_date') or ''
+        if start_date:
+            try:
+                if today < datetime.strptime(start_date, '%Y-%m-%d').date():
+                    return False
+            except (ValueError, TypeError):
+                pass  # malformed = treat as no lower bound (never suppress)
+        if end_date:
+            try:
+                # end_date is INCLUSIVE — the last day the discount is valid.
+                if today > datetime.strptime(end_date, '%Y-%m-%d').date():
+                    return False
+            except (ValueError, TypeError):
+                pass
+
+        recurring_days = details.get('recurring_days') or []
+        # DECISION LEVER: empty recurring_days == "every day" (no day filter).
+        # To make empty == "never", replace the guard below with:
+        #     if not recurring_days: return False
+        if isinstance(recurring_days, (list, tuple)) and len(recurring_days) > 0:
+            if today.isoweekday() not in recurring_days:
+                return False
+
+        now_time = timezone.localtime().time()
+        start_time = details.get('start_time') or ''
+        end_time = details.get('end_time') or ''
+        if start_time:
+            try:
+                if now_time < datetime.strptime(f'{start_time}:00', '%H:%M:%S').time():
+                    return False
+            except (ValueError, TypeError):
+                pass  # malformed/empty = no lower bound
+        if end_time:
+            try:
+                if now_time > datetime.strptime(f'{end_time}:00', '%H:%M:%S').time():
+                    return False
+            except (ValueError, TypeError):
+                pass
+
+        return True
+
+    def effective_base_price(self):
+        """Per-unit BASE price (no modifiers): the discounted price when the
+        discount is active, else ``primary_price``. Decimal, never negative.
+        Shares ``is_discount_active`` / ``discount_details`` as its source of
+        truth so the diner-displayed price and the order-charged price agree.
+        """
+        primary = Decimal(str(self.primary_price or 0))
+        if not self.is_discount_active():
+            return primary
+        details = self.discount_details if isinstance(self.discount_details, dict) else {}
+        pct = Decimal(str(details.get('discount_percentage', 0) or 0))
+        amt = Decimal(str(details.get('discount_amount', 0) or 0))
+        if pct > 0:
+            price = primary - (primary * pct / Decimal('100'))
+        elif amt > 0:
+            price = primary - amt
+        else:
+            price = primary
+        return price if price > 0 else Decimal('0')
 
 
 TAG_CATEGORY_CHOICES = (

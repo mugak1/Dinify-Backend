@@ -1,6 +1,8 @@
 from decimal import Decimal
+from datetime import timedelta
 
 from django.test import TestCase
+from django.utils import timezone
 from django.db.models.deletion import ProtectedError
 from rest_framework.test import APIClient
 
@@ -10,7 +12,7 @@ from users_app.tests import seed_user, TEST_PHONE
 from users_app.models import User
 from restaurants_app.tests import (
     seed_restaurant, seed_menu_section, seed_menu_items, seed_tables,
-    TEST_RESTAURANT_NAME,
+    TEST_RESTAURANT_NAME, TEST_MENU_SECTION_NAME,
     TEST_MENU_ITEM1_NAME, TEST_MENU_ITEM2_NAME,
     TEST_DISCOUNTED_MENU_ITEM_NAME,
     TEST_TABLE_NUMBER1,
@@ -23,7 +25,7 @@ from restaurants_app.tests import (
     TEST_OPTION_CHOICE_LARGE_ID,
     TEST_OPTION_CHOICE_SMALL_COST,
 )
-from restaurants_app.models import Restaurant, Table, MenuItem
+from restaurants_app.models import Restaurant, Table, MenuItem, MenuSection
 from dinify_backend.configss.messages import OK_ORDER_UPDATED
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated, OrderStatus_Pending,
@@ -375,3 +377,80 @@ class TestAnonymousOrderPaths(TestCase):
         self.assertTrue(item.deleted)
         # deleted_by FK is left null instead of raising on AnonymousUser
         self.assertIsNone(item.deleted_by)
+
+
+class TestDiscountActivationPricing(TestCase):
+    """The effective unit price honours the single, timezone-aware discount
+    window predicate: an inactive window charges primary_price even when
+    running_discount=True and a discounted_price is stored (that column is no
+    longer consulted — discount_details is the source of truth)."""
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant(seed_owner=True)
+        seed_menu_section()
+        self.section = MenuSection.objects.get(name=TEST_MENU_SECTION_NAME)
+
+    def _make_item(self, name, discount_details):
+        # discounted_price is deliberately set to a stale 8000 to prove the
+        # window predicate — not the stored column — decides the charge.
+        return MenuItem.objects.create(
+            name=name,
+            section=self.section,
+            primary_price=Decimal('10000'),
+            discounted_price=Decimal('8000'),
+            running_discount=True,
+            consider_discount_object=True,
+            discount_details=discount_details,
+        )
+
+    def test_expired_window_charges_primary_price(self):
+        yesterday = (timezone.localdate() - timedelta(days=1)).isoformat()
+        item = self._make_item('Expired Discount Item', {
+            'discount_type': 'percentage', 'discount_percentage': 20.0,
+            'discount_amount': 0.0, 'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+            'start_date': '', 'end_date': yesterday,
+            'start_time': '', 'end_time': '',
+        })
+        result = ConOrder.determine_effective_unit_price(menu_item=item)
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['price'], Decimal('10000.00'))
+
+    def test_wrong_recurring_day_charges_primary_price(self):
+        today_iso = timezone.localdate().isoweekday()
+        other_days = [d for d in range(1, 8) if d != today_iso]
+        item = self._make_item('Wrong Day Discount Item', {
+            'discount_type': 'percentage', 'discount_percentage': 20.0,
+            'discount_amount': 0.0, 'recurring_days': other_days,
+            'start_date': '', 'end_date': '',
+            'start_time': '', 'end_time': '',
+        })
+        result = ConOrder.determine_effective_unit_price(menu_item=item)
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['price'], Decimal('10000.00'))
+
+    def test_active_window_charges_discounted_price(self):
+        item = self._make_item('Active Discount Item', {
+            'discount_type': 'percentage', 'discount_percentage': 20.0,
+            'discount_amount': 0.0, 'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+            'start_date': '', 'end_date': '',
+            'start_time': '', 'end_time': '',
+        })
+        result = ConOrder.determine_effective_unit_price(menu_item=item)
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['price'], Decimal('8000.00'))
+
+    def test_empty_recurring_days_means_every_day(self):
+        # Empty recurring_days == "every day". Locks the chosen semantic so a
+        # future switch to "never" is a deliberate change.
+        today = timezone.localdate()
+        item = self._make_item('Empty Recurring Discount Item', {
+            'discount_type': 'percentage', 'discount_percentage': 20.0,
+            'discount_amount': 0.0, 'recurring_days': [],
+            'start_date': (today - timedelta(days=5)).isoformat(),
+            'end_date': (today + timedelta(days=5)).isoformat(),
+            'start_time': '', 'end_time': '',
+        })
+        result = ConOrder.determine_effective_unit_price(menu_item=item)
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['price'], Decimal('8000.00'))
