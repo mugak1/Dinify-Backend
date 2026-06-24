@@ -3672,6 +3672,22 @@ class DinerTableScanTests(TestCase):
         )
         self.assertTrue(data['available']['available'])
 
+    def test_scan_restaurant_payload_includes_socials(self):
+        # socials rides through to the diner scan payload as the raw dict —
+        # no normalization (empty handles stay '' for the frontend to filter).
+        self.restaurant.socials = {
+            'instagram': 'dinify', 'facebook': '', 'x': '', 'tiktok': '',
+        }
+        self.restaurant.save(update_fields=['socials'])
+        response = self._scan(str(self.table.id))
+        self.assertEqual(response['status'], 200)
+        socials = response['data']['restaurant']['socials']
+        self.assertEqual(
+            set(socials.keys()), {'instagram', 'facebook', 'x', 'tiktok'},
+        )
+        self.assertEqual(socials['instagram'], 'dinify')
+        self.assertEqual(socials['facebook'], '')  # empty rides through raw
+
     def test_occupied_table_still_scannable(self):
         # An ongoing order must NOT block a scan — the diner resumes it.
         from orders_app.models import Order
@@ -3751,6 +3767,7 @@ class DinerTableScanTests(TestCase):
                 'logo': None,
                 'cover_photo': None,
                 'branding_configuration': self.restaurant.branding_configuration,
+                'socials': self.restaurant.socials,
                 'menu_approval_status':
                     self.restaurant.first_time_menu_approval_decision,
                 'preset_tags': [],

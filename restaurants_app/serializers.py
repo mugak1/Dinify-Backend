@@ -521,6 +521,7 @@ class SerializerPublicGetTableDetails(ModelSerializer):
             'logo': logo,
             'cover_photo': cover_photo,
             'branding_configuration': restaurant.branding_configuration,
+            'socials': restaurant.socials,
             'menu_approval_status': restaurant.first_time_menu_approval_decision,
             'preset_tags': SerializerRestaurantTag(
                 RestaurantTag.objects.filter(
