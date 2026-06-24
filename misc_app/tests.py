@@ -329,6 +329,53 @@ class SecretaryAbsentVsNullSemanticTests(TestCase):
         self.assertEqual(calories_change['old_value'], 200)
         self.assertIsNone(calories_change['new_value'])
 
+    def _restaurant_args(self, data):
+        return {
+            'serializer': SerializerPutRestaurant,
+            'data': data,
+            'edit_considerations': EDIT_INFORMATION.get('restaurants'),
+            'user_id': str(self.owner.id),
+            'username': self.owner.username,
+            'success_message': 'ok',
+            'error_message': 'err',
+        }
+
+    def test_explicit_null_clears_file_field_as_sole_change(self):
+        """
+        Clearing a file field (cover_photo) as the ONLY change must succeed.
+
+        determine_changes ignores STRINGIFY_LOG_FIELDS (file fields), so it can
+        never see a file change. Pre-fix the file-field fallback only counted an
+        upload (`value is not None`), so an explicit null-clear collapsed to
+        400 'No changes detected' — the restaurant cover-photo removal bug. The
+        fallback now keys on `key in self.data`, so a null-clear counts.
+        """
+        # Seed a stored cover_photo via queryset .update() to bypass the image
+        # optimiser in Restaurant.save() (no real file on disk needed).
+        Restaurant.objects.filter(id=self.restaurant.id).update(
+            cover_photo='restaurant_cover_photos/seed.jpg',
+        )
+        result = Secretary(self._restaurant_args({
+            'id': str(self.restaurant.id),
+            'cover_photo': None,
+        })).update()
+        self.assertEqual(result.get('status'), 200)
+        self.restaurant.refresh_from_db()
+        self.assertFalse(self.restaurant.cover_photo)
+
+    def test_no_file_key_unchanged_still_reports_no_changes(self):
+        """
+        Converse guard: the widened fallback must not over-broaden. A payload
+        with no real change and no file key still returns 400 'No changes
+        detected'.
+        """
+        result = Secretary(self._restaurant_args({
+            'id': str(self.restaurant.id),
+            'name': self.restaurant.name,  # unchanged after str.title round-trip
+        })).update()
+        self.assertEqual(result.get('status'), 400)
+        self.assertIn('No changes detected', result.get('message', ''))
+
 
 class BackendTechDebtBundleTests(TestCase):
     """Regression guards for the DinifyPaginator robustness fixes:
