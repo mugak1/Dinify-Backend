@@ -378,11 +378,17 @@ class Secretary:
             })
 
             if len(changes) < 1:
-                # check if any of the file fields is provided
+                # Check whether a file-field operation is in play. determine_changes
+                # ignores STRINGIFY_LOG_FIELDS (file fields serialise to URLs/objects
+                # that don't compare cleanly), so it can never see a file change — this
+                # fallback covers both an upload AND an explicit null-clear. Test
+                # `key in self.data`, not `value is not None`: under the absent-vs-None
+                # convention an omitted field is untouched while an explicit null clears
+                # it, so a null-clear (e.g. removing a restaurant cover_photo/logo) must
+                # count as a change rather than collapsing to "No changes detected".
                 file_fields_present = False
                 for key in STRINGIFY_LOG_FIELDS:
-                    check = self.data.get(key)
-                    if check is not None:
+                    if key in self.data:
                         file_fields_present = True
                         break
 
