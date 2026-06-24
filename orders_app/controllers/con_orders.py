@@ -3,7 +3,6 @@ import logging
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Sum
-from datetime import datetime
 from typing import Optional, Union
 from users_app.models import User
 from dinify_backend.configss.messages import MESSAGES
@@ -173,73 +172,14 @@ class ConOrder:
 
     @staticmethod
     def determine_effective_unit_price(menu_item: MenuItem, selected_modifiers: dict = None) -> dict:
-        unit_price = menu_item.primary_price
-        effective_unit_price = unit_price
-
-        # consideration for the discount
-        # The fast path (running_discount + discounted_price) and the
-        # discount-object path are mutually exclusive: one applies a
-        # pre-computed price, the other recomputes from discount_details.
-        # Allowing both to fire let the second silently overwrite the first.
-        if menu_item.running_discount:
-            if menu_item.discounted_price is not None:
-                effective_unit_price = menu_item.discounted_price
-        elif menu_item.consider_discount_object:
-            run_discount = False
-
-            discount = menu_item.discount_details
-            recurring_days = discount.get('recurring_days', [])
-            start_date = discount.get('start_date', '')
-            end_date = discount.get('end_date', '')
-            start_time = discount.get('start_time', '')
-            end_time = discount.get('end_time', '')
-            discount_percentage = Decimal(str(discount.get('discount_percentage', 0)))
-            discount_amount = Decimal(str(discount.get('discount_amount', 0)))
-
-            # check if the discount is applicable
-            # check if the discount is recurring
-            # check if the discount is within the time frame
-            # check if the discount is within the date frame
-            time_now = datetime.now()
-            if len(recurring_days) > 0:
-                today = time_now.date().isoweekday()
-                if today in recurring_days:
-                    run_discount = True
-            if start_date != '':
-                # parse the start date to date
-                start_date = datetime.strptime(start_date, '%Y-%m-%d')
-                if time_now.date() <= start_date.date():
-                    run_discount = False
-            if end_date != '':
-                # parse the end date to date
-                end_date = datetime.strptime(end_date, '%Y-%m-%d')
-                # end_date is inclusive: the last day the discount is valid.
-                # Use strict '>' so the discount still applies on end_date
-                # itself; previously this was '>=' which expired one day early.
-                if time_now.date() > end_date.date():
-                    run_discount = False
-
-            if run_discount:
-                if start_time != '' and start_date != '':
-                    # parse the start time to time
-                    start_time = datetime.strptime(f'{start_time}:00', '%H:%M:%S')
-                    if time_now.time() <= start_time.time():
-                        run_discount = False
-                if end_time != '' and end_date != '':
-                    # parse the end time to time
-                    end_time = datetime.strptime(f'{end_time}:00', '%H:%M:%S')
-                    if time_now.time() >= end_time.time():
-                        run_discount = False
-
-            if run_discount:
-                # Percentage and fixed-amount discounts are mutually exclusive
-                # per the canonical discount_details shape (one of the two is
-                # zero post-0042). if/elif prevents an amount from silently
-                # overwriting a percentage if both were ever non-zero.
-                if discount_percentage > 0:
-                    effective_unit_price = unit_price - (unit_price * discount_percentage / Decimal('100'))
-                elif discount_amount > 0:
-                    effective_unit_price = unit_price - discount_amount
+        # Discount activation and the effective base price come from the single,
+        # timezone-aware (EAT) predicate on the model — the SAME one the diner
+        # menu serializer uses — so the diner-displayed price and the charged
+        # price agree. An expired / out-of-window / wrong-day / zero-value
+        # discount charges primary_price even when running_discount and
+        # discounted_price are set. The client still cannot inject a price: the
+        # effective base is recomputed server-side from the MenuItem here.
+        effective_unit_price = menu_item.effective_base_price()
 
         # add the cost of the grouped modifier selections
         cost_of_options = Decimal('0')
@@ -419,7 +359,9 @@ class ConOrder:
             'unit_price': unit_price,
             'discounted_price': effective_unit_price,
             'actual_price': effective_unit_price,
-            'discounted': menu_item.running_discount,
+            # Truthful only when the discount is actually live (same predicate
+            # that set the price above), not merely when the flag is on.
+            'discounted': menu_item.is_discount_active(),
             'unit_cost_of_options': unit_cost_of_options,
 
             'total_cost': total_cost,

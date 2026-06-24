@@ -87,7 +87,26 @@ def seed_menu_items():
         MenuItem(name=TEST_MENU_ITEM4_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False),  # noqa
         MenuItem(name=TEST_MENU_ITEM5_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False),  # noqa
         MenuItem(name=TEST_UNAVAILABLE_MENU_ITEM_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=False, available=False),  # noqa
-        MenuItem(name=TEST_DISCOUNTED_MENU_ITEM_NAME, section=menu_section, primary_price=1000.0, discounted_price=900.0, running_discount=True),  # noqa
+        MenuItem(
+            name=TEST_DISCOUNTED_MENU_ITEM_NAME,
+            section=menu_section,
+            primary_price=1000.0,
+            # Canonical post-0042 shape (10% off 1000 = 900). The effective price
+            # is recomputed from discount_details, not read from discounted_price.
+            discounted_price=900.0,
+            running_discount=True,
+            consider_discount_object=True,
+            discount_details={
+                'discount_type': 'percentage',
+                'discount_percentage': 10.0,
+                'discount_amount': 0.0,
+                'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+                'start_date': '',
+                'end_date': '',
+                'start_time': '',
+                'end_time': '',
+            },
+        ),  # noqa
         MenuItem(
             name=TEST_EXTRA_DISCOUNTED_MENU_ITEM_NAME,
             section=menu_section,
@@ -124,6 +143,19 @@ def seed_menu_items():
             primary_price=1000.0,
             discounted_price=900.0,
             running_discount=True,
+            consider_discount_object=True,
+            # Canonical post-0042 shape (10% off 1000 = 900); effective base is
+            # recomputed from discount_details. 900 + Small 1100 = 2000.
+            discount_details={
+                'discount_type': 'percentage',
+                'discount_percentage': 10.0,
+                'discount_amount': 0.0,
+                'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+                'start_date': '',
+                'end_date': '',
+                'start_time': '',
+                'end_time': '',
+            },
             options={
                 'hasModifiers': True,
                 'groups': [
@@ -875,6 +907,48 @@ class MenuItemDiscountMathTests(TestCase):
         item.refresh_from_db()
         self.assertNotIn('raw_discount_value', item.discount_details)
         self.assertNotIn('raw_discount_type', item.discount_details)
+
+    def test_serializer_gates_on_active_window(self):
+        # The diner serializer reports the discount as inactive (current_price
+        # == primary, discount_percentage == 0) when the window has lapsed, and
+        # active (current_price < primary, discount_percentage > 0) when live —
+        # the same predicate the order/charge path uses.
+        from datetime import timedelta
+        from decimal import Decimal
+        from django.utils import timezone
+        from restaurants_app.serializers import SerializerPublicGetMenuItem
+
+        yesterday = (timezone.localdate() - timedelta(days=1)).isoformat()
+        expired = self._make_item(
+            'Serializer Expired Item', Decimal('10000'),
+            {
+                'discount_type': 'percentage', 'discount_percentage': 20.0,
+                'discount_amount': 0.0, 'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+                'start_date': '', 'end_date': yesterday,
+                'start_time': '', 'end_time': '',
+            },
+            Decimal('8000.00'),
+        )
+        data = SerializerPublicGetMenuItem(expired).data
+        self.assertFalse(data['is_discount_active'])
+        self.assertEqual(data['current_price'], '10000.00')
+        self.assertEqual(data['discount_percentage'], 0)
+
+        active = self._make_item(
+            'Serializer Active Item', Decimal('10000'),
+            {
+                'discount_type': 'percentage', 'discount_percentage': 20.0,
+                'discount_amount': 0.0, 'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+                'start_date': '', 'end_date': '',
+                'start_time': '', 'end_time': '',
+            },
+            Decimal('8000.00'),
+        )
+        data = SerializerPublicGetMenuItem(active).data
+        self.assertTrue(data['is_discount_active'])
+        self.assertEqual(data['current_price'], '8000.00')
+        self.assertLess(Decimal(data['current_price']), Decimal('10000'))
+        self.assertEqual(data['discount_percentage'], 20.0)
 
 
 class TenantIsolationTests(TestCase):
