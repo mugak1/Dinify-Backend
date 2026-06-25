@@ -90,10 +90,17 @@ with PostgreSQL on AWS RDS.
   dimension ratings; `is_public` seeded from `PUBLIC_RATING_THRESHOLD` (≥4 →
   public-eligible) but stays owner-overridable. List/analytics gate on the
   `reviews` module (`get_module_restaurant_ids` / `can_user_access_module`);
-  resolution stays manage-level (`can_manage_restaurant`). Migrations
-  `reviews_app/0001_initial`, `0002_review_resolution_note`. `Review` is the
-  system of record — the legacy inline-review fields on `Order`/`OrderItem`
-  were dropped (orders_app migration `0034`)
+  resolution stays manage-level (`can_manage_restaurant`). Diner submissions may
+  also carry quick-chip `tags` — a JSON list of stable `ReviewTag` keys
+  (`great_flavour`/`quick_service`/`friendly_staff`/`good_value`/`spotless`,
+  the enum is the single source of truth for the allowed set); the write
+  serializer DROPS unknown keys (never rejects, logs via stdlib logging) so the
+  stars/comment always save, persisting only the valid subset for Reports to
+  aggregate later (the one 400 is a non-list payload). Migrations
+  `reviews_app/0001_initial`, `0002_review_resolution_note`,
+  `0003_review_tags`. `Review` is the system of record — the legacy
+  inline-review fields on `Order`/`OrderItem` were dropped (orders_app
+  migration `0034`)
 - Payments — non-custodial migration: 🚧 In progress (custodial teardown
   essentially complete). Dinify must operate as a software vendor, NOT a
   custodial payment institution (Uganda NPS Act 2020 — see
@@ -228,6 +235,11 @@ the catch-all `<str:config_detail>/` route.
 - Secretary now honours absent-vs-None semantics: omitting a field leaves
   it untouched, sending `null` clears it. The legacy `clear_<field>`
   sentinels are deprecated — do not introduce new ones
+- File fields (`STRINGIFY_LOG_FIELDS`, e.g. restaurant `cover_photo`/`logo`) are
+  invisible to `determine_changes`, so `Secretary.update()`'s fallback is the
+  only thing that can register a file edit — it keys on `key in self.data` (NOT
+  "value is non-null"), so an explicit `null`-clear of a file field counts as a
+  change and persists (HTTP 200), rather than collapsing to "no changes detected"
 - Check this file before adding any editable field — it may already be there
 
 ## Tenant Isolation / Role-Permission ENFORCEMENT — CRITICAL
@@ -343,9 +355,20 @@ the catch-all `<str:config_detail>/` route.
   now fully complete — post-0046 dropped the legacy `_legacy_tags` column. Do
   not reintroduce a separate allergens path. Menu items additionally reference
   the restaurant tag catalog via `tag_ids`
-- `MenuItem.discount_details` uses the canonical post-0042 shape. Use
-  `get_discount_percentage` (returns positive magnitude) — do not invert
-  the sign in callers
+- `MenuItem.discount_details` uses the canonical post-0042 shape.
+  `MenuItem.is_discount_active()` (timezone-aware, EAT) + `effective_base_price()`
+  are the SINGLE source of truth for whether a discount is live now and the
+  per-unit base price — both read purely from `discount_details`, NOT the stored
+  `discounted_price` column. The diner menu serializer
+  (`is_discount_active`/`current_price`/`discount_percentage`) and the order
+  charge path (`ConOrder.determine_effective_unit_price`) gate on the SAME
+  predicate so the displayed and charged prices agree — do NOT gate discount
+  logic on `running_discount` alone (an expired / out-of-window / wrong-day /
+  zero-value discount must charge `primary_price`; `recurring_days=[]` means
+  "every day"). Use `get_discount_percentage` (returns positive magnitude) — do
+  not invert the sign in callers. A menu-item PUT with an inverted date window
+  (`end_date` < `start_date`) is rejected 400 by `SerializerPutMenuItem`
+  (end-date stays inclusive; `end_date == start_date` is a valid one-day window)
 - `Restaurant.branding_configuration` uses the four-key shape (post-0041).
   Do not regress to the legacy nested shape
 - `MenuItem.listing_position` and `MenuSection.listing_position` are
@@ -361,7 +384,14 @@ the catch-all `<str:config_detail>/` route.
 
 ## Key Serializer Notes
 - `SerializerPublicGetMenuItem` includes `section` and `in_stock` —
-  added deliberately for the diner menu. Do not remove them
+  added deliberately for the diner menu. Do not remove them. It also emits
+  read-only `is_discount_active` (bool) and `current_price` (effective base
+  price, string) alongside `discount_percentage`, all gated on
+  `is_discount_active()` (see Canonical Data Shapes)
+- `SerializerPublicGetTableDetails` (diner QR table-scan) hand-builds its
+  restaurant dict and now passes `socials` through raw, beside
+  `branding_configuration` — do not drop it (no migration/EDIT_INFORMATION
+  needed; `socials` is already a Secretary-editable `JSONField`)
 
 ## Existing Management Commands
 - `optimize_images` in `restaurants_app/management/commands/` — resizes
@@ -378,7 +408,7 @@ the catch-all `<str:config_detail>/` route.
 - Latest migration: `restaurants_app/migrations/0053_backfill_role_permissions.py`,
   `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
-  `reviews_app/migrations/0002_review_resolution_note.py`
+  `reviews_app/migrations/0003_review_tags.py`
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
