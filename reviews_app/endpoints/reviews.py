@@ -31,6 +31,7 @@ class ReviewSubmissionEndpoint(APIView):
             order_id=request.data.get('order'),
             rating_fields=rating_fields,
             comment=request.data.get('comment'),
+            tags=request.data.get('tags'),
         )
         return Response(response, status=response['status'])
 

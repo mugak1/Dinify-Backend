@@ -28,7 +28,7 @@ from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Active, RESTAURANT_OWNER, RESTAURANT_MANAGER,
     OrderStatus_Cancelled,
 )
-from reviews_app.models import PUBLIC_RATING_THRESHOLD, Review
+from reviews_app.models import PUBLIC_RATING_THRESHOLD, Review, ReviewTag
 from reviews_app.serializers import ReviewRestaurantReadSerializer
 from reviews_app.controllers.review_analytics import DEFAULT_ANALYTICS_WINDOW_DAYS
 
@@ -248,6 +248,94 @@ class ReviewSubmissionTests(ReviewApiTestBase):
         order.refresh_from_db()
         self.assertEqual(data['spend'], str(order.actual_cost))
         self.assertFalse(data['is_critical'])
+
+    # --- quick-chip tags ------------------------------------------------
+    def test_tags_round_trip(self):
+        # Selected keys are persisted and echoed back in the read representation.
+        order = self.make_order(self.restaurant_a, self.table_a)
+        tags = [ReviewTag.GREAT_FLAVOUR, ReviewTag.SPOTLESS]
+        resp = self.post_submit({
+            'order': str(order.id), 'overall_rating': 5, 'tags': tags,
+        })
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()['data']['tags'], tags)
+        self.assertEqual(Review.objects.get(order=order).tags, tags)
+
+    def test_tags_unknown_key_dropped_and_logged(self):
+        # Unknown keys never block the submission: the review saves, only the
+        # valid subset is stored, and the drop is logged via standard
+        # application logging (NOT the MongoDB action-log pipeline).
+        order = self.make_order(self.restaurant_a, self.table_a)
+        with self.assertLogs('reviews_app.serializers', level='WARNING') as logs:
+            resp = self.post_submit({
+                'order': str(order.id), 'overall_rating': 5,
+                'tags': ['great_flavour', 'not_a_real_tag', 'spotless'],
+            })
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(
+            resp.json()['data']['tags'], ['great_flavour', 'spotless'],
+        )
+        self.assertEqual(
+            Review.objects.get(order=order).tags,
+            ['great_flavour', 'spotless'],
+        )
+        # The dropped key is visible in the warning log.
+        self.assertTrue(
+            any('not_a_real_tag' in line for line in logs.output),
+            logs.output,
+        )
+
+    def test_tags_all_unknown_saves_review_with_empty_tags(self):
+        # Even an all-unknown list must not block the stars/comment from saving.
+        order = self.make_order(self.restaurant_a, self.table_a)
+        with self.assertLogs('reviews_app.serializers', level='WARNING'):
+            resp = self.post_submit({
+                'order': str(order.id), 'overall_rating': 5,
+                'tags': ['nope', 'still_nope'],
+            })
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()['data']['tags'], [])
+        self.assertEqual(Review.objects.get(order=order).tags, [])
+
+    def test_tags_non_list_returns_400(self):
+        # A non-list payload is the one malformed-tags case that 400s (a string
+        # would otherwise be iterated per-character) — no review is created.
+        order = self.make_order(self.restaurant_a, self.table_a)
+        resp = self.post_submit({
+            'order': str(order.id), 'overall_rating': 5,
+            'tags': 'great_flavour',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Review.objects.filter(order=order).exists())
+
+    def test_tags_empty_list_allowed(self):
+        order = self.make_order(self.restaurant_a, self.table_a)
+        resp = self.post_submit({
+            'order': str(order.id), 'overall_rating': 5, 'tags': [],
+        })
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()['data']['tags'], [])
+        self.assertEqual(Review.objects.get(order=order).tags, [])
+
+    def test_tags_omitted_defaults_to_empty(self):
+        # No tags key at all -> the model's [] default, never null.
+        order = self.make_order(self.restaurant_a, self.table_a)
+        resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()['data']['tags'], [])
+        self.assertEqual(Review.objects.get(order=order).tags, [])
+
+    def test_tags_deduplicated_preserving_order(self):
+        order = self.make_order(self.restaurant_a, self.table_a)
+        resp = self.post_submit({
+            'order': str(order.id), 'overall_rating': 5,
+            'tags': ['quick_service', 'good_value', 'quick_service'],
+        })
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(
+            Review.objects.get(order=order).tags,
+            ['quick_service', 'good_value'],
+        )
 
 
 class RestaurantReviewListTests(ReviewApiTestBase):
