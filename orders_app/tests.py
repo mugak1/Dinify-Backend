@@ -344,39 +344,39 @@ class TestAnonymousOrderPaths(TestCase):
         # attribution is left null rather than crashing on AnonymousUser
         self.assertIsNone(order.last_updated_by)
 
-    def test_anonymous_prepare_and_cancel_require_login(self):
-        order_id = self._initiate_anonymous_order()
-
-        for action in ['prepare', 'cancel']:
-            response = self.client.put(
-                f'/api/v1/orders/{action}/',
-                {'order': order_id},
-                format='json',
-            )
-            # auth-gated: rejected cleanly, not a 500 or generic update error
-            self.assertEqual(response.status_code, 400)
-            self.assertEqual(response.json()['message'], 'Please log in')
-
-        # the rejected actions never touched the order
-        order = Order.objects.get(id=order_id)
-        self.assertEqual(order.order_status, OrderStatus_Initiated)
-
-    def test_anonymous_delete_item_does_not_500(self):
+    def test_order_management_actions_are_retired(self):
+        # prepare / cancel / update-item (v1) and add-items (v2, POST & DELETE)
+        # were orphaned and unscoped (any authenticated user could transition
+        # another restaurant's order by id) — they are retired and now 404
+        # instead of falling through to a 500. submit / initiate stay live
+        # (covered above). Mirrors tests_kitchen.test_kds_routes_are_retired.
         order_id = self._initiate_anonymous_order()
         item = OrderItem.objects.filter(order__id=order_id).first()
         self.assertIsNotNone(item)
 
-        response = self.client.delete(
-            '/api/v2/orders/add-items/',
-            {'item': str(item.pk), 'reason': 'changed mind'},
-            format='json',
-        )
-        self.assertEqual(response.status_code, 200)
+        retired = [
+            ('put', '/api/v1/orders/cancel/'),
+            ('put', '/api/v1/orders/prepare/'),
+            ('put', '/api/v1/orders/update-item/'),
+            ('post', '/api/v2/orders/add-items/'),
+            ('delete', '/api/v2/orders/add-items/'),
+        ]
+        for method, url in retired:
+            response = getattr(self.client, method)(
+                url,
+                {'order': order_id, 'item': str(item.pk)},
+                format='json',
+            )
+            self.assertEqual(
+                response.status_code, 404,
+                msg=f'expected 404 for retired {method.upper()} {url}',
+            )
 
+        # the retired actions touched nothing: order still initiated, item live
+        order = Order.objects.get(id=order_id)
+        self.assertEqual(order.order_status, OrderStatus_Initiated)
         item.refresh_from_db()
-        self.assertTrue(item.deleted)
-        # deleted_by FK is left null instead of raising on AnonymousUser
-        self.assertIsNone(item.deleted_by)
+        self.assertFalse(item.deleted)
 
 
 class TestDiscountActivationPricing(TestCase):
