@@ -378,6 +378,16 @@ class TestAnonymousOrderPaths(TestCase):
         item.refresh_from_db()
         self.assertFalse(item.deleted)
 
+    def test_details_read_endpoint_is_retired(self):
+        # api/v2/orders/details/ was an orphaned, unauthenticated full-order
+        # read (C1) — no caller; the diner gets its order from the initiate
+        # response + nav-state, and the scoped diner view uses the journey path.
+        # It is retired and now 404s. Mirrors tests_kitchen's
+        # test_kds_routes_are_retired.
+        order_id = self._initiate_anonymous_order()
+        response = self.client.get(f'/api/v2/orders/details/?order={order_id}')
+        self.assertEqual(response.status_code, 404)
+
 
 class TestDiscountActivationPricing(TestCase):
     """The effective unit price honours the single, timezone-aware discount

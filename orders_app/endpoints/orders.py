@@ -1,18 +1,13 @@
 """
 endpoints to handle order
 """
-import logging
-
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from orders_app.models import Order
-from orders_app.serializers import SerializerListGetOrder
 from orders_app.controllers.manage_order import update_order_status
 from dinify_backend.configss.string_definitions import OrderStatus_Pending
 from orders_app.controllers.con_orders import ConOrder
-
-logger = logging.getLogger(__name__)
 
 
 class OrdersEndpoint(APIView):
@@ -115,34 +110,8 @@ class V2OrdersEndpoint(APIView):
         return Response({'status': 404, 'message': 'Not found'}, status=404)
 
     def get(self, request, action):
-        """
-        This endpoint is used to get the order items for a given order
-        """
-        order_id = request.GET.get('order')
-
-        if action == 'details':
-            if order_id is None:
-                response = {
-                    'status': 400,
-                    'message': 'No order reference found'
-                }
-                return Response(response, status=400)
-
-            try:
-                order = Order.objects.get(id=order_id)
-                order_data = SerializerListGetOrder(order, many=False).data
-                response = {
-                    'status': 200,
-                    'message': 'Order retrieved successfully',
-                    'data': order_data
-                }
-            except Exception as error:
-                logger.error("Error retrieving order: %s", error)
-                response = {
-                    'status': 404,
-                    'message': 'Order not found'
-                }
-            return Response(response, status=response['status'])
-
-        # `details` is the only GET action (retired separately); 404 the rest.
+        # All v2 GET order actions are retired. `details` — the orphaned,
+        # unauthenticated full-order read (closes C1) — is gone. A future diner
+        # "view my order" must use the scoped journey path (OrderJourneyEndpoint
+        # + SerializerPublicOrderDetails), not a revived AllowAny full read.
         return Response({'status': 404, 'message': 'Not found'}, status=404)
