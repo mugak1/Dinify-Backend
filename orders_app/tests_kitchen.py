@@ -33,7 +33,7 @@ from restaurants_app.tests import (
 )
 from restaurants_app.models import (
     Restaurant, Table, MenuItem, MenuSection, RestaurantEmployee, RestaurantTag,
-    MenuItemTag,
+    MenuItemTag, RestaurantRolePermission,
 )
 from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN, RESTAURANT_WAITER,
@@ -41,6 +41,7 @@ from dinify_backend.configss.string_definitions import (
     PaymentStatus_Pending,
     RestaurantStatus_Active,
     CancellationReason_CustomerChangedMind,
+    MODULE_KITCHEN,
 )
 
 ACTIVE_URL = '/api/v1/kitchen/orders/active/'
@@ -810,3 +811,83 @@ class KitchenCancelTests(KitchenTestBase):
                 {'cancellation_reason': self.VALID_REASON}, format='json',
             ).status_code, 404,
         )
+
+
+class KitchenModuleGridOverrideTests(KitchenTestBase):
+    """
+    H2: kitchen endpoints gate on the central permission resolver
+    (can_user_access_module / MODULE_KITCHEN), so the owner-configured Roles &
+    Access grid takes server-side effect for the kitchen module — like every
+    other portal module.
+
+    A RestaurantRolePermission override row that GRANTS kitchen to a normally
+    denied role (waiter) lets it in; one that REVOKES kitchen from a normally
+    granted role (kitchen) locks it out — proven across both a read gate (the
+    active feed) and a write gate (the 86 / stock toggle), so the conversion is
+    uniform. With no override rows the seeded defaults are unchanged (the
+    per-endpoint permission tests above remain the full default-matrix coverage).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.item = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+
+    def _active_status(self, user):
+        """Status of a representative READ gate (GET active feed) for ``user``."""
+        self.client.force_authenticate(user=user)
+        return self.client.get(
+            ACTIVE_URL, {'restaurant': str(self.restaurant.id)},
+        ).status_code
+
+    def _stock_status(self, user):
+        """Status of a representative WRITE gate (86 / stock toggle) for ``user``."""
+        self.client.force_authenticate(user=user)
+        return self.client.put(
+            _stock_url(self.item.id), {'in_stock': True}, format='json',
+        ).status_code
+
+    def test_owner_grant_kitchen_to_waiter_enables_access(self):
+        # Baseline: a waiter holds no kitchen module by default -> denied on both
+        # a read and a write kitchen gate.
+        self.assertEqual(self._active_status(self.waiter_user), 403)
+        self.assertEqual(self._stock_status(self.waiter_user), 403)
+
+        # The owner customises the grid to GRANT kitchen to the waiter role.
+        RestaurantRolePermission.objects.create(
+            restaurant=self.restaurant, role=RESTAURANT_WAITER,
+            modules={MODULE_KITCHEN: True},
+        )
+
+        # The override now takes server-side effect across every kitchen gate.
+        self.assertEqual(self._active_status(self.waiter_user), 200)
+        self.assertEqual(self._stock_status(self.waiter_user), 200)
+
+    def test_owner_revoke_kitchen_from_kitchen_role_denies_access(self):
+        # Baseline: the kitchen role holds kitchen by default -> allowed.
+        self.assertEqual(self._active_status(self.kitchen_user), 200)
+        self.assertEqual(self._stock_status(self.kitchen_user), 200)
+
+        # The owner customises the grid to REVOKE kitchen from the kitchen role.
+        # A non-empty override dict supersedes the coded default even when its
+        # value is False.
+        RestaurantRolePermission.objects.create(
+            restaurant=self.restaurant, role=RESTAURANT_KITCHEN,
+            modules={MODULE_KITCHEN: False},
+        )
+
+        # The revoke now takes server-side effect across every kitchen gate.
+        self.assertEqual(self._active_status(self.kitchen_user), 403)
+        self.assertEqual(self._stock_status(self.kitchen_user), 403)
+
+    def test_seeded_default_grid_unchanged(self):
+        # With NO override rows the resolver falls back to the coded defaults,
+        # which must match the pre-fix hardcoded set exactly: owner / manager /
+        # kitchen / admin in, waiter / outsider out — on both a read and a write
+        # kitchen gate.
+        for user in (self.kitchen_user, self.manager_user, self.owner_user, self.admin_user):
+            self.assertEqual(self._active_status(user), 200, msg=f'active 200 for {user.username}')
+            self.assertEqual(self._stock_status(user), 200, msg=f'stock 200 for {user.username}')
+
+        for user in (self.waiter_user, self.outsider_user):
+            self.assertEqual(self._active_status(user), 403, msg=f'active 403 for {user.username}')
+            self.assertEqual(self._stock_status(user), 403, msg=f'stock 403 for {user.username}')

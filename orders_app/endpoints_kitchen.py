@@ -1,10 +1,15 @@
 """
 Kitchen view endpoints (api/v1/kitchen/).
 
-Role-checked (owner / manager / kitchen, or Dinify admin) and authenticated via
-the global SimpleJWT default — there is no AllowAny here. Kitchen writes ONLY
-the fulfilment axis (fulfilment_status, priority, served_at and the fulfilment
-timestamps); order_status / payment_status stay finance-owned.
+Module-gated through the central permission resolver: access honours the
+owner-configured Roles & Access grid for the `kitchen` module
+(can_user_access_module / MODULE_KITCHEN), so revoking/granting kitchen on a role
+takes server-side effect. The in-progress goodwill-cancel escalation defers to
+the manage-level gate (can_manage_restaurant), which is intentionally NOT
+module-granular. All views are authenticated via the global SimpleJWT default —
+there is no AllowAny here. Kitchen writes ONLY the fulfilment axis
+(fulfilment_status, priority, served_at and the fulfilment timestamps);
+order_status / payment_status stay finance-owned.
 """
 import logging
 from datetime import timedelta
@@ -22,13 +27,11 @@ from orders_app.serializers_kitchen import (
 )
 from restaurants_app.models import MenuItem
 from users_app.controllers.permissions_check import (
-    is_dinify_admin,
-    get_user_restaurant_roles,
+    can_user_access_module,
+    can_manage_restaurant,
 )
 from dinify_backend.configss.string_definitions import (
-    RESTAURANT_OWNER,
-    RESTAURANT_MANAGER,
-    RESTAURANT_KITCHEN,
+    MODULE_KITCHEN,
     OrderStatus_Cancelled,
     CANCELLATION_REASONS,
 )
@@ -47,42 +50,6 @@ FORWARD_TRANSITIONS = {
     'ready': 'served',
 }
 FULFILMENT_STATUSES = {'new', 'preparing', 'ready', 'served'}
-
-
-def user_can_access_kitchen(user, restaurant_id) -> bool:
-    """
-    Owner / manager / kitchen of the restaurant, or a Dinify admin. The kitchen
-    module-access gate — kept role-based here (equivalent to the `kitchen`
-    module for the seeded defaults).
-    """
-    if is_dinify_admin(user):
-        return True
-    roles = get_user_restaurant_roles(
-        user_id=str(user.id),
-        restaurant_id=str(restaurant_id),
-    )
-    return any(
-        role in (RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN)
-        for role in roles
-    )
-
-
-def user_can_manage_restaurant(user, restaurant_id) -> bool:
-    """
-    Owner / manager of the restaurant, or a Dinify admin. Parallels
-    user_can_access_kitchen but WITHOUT RESTAURANT_KITCHEN — the goodwill gate
-    for cancelling an order once preparation has started.
-    """
-    if is_dinify_admin(user):
-        return True
-    roles = get_user_restaurant_roles(
-        user_id=str(user.id),
-        restaurant_id=str(restaurant_id),
-    )
-    return any(
-        role in (RESTAURANT_OWNER, RESTAURANT_MANAGER)
-        for role in roles
-    )
 
 
 def _get_order_or_none(pk):
@@ -114,7 +81,7 @@ class ActiveKitchenOrdersView(APIView):
                 {'status': 400, 'message': 'restaurant query param is required'},
                 status=400,
             )
-        if not user_can_access_kitchen(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_KITCHEN):
             return Response(
                 {'status': 403, 'message': 'You do not have permission to view this kitchen'},
                 status=403,
@@ -163,7 +130,7 @@ class CompletedKitchenOrdersView(APIView):
                 {'status': 400, 'message': 'restaurant query param is required'},
                 status=400,
             )
-        if not user_can_access_kitchen(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_KITCHEN):
             return Response(
                 {'status': 403, 'message': 'You do not have permission to view this kitchen'},
                 status=403,
@@ -203,7 +170,7 @@ class KitchenOrderFulfilmentStatusView(APIView):
         order = _get_order_or_none(pk)
         if order is None:
             return Response({'status': 404, 'message': 'Order not found'}, status=404)
-        if not user_can_access_kitchen(request.user, order.restaurant_id):
+        if not can_user_access_module(request.user, order.restaurant_id, MODULE_KITCHEN):
             return Response(
                 {'status': 403, 'message': 'You do not have permission for this kitchen'},
                 status=403,
@@ -271,7 +238,7 @@ class KitchenOrderPriorityView(APIView):
         order = _get_order_or_none(pk)
         if order is None:
             return Response({'status': 404, 'message': 'Order not found'}, status=404)
-        if not user_can_access_kitchen(request.user, order.restaurant_id):
+        if not can_user_access_module(request.user, order.restaurant_id, MODULE_KITCHEN):
             return Response(
                 {'status': 403, 'message': 'You do not have permission for this kitchen'},
                 status=403,
@@ -297,7 +264,7 @@ class KitchenMenuItemsView(APIView):
     """
     GET the restaurant's on-menu items with their in_stock state — the read
     behind the kitchen sold-out panel. Mirrors ActiveKitchenOrdersView: required
-    ?restaurant=<id>, the owner/manager/kitchen gate, the {status, message, data}
+    ?restaurant=<id>, the kitchen-module gate, the {status, message, data}
     envelope.
     """
 
@@ -308,7 +275,7 @@ class KitchenMenuItemsView(APIView):
                 {'status': 400, 'message': 'restaurant query param is required'},
                 status=400,
             )
-        if not user_can_access_kitchen(request.user, restaurant_id):
+        if not can_user_access_module(request.user, restaurant_id, MODULE_KITCHEN):
             return Response(
                 {'status': 403, 'message': 'You do not have permission to view this kitchen'},
                 status=403,
@@ -349,7 +316,7 @@ class KitchenMenuItemStockView(APIView):
         item = _get_menu_item_or_none(pk)
         if item is None:
             return Response({'status': 404, 'message': 'Menu item not found'}, status=404)
-        if not user_can_access_kitchen(request.user, item.section.restaurant_id):
+        if not can_user_access_module(request.user, item.section.restaurant_id, MODULE_KITCHEN):
             return Response(
                 {'status': 403, 'message': 'You do not have permission for this kitchen'},
                 status=403,
@@ -391,7 +358,7 @@ class KitchenOrderCancelView(APIView):
         order = _get_order_or_none(pk)
         if order is None:
             return Response({'status': 404, 'message': 'Order not found'}, status=404)
-        if not user_can_access_kitchen(request.user, order.restaurant_id):
+        if not can_user_access_module(request.user, order.restaurant_id, MODULE_KITCHEN):
             return Response(
                 {'status': 403, 'message': 'You do not have permission for this kitchen'},
                 status=403,
@@ -408,7 +375,7 @@ class KitchenOrderCancelView(APIView):
                 status=400,
             )
         if order.fulfilment_status in ('preparing', 'ready') and not \
-                user_can_manage_restaurant(request.user, order.restaurant_id):
+                can_manage_restaurant(request.user, order.restaurant_id):
             return Response(
                 {
                     'status': 403,
