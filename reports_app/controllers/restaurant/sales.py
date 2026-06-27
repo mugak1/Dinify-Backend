@@ -32,7 +32,9 @@ from misc_app.controllers.report_support_functions import make_graph_series_data
 from reports_app.controllers.common.sale_filters import (
     sale_orders, revenue_sum, discount_sum, SALE_STATUSES,
 )
-from reports_app.controllers.common.bucketing import bucket_sales, LOCAL_TZ
+from reports_app.controllers.common.bucketing import (
+    bucket_sales, bucket_sales_by_hour, LOCAL_TZ,
+)
 from reports_app.serializers import SerializerOrderListingReport
 
 
@@ -259,6 +261,49 @@ def generate_restaurant_sales_trends(
         'status': 200,
         'message': 'Successfully retrieved the sales trend table.',
         'data': table,
+    }
+
+
+def generate_restaurant_sales_hourly(
+    restaurant_id: str,
+    date_from: str,
+    date_to: str,
+) -> dict:
+    """Hour-of-day ("when orders land") sale distribution, 0–23 in EAT.
+
+    Shares the Sales section's sale set (``{served, paid}``) and revenue basis
+    (``Sum('actual_cost')``) via :func:`sale_orders` / ``bucket_sales_by_hour``,
+    so the figures agree with the other Sales panes. Returns a stable 24-row
+    axis (zero-filled for hours without orders) of RAW hours — the frontend
+    owns any display window / peak labelling.
+    """
+    dates = clean_dates(date_from=date_from, date_to=date_to)
+    if dates.get('status') != 200:
+        return dates
+    date_from = dates['date_from']
+    date_to = dates['date_to']
+
+    # ONE grouped query; only hours that had orders are returned.
+    buckets = bucket_sales_by_hour(
+        sale_orders(restaurant_id, date_from, date_to),
+    )
+    by_hour = {row['hour']: row for row in buckets}
+
+    # Zero-fill to a continuous 0–23 axis (the transactions-summary idiom).
+    data = [
+        {
+            'hour': hour,
+            'count': (by_hour.get(hour) or {}).get('count', 0),
+            'revenue': (by_hour.get(hour) or {}).get('revenue') or 0,
+            'discount': (by_hour.get(hour) or {}).get('discount') or 0,
+        }
+        for hour in range(24)
+    ]
+
+    return {
+        'status': 200,
+        'message': 'Successfully retrieved the hourly sales distribution.',
+        'data': data,
     }
 
 

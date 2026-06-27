@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from django.conf import settings
 from django.db.models import Count
 from django.db.models.functions import (
+    ExtractHour,
     TruncDay,
     TruncWeek,
     TruncMonth,
@@ -84,4 +85,44 @@ def bucket_sales(order_qs, period):
             discount=discount_sum(),
         )
         .order_by('period')
+    )
+
+
+def bucket_sales_by_hour(order_qs):
+    """Group a (sale-filtered) ``Order`` queryset by hour-of-day (0–23) in EAT.
+
+    A sibling to :func:`bucket_sales`, but keyed by an *integer hour* rather
+    than a ``Trunc`` datetime — so it is deliberately NOT a ``PERIOD_TRUNC``
+    entry. Runs as ONE grouped query, reusing the same revenue / discount
+    basis so the figures agree with the other Sales panes.
+
+    :param order_qs: an ``Order`` queryset (typically from
+        :func:`reports_app.controllers.common.sale_filters.sale_orders`).
+    :returns: a list of dicts ordered ascending by hour, with one entry per
+        hour that had orders, each shaped::
+
+            {
+                'hour': <int 0–23>,
+                'count': <int>,
+                'revenue': <Decimal | None>,
+                'discount': <Decimal | None>,
+            }
+
+        Hours with no orders are absent — the caller zero-fills to a
+        continuous 0–23 axis.
+
+    The hour is extracted in EAT (``tzinfo=LOCAL_TZ``), which is the
+    correctness must: an order at 23:30 UTC buckets into hour 2 (02:30 EAT),
+    not hour 23.
+    """
+    return list(
+        order_qs
+        .annotate(hour=ExtractHour('time_created', tzinfo=LOCAL_TZ))
+        .values('hour')
+        .annotate(
+            count=Count('id'),
+            revenue=revenue_sum(),
+            discount=discount_sum(),
+        )
+        .order_by('hour')
     )

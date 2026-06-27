@@ -37,6 +37,7 @@ from reports_app.controllers.restaurant.sales import (
     generate_restaurant_sales_summary,
     generate_restaurant_sales_listing,
     generate_restaurant_sales_trends,
+    generate_restaurant_sales_hourly,
 )
 
 
@@ -419,3 +420,89 @@ class SalesTrendsTests(SalesReportBase):
             trend_category='daily', trend_result='table',
         )
         self.assertEqual(result['status'], 400)
+
+
+class SalesHourlyTests(SalesReportBase):
+    """The hour-of-day ("when orders land") sale distribution.
+
+    EAT is UTC+3, so 09:00 UTC == 12:00 EAT (hour 12), 16:00 UTC == 19:00 EAT
+    (hour 19), and 23:30 UTC == 02:30 EAT the next day (hour 2). The hour must
+    be extracted in EAT, never UTC.
+    """
+
+    def test_hour_is_bucketed_in_eat_not_utc(self):
+        # 23:30 UTC is 02:30 EAT the next day -> hour 2, NOT hour 23.
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 1, 10, 23, 30))
+
+        # Window spans both calendar days so the order is included regardless
+        # of the date-edge timezone.
+        data = generate_restaurant_sales_hourly(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-01-10', date_to='2024-01-11',
+        )['data']
+
+        self.assertEqual(len(data), 24)
+        self.assertEqual(data[2]['hour'], 2)
+        self.assertEqual(data[2]['count'], 1)
+        self.assertEqual(data[23]['count'], 0)   # NOT bucketed in UTC
+
+    def test_zero_filled_to_continuous_24_hour_axis(self):
+        # Seed only EAT hours 12 and 19.
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 1, 10, 9, 0))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 1, 10, 16, 0))
+
+        data = generate_restaurant_sales_hourly(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-01-10', date_to='2024-01-10',
+        )['data']
+
+        # A stable 0..23 axis, in order.
+        self.assertEqual(len(data), 24)
+        self.assertEqual([row['hour'] for row in data], list(range(24)))
+
+        self.assertEqual(data[12]['count'], 1)
+        self.assertEqual(data[19]['count'], 1)
+        # Every untouched hour is present and zeroed (not absent).
+        for hour, row in enumerate(data):
+            if hour not in (12, 19):
+                self.assertEqual(row['count'], 0)
+                self.assertEqual(row['revenue'], 0)
+
+    def test_only_sale_status_orders_are_counted(self):
+        # Both sale statuses ({served, paid}) count; cancelled / pending do not.
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 1, 10, 9, 0))
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 1, 10, 9, 0))
+        self.make_order(status=OrderStatus_Cancelled, when=utc(2024, 1, 10, 9, 0))
+        self.make_order(status=OrderStatus_Pending, when=utc(2024, 1, 10, 9, 0))
+
+        data = generate_restaurant_sales_hourly(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-01-10', date_to='2024-01-10',
+        )['data']
+
+        self.assertEqual(data[12]['count'], 2)   # served + paid only
+
+    def test_revenue_is_actual_cost_not_total_or_discounted(self):
+        # Defaults: total=1000, discounted=800, savings=200, actual=750.
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 1, 10, 9, 0))
+
+        data = generate_restaurant_sales_hourly(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-01-10', date_to='2024-01-10',
+        )['data']
+
+        # revenue == Sum(actual_cost), NOT total_cost / discounted_cost.
+        self.assertEqual(data[12]['revenue'], Decimal('750.00'))
+        self.assertNotEqual(data[12]['revenue'], Decimal('1000.00'))
+        self.assertNotEqual(data[12]['revenue'], Decimal('800.00'))
+        # discount == Sum(savings).
+        self.assertEqual(data[12]['discount'], Decimal('200.00'))
+
+    def test_runs_as_a_single_grouped_query(self):
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 1, 10, 9, 0))
+
+        with self.assertNumQueries(1):
+            generate_restaurant_sales_hourly(
+                restaurant_id=self.restaurant.id,
+                date_from='2024-01-10', date_to='2024-01-10',
+            )
