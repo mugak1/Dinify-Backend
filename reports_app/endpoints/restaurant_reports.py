@@ -14,7 +14,8 @@ from reports_app.controllers.restaurant.dashboard import (
 from reports_app.controllers.restaurant.sales import (
     generate_restaurant_sales_summary,
     generate_restaurant_sales_listing,
-    generate_restaurant_sales_trends
+    generate_restaurant_sales_trends,
+    generate_restaurant_sales_hourly
 )
 from reports_app.controllers.restaurant.diners import (
     generate_restaurant_diners_summary,
@@ -74,6 +75,12 @@ class RestaurantReportsEndpoint(APIView):
                 date_to=request.GET.get('to', str(date_today)),
                 trend_category=request.GET.get('category', 'daily'),
                 trend_result=request.GET.get('result', 'table')
+            )
+        elif report_name == 'sales-hourly':
+            response = generate_restaurant_sales_hourly(
+                restaurant_id=request.GET.get('restaurant', None),
+                date_from=request.GET.get('from', str(date_today)),
+                date_to=request.GET.get('to', str(date_today))
             )
         elif report_name == 'diners-summary':
             response = generate_restaurant_diners_summary(
