@@ -13,7 +13,6 @@ The ``{status, message, data}`` envelope and the three public entrypoints
 the endpoint dispatch (``reports_app/endpoints/restaurant_reports.py``) is
 unchanged.
 """
-import calendar
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db.models import (
@@ -308,19 +307,23 @@ def generate_restaurant_sales_hourly(
 
 
 def _period_label(period_dt, period: str) -> str:
-    """Human label for a bucket's period boundary, on the EAT calendar.
+    """ISO, sortable-as-text period key for a bucket boundary, on the EAT calendar.
+
+    The Reports contract is that the BACKEND returns RAW, SORTABLE values and the
+    FRONTEND owns display formatting (it parses these keys as ISO dates). Every
+    bucket therefore emits a key that sorts correctly as a plain string.
 
     day      -> 'YYYY-MM-DD'   (2024-03-01)
-    month    -> 'Mon-YY'       (Mar-24)
-    quarter  -> 'Qn-YYYY'      (Q1-2024)
+    month    -> 'YYYY-MM'      (2024-03)
+    quarter  -> 'YYYY-Qn'      (2024-Q1)   year-first so it sorts as text
     year     -> 'YYYY'         (2024)
     """
     local_date = period_dt.astimezone(LOCAL_TZ).date()
     if period == 'day':
         return local_date.strftime('%Y-%m-%d')
     if period == 'month':
-        return f"{calendar.month_abbr[local_date.month]}-{local_date.year % 100:02d}"
+        return local_date.strftime('%Y-%m')
     if period == 'quarter':
         quarter = (local_date.month - 1) // 3 + 1
-        return f"Q{quarter}-{local_date.year}"
+        return f"{local_date.year}-Q{quarter}"
     return str(local_date.year)

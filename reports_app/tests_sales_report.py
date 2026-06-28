@@ -367,7 +367,7 @@ class SalesTrendsTests(SalesReportBase):
             date_from='2024-01-01', date_to='2024-02-29',
             trend_category='monthly', trend_result='table',
         )['data']
-        self.assertEqual([r['period'] for r in months], ['Jan-24', 'Feb-24'])
+        self.assertEqual([r['period'] for r in months], ['2024-01', '2024-02'])
         self.assertEqual([r['count'] for r in months], [1, 2])
 
         # Quarterly — Jan (Q1) and Apr (Q2) 2024.
@@ -377,7 +377,7 @@ class SalesTrendsTests(SalesReportBase):
             date_from='2024-01-01', date_to='2024-04-30',
             trend_category='quarterly', trend_result='table',
         )['data']
-        self.assertEqual([r['period'] for r in quarters], ['Q1-2024', 'Q2-2024'])
+        self.assertEqual([r['period'] for r in quarters], ['2024-Q1', '2024-Q2'])
 
         # Annual — 2024 and 2025.
         self.make_order(status=OrderStatus_Served, when=utc(2025, 6, 15))
