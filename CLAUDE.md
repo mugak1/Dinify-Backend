@@ -31,7 +31,15 @@ with PostgreSQL on AWS RDS.
   `0033`), and the sold-out ("86") panel — `menu-items/` (list) +
   `menu-items/<pk>/stock/` (toggles `MenuItem.in_stock`). The legacy
   `KitchenTicket`/`KitchenTicketItem` KDS models were RETIRED (migration
-  `0030_retire_kitchen_tickets`) — do not reintroduce them
+  `0030_retire_kitchen_tickets`) — do not reintroduce them. Kitchen
+  authorization now routes through the CENTRAL permission resolver (PR #183):
+  all eight module gates call `can_user_access_module(user, restaurant_id,
+  MODULE_KITCHEN)` and the in-progress goodwill-cancel escalation calls
+  `can_manage_restaurant`, so owner-configured Roles & Access grid overrides
+  finally take effect for kitchen. The old hardcoded
+  `user_can_access_kitchen`/`user_can_manage_restaurant` local helpers were
+  removed (behaviour-neutral for the seeded owner/manager/kitchen default
+  matrix; no migration)
 - Restaurant tag catalog: ✅ Per-restaurant tag catalog (migrations 0044–0045) +
   `restaurant_tags.py` endpoint + `EI_RESTAURANT_TAG`; menu items reference
   catalog tags via `tag_ids`
@@ -136,6 +144,14 @@ with PostgreSQL on AWS RDS.
   (PR #166, `transactions.py`), Diners summary/listing (PR #167, `diners.py`),
   and Menu summary/listing (PR #168, `menu.py`; the menu-summary date-range cap
   was later relaxed in PR #169) — each with its own `tests_*_report.py`.
+  Sales additionally exposes `sales-hourly/` — an EAT-aware hour-of-day (0–23)
+  distribution (PR #184, `bucket_sales_by_hour` via `ExtractHour(tzinfo=LOCAL_TZ)`,
+  keyed by integer hour so deliberately NOT a `PERIOD_TRUNC` entry, zero-filled
+  to a continuous 24-hour axis on the same revenue basis). Sales-trends now
+  emits ISO/sortable `period` keys (`2024-03` for month, `2024-Q1` for quarter;
+  day/year already ISO) so the frontend can `parseISO()` every bucket (PR #185);
+  `REPORTS_CONTRACT_AUDIT.md` at the repo root is the cross-repo Reports contract
+  reconciliation / test plan for the eventual live-data flip.
   Sales/Diners/Menu are Order-based and share `sale_filters`; Diners operates
   strictly on non-NULL-customer sale orders so anonymous-QR guests are never
   collapsed into a phantom repeat diner (guests are surfaced as a separate count,
@@ -201,8 +217,15 @@ with PostgreSQL on AWS RDS.
   upsell-config/items, reservations, waitlist, table-actions/<action>/,
   role-permissions
 - `api/v1/reports/restaurant/<report_name>/` → RestaurantReportsEndpoint
-- `api/v1/orders/` → v1 orders (urls.py)
-- `api/v2/orders/` → v2 orders (v2_urls.py) — separate file, don't confuse
+- `api/v1/orders/` → v1 orders (urls.py) — only `submit` (PUT) is live; the
+  orphaned, unscoped `prepare`/`cancel`/`update-item` write actions were
+  RETIRED (finding H3, PR #181) and any retired/unknown action now 404s
+  (hardened dispatch, no fallthrough to 500). Superseded by `api/v1/kitchen/`,
+  which gates every write
+- `api/v2/orders/` → v2 orders (v2_urls.py) — separate file, don't confuse;
+  only `initiate` (POST) is live. `add-items` (POST/DELETE) was retired
+  (PR #181) and the AllowAny, unscoped `details/` GET was retired (finding C1,
+  PR #182) — both 404 via the hardened dispatch
 - `api/v1/kitchen/` → Kitchen endpoints (urls_kitchen.py) — separate file
 - `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
   `issues/`, `issues/<uuid:issue_id>/`, `admin/issues/` — separate app
@@ -260,6 +283,10 @@ the catch-all `<str:config_detail>/` route.
     restaurant.
   - `get_employed_restaurant_ids(user)` → role-agnostic employed set (no
     restaurant-status filter); powers the ungated `support` module's scoping.
+  - `get_any_restaurant_roles(user)` (login/profile portal-role payload) also
+    filters `RestaurantEmployee` on `active=True` (PR #187), matching the module
+    resolvers — a deactivated employment (`active=False`) no longer resolves
+    portal roles on the next sign-in or profile fetch.
   - The legacy `get_readable_restaurant_ids` / `can_read_restaurant` /
     `READ_ROLES` (owner/manager-only) were DELETED — do not reintroduce them.
     `can_manage_restaurant` / `MANAGE_ROLES` REMAIN, but only for the
@@ -391,7 +418,14 @@ the catch-all `<str:config_detail>/` route.
 - `SerializerPublicGetTableDetails` (diner QR table-scan) hand-builds its
   restaurant dict and now passes `socials` through raw, beside
   `branding_configuration` — do not drop it (no migration/EDIT_INFORMATION
-  needed; `socials` is already a Secretary-editable `JSONField`)
+  needed; `socials` is already a Secretary-editable `JSONField`). Its
+  `get_current_order` delegates to `ConOrder.any_present_ongoing_order` — the
+  FULFILMENT-axis occupancy gate (not deleted, not cancelled, `fulfilment_status
+  != 'served'`) the kitchen board and order-create path already share — so a
+  served order FREES the table for diner checkout instead of blocking forever on
+  the stale payment axis (PR #186; diner payment is unwired, so `payment_status`
+  never leaves `'pending'`). Do NOT regress `get_current_order` to the
+  `order_status`/`payment_status` axis
 
 ## Existing Management Commands
 - `optimize_images` in `restaurants_app/management/commands/` — resizes
