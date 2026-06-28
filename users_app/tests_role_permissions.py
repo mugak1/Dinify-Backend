@@ -173,6 +173,17 @@ class RolePermissionPayloadTests(TestCase):
         self.assertTrue(entry['permissions'][MODULE_KITCHEN])
         self.assertFalse(entry['permissions'][MODULE_DASHBOARD])
 
+    def test_get_any_restaurant_roles_excludes_inactive_employment(self):
+        # A deactivated (active=False, deleted=False) employment must NOT load
+        # the portal — matching get_employed_restaurant_ids / module resolution.
+        inactive = make_user('256700000102')
+        RestaurantEmployee.objects.create(
+            user=inactive, restaurant=self.restaurant,
+            roles=[RESTAURANT_KITCHEN], active=False)
+        self.assertEqual(get_any_restaurant_roles(inactive), [])
+        # The active chef from setUp is still included.
+        self.assertEqual(len(get_any_restaurant_roles(self.chef)), 1)
+
     def test_serializer_no_context_matches_canonical_builder(self):
         # the no-context profile-fetch path must equal get_any_restaurant_roles
         serialized = SerGetUserProfile(self.chef).data

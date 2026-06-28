@@ -92,6 +92,7 @@ def get_any_restaurant_roles(user: User) -> list:
         RestaurantEmployee.objects.select_related('restaurant').filter(
             restaurant__status__in=['active'],
             user=user,
+            active=True,
             deleted=False
         )
     )
