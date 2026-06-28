@@ -16,13 +16,6 @@ from restaurants_app.models import (
     SectionGroup, DiningArea, UpsellConfig, UpsellItem,
     Reservation, WaitlistEntry, RestaurantTag
 )
-from dinify_backend.configss.string_definitions import (
-    OrderItemStatus_Initiated,
-    OrderItemStatus_Preparing,
-    OrderStatus_Pending,
-    OrderStatus_Served,
-    PaymentStatus_Paid
-)
 from misc_app.serializers.fields import JSONStringCompatField, JSONStringCompatListField
 from restaurants_app.controllers.tables import get_table_availability
 
@@ -515,23 +508,19 @@ class SerializerPublicGetTableDetails(ModelSerializer):
         }
 
     def get_current_order(self, table):
-        # Single query: fetch the most-recent matching order (or None) instead
-        # of a separate count() + first() on the same queryset.
-        current = Order.objects.values('id').filter(
-            table=table,
-            order_status__in=[
-                OrderItemStatus_Initiated,
-                OrderStatus_Pending,
-                OrderItemStatus_Preparing,
-                OrderStatus_Served
-            ]
-        ).exclude(
-            payment_status=PaymentStatus_Paid
-        ).order_by('-time_created').first()
-
+        # Single source of truth for table occupancy: the same fulfilment-axis
+        # gate the kitchen board and the order-create path use (not deleted, not
+        # cancelled, fulfilment_status != 'served'). The old
+        # order_status/payment_status check wrongly flagged a served-but-unpaid
+        # order as ongoing — diner payment is unwired, so it stays 'pending' —
+        # which blocked the diner while the kitchen board (keyed off the
+        # fulfilment axis) showed nothing. Local import avoids a
+        # serializers <-> controllers import cycle.
+        from orders_app.controllers.con_orders import ConOrder
+        result = ConOrder.any_present_ongoing_order(table)
         return {
-            'ongoing': current is not None,
-            'order_id': current['id'] if current else None
+            'ongoing': result.get('present', False),
+            'order_id': result.get('order_id'),
         }
 
     def get_restaurant(self, table):

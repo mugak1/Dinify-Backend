@@ -3827,6 +3827,33 @@ class DinerTableScanTests(TestCase):
             str(response['data']['current_order']['order_id']), str(order.id),
         )
 
+    def test_served_order_is_not_ongoing(self):
+        # Regression: a served order frees the table even though diner payment is
+        # unwired (payment_status stays 'pending'). current_order must agree with
+        # the kitchen board, which drops served tickets off the active feed — the
+        # old order_status/payment_status check wrongly flagged this as ongoing.
+        from orders_app.models import Order
+        Order.objects.create(
+            restaurant=self.restaurant, table=self.table,
+            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
+            payment_status='pending', order_status='served',
+            fulfilment_status='served',
+        )
+        current = self._scan(str(self.table.id))['data']['current_order']
+        self.assertFalse(current['ongoing'])
+        self.assertIsNone(current['order_id'])
+
+    def test_cancelled_order_is_not_ongoing(self):
+        from orders_app.models import Order
+        Order.objects.create(
+            restaurant=self.restaurant, table=self.table,
+            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
+            payment_status='pending', order_status='cancelled',
+            fulfilment_status='new',
+        )
+        current = self._scan(str(self.table.id))['data']['current_order']
+        self.assertFalse(current['ongoing'])
+
     def test_reserved_table_returns_400(self):
         self.table.reserved = True
         self.table.save(update_fields=['reserved'])
