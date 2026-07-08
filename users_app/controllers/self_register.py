@@ -3,6 +3,7 @@ create a user on dinify
 """
 from typing import Optional
 from misc_app.controllers.check_required_information import check_required_information
+from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from dinify_backend.configss.messages import MESSAGES
 from dinify_backend.configss.required_information import REQUIRED_INFORMATION
 from users_app.models import User
@@ -20,6 +21,21 @@ def self_register(
     Handle user self registration
     - `data` is the registration data
     """
+    # Canonicalise the phone number up front (256XXXXXXXXX, no '+') so the
+    # duplicate check, OTP verification and the stored phone_number/username are
+    # all compared and stored in the same form. Applies to registration, staff
+    # invite and admin onboarding (both delegate here).
+    data = dict(data)
+    try:
+        data['phone_number'] = normalise_msisdn(
+            data.get('phone_number'), country=data.get('country') or 'UG'
+        )
+    except MsisdnError:
+        return {
+            'status': 400,
+            'message': 'Please provide a valid Ugandan phone number.',
+        }
+
     # check that that the phone number is not repeated
     existing_phone = User.objects.filter(phone_number=data.get('phone_number'))
     if existing_phone.exists():

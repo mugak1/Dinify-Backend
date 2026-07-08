@@ -15,6 +15,7 @@ from dinify_backend.configss.string_definitions import (
     PaymentMode_MobileMoney
 )
 from users_app.controllers.otp_manager import OtpManager
+from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,19 @@ class OrderPaymentTransaction:
         manual_payment_details: Optional[dict] = None,
         otp: Optional[str] = None
     ) -> dict:
+        # Canonicalise the payer MSISDN once, before it is used for the username
+        # existence probe, the OTP target, and the stored DinifyTransaction.msisdn.
+        # Only when supplied — manual/cash payments legitimately omit it.
+        if msisdn is not None and str(msisdn).strip():
+            try:
+                msisdn = normalise_msisdn(
+                    msisdn, country=(order.restaurant.country or 'UG')
+                )
+            except MsisdnError:
+                return {
+                    'status': 400,
+                    'message': 'Please provide a valid Ugandan phone number.',
+                }
         transaction_amount = clean_amount(Decimal(str(order.actual_cost))) if payment_form is PaymentForm_Full else clean_amount(Decimal(str(amount))) # noqa
         if transaction_amount is None:
             return {

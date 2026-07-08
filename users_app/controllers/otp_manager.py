@@ -11,6 +11,7 @@ from misc_app.controllers.notifications.notification import Notification
 from rest_framework_simplejwt.tokens import RefreshToken
 from payment_integrations_app.controllers.yo_integrations import YoIntegration
 from notifications_app.controllers.messenger import Messenger
+from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,15 @@ class OtpManager:
         msisdn: Optional[str] = None,
         purpose: Optional[str] = None,
     ) -> True:
+        # Canonicalise the msisdn at OTP creation so the stored UserOtp.msisdn,
+        # the dedup filter and the SMS target are all canonical, and verify
+        # (which also canonicalises) compares canonical-to-canonical. Defensive:
+        # never let a bad msisdn break OTP creation.
+        if msisdn is not None:
+            try:
+                msisdn = normalise_msisdn(msisdn)
+            except MsisdnError:
+                logger.warning("make_otp: could not canonicalise msisdn; using raw value")
         otp = random.randint(1000, 9999)
         otp_str = str(otp)
         if config('ENV') in ['dev']:
@@ -70,6 +80,14 @@ class OtpManager:
         msisdn: Optional[str] = None,
         email: Optional[str] = None
     ) -> dict:
+        # Canonicalise the msisdn so lookups match canonically-stored OTPs.
+        # Defensive: on a bad msisdn, leave it raw — the lookup simply finds
+        # nothing and returns "invalid OTP" rather than raising.
+        if msisdn is not None:
+            try:
+                msisdn = normalise_msisdn(msisdn)
+            except MsisdnError:
+                pass
         encrypted_otp = hashlib.sha256(otp.encode()).hexdigest()
         time_now = timezone.now()
 
