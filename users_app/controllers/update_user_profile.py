@@ -15,6 +15,7 @@ from dinify_backend.configss.string_definitions import (
     DINIFY_ADMIN
 )
 from misc_app.controllers.secretary import Secretary
+from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from users_app.controllers.otp_manager import OtpManager
 
 
@@ -33,6 +34,19 @@ def self_update_user_profile(
     require_approval = False
     # check if the user has dinify or restaurant roles
     user = User.objects.get(id=user_id)
+
+    # Canonicalise the phone number (256XXXXXXXXX, no '+') before it is written
+    # to phone_number/username below.
+    if phone_number is not None:
+        try:
+            phone_number = normalise_msisdn(
+                phone_number, country=(country or user.country or 'UG')
+            )
+        except MsisdnError:
+            return {
+                'status': 400,
+                'message': 'Please provide a valid Ugandan phone number.',
+            }
     res_roles = RestaurantEmployee.objects.filter(
         user=user_id,
         deleted=False
@@ -184,6 +198,17 @@ def update_user_profile(
     # check if the phone number has changed
     user_profile = User.objects.get(id=user_id)
     if phone_number is not None:
+        # Canonicalise before comparing to the stored value and before it flows
+        # into put_data (phone_number + username) for Secretary.update().
+        try:
+            phone_number = normalise_msisdn(
+                phone_number, country=(country or user_profile.country or 'UG')
+            )
+        except MsisdnError:
+            return {
+                'status': 400,
+                'message': 'Please provide a valid Ugandan phone number.',
+            }
         if user_profile.phone_number != phone_number:
             # check if the otp has been provided
             if otp is None:

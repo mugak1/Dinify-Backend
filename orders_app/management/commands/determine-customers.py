@@ -6,7 +6,7 @@ from django.core.management.base import BaseCommand
 from orders_app.models import Order
 from finance_app.models import DinifyTransaction
 from users_app.models import User
-from misc_app.controllers.clean_msisdn import internationalise_msisdn
+from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from dinify_backend.configss.string_definitions import TransactionType_OrderPayment
 
 
@@ -29,17 +29,21 @@ class Command(BaseCommand):
             return None
 
         if customer_phone is not None:
-            msisdn = internationalise_msisdn(
-                country=restaurant_country,
-                msisdn=customer_phone
-            )
             try:
-                user = User.objects.get(phone_number=msisdn)
-                return user
-            except User.DoesNotExist:
-                user_phone = msisdn
-            except Exception as error:
-                print(f"Error matching customer based on phone: {error}")
+                msisdn = normalise_msisdn(customer_phone, country=restaurant_country)
+            except MsisdnError as error:
+                # Unnormalisable / non-UG order phone — skip phone matching for
+                # this order rather than crash on a null write downstream.
+                print(f"Skipping unnormalisable customer phone: {error}")
+                msisdn = None
+            if msisdn is not None:
+                try:
+                    user = User.objects.get(phone_number=msisdn)
+                    return user
+                except User.DoesNotExist:
+                    user_phone = msisdn
+                except Exception as error:
+                    print(f"Error matching customer based on phone: {error}")
 
         if customer_email is not None:
             try:
@@ -52,6 +56,10 @@ class Command(BaseCommand):
 
         # create the user
         username = user_phone if user_phone is not None else user_email
+        if username is None:
+            # No usable phone or email to key the new user on — do not create a
+            # row with a null phone_number/username (the column is NOT NULL).
+            return None
         user = User.objects.create(
             phone_number=user_phone,
             email=user_email,
