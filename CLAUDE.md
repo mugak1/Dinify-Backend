@@ -55,6 +55,12 @@ with PostgreSQL on AWS RDS.
   `{closed, open, close}` shape)
 - Auth: ✅ Refresh-token rotation + blacklist-on-logout + 7-day refresh lifetime
   (SimpleJWT, `JWT_REFRESH_LIFETIME_DAYS`)
+- MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
+  `+`) is the canonical stored/compared form for `User.phone_number` /
+  `User.username`, enforced at every write site (registration, profile update,
+  payment intake, OTP create/verify) via `normalise_msisdn()` and backfilled by
+  migration `users_app/0008_backfill_canonical_msisdn`. See the "Phone Numbers /
+  MSISDN" CRITICAL section below
 - Tenant isolation / role-permission ENFORCEMENT: ✅ Portal gates enforce
   per-module access via `can_user_access_module` / `get_module_restaurant_ids`
   (`users_app/controllers/permissions_check.py`) — see the "Tenant Isolation /
@@ -363,6 +369,28 @@ the catch-all `<str:config_detail>/` route.
 - All SMS dispatch must use `threading.Thread(daemon=True)` — never
   called synchronously (30-second timeout will block requests)
 
+## Phone Numbers / MSISDN — CRITICAL
+- The canonical STORED/COMPARED form of `User.phone_number` and `User.username`
+  is `256XXXXXXXXX` — 12 digits, NO leading `+`. Display formatting (`+256 …`) is
+  a frontend concern; the backend never stores or compares it
+- `normalise_msisdn()` in `misc_app/controllers/msisdn.py` is the SINGLE source
+  of truth for canonicalisation (Uganda-only; strips `+`/spaces/hyphens then
+  branches on the remaining digits; idempotent; raises `InvalidMsisdn` /
+  `UnsupportedCountry` — both subclasses of `MsisdnError`/`ValueError` — and
+  NEVER returns `None` or a partial string). Its error messages never include the
+  raw number, so they are safe to log or surface
+- Apply it at EVERY write/compare site. It is already wired into `self_register`
+  (registration / staff invite / admin onboarding),
+  `self_update_user_profile`/`update_user_profile` (before Secretary), payment
+  `initiate()` intake, and OTP `make_otp`/`verify_otp` (so create/verify compare
+  canonical-to-canonical). Do NOT reintroduce the deleted `clean_msisdn.py` /
+  `internationalise_msisdn` helper or hand-roll ad-hoc phone formatting
+- `mask_msisdn()` (length-based, defensive) is the helper for logging phone-ish
+  values without leaking them; `plan_msisdn_backfill()` is the pure, collision-safe
+  planner behind migration `users_app/0008_backfill_canonical_msisdn` (idempotent,
+  re-runnable; buckets rows into writes/invalid/unsupported/diverged/collision,
+  masked before→after summary gated on `MSISDN_BACKFILL_DEBUG`, off by default)
+
 ## Development Config
 - `ENV=dev` must always be retained — hardcodes OTP to `1234` and skips
   SMS sending, essential for local development
@@ -442,7 +470,8 @@ the catch-all `<str:config_detail>/` route.
 - Latest migration: `restaurants_app/migrations/0053_backfill_role_permissions.py`,
   `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
-  `reviews_app/migrations/0003_review_tags.py`
+  `reviews_app/migrations/0003_review_tags.py`,
+  `users_app/migrations/0008_backfill_canonical_msisdn.py`
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
