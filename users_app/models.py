@@ -106,6 +106,10 @@ class UserOtp(models.Model):
     msisdn = models.CharField(max_length=255, null=True, blank=True)
     purpose = models.CharField(max_length=255, null=True, blank=True)
     otp_hash = models.CharField(max_length=255)
+    salt = models.CharField(max_length=64, default='')
+    identifier = models.CharField(max_length=255, default='', db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    consumed_at = models.DateTimeField(null=True, blank=True)
     time_created = models.DateTimeField(auto_now_add=True)
     expiry_time = models.DateTimeField()
 
