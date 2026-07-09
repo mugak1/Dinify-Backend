@@ -1,10 +1,13 @@
 from typing import Optional
 import logging
-import random
+import secrets
+import hmac
 import hashlib
 import threading
 from decouple import config
 from datetime import timedelta
+from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from users_app.models import User, UserOtp
 from misc_app.controllers.notifications.notification import Notification
@@ -14,6 +17,27 @@ from notifications_app.controllers.messenger import Messenger
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 
 logger = logging.getLogger(__name__)
+
+# Lock an OTP challenge after this many failed verification attempts. A module
+# constant (not a per-row column) so it can't be tampered with per challenge.
+OTP_MAX_ATTEMPTS = 5
+
+
+def _otp_pepper() -> bytes:
+    """
+    Server-side HMAC key for OTP hashing.
+
+    Uses a dedicated ``OTP_HMAC_PEPPER`` when configured (stronger secret
+    separation); otherwise derives one deterministically from ``SECRET_KEY`` so
+    prod and CI work with zero config changes. Always returns ``bytes`` (the
+    configured value is a ``str`` and must be encoded before use as an HMAC key).
+    """
+    configured = config('OTP_HMAC_PEPPER', default=None)
+    if configured:
+        return configured.encode()
+    return hmac.new(
+        settings.SECRET_KEY.encode(), b'otp-pepper', hashlib.sha256
+    ).hexdigest().encode()
 
 
 class OtpManager:
@@ -32,11 +56,26 @@ class OtpManager:
                 msisdn = normalise_msisdn(msisdn)
             except MsisdnError:
                 logger.warning("make_otp: could not canonicalise msisdn; using raw value")
-        otp = random.randint(1000, 9999)
+        otp = secrets.randbelow(9000) + 1000
         otp_str = str(otp)
         if config('ENV') in ['dev']:
             otp_str = '1234'
-        encrypted_otp = hashlib.sha256(otp_str.encode()).hexdigest()
+
+        # Salted HMAC-SHA256 (keyed by the server pepper): the stored hash can
+        # neither be reversed nor precomputed from a DB read alone. make_otp and
+        # verify_otp hash identically (same pepper + per-row salt).
+        salt = secrets.token_hex(16)
+        otp_hash = hmac.new(
+            _otp_pepper(), (salt + otp_str).encode(), hashlib.sha256
+        ).hexdigest()
+
+        # Stable identity for this challenge (also the per-identifier throttle key).
+        if user is not None:
+            identifier = f"user:{user.id}"
+        elif msisdn is not None:
+            identifier = f"msisdn:{msisdn}"
+        else:
+            identifier = ''
 
         # delete any old otps associated with the user
         UserOtp.objects.filter(user=user, msisdn=msisdn).delete()
@@ -44,8 +83,12 @@ class OtpManager:
         user_otp = UserOtp(
             user=user,
             msisdn=msisdn,
-            otp_hash=encrypted_otp,
-            purpose=purpose
+            otp_hash=otp_hash,
+            purpose=purpose,
+            salt=salt,
+            identifier=identifier,
+            attempts=0,
+            consumed_at=None,
         )
         user_otp.save()
 
@@ -88,45 +131,85 @@ class OtpManager:
                 msisdn = normalise_msisdn(msisdn)
             except MsisdnError:
                 pass
-        encrypted_otp = hashlib.sha256(otp.encode()).hexdigest()
+
+        invalid = {
+            'status': 200,
+            'message': 'Invalid OTP',
+            'data': {
+                'valid': False,
+            }
+        }
+
+        # Never crash on a missing code — treat as invalid.
+        if otp is None:
+            return invalid
+        otp = str(otp)
+
+        # Resolve the identity to a single-table filter. If none is derivable
+        # (all identifiers None) return invalid rather than crashing.
+        if user_id is not None:
+            identity = {'user_id': user_id}
+        elif msisdn is not None:
+            identity = {'msisdn': msisdn}
+        elif email is not None:
+            # Resolve email -> user_id so the locked query stays single-table
+            # (avoids SELECT ... FOR UPDATE across a join).
+            resolved_id = (
+                User.objects.filter(email=email)
+                .values_list('id', flat=True)
+                .first()
+            )
+            if resolved_id is None:
+                return invalid
+            identity = {'user_id': resolved_id}
+        else:
+            return invalid
+
         time_now = timezone.now()
 
-        if user_id is not None:
-            otps = UserOtp.objects.filter(
-                user_id=user_id,
-                otp_hash=encrypted_otp,
-                expiry_time__gte=time_now
-            ).order_by('-time_created')
-        elif msisdn is not None:
-            otps = UserOtp.objects.filter(
-                msisdn=msisdn,
-                otp_hash=encrypted_otp,
-                expiry_time__gte=time_now
-            ).order_by('-time_created')
-        elif email is not None:
-            otps = UserOtp.objects.filter(
-                user__email=email,
-                otp_hash=encrypted_otp,
-                expiry_time__gte=time_now
-            ).order_by('-time_created')
+        with transaction.atomic():
+            # Fetch the SINGLE active challenge for this identity (NOT by the
+            # submitted hash — the hash now depends on the per-row salt) and
+            # lock the row so concurrent verifies serialise on the counter.
+            challenge = (
+                UserOtp.objects.select_for_update()
+                .filter(
+                    **identity,
+                    consumed_at__isnull=True,
+                    expiry_time__gte=time_now,
+                )
+                .order_by('-time_created')
+                .first()
+            )
+            if challenge is None:
+                return invalid
 
-        if otps.count() < 1:
-            return {
-                'status': 200,
-                'message': 'Invalid OTP',
-                'data': {
-                    'valid': False,
-                }
-            }
+            # Too many wrong guesses: locked. Consume it so it can't be retried.
+            if challenge.attempts >= OTP_MAX_ATTEMPTS:
+                challenge.consumed_at = time_now
+                # update_fields excludes expiry_time so the set_expiry_time
+                # pre_save signal can't re-extend the window on this write.
+                challenge.save(update_fields=['consumed_at'])
+                return invalid
 
-        verified_otp = otps.first()
+            candidate = hmac.new(
+                _otp_pepper(), (challenge.salt + otp).encode(), hashlib.sha256
+            ).hexdigest()
+            if not hmac.compare_digest(challenge.otp_hash, candidate):
+                # Wrong guess — count it (the row is locked, so this is race-free).
+                challenge.attempts += 1
+                challenge.save(update_fields=['attempts'])
+                return invalid
 
-        # if the otp purpose is for login,
-        # make a token and return it
-        if verified_otp.purpose == 'login':
-            token = RefreshToken.for_user(verified_otp.user)
-            # delete the otp right after verification
-            verified_otp.delete()
+            # Correct: mark single-use so a verified code can never be replayed.
+            challenge.consumed_at = time_now
+            challenge.save(update_fields=['consumed_at'])
+            purpose = challenge.purpose
+            otp_user = challenge.user
+
+        # if the otp purpose is for login, make a token and return it
+        if purpose == 'login':
+            token = RefreshToken.for_user(otp_user)
             return {
                 'status': 200,
                 'message': 'Valid OTP',
@@ -137,8 +220,6 @@ class OtpManager:
                 }
             }
 
-        # delete the otp right after verification
-        verified_otp.delete()
         return {
             'status': 200,
             'message': 'Valid OTP',
@@ -154,6 +235,7 @@ class OtpManager:
         purpose: Optional[str] = None
     ) -> dict:
         user = None
+        msisdn = None
         if identification is None or identifier is None:
             return {
                 'status': 400,
@@ -167,7 +249,18 @@ class OtpManager:
             elif identification == 'email':
                 user = User.objects.get(email=identifier)
             elif identification == 'msisdn':
-                pass
+                # No user context: issue/resend an msisdn-keyed challenge.
+                # Canonicalise so it matches the stored/compared form; a bad
+                # number is a clean 400 rather than a later None-deref.
+                try:
+                    msisdn = normalise_msisdn(identifier)
+                except MsisdnError:
+                    return {
+                        'status': 400,
+                        'message': 'Invalid phone number'
+                    }
+                # Reuse an existing account for this number when there is one.
+                user = User.objects.filter(phone_number=msisdn).first()
         except Exception as error:
             logger.error("OTP Resend Error: %s", error)
             return {
@@ -178,30 +271,33 @@ class OtpManager:
         # if the purpose is login, check if there is a recent otp,
         # the otp should not be older than 5 minutes
         if purpose == 'login':
-            ten_minutes_ago = timezone.now() - timedelta(minutes=5)
-            try:
-                old_otps = UserOtp.objects.filter(
-                    user_id=user.id,
-                    purpose=purpose,
-                    time_created__gte=ten_minutes_ago
-                ).count()
-                if old_otps < 1:
-                    return {
-                        'status': 400,
-                        'message': 'Please provide your username and password again to get a login OTP'
-                    }
-            except UserOtp.DoesNotExist:
+            five_minutes_ago = timezone.now() - timedelta(minutes=5)
+            recent = UserOtp.objects.filter(
+                purpose=purpose,
+                time_created__gte=five_minutes_ago,
+            )
+            if user is not None:
+                recent = recent.filter(user_id=user.id)
+            elif msisdn is not None:
+                recent = recent.filter(msisdn=msisdn)
+            if recent.count() < 1:
                 return {
                     'status': 400,
                     'message': 'Please provide your username and password again to get a login OTP'
                 }
 
-        # if purpose == 'first-time-payment':
-        if self.make_otp(
-            user=user,
-            purpose=purpose,
-            msisdn=user.phone_number
-        ):
+        # Issue the OTP against whichever identity we resolved.
+        if user is not None:
+            made = self.make_otp(user=user, purpose=purpose, msisdn=user.phone_number)
+        elif msisdn is not None:
+            made = self.make_otp(msisdn=msisdn, purpose=purpose)
+        else:
+            return {
+                'status': 400,
+                'message': 'User not found'
+            }
+
+        if made:
             return {
                 'status': 200,
                 'message': 'OTP sent successfully'

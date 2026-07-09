@@ -9,7 +9,9 @@ from users_app.controllers.reset_password import reset_password, initiate_passwo
 from users_app.controllers.change_password import change_password
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from users_app.controllers.otp_manager import OtpManager
-from users_app.throttles import LoginThrottle, OtpThrottle, PasswordResetThrottle
+from users_app.throttles import (
+    LoginThrottle, OtpThrottle, OtpIdentifierThrottle, PasswordResetThrottle
+)
 from dinify_backend.configss.messages import MESSAGES
 
 
@@ -17,8 +19,8 @@ from dinify_backend.configss.messages import MESSAGES
 # Actions not listed here get no extra throttling.
 _ACTION_THROTTLES = {
     'login': [LoginThrottle],
-    'verify-otp': [OtpThrottle],
-    'resend-otp': [OtpThrottle],
+    'verify-otp': [OtpThrottle, OtpIdentifierThrottle],
+    'resend-otp': [OtpThrottle, OtpIdentifierThrottle],
     'initiate-reset-password': [PasswordResetThrottle],
     'reset-password': [PasswordResetThrottle],
 }

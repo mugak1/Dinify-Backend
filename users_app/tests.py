@@ -1,5 +1,8 @@
+import hashlib
 from unittest.mock import patch, MagicMock
 from django.test import TestCase
+from django.core.cache import cache
+from django.contrib.auth.models import AnonymousUser
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 from dinify_backend.configss.messages import MESSAGES
@@ -8,8 +11,9 @@ from users_app.controllers.login import login
 from users_app.controllers.change_password import change_password
 from users_app.controllers.reset_password import reset_password, initiate_password_reset
 from users_app.models import User, UserOtp
-from users_app.controllers.otp_manager import OtpManager
+from users_app.controllers.otp_manager import OtpManager, OTP_MAX_ATTEMPTS
 from users_app.controllers.update_user_profile import update_user_profile
+from users_app.throttles import OtpIdentifierThrottle
 
 
 TEST_PHONE = '1234567890'
@@ -308,6 +312,140 @@ class PasswordResetSecurityTests(TestCase):
                 'password', msg_data,
                 "Notification msg_data should not contain a 'password' key"
             )
+
+
+class _FakeThrottleRequest:
+    """Minimal stand-in for a DRF request.
+
+    OtpIdentifierThrottle.get_cache_key only reads .user and .data, so a tiny
+    object is enough to exercise the key-derivation logic deterministically
+    (no cache/timing involved).
+    """
+
+    def __init__(self, user, data):
+        self.user = user
+        self.data = data
+
+
+@patch(_PATCH_NOTIFICATION, return_value=None)
+@patch(_PATCH_MESSENGER_EMAIL, return_value=None)
+@patch(_PATCH_YO_SMS, return_value=None)
+class OtpHardeningTests(TestCase):
+    """OTP verify hardening: lockout, single-use, salted HMAC, per-id throttle."""
+
+    def setUp(self):
+        seed_user()
+        # DRF throttles use the default (LocMemCache) cache, which persists
+        # across requests and tests in a run — clear it so tests don't leak.
+        cache.clear()
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_lockout_after_max_attempts(self, *mocks):
+        """5 wrong guesses lock the code; a 6th correct guess is rejected."""
+        user = User.objects.get(phone_number=TEST_PHONE)
+        OtpManager().make_otp(user=user)
+
+        for _ in range(OTP_MAX_ATTEMPTS):
+            result = OtpManager().verify_otp(user_id=user.id, otp='0000')
+            self.assertFalse(result['data']['valid'])
+
+        # The challenge is now locked, so even the correct code fails.
+        result = OtpManager().verify_otp(user_id=user.id, otp='1234')
+        self.assertFalse(result['data']['valid'])
+
+    def test_verified_code_cannot_be_reused(self, *mocks):
+        """A consumed (already-verified) code cannot be replayed."""
+        user = User.objects.get(phone_number=TEST_PHONE)
+        OtpManager().make_otp(user=user)
+
+        first = OtpManager().verify_otp(user_id=user.id, otp='1234')
+        self.assertTrue(first['data']['valid'])
+
+        second = OtpManager().verify_otp(user_id=user.id, otp='1234')
+        self.assertFalse(second['data']['valid'])
+
+    def test_otp_hash_is_salted_hmac_not_raw_sha256(self, *mocks):
+        """Stored hash is a salted HMAC, not the reversible sha256 of the code."""
+        user = User.objects.get(phone_number=TEST_PHONE)
+        OtpManager().make_otp(user=user)
+
+        challenge = UserOtp.objects.get(user_id=user.id)
+        self.assertNotEqual(challenge.otp_hash, hashlib.sha256(b'1234').hexdigest())
+        self.assertTrue(challenge.salt)
+
+    def test_make_otp_populates_salt_and_identifier(self, *mocks):
+        """make_otp writes salt + identifier; dev still yields a verifiable 1234."""
+        user = User.objects.get(phone_number=TEST_PHONE)
+        OtpManager().make_otp(user=user)
+
+        challenge = UserOtp.objects.get(user_id=user.id)
+        self.assertEqual(len(challenge.salt), 32)  # secrets.token_hex(16)
+        self.assertEqual(challenge.identifier, f"user:{user.id}")
+        self.assertEqual(challenge.attempts, 0)
+        self.assertIsNone(challenge.consumed_at)
+        # Dev override → still verifiable with '1234' through the new path.
+        self.assertTrue(
+            OtpManager().verify_otp(user_id=user.id, otp='1234')['data']['valid']
+        )
+
+    def test_resend_otp_msisdn_no_user_does_not_crash(self, *mocks):
+        """The resend msisdn path no longer dereferences a None user (was a 500)."""
+        result = OtpManager().resend_otp(
+            identification='msisdn',
+            identifier='256700000000',
+            purpose='first-time-payment',
+        )
+        self.assertEqual(result.get('status'), 200)
+
+    def test_throttle_cache_key_derivation(self, *mocks):
+        """OtpIdentifierThrottle keys on the target identity, not the client IP."""
+        throttle = OtpIdentifierThrottle()
+        user = User.objects.get(phone_number=TEST_PHONE)
+
+        # Authenticated → keyed on the user id.
+        key = throttle.get_cache_key(_FakeThrottleRequest(user, {}), None)
+        self.assertIsNotNone(key)
+        self.assertTrue(key.endswith(f"user:{user.id}"))
+
+        # Anonymous with a `user` field in the body.
+        key = throttle.get_cache_key(
+            _FakeThrottleRequest(AnonymousUser(), {'user': '42'}), None
+        )
+        self.assertIn('id:42', key)
+
+        # Anonymous phone identifier is canonicalised into a single bucket.
+        key = throttle.get_cache_key(
+            _FakeThrottleRequest(AnonymousUser(), {'msisdn': '0700000000'}), None
+        )
+        self.assertIn('id:256700000000', key)
+
+        # Nothing derivable → None (falls back to the per-IP throttle).
+        key = throttle.get_cache_key(
+            _FakeThrottleRequest(AnonymousUser(), {}), None
+        )
+        self.assertIsNone(key)
+
+    @patch.object(OtpIdentifierThrottle, 'get_rate', return_value='2/min')
+    def test_verify_otp_endpoint_throttled_per_identity(self, _rate, *mocks):
+        """Per-identity throttle returns 429 after its limit, even across IPs."""
+        user = User.objects.get(phone_number=TEST_PHONE)
+        client = APIClient()
+        url = '/api/v1/users/auth/verify-otp/'
+        payload = {'user': str(user.id), 'otp': '9999'}
+
+        # Rotate REMOTE_ADDR so the per-IP OtpThrottle never accumulates; only
+        # the per-identity throttle (same `user`) can trip.
+        statuses = []
+        for i in range(3):
+            resp = client.post(
+                url, payload, format='json', REMOTE_ADDR=f'10.0.0.{i + 1}'
+            )
+            statuses.append(resp.status_code)
+
+        self.assertNotEqual(statuses[0], 429)  # under the limit
+        self.assertEqual(statuses[-1], 429)     # over the per-identity limit
 
 
 class RefreshRotationAndLogoutTests(TestCase):
