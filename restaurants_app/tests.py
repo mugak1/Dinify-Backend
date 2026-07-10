@@ -4114,3 +4114,182 @@ class UpdateFloorPlanEndpointTests(TestCase):
             content_type='application/json',
         )
         self.assertEqual(resp.status_code, 401)
+
+
+class SubscriptionDetailsGateTests(TestCase):
+    """
+    Authorization + validation for the subscription-details capability at
+    ``/api/v1/restaurant-setup/subscription-details/``.
+
+    WRITE (PUT) is Dinify-admin ONLY — subscription validity/expiry is
+    system/billing state that no restaurant user (owner included) may self-set;
+    the gate lives inside ``RestaurantSubscription.update``. READ (GET) stays
+    gated upstream on the settings module (owner + manager + admin, 404 on
+    denial); these tests also cover the controller's input hardening (missing
+    restaurant -> 400, unknown restaurant -> 404, never a 500).
+    """
+
+    BASE = '/api/v1/restaurant-setup'
+
+    def setUp(self):
+        self.owner_a = User.objects.create_user(
+            first_name='Owner', last_name='A',
+            email='sub_owner_a@test.com', phone_number='256700000210',
+            username='256700000210', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_a = Restaurant.objects.create(
+            name='Sub Restaurant A', location='loc-a',
+            status=RestaurantStatus_Active, owner=self.owner_a,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        self.manager_a = User.objects.create_user(
+            first_name='Manager', last_name='A',
+            email='sub_manager_a@test.com', phone_number='256700000211',
+            username='256700000211', country='Uganda', password='password',
+            roles=[],
+        )
+        RestaurantEmployee.objects.create(
+            user=self.manager_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_MANAGER')],
+        )
+
+        self.owner_b = User.objects.create_user(
+            first_name='Owner', last_name='B',
+            email='sub_owner_b@test.com', phone_number='256700000220',
+            username='256700000220', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_b = Restaurant.objects.create(
+            name='Sub Restaurant B', location='loc-b',
+            status=RestaurantStatus_Active, owner=self.owner_b,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_b, restaurant=self.restaurant_b,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # Independent dinify admin, employed at neither restaurant.
+        self.dinify_admin = User.objects.create_user(
+            first_name='Dinify', last_name='Admin',
+            email='sub_admin@test.com', phone_number='256700000240',
+            username='256700000240', country='Uganda', password='password',
+            roles=['dinify_admin'],
+        )
+
+    # -- helpers --------------------------------------------------------------
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _put(self, user, body):
+        return self.client.put(
+            f'{self.BASE}/subscription-details/',
+            data=json.dumps(body),
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(user)}',
+        )
+
+    def _get(self, user, restaurant_id):
+        return self.client.get(
+            f'{self.BASE}/subscription-details/?restaurant={restaurant_id}',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(user)}',
+        )
+
+    def _valid_body(self, restaurant_id):
+        return {
+            'restaurant': str(restaurant_id),
+            'subscription_validity': True,
+            'subscription_expiry_date': '2030-12-31',
+        }
+
+    # -- PUT: write gate (the P0) --------------------------------------------
+
+    def test_put_owner_of_target_restaurant_forbidden(self):
+        response = self._put(self.owner_a, self._valid_body(self.restaurant_a.id))
+        self.assertEqual(response.status_code, 403)
+
+    def test_put_user_of_different_restaurant_forbidden(self):
+        response = self._put(self.owner_b, self._valid_body(self.restaurant_a.id))
+        self.assertEqual(response.status_code, 403)
+
+    def test_put_dinify_admin_succeeds_and_persists(self):
+        self.assertTrue(self.restaurant_a.subscription_validity)
+        response = self._put(self.dinify_admin, {
+            'restaurant': str(self.restaurant_a.id),
+            'subscription_validity': False,
+            'subscription_expiry_date': '2031-01-15T10:00:00Z',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.restaurant_a.refresh_from_db()
+        self.assertFalse(self.restaurant_a.subscription_validity)
+        self.assertIsNotNone(self.restaurant_a.subscription_expiry_date)
+        self.assertEqual(self.restaurant_a.subscription_expiry_date.year, 2031)
+
+    def test_put_owner_forbidden_before_any_db_write(self):
+        original = self.restaurant_a.subscription_validity
+        self._put(self.owner_a, {
+            'restaurant': str(self.restaurant_a.id),
+            'subscription_validity': not original,
+            'subscription_expiry_date': '2030-12-31',
+        })
+        self.restaurant_a.refresh_from_db()
+        self.assertEqual(self.restaurant_a.subscription_validity, original)
+
+    def test_put_admin_missing_field_returns_400(self):
+        response = self._put(self.dinify_admin, {
+            'restaurant': str(self.restaurant_a.id),
+            'subscription_validity': True,
+            # subscription_expiry_date deliberately omitted
+        })
+        self.assertEqual(response.status_code, 400)
+
+    def test_put_admin_non_boolean_validity_returns_400(self):
+        response = self._put(self.dinify_admin, {
+            'restaurant': str(self.restaurant_a.id),
+            'subscription_validity': 'yes',
+            'subscription_expiry_date': '2030-12-31',
+        })
+        self.assertEqual(response.status_code, 400)
+
+    def test_put_admin_nonexistent_restaurant_returns_404(self):
+        import uuid
+        response = self._put(self.dinify_admin, self._valid_body(uuid.uuid4()))
+        self.assertEqual(response.status_code, 404)
+
+    # -- GET: read gate preserved (settings) + input hardening ---------------
+
+    def test_get_owner_reads_own_succeeds(self):
+        response = self._get(self.owner_a, self.restaurant_a.id)
+        self.assertEqual(response.status_code, 200)
+
+    def test_get_manager_reads_own_succeeds(self):
+        # Managers keep subscription read access (settings module) under the
+        # chosen "keep read as-is" approach.
+        response = self._get(self.manager_a, self.restaurant_a.id)
+        self.assertEqual(response.status_code, 200)
+
+    def test_get_user_of_different_restaurant_denied(self):
+        response = self._get(self.owner_b, self.restaurant_a.id)
+        self.assertEqual(response.status_code, 404)
+
+    def test_get_dinify_admin_reads_any(self):
+        response = self._get(self.dinify_admin, self.restaurant_a.id)
+        self.assertEqual(response.status_code, 200)
+
+    def test_get_admin_missing_restaurant_returns_400(self):
+        response = self.client.get(
+            f'{self.BASE}/subscription-details/',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(self.dinify_admin)}',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_get_admin_nonexistent_restaurant_returns_404(self):
+        import uuid
+        response = self._get(self.dinify_admin, uuid.uuid4())
+        self.assertEqual(response.status_code, 404)
