@@ -29,7 +29,6 @@ urlpatterns = [
     path('api/v1/finances/', include('finance_app.urls')),
     path('api/v1/reports/', include('reports_app.urls')),
     path('api/v1/notifications/', include('notifications_app.urls')),
-    path('api/v1/crm/', include('crm_app.urls')),
     path('api/v1/kitchen/', include('orders_app.urls_kitchen')),
     path('api/v1/support/', include('support_app.urls')),
     path('api/v1/reviews/', include('reviews_app.urls')),
