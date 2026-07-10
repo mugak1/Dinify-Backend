@@ -438,6 +438,21 @@ class RestaurantSetupEndpoint(APIView):
                 status=response['status']
             )
         if config_detail == 'admin-register-restaurant':
+            # Admin-only trust boundary: this branch mints User accounts and
+            # dispatches credential SMS/email (self_register, skip_otp=True), so
+            # it must be gated before any data processing. request.user is only
+            # available here — the controller receives an auth_info dict.
+            if not (
+                request.user
+                and request.user.is_authenticated
+                and request.user.is_active
+                and is_dinify_admin(request.user)
+            ):
+                return Response(
+                    {'status': 403, 'message': 'Not authorised.'},
+                    status=403,
+                )
+
             post_data = request.data
             try:
                 post_data = post_data.dict()
