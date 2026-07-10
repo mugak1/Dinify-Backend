@@ -950,11 +950,13 @@ class RestaurantSetupEndpoint(APIView):
 
         put_data = request.data
 
-        # Non-CRUD config_detail values (reorder + subscription) have their
-        # own scoped permission checks inside their controllers, and don't
-        # match the resolver dispatch (which is keyed on CRUD resource
-        # names). Handle them above the generic gate so the resolver isn't
-        # asked to authorize an action it doesn't model.
+        # Non-CRUD config_detail values (reorder + subscription) don't match
+        # the resolver dispatch (which is keyed on CRUD resource names), so
+        # they are handled above the generic gate. Each self-guards: the
+        # reorder / sort-mode controllers take user= and check internally, and
+        # RestaurantSubscription.update enforces a Dinify-admin-only gate on the
+        # subscription write. (The subscription READ is gated separately in
+        # get() on the settings module.)
         if config_detail == 'subscription-details':
             return RestaurantSubscription().update(request)
 
