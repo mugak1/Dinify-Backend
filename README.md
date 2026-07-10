@@ -67,8 +67,7 @@ The project uses a single Django settings file (`dinify_backend/settings.py`) wi
 | `payment_integrations_app` | Integrations with external payment providers: Flutterwave, DPO, Yo Uganda (mobile money), and Pesapal. Handles payment initiation, callback processing, and status verification. Has no Django models — uses MongoDB for callback storage. |
 | `notifications_app` | Email and SMS dispatch. Reads unsent notifications from MongoDB and sends them. Has no Django models. |
 | `reports_app` | End-of-day processing and report generation. Has no Django models currently — report logic operates on other apps' data. |
-| `support_app` | Restaurant-facing support ticketing (`SupportIssue`, collision-safe `SUP-000123` references). Secretary-pattern endpoints at `api/v1/support/`; supersedes legacy `crm_app`. |
-| `crm_app` | **Legacy** — original `ServiceTicket` support tickets, superseded by `support_app`; retained for historical data. |
+| `support_app` | Restaurant-facing support ticketing (`SupportIssue`, collision-safe `SUP-000123` references). Secretary-pattern endpoints at `api/v1/support/`. |
 | `misc_app` | System-level configuration via `SysActivityConfig` model (boolean/integer/string/date settings). Also houses soft-delete vacuum utilities. |
 
 ### Third-Party Django Apps
@@ -195,7 +194,6 @@ CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 | `finance_app` | Yes | Yes | Transactions, balances, payments |
 | `misc_app` | Yes | Yes | Config; PostgreSQL `JSONField` lookups |
 | `support_app` | Yes | Yes | Support-ticket lifecycle |
-| `crm_app` | No | No | Legacy app (superseded by `support_app`) |
 | `notifications_app` | No | No | No tests written |
 | `reports_app` | No | No | No tests written |
 
@@ -233,6 +231,6 @@ These are issues acknowledged in the codebase as of the current state:
 
 **Permissions:** `OrderPaymentsEndpoint` and `MsisdnLookupEndpoint` use `AllowAny` — intentional for their use cases but warrant review for whether unauthenticated access is appropriate.
 
-**Test gaps:** Three apps have no tests at all (`crm_app` — legacy, `notifications_app`, `reports_app`). The full suite now runs in CI against PostgreSQL 15, so every app that *does* have tests is exercised there.
+**Test gaps:** Two apps have no tests at all (`notifications_app`, `reports_app`). The full suite now runs in CI against PostgreSQL 15, so every app that *does* have tests is exercised there.
 
 **Missing `.env.example` entries:** MongoDB connection variables and all payment integration credentials are required by the code but not listed in `.env.example`.

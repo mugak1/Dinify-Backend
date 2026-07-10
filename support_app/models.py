@@ -1,9 +1,9 @@
 """
 Models for the support_app.
 
-`SupportIssue` is the restaurant-facing support/ticketing record that replaces
-the legacy `crm_app.ServiceTicket`. The reporter is `created_by` (inherited from
-`BaseModel`) — there is no separate reporter field.
+`SupportIssue` is the restaurant-facing support/ticketing record. The reporter
+is `created_by` (inherited from `BaseModel`) — there is no separate reporter
+field.
 """
 from django.db import models, transaction, IntegrityError
 from django.utils import timezone

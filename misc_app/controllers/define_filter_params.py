@@ -54,18 +54,6 @@ ORDER_FILTERS = {
     'payment_status': 'payment_status'
 }
 
-SERVICE_TICKET_FILTERS = {
-    'ticket_type': 'ticket_type',
-    'ticket_title': 'ticket_title__icontains',
-    'ticket_description': 'ticket_description__icontains',
-    'ticket_status': 'ticket_status',
-    'ticket_priority': 'ticket_priority',
-    'restaurant': 'restaurant',
-    'assigned_to': 'assigned_to',
-    'assigned_by': 'assigned_by',
-    'resolution_notes': 'resolution_notes__icontains',
-}
-
 DINING_AREA_FILTERS = {
     'name': 'name__icontains',
     'outdoor_seating': 'outdoor_seating',
@@ -88,7 +76,6 @@ FILTER_DEFINITIONS = {
     'menuitems': MENU_ITEM_FILTERS,
     'tables': TABLE_FILTERS,
     'orders': ORDER_FILTERS,
-    'servicetickets': SERVICE_TICKET_FILTERS,
     'diningareas': DINING_AREA_FILTERS,
     'supportissues': SUPPORT_ISSUE_FILTERS
 }

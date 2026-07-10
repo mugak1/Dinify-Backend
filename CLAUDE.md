@@ -86,7 +86,7 @@ with PostgreSQL on AWS RDS.
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
   still exists
 - Support module: ✅ `support_app` — restaurant-facing `SupportIssue`
-  ticketing (supersedes legacy `crm_app.ServiceTicket`), Secretary-pattern
+  ticketing, Secretary-pattern
   endpoints at `api/v1/support/` (`support_app/urls.py`): `issues/`,
   `issues/<uuid:issue_id>/`, and dinify-admin `admin/issues/`. Support is an
   UNGATED module: list/detail/create are widened to ANY active employee of the
