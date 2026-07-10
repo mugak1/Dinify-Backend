@@ -4,46 +4,75 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from users_app.models import User
+from users_app.controllers.permissions_check import (
+    is_dinify_admin,
+    get_module_restaurant_ids,
+    MODULE_TEAM,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class UserLookupEndpoint(APIView):
     def get(self, request):
+        # Gate: this resolves a person's identity from a raw contact, so it is
+        # restricted to the two legitimate callers — the Dinify-admin
+        # owner-creation lookup and the restaurant team staff-add lookup. team
+        # is owner/admin-only, so this admits Dinify admins and restaurant
+        # owners and denies everyone else (managers, kitchen, staff, diners).
+        user = request.user
+        if not (
+            user
+            and user.is_authenticated
+            and user.is_active
+            and (
+                is_dinify_admin(user)
+                or len(get_module_restaurant_ids(user, MODULE_TEAM)) > 0
+            )
+        ):
+            return Response(
+                {'status': 403, 'message': 'Not authorised.'},
+                status=403,
+            )
+
+        contact = request.GET.get('contact')
+        if not contact:
+            return Response(
+                {'status': 400,
+                 'message': 'A contact query parameter is required.'},
+                status=400,
+            )
+
         try:
             # check if the identity includes @
-            contact = request.GET.get('contact')
-
             if '@' in contact:
-                user = User.objects.values(
-                    'id', 'first_name', 'last_name',
-                    'phone_number', 'email'
+                found = User.objects.values(
+                    'id', 'first_name', 'last_name'
                 ).get(email=contact)
             else:
                 # TODO internationalise the phone number
-                user = User.objects.values(
-                    'id', 'first_name', 'last_name',
-                    'phone_number', 'email'
+                found = User.objects.values(
+                    'id', 'first_name', 'last_name'
                 ).get(phone_number=contact)
-            response = {
-                'status': 200,
-                'message': 'User found',
-                'data': {
-                    'id': str(user.get('id')),
-                    'first_name': user.get('first_name'),
-                    'last_name': user.get('last_name'),
-                    'phone_number': user.get('phone_number'),
-                    'email': user.get('email')
-                }
+        except User.DoesNotExist:
+            return Response(
+                {'status': 404, 'message': 'User not found'},
+                status=404,
+            )
+
+        # Minimal disclosure: existence + id (to link) + name (to confirm).
+        # phone_number / email are deliberately NOT returned — searching by one
+        # contact must not reveal the complementary contact (BUG-P1-3).
+        response = {
+            'status': 200,
+            'message': 'User found',
+            'data': {
+                'id': str(found.get('id')),
+                'first_name': found.get('first_name'),
+                'last_name': found.get('last_name'),
             }
-            return Response(response, status=200)
-        except Exception as error:
-            logger.error("Error while looking up user: %s", error)
-            response = {
-                'status': 404,
-                'message': 'User not found'
-            }
-            return Response(response, status=404)
+        }
+        return Response(response, status=200)
 
 
 class MsisdnLookupEndpoint(APIView):
