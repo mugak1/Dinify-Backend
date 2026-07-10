@@ -4293,3 +4293,117 @@ class SubscriptionDetailsGateTests(TestCase):
         import uuid
         response = self._get(self.dinify_admin, uuid.uuid4())
         self.assertEqual(response.status_code, 404)
+
+
+class AdminRegisterRestaurantAuthorizationTests(TestCase):
+    """
+    Endpoint-level authorization for the admin restaurant-registration
+    capability at ``POST /api/v1/restaurant-setup/admin-register-restaurant/``.
+
+    This branch creates a restaurant, mints an owner ``User`` account and
+    dispatches credential SMS/email (``self_register`` with ``skip_otp=True`` —
+    no phone-ownership check), so it is Dinify-admin ONLY. The gate lives at the
+    endpoint (the trust boundary, and the only place ``request.user`` exists —
+    the controller receives an ``auth_info`` dict). Any other authenticated
+    user (a restaurant owner or a plain diner) must get a side-effect-free 403.
+
+    The existing controller-unit test ``test_admin_register_restaurant`` calls
+    the controller directly and is unaffected — the gate is at the endpoint.
+    """
+
+    BASE = '/api/v1/restaurant-setup'
+
+    # A restaurant/owner that the admin-register call would mint on success.
+    NEW_RESTAURANT_NAME = 'Admin Registered Restaurant'
+    NEW_OWNER_PHONE = '256788888888'
+
+    def setUp(self):
+        # Dinify admin, employed at no restaurant.
+        self.dinify_admin = User.objects.create_user(
+            first_name='Dinify', last_name='Admin',
+            email='ar_admin@test.com', phone_number='256700000310',
+            username='256700000310', country='Uganda', password='password',
+            roles=['dinify_admin'],
+        )
+
+        # A restaurant owner (non-admin): a plain user plus an active
+        # owner employment on their own restaurant.
+        self.owner = User.objects.create_user(
+            first_name='Owner', last_name='AR',
+            email='ar_owner@test.com', phone_number='256700000320',
+            username='256700000320', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant = Restaurant.objects.create(
+            name='AR Existing Restaurant', location='ar-loc',
+            status=RestaurantStatus_Active, owner=self.owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # A plain authenticated user: no admin role, no employment.
+        self.plain_user = User.objects.create_user(
+            first_name='Plain', last_name='User',
+            email='ar_plain@test.com', phone_number='256700000330',
+            username='256700000330', country='Uganda', password='password',
+            roles=[],
+        )
+
+    # -- helpers --------------------------------------------------------------
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _post(self, user, body):
+        return self.client.post(
+            f'{self.BASE}/admin-register-restaurant/',
+            data=json.dumps(body),
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(user)}',
+        )
+
+    def _valid_body(self):
+        return {
+            'name': self.NEW_RESTAURANT_NAME,
+            'location': 'AR Test Location',
+            'first_name': 'New',
+            'last_name': 'Owner',
+            'email': 'ar_new_owner@test.com',
+            'phone_number': self.NEW_OWNER_PHONE,
+            'country': 'UG',
+        }
+
+    def _assert_nothing_minted(self):
+        self.assertFalse(
+            Restaurant.objects.filter(name=self.NEW_RESTAURANT_NAME).exists()
+        )
+        self.assertFalse(
+            User.objects.filter(phone_number=self.NEW_OWNER_PHONE).exists()
+        )
+
+    # -- the gate (the P1) ----------------------------------------------------
+
+    def test_restaurant_owner_forbidden(self):
+        response = self._post(self.owner, self._valid_body())
+        self.assertEqual(response.status_code, 403)
+        # The real harm is minting an account + credential SMS: assert the
+        # denial happened with no side effects.
+        self._assert_nothing_minted()
+
+    def test_plain_user_forbidden(self):
+        response = self._post(self.plain_user, self._valid_body())
+        self.assertEqual(response.status_code, 403)
+        self._assert_nothing_minted()
+
+    def test_dinify_admin_succeeds(self):
+        response = self._post(self.dinify_admin, self._valid_body())
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(
+            Restaurant.objects.filter(name=self.NEW_RESTAURANT_NAME).exists()
+        )
+        self.assertTrue(
+            User.objects.filter(phone_number=self.NEW_OWNER_PHONE).exists()
+        )
