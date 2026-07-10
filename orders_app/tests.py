@@ -1,3 +1,4 @@
+from uuid import uuid4
 from decimal import Decimal
 from datetime import timedelta
 
@@ -464,3 +465,128 @@ class TestDiscountActivationPricing(TestCase):
         result = ConOrder.determine_effective_unit_price(menu_item=item)
         self.assertEqual(result['status'], 200)
         self.assertEqual(result['price'], Decimal('8000.00'))
+
+
+class TestOrderTenantConsistency(TestCase):
+    """
+    BUG-P1-1: order creation must reject a table or menu items that do not
+    belong to the order's restaurant. The diner app always sends a consistent
+    restaurant/table/items triple (QR scan -> that restaurant's own menu), so
+    these guards only ever reject crafted cross-tenant submissions.
+    """
+
+    def setUp(self) -> None:
+        seed_user()
+        seed_restaurant(seed_owner=True)
+        seed_menu_section()
+        seed_menu_items()
+        seed_tables()
+        seed_order()
+
+        # Restaurant A — the legitimate tenant. seed_order() occupies tables 1
+        # and 3, so table 4 is free for a clean creation.
+        self.restaurant_a = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        self.table_a = Table.objects.get(number=TEST_TABLE_NUMBER4)
+        self.item_a = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+        self.item_a2 = MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME)
+
+        # Restaurant B — a second tenant with its own section, item and table.
+        owner = User.objects.get(username=TEST_PHONE)
+        self.restaurant_b = Restaurant.objects.create(
+            name='Other Tenant Restaurant',
+            location='elsewhere',
+            owner=owner,
+        )
+        section_b = MenuSection.objects.create(
+            name='Other Tenant Section',
+            restaurant=self.restaurant_b,
+        )
+        self.item_b = MenuItem.objects.create(
+            name='Other Tenant Item',
+            section=section_b,
+            primary_price=1000.0,
+            discounted_price=900.0,
+            running_discount=False,
+        )
+        self.table_b = Table.objects.create(
+            number=99,
+            restaurant=self.restaurant_b,
+            prepayment_required=False,
+        )
+
+    def test_table_from_other_restaurant_rejected(self):
+        before = Order.objects.count()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_b.pk),
+            items=[{'item': str(self.item_a.pk), 'quantity': 1}],
+        )
+        self.assertEqual(response['status'], 400)
+        # nothing created, and B's table is untouched
+        self.assertEqual(Order.objects.count(), before)
+        self.assertFalse(Order.objects.filter(table=self.table_b).exists())
+
+    def test_item_from_other_restaurant_rejected(self):
+        before = Order.objects.count()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[
+                {'item': str(self.item_a.pk), 'quantity': 1},
+                {'item': str(self.item_b.pk), 'quantity': 1},
+            ],
+        )
+        self.assertEqual(response['status'], 400)
+        # the whole order is rejected — a single foreign item poisons it
+        self.assertEqual(Order.objects.count(), before)
+        self.assertFalse(Order.objects.filter(table=self.table_a).exists())
+
+    def test_nonexistent_table_returns_400(self):
+        before = Order.objects.count()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(uuid4()),
+            items=[{'item': str(self.item_a.pk), 'quantity': 1}],
+        )
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_nonexistent_item_returns_400(self):
+        before = Order.objects.count()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[{'item': str(uuid4()), 'quantity': 1}],
+        )
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_item_missing_quantity_returns_400(self):
+        before = Order.objects.count()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[{'item': str(self.item_a.pk)}],
+        )
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_valid_same_restaurant_order_succeeds(self):
+        before = Order.objects.count()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[
+                {'item': str(self.item_a.pk), 'quantity': 2},
+                {'item': str(self.item_a2.pk), 'quantity': 1},
+            ],
+        )
+        self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), before + 1)
+        order_id = str(response['data']['order_details']['id'])
+        self.assertTrue(
+            OrderItem.objects.filter(order__id=order_id, item=self.item_a).exists()
+        )
+        self.assertTrue(
+            OrderItem.objects.filter(order__id=order_id, item=self.item_a2).exists()
+        )

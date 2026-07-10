@@ -1,12 +1,13 @@
 import logging
 
+from uuid import UUID
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Sum
 from typing import Optional, Union
 from users_app.models import User
 from dinify_backend.configss.messages import MESSAGES
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from restaurants_app.models import Restaurant, MenuItem, Table
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Cancelled,
@@ -311,7 +312,37 @@ class ConOrder:
 
     @staticmethod
     def add_order_item(item: dict, order_id: str):
-        menu_item = MenuItem.objects.get(pk=item['item'])
+        # defense-in-depth: this chokepoint self-guards for every caller. A
+        # malformed payload or an item that does not belong to the order's
+        # restaurant returns a 400 dict instead of raising 500 downstream.
+        if (
+            not isinstance(item, dict)
+            or item.get('item') is None
+            or item.get('quantity') is None
+        ):
+            return {
+                'status': 400,
+                'message': 'Each order item must include an item and a quantity.'
+            }
+
+        try:
+            order = Order.objects.get(pk=order_id)
+        except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+            return {
+                'status': 400,
+                'message': 'Invalid order selected'
+            }
+
+        try:
+            menu_item = MenuItem.objects.get(
+                pk=item['item'], section__restaurant=order.restaurant
+            )
+        except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+            return {
+                'status': 400,
+                'message': "One or more items are not on this restaurant's menu."
+            }
+
         unit_price = menu_item.primary_price
 
         # check if the item already exists in the order so that we just update the quantity
@@ -475,6 +506,41 @@ class ConOrder:
                 'message': MESSAGES.get('NO_ORDER_ITEMS')
             }
 
+        # tenant consistency: every requested item must belong to THIS
+        # restaurant's menu. Runs BEFORE the options/extras pre-checks (which
+        # resolve each item by bare pk) so a missing/foreign/malformed item id
+        # fails fast with a 400 here instead of raising 500 downstream, and no
+        # Order row is ever created for a cross-tenant submission.
+        requested_uuids = set()
+        for entry in items:
+            if (
+                not isinstance(entry, dict)
+                or entry.get('item') is None
+                or entry.get('quantity') is None
+            ):
+                return {
+                    'status': 400,
+                    'message': 'Each order item must include an item and a quantity.'
+                }
+            try:
+                requested_uuids.add(UUID(str(entry['item'])))
+            except (ValueError, TypeError):
+                return {
+                    'status': 400,
+                    'message': "One or more items are not on this restaurant's menu."
+                }
+
+        owned_uuids = set(
+            MenuItem.objects
+            .filter(pk__in=requested_uuids, section__restaurant=restaurant)
+            .values_list('pk', flat=True)
+        )
+        if requested_uuids - owned_uuids:
+            return {
+                'status': 400,
+                'message': "One or more items are not on this restaurant's menu."
+            }
+
         # for each order item, check if the options are applicable
         options_check = ConOrder.check_options_requirements(items)
         if options_check.get('status') != 200:
@@ -485,7 +551,17 @@ class ConOrder:
         if extras_check.get('status') != 200:
             return extras_check
 
-        table = Table.objects.get(pk=table_id)
+        # tenant consistency: the table must belong to this restaurant. Scoped
+        # fetch validates existence AND ownership in one query, so a
+        # foreign/nonexistent/malformed table id → 400 (never 500, never a
+        # silent order against another restaurant's floor).
+        try:
+            table = Table.objects.get(pk=table_id, restaurant=restaurant)
+        except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+            return {
+                'status': 400,
+                'message': 'Invalid table for this restaurant'
+            }
 
         # idempotency, table-gating, daily numbering and creation are all
         # handled atomically by the order-creation service.
