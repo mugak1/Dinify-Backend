@@ -126,15 +126,23 @@ class ConOrder:
         return {'present': False}
 
     @staticmethod
-    def determine_existing_order_item(item:dict, order_id: str) -> bool:
+    def find_existing_order_item(item: dict, order_id: str):
+        # Returns the matching OrderItem line (so the caller can bump it directly)
+        # or None. Returning the resolved row — instead of a bare bool — is what
+        # lets update_item_quantity avoid a non-unique re-lookup: the same menu
+        # item can sit on an order as several lines (different modifiers/extras),
+        # so an OrderItem.objects.get(order, item) would raise
+        # MultipleObjectsReturned. The `existing_item` binding stays on the parent
+        # line throughout (the extras loops iterate a separate `extra` variable) so
+        # every match path returns that parent line, never a child-extra row.
         menu_item = MenuItem.objects.get(pk=item['item'])
-        existing_item = OrderItem.objects.filter(
+        existing_items = OrderItem.objects.filter(
             order__id=order_id,
             item=menu_item,
             deleted=False
         )
-        if existing_item.count() > 0:
-            existing_item = existing_item[0]
+        if existing_items.count() > 0:
+            existing_item = existing_items[0]
             extras = item.get('extras')
             existing_item_extras = OrderItem.objects.filter(parent_item=existing_item)
             incoming_modifiers = item.get('selected_modifiers') or {}
@@ -143,33 +151,33 @@ class ConOrder:
 
             # no extras and no options
             if existing_item_extras.count() == 0 and not has_modifiers:
-                return True
+                return existing_item
 
             # only extras but no item_options
             if existing_item_extras.count() > 0 and not has_modifiers:
                 logger.debug("checking only extras with no items")
                 if len(extras) == existing_item_extras.count():
-                    for existing_item in existing_item_extras:
-                        if str(existing_item.item.pk) not in extras:
-                            return False
-                    return True
+                    for extra in existing_item_extras:
+                        if str(extra.item.pk) not in extras:
+                            return None
+                    return existing_item
 
             # only options but no extras
             if existing_item_extras.count() == 0 and has_modifiers:
                 if existing_modifiers == incoming_modifiers:
-                    return True
-                return False
+                    return existing_item
+                return None
 
             # both extras and options
             if existing_item_extras.count() > 0 and has_modifiers:
                 if len(extras) == existing_item_extras.count():
-                    for existing_item in existing_item_extras:
-                        if str(existing_item.item.pk) not in extras:
-                            return False
+                    for extra in existing_item_extras:
+                        if str(extra.item.pk) not in extras:
+                            return None
                     if existing_modifiers == incoming_modifiers:
-                        return True
+                        return existing_item
 
-        return False
+        return None
 
     @staticmethod
     def determine_effective_unit_price(menu_item: MenuItem, selected_modifiers: dict = None) -> dict:
@@ -283,27 +291,28 @@ class ConOrder:
             extra_record.save()
 
     @staticmethod
-    def update_item_quantity(item: dict, order_id: str) -> dict:
-        menu_item = MenuItem.objects.get(pk=item['item'])
-
-        existing_item = OrderItem.objects.get(
-            order__id=order_id,
-            item=menu_item,
-            deleted=False
-        )
-        new_quantity = existing_item.quantity + item['quantity']
-        new_total_cost = existing_item.unit_price * new_quantity
-        new_cost_of_options = existing_item.cost_of_options * new_quantity
-        new_discounted_cost = existing_item.discounted_price * new_quantity
+    def update_item_quantity(order_item, item: dict) -> dict:
+        # The caller (find_existing_order_item) already resolved the exact matching
+        # line, so bump it directly. Do NOT re-fetch it via
+        # OrderItem.objects.get(order, item): that filter is non-unique once the
+        # same menu item is on the order as more than one line and raises
+        # MultipleObjectsReturned (BUG-P2-5). The recompute is left exactly as
+        # before (per-unit unit_price/discounted_price scaled to the new quantity;
+        # cost_of_options carried verbatim) — this is a crash-only fix, not a
+        # pricing change.
+        new_quantity = order_item.quantity + item['quantity']
+        new_total_cost = order_item.unit_price * new_quantity
+        new_cost_of_options = order_item.cost_of_options * new_quantity
+        new_discounted_cost = order_item.discounted_price * new_quantity
         new_savings = new_total_cost - new_discounted_cost
 
-        existing_item.quantity = new_quantity
-        existing_item.total_cost = new_total_cost
-        existing_item.discounted_cost = new_discounted_cost
-        existing_item.cost_of_options = new_cost_of_options
-        existing_item.savings = new_savings
+        order_item.quantity = new_quantity
+        order_item.total_cost = new_total_cost
+        order_item.discounted_cost = new_discounted_cost
+        order_item.cost_of_options = new_cost_of_options
+        order_item.savings = new_savings
 
-        existing_item.save()
+        order_item.save()
 
         return {
             'status': 200,
@@ -346,9 +355,9 @@ class ConOrder:
         unit_price = menu_item.primary_price
 
         # check if the item already exists in the order so that we just update the quantity
-        existing_item = ConOrder.determine_existing_order_item(item=item, order_id=order_id)
-        if existing_item:
-            return ConOrder.update_item_quantity(item=item, order_id=order_id)
+        existing_item = ConOrder.find_existing_order_item(item=item, order_id=order_id)
+        if existing_item is not None:
+            return ConOrder.update_item_quantity(order_item=existing_item, item=item)
 
         # handling modifiers
         selected_modifiers = item.get('selected_modifiers') or {}

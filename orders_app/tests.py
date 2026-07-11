@@ -203,16 +203,16 @@ class TestOrderFunctions(TestCase):
 
         order_id = str(response['data']['order_details']['id'])
         # dedup check: re-submitting the same grouped modifier selection finds the existing row
-        self.assertTrue(
-            ConOrder.determine_existing_order_item(item=order_item_payload, order_id=order_id)
+        self.assertIsNotNone(
+            ConOrder.find_existing_order_item(item=order_item_payload, order_id=order_id)
         )
         # but a different choice is a distinct row
         different_choice = dict(order_item_payload)
         different_choice['selected_modifiers'] = {
             TEST_OPTION_GROUP_ID: [TEST_OPTION_CHOICE_LARGE_ID]
         }
-        self.assertFalse(
-            ConOrder.determine_existing_order_item(item=different_choice, order_id=order_id)
+        self.assertIsNone(
+            ConOrder.find_existing_order_item(item=different_choice, order_id=order_id)
         )
 
         # confirm stored fields on the created item
@@ -253,6 +253,102 @@ class TestOrderFunctions(TestCase):
 
         order_record.refresh_from_db()
         self.assertGreater(order_record.total_cost, old_total_cost)
+
+    def test_add_order_item_merges_when_same_item_has_two_lines(self):
+        # BUG-P2-5 regression: the same menu item can legitimately sit on an order
+        # as two lines (e.g. Small vs Large). The bump path used to re-look-up the
+        # line with OrderItem.objects.get(order, item) — non-unique here, so it
+        # raised MultipleObjectsReturned -> 500. It must now bump the matched line
+        # in place and never crash.
+        order = Order.objects.get(table=Table.objects.get(number=TEST_TABLE_NUMBER3))
+        options_item = MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME)
+
+        line_defaults = dict(
+            quantity=1,
+            unit_price=Decimal('10.00'),
+            discounted_price=Decimal('10.00'),
+            unit_cost_of_options=Decimal('0.00'),
+            total_cost=Decimal('10.00'),
+            discounted_cost=Decimal('10.00'),
+            savings=Decimal('0.00'),
+            cost_of_options=Decimal('0.00'),
+            actual_cost=Decimal('10.00'),
+        )
+        small_line = OrderItem.objects.create(
+            order=order, item=options_item,
+            selected_modifiers={TEST_OPTION_GROUP_ID: [TEST_OPTION_CHOICE_SMALL_ID]},
+            **line_defaults,
+        )
+        large_line = OrderItem.objects.create(
+            order=order, item=options_item,
+            selected_modifiers={TEST_OPTION_GROUP_ID: [TEST_OPTION_CHOICE_LARGE_ID]},
+            **line_defaults,
+        )
+        # The matcher inspects existing_items[0], ordered by '-time_created'. Pin
+        # the Small line as the most recent so it is deterministically [0] — the
+        # row the incoming Small selection must merge onto.
+        now = timezone.now()
+        OrderItem.objects.filter(pk=large_line.pk).update(
+            time_created=now - timedelta(minutes=1)
+        )
+        OrderItem.objects.filter(pk=small_line.pk).update(time_created=now)
+        self.assertEqual(
+            OrderItem.objects.filter(
+                order__id=order.pk, item=options_item, deleted=False
+            ).count(),
+            2,
+        )
+
+        payload = {
+            'item': str(options_item.pk),
+            'quantity': 2,
+            'selected_modifiers': {TEST_OPTION_GROUP_ID: [TEST_OPTION_CHOICE_SMALL_ID]},
+        }
+        # Previously raised OrderItem.MultipleObjectsReturned; now returns the 200 dict.
+        result = ConOrder.add_order_item(item=payload, order_id=str(order.pk))
+        self.assertEqual(result['status'], 200)
+
+        small_line.refresh_from_db()
+        large_line.refresh_from_db()
+        self.assertEqual(small_line.quantity, 3)   # 1 + 2 merged onto the matched [0] line
+        self.assertEqual(large_line.quantity, 1)   # the non-matching line is untouched
+        # merged in place, not appended as a third line
+        self.assertEqual(
+            OrderItem.objects.filter(
+                order__id=order.pk, item=options_item, deleted=False
+            ).count(),
+            2,
+        )
+
+    def test_add_order_item_creates_then_merges_single_line(self):
+        # A genuinely-new item creates a line; re-adding the same item merges into
+        # that one line (the simple single-line dedup path) instead of duplicating.
+        order = Order.objects.get(table=Table.objects.get(number=TEST_TABLE_NUMBER3))
+        menu_item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+
+        # new item -> create path (returns None), exactly one line at quantity 1
+        create_result = ConOrder.add_order_item(
+            item={'item': str(menu_item1.pk), 'quantity': 1}, order_id=str(order.pk)
+        )
+        self.assertIsNone(create_result)
+        line = OrderItem.objects.get(
+            order__id=order.pk, item=menu_item1, deleted=False
+        )
+        self.assertEqual(line.quantity, 1)
+
+        # same item again -> merge path bumps the same line, no duplicate created
+        merge_result = ConOrder.add_order_item(
+            item={'item': str(menu_item1.pk), 'quantity': 2}, order_id=str(order.pk)
+        )
+        self.assertEqual(merge_result['status'], 200)
+        line.refresh_from_db()
+        self.assertEqual(line.quantity, 3)
+        self.assertEqual(
+            OrderItem.objects.filter(
+                order__id=order.pk, item=menu_item1, deleted=False
+            ).count(),
+            1,
+        )
 
 
 class TestOrderTableProtect(TestCase):
