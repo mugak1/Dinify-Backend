@@ -34,13 +34,19 @@ class UserProfileEndpoint(APIView):
 
 
 class V2UserProfileEndpoint(APIView):
-    def get(self, request, intention):
-        if intention == 'pending-approvals':
+    def get(self, request, action):
+        if action == 'pending-approvals':
             response = get_pending_profile_updates(
                 user=request.user,
                 restaurant=request.query_params.get('restaurant')
             )
             return Response(response, status=response.get('status', 200))
+        else:
+            response = {
+                'status': 400,
+                'message': 'Invalid intention.'
+            }
+            return Response(response, status=400)
 
     def put(self, request, action):
         if action == 'update-profile':
