@@ -590,3 +590,133 @@ class TestOrderTenantConsistency(TestCase):
         self.assertTrue(
             OrderItem.objects.filter(order__id=order_id, item=self.item_a2).exists()
         )
+
+
+class TestOrderingAvailabilityGates(TestCase):
+    """
+    BUG-P2-1: order creation must enforce ordering availability for DINER orders
+    (created_by is None). A paused restaurant (accepting_orders=False), a
+    view-only table (qr_mode='menu_only'), or a table that is not available for a
+    scan (soft-deleted / disabled / inactive / out of service) must reject the
+    order without creating a row. Staff/admin orders (created_by set) are a
+    management action and bypass every one of these gates.
+    """
+
+    def setUp(self) -> None:
+        seed_user()
+        seed_restaurant(seed_owner=True)
+        seed_menu_section()
+        seed_menu_items()
+        seed_tables()
+        # NB: seed_order() is deliberately NOT called, so every seeded table is
+        # free — the double-seating gate never interferes with the success cases.
+
+        self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        self.item = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+        # A real User to stand in for a staff/admin order's created_by.
+        self.staff = User.objects.get(username=TEST_PHONE)
+        # A free table carrying the ordering-friendly defaults (qr_mode
+        # 'order_pay', is_active True, status 'available').
+        self.table = Table.objects.get(number=TEST_TABLE_NUMBER4)
+
+    def _order(self, created_by=None):
+        return ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant.pk),
+            table_id=str(self.table.pk),
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            created_by=created_by,
+        )
+
+    # --- Gate 1: restaurant accepting_orders -------------------------------
+
+    def test_diner_order_blocked_when_not_accepting_orders(self):
+        self.restaurant.accepting_orders = False
+        self.restaurant.save(update_fields=['accepting_orders'])
+        before = Order.objects.count()
+        response = self._order()
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(
+            response['message'], 'This restaurant is not currently accepting orders'
+        )
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_staff_order_succeeds_when_not_accepting_orders(self):
+        self.restaurant.accepting_orders = False
+        self.restaurant.save(update_fields=['accepting_orders'])
+        before = Order.objects.count()
+        response = self._order(created_by=self.staff)
+        self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), before + 1)
+
+    # --- Gate 2: table qr_mode ---------------------------------------------
+
+    def test_diner_order_blocked_at_menu_only_table(self):
+        self.table.qr_mode = 'menu_only'
+        self.table.save(update_fields=['qr_mode'])
+        before = Order.objects.count()
+        response = self._order()
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(response['message'], 'Ordering is not available at this table')
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_diner_order_succeeds_at_order_pay_table(self):
+        self.table.qr_mode = 'order_pay'
+        self.table.save(update_fields=['qr_mode'])
+        response = self._order()
+        self.assertEqual(response['status'], 200)
+
+    def test_diner_order_succeeds_at_order_only_table(self):
+        self.table.qr_mode = 'order_only'
+        self.table.save(update_fields=['qr_mode'])
+        response = self._order()
+        self.assertEqual(response['status'], 200)
+
+    def test_staff_order_bypasses_menu_only_gate(self):
+        self.table.qr_mode = 'menu_only'
+        self.table.save(update_fields=['qr_mode'])
+        before = Order.objects.count()
+        response = self._order(created_by=self.staff)
+        self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), before + 1)
+
+    # --- Gate 3: table availability (is_available_for_scan) ----------------
+
+    def test_diner_order_blocked_at_inactive_table(self):
+        self.table.is_active = False
+        self.table.save(update_fields=['is_active'])
+        before = Order.objects.count()
+        response = self._order()
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(response['message'], 'This table is not available for ordering')
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_diner_order_blocked_at_out_of_service_table(self):
+        self.table.status = 'out_of_service'
+        self.table.save(update_fields=['status'])
+        before = Order.objects.count()
+        response = self._order()
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(response['message'], 'This table is not available for ordering')
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_staff_order_bypasses_inactive_table_gate(self):
+        self.table.is_active = False
+        self.table.save(update_fields=['is_active'])
+        before = Order.objects.count()
+        response = self._order(created_by=self.staff)
+        self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), before + 1)
+
+    # --- Happy path --------------------------------------------------------
+
+    def test_normal_diner_order_succeeds_end_to_end(self):
+        # accepting_orders True, qr_mode 'order_pay', active/available table are
+        # all fixture defaults, so there is nothing to mutate here.
+        before = Order.objects.count()
+        response = self._order()
+        self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), before + 1)
+        order_id = str(response['data']['order_details']['id'])
+        self.assertTrue(
+            OrderItem.objects.filter(order__id=order_id, item=self.item).exists()
+        )

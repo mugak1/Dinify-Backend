@@ -493,6 +493,15 @@ class ConOrder:
                 'message': MESSAGES.get('GENERAL_ERROR')
             }
 
+        # availability: a diner cannot place an order while the restaurant has
+        # paused ordering (accepting_orders=False). Staff/admin orders
+        # (created_by set) are a management action and bypass this gate.
+        if created_by is None and not restaurant.accepting_orders:
+            return {
+                'status': 400,
+                'message': 'This restaurant is not currently accepting orders'
+            }
+
         # check that order items are provided
         if items is None:
             return {
@@ -561,6 +570,26 @@ class ConOrder:
             return {
                 'status': 400,
                 'message': 'Invalid table for this restaurant'
+            }
+
+        # availability: a diner may only order at a table whose QR mode permits
+        # ordering. Whitelist the ordering modes so any future non-ordering mode
+        # fails safe rather than accidentally permitting orders. Staff/admin
+        # orders (created_by set) bypass this gate.
+        ORDERING_QR_MODES = ('order_pay', 'order_only')  # 'menu_only' is view-only
+        if created_by is None and table.qr_mode not in ORDERING_QR_MODES:
+            return {
+                'status': 400,
+                'message': 'Ordering is not available at this table'
+            }
+
+        # availability: a diner cannot order at a table that is not available for
+        # a scan (soft-deleted, disabled, inactive, or out of service). Reuse the
+        # same predicate the diner QR-scan flow uses so the two stay consistent.
+        if created_by is None and not table.is_available_for_scan():
+            return {
+                'status': 400,
+                'message': 'This table is not available for ordering'
             }
 
         # idempotency, table-gating, daily numbering and creation are all
