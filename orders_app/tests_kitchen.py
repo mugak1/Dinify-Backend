@@ -7,6 +7,7 @@ priority), the finance/kitchen field isolation, and that the retired KDS routes
 are gone.
 """
 import uuid
+from decimal import Decimal
 from datetime import timedelta
 from unittest import mock
 
@@ -40,11 +41,13 @@ from restaurants_app.models import (
 from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN, RESTAURANT_WAITER,
     OrderStatus_Initiated, OrderStatus_Cancelled,
+    OrderStatus_Served, OrderStatus_Pending,
     PaymentStatus_Pending,
     RestaurantStatus_Active,
     CancellationReason_CustomerChangedMind,
     MODULE_KITCHEN,
 )
+from reports_app.controllers.common.sale_filters import sale_orders, revenue_sum
 
 ACTIVE_URL = '/api/v1/kitchen/orders/active/'
 COMPLETED_URL = '/api/v1/kitchen/orders/completed/'
@@ -1060,3 +1063,112 @@ class KitchenModuleGridOverrideTests(KitchenTestBase):
         for user in (self.waiter_user, self.outsider_user):
             self.assertEqual(self._active_status(user), 403, msg=f'active 403 for {user.username}')
             self.assertEqual(self._stock_status(user), 403, msg=f'stock 403 for {user.username}')
+
+
+class KitchenServeAdvancesOrderStatusTests(KitchenTestBase):
+    """
+    BUG-P1-2: the kitchen serve/recall completion transition couples
+    order_status to the fulfilment axis, so a served order counts as a sale
+    (order_status='served' is in SALE_STATUSES) and a recall reverts it
+    (-> 'pending'). The finance-owned no-clobber behaviour is preserved on every
+    non-completion transition, and a cancelled order is never resurrected into a
+    sale. payment_status is never touched.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(user=self.kitchen_user)
+        self.today = timezone.localdate()
+
+    def _patch_status(self, order, target):
+        return self.client.put(
+            _fulfilment_url(order.id), {'fulfilment_status': target}, format='json',
+        )
+
+    def _sale_qs(self):
+        return sale_orders(self.restaurant.id, self.today, self.today)
+
+    def _is_sale(self, order):
+        return self._sale_qs().filter(id=order.id).exists()
+
+    def test_serve_advances_order_status_and_qualifies_as_sale(self):
+        order = self._make_order(
+            fulfilment_status='ready',
+            order_status=OrderStatus_Pending,
+            actual_cost=Decimal('5000.00'),
+        )
+        # in-flight: not yet a sale
+        self.assertFalse(self._is_sale(order))
+
+        self.assertEqual(self._patch_status(order, 'served').status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, 'served')
+        self.assertEqual(order.order_status, OrderStatus_Served)
+        self.assertIsNotNone(order.served_at)
+
+        # now a sale, and its actual_cost is recognised as revenue
+        self.assertTrue(self._is_sale(order))
+        revenue = self._sale_qs().aggregate(revenue=revenue_sum())['revenue']
+        self.assertEqual(revenue, Decimal('5000.00'))
+
+    def test_recall_reverts_order_status_and_drops_from_sales(self):
+        order = self._make_order(
+            fulfilment_status='served',
+            order_status=OrderStatus_Served,
+            served_at=timezone.now(),
+            actual_cost=Decimal('5000.00'),
+        )
+        self.assertTrue(self._is_sale(order))
+
+        self.assertEqual(self._patch_status(order, 'ready').status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, 'ready')
+        self.assertEqual(order.order_status, OrderStatus_Pending)
+        self.assertIsNone(order.served_at)
+        self.assertFalse(self._is_sale(order))
+
+    def test_non_completion_transitions_do_not_write_order_status(self):
+        # (a) new -> preparing: order_status is NOT in the save's update_fields
+        order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Pending)
+        with mock.patch.object(Order, 'save', autospec=True) as save_mock:
+            self.assertEqual(self._patch_status(order, 'preparing').status_code, 200)
+        self.assertEqual(save_mock.call_count, 1)
+        self.assertNotIn('order_status', save_mock.call_args.kwargs['update_fields'])
+
+        # (b) unmocked: order_status is untouched across the non-completion steps
+        order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Pending)
+        self.assertEqual(self._patch_status(order, 'preparing').status_code, 200)
+        self.assertEqual(self._patch_status(order, 'ready').status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, 'ready')
+        self.assertEqual(order.order_status, OrderStatus_Pending)
+
+    def test_cancelled_order_driven_to_served_stays_cancelled(self):
+        # The fulfilment endpoint doesn't itself block a cancelled order on the
+        # fulfilment axis (pre-existing gap), but the serve guard keeps
+        # order_status='cancelled' -> it never becomes a sale.
+        order = self._make_order(
+            fulfilment_status='ready',
+            order_status=OrderStatus_Cancelled,
+            actual_cost=Decimal('5000.00'),
+        )
+        self.assertEqual(self._patch_status(order, 'served').status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, 'served')
+        self.assertEqual(order.order_status, OrderStatus_Cancelled)
+        self.assertFalse(self._is_sale(order))
+
+    def test_serve_is_server_authoritative_ignoring_body_order_status(self):
+        # A spoofed order_status in the body must not win — the server sets it
+        # from its own constant, so serving cannot inflate an order to 'paid'.
+        order = self._make_order(
+            fulfilment_status='ready', order_status=OrderStatus_Pending,
+        )
+        response = self.client.put(
+            _fulfilment_url(order.id),
+            {'fulfilment_status': 'served', 'order_status': 'paid'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, OrderStatus_Served)

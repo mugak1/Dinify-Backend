@@ -61,7 +61,11 @@ class Order(BaseModel):
     client_order_id = models.UUIDField(null=True, blank=True, db_index=True)
 
     # === kitchen-owned fulfilment axis (Phase 2) ===
-    # Kitchen writes ONLY these fields, never order_status / payment_status.
+    # Kitchen writes these fields on every transition. It ALSO writes
+    # order_status on two transitions — the serve/recall completion transition
+    # (serve -> 'served', recall -> 'pending', in
+    # KitchenOrderFulfilmentStatusView) and cancellation (see below) — but never
+    # payment_status.
     fulfilment_status = models.CharField(
         max_length=20,
         choices=[
@@ -87,10 +91,11 @@ class Order(BaseModel):
     order_date = models.DateField(null=True, db_index=True)
 
     # === cancellation (order_status='cancelled') — provenance only ===
-    # Cancelling is the ONE kitchen write that sets order_status; these capture
-    # who/when/why. cancelled_by mirrors fulfilment_status_updated_by's FK
-    # signature with its own related_name. payment_status and the fulfilment
-    # axis are deliberately untouched by a cancellation.
+    # Cancelling is one of the kitchen writes that set order_status (the other
+    # is the serve/recall completion transition); these capture who/when/why.
+    # cancelled_by mirrors fulfilment_status_updated_by's FK signature with its
+    # own related_name. payment_status and the fulfilment axis are deliberately
+    # untouched by a cancellation.
     cancelled_at = models.DateTimeField(null=True, blank=True)
     cancelled_by = models.ForeignKey(
         "users_app.User",
