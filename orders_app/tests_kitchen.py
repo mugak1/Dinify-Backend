@@ -676,6 +676,99 @@ class TableGatingTests(KitchenTestBase):
         self._assert_both(self.table1, {'present': True, 'order_id': str(newer.id)})
 
 
+class TableLockTests(KitchenTestBase):
+    """
+    BUG-P2-4 (double-seating): _create_order locks the Table row
+    (select_for_update) between the idempotency short-circuit and the occupancy
+    gate, so two concurrent genuinely-new submissions for the same table
+    serialize — the second blocks until the first commits, then its gate sees the
+    first order and is rejected. True concurrency can't be simulated in the test
+    harness, so these assert the post-lock gate, that the lock is applied, and
+    that idempotent replays skip it.
+    """
+
+    def _items(self):
+        return [{
+            'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk),
+            'quantity': 1,
+        }]
+
+    def test_second_new_submission_same_table_is_gated(self):
+        # Two genuinely-new submissions (DIFFERENT client_order_ids) on one table.
+        # The first occupies the table; the second, past the lock, is gated.
+        first = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+            client_order_id=uuid.uuid4(),
+        )
+        self.assertEqual(first['status'], 200)
+        self.assertFalse(first['idempotent'])
+
+        second = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+            client_order_id=uuid.uuid4(),
+        )
+        self.assertEqual(second['status'], 400)
+        self.assertEqual(second['message'], 'The table has an ongoing order')
+        self.assertEqual(str(second['data']['order_id']), str(first['order'].id))
+
+        # Exactly one order exists on the table — no double-seating.
+        self.assertEqual(
+            Order.objects.filter(
+                restaurant=self.restaurant, table=self.table1,
+            ).count(),
+            1,
+        )
+
+    def test_create_locks_the_table_row(self):
+        # The lock is verifiably applied even though the harness can't force a
+        # real race. `wraps` spies without replacing, so the real
+        # select_for_update still runs (a no-op on SQLite, a real lock on the CI
+        # Postgres) — the assertion is backend-agnostic and isolated to
+        # Table.objects (the counter / final-order locks use other managers).
+        with mock.patch.object(
+            Table.objects, 'select_for_update',
+            wraps=Table.objects.select_for_update,
+        ) as spy:
+            result = _create_order(
+                restaurant=self.restaurant, table=self.table1, items=self._items(),
+            )
+        self.assertEqual(result['status'], 200)
+        self.assertTrue(spy.called)
+
+    def test_normal_single_order_succeeds(self):
+        result = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+        )
+        self.assertEqual(result['status'], 200)
+        self.assertFalse(result['idempotent'])
+        self.assertTrue(Order.objects.filter(id=result['order'].id).exists())
+
+    def test_idempotent_replay_returns_existing_without_locking(self):
+        # A replay (same client_order_id) short-circuits on idempotency BEFORE the
+        # lock: it returns the existing order and never locks the table row.
+        client_order_id = uuid.uuid4()
+        first = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+            client_order_id=client_order_id,
+        )
+        self.assertEqual(first['status'], 200)
+
+        with mock.patch.object(
+            Table.objects, 'select_for_update',
+            wraps=Table.objects.select_for_update,
+        ) as spy:
+            replay = _create_order(
+                restaurant=self.restaurant, table=self.table1, items=self._items(),
+                client_order_id=client_order_id,
+            )
+        self.assertEqual(replay['status'], 200)
+        self.assertTrue(replay['idempotent'])
+        self.assertEqual(str(replay['order'].id), str(first['order'].id))
+        # The lock sits AFTER the idempotency short-circuit, so a replay never
+        # reaches it.
+        self.assertFalse(spy.called)
+
+
 class KitchenMenuItemStockTests(KitchenTestBase):
     """
     86 endpoint — toggle MenuItem.in_stock. Mirrors the priority-endpoint tests:

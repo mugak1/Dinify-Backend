@@ -90,6 +90,18 @@ def _create_order(*, restaurant, table, items,
             if existing is not None:
                 return {'status': 200, 'order': existing, 'idempotent': True}
 
+        # 1b. Lock the table row so concurrent same-table submissions serialize.
+        #     Mirrors allocate_daily_order_number's select_for_update in this file:
+        #     the second creator blocks here until the first commits, then its
+        #     step-2 gate below sees the first order and returns the 400. Placed
+        #     AFTER step 1 so idempotent replays return without taking the lock.
+        #     Lazy import keeps this module import-cycle-free (as with ConOrder).
+        from restaurants_app.models import Table
+        try:
+            table = Table.objects.select_for_update().get(pk=table.pk)
+        except Table.DoesNotExist:
+            return {'status': 400, 'message': 'Invalid table for this restaurant'}
+
         # 2. table-gating — only for genuinely new submissions
         ongoing = ConOrder.any_present_ongoing_order(table)
         if ongoing.get('present'):
