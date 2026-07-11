@@ -8,7 +8,9 @@ are gone.
 """
 import uuid
 from datetime import timedelta
+from unittest import mock
 
+from django.db import IntegrityError
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -164,6 +166,80 @@ class KitchenNumberingTests(KitchenTestBase):
         self.assertEqual(
             Order.objects.filter(restaurant=self.restaurant).count(),
             count_after_first,
+        )
+
+    def test_concurrent_create_conflict_returns_existing_order(self):
+        """
+        The CREATE-time race (distinct from the step-1 replay): two requests
+        carrying the same client_order_id both clear the step-1 lookup before
+        either commits, so the loser's INSERT trips
+        uniq_order_restaurant_client_order_id. Simulate the winner appearing
+        between step 1 and step 4 by injecting it at daily-number allocation
+        (step 3 — after the step-1 lookup, before the create). The real create
+        then raises IntegrityError and the catch must re-fetch and return the
+        winner (200, idempotent) — creating no second row and never 500-ing.
+        """
+        items = [{'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk),
+                  'quantity': 1}]
+        client_order_id = uuid.uuid4()
+        winner_box = {}
+
+        def _inject_concurrent_winner(restaurant, order_date):
+            # a racing request wins the INSERT for this client_order_id; its
+            # order_number stays NULL so ONLY the client_order_id constraint trips
+            winner = self._make_order(
+                table=self.table1,
+                client_order_id=client_order_id,
+                order_number=None,
+                order_date=order_date,
+            )
+            winner_box['id'] = winner.id
+            return 1  # the losing request's (soon-to-conflict) order number
+
+        with mock.patch(
+            'orders_app.controllers.services.create_order.allocate_daily_order_number',
+            side_effect=_inject_concurrent_winner,
+        ):
+            result = _create_order(
+                restaurant=self.restaurant, table=self.table1, items=items,
+                client_order_id=client_order_id,
+            )
+
+        self.assertEqual(result['status'], 200)
+        self.assertTrue(result['idempotent'])
+        self.assertEqual(str(result['order'].id), str(winner_box['id']))
+        # exactly one row for this (restaurant, client_order_id): the winner
+        self.assertEqual(
+            Order.objects.filter(
+                restaurant=self.restaurant, client_order_id=client_order_id,
+            ).count(),
+            1,
+        )
+
+    def test_create_integrity_error_unrelated_propagates(self):
+        """
+        An IntegrityError that is NOT the client_order_id conflict (no existing
+        row for this client_order_id) must propagate rather than be swallowed by
+        the idempotency catch.
+        """
+        items = [{'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk),
+                  'quantity': 1}]
+        client_order_id = uuid.uuid4()  # fresh — nothing to re-fetch
+
+        with mock.patch.object(
+            Order.objects, 'create',
+            side_effect=IntegrityError('unrelated constraint'),
+        ):
+            with self.assertRaises(IntegrityError):
+                _create_order(
+                    restaurant=self.restaurant, table=self.table1, items=items,
+                    client_order_id=client_order_id,
+                )
+
+        self.assertFalse(
+            Order.objects.filter(
+                restaurant=self.restaurant, client_order_id=client_order_id,
+            ).exists()
         )
 
 
