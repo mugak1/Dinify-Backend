@@ -46,13 +46,28 @@ def get_notifications(
         return []
 
 
-def flag_notification_as_read(notification_id: str):
+def flag_notification_as_read(notification_id: str, email: str, phone: str):
     try:
-        MONGO_DB[COL_NOTIFICATIONS].update_one(
-            filter={'_id': ObjectId(notification_id)},
+        # Scope the write to a notification the requesting user actually
+        # receives — the SAME recipient predicate get_notifications uses on
+        # the read side (email/phone present in the tos/ccs arrays). Filtering
+        # on _id alone would let any authenticated user flag any notification.
+        filter = {
+            '_id': ObjectId(notification_id),
+            '$or': [
+                {'tos': email},
+                {'tos': phone},
+                {'ccs': email},
+                {'ccs': phone}
+            ]
+        }
+        result = MONGO_DB[COL_NOTIFICATIONS].update_one(
+            filter=filter,
             update={'$set': {'read': True}}
         )
-        return True
+        # matched_count (not modified_count) so re-flagging an already-read
+        # notification the user owns still counts as success.
+        return result.matched_count > 0
     except Exception as error:
         logger.error("Error while flagging notification as read: %s", error)
         return False
