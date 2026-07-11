@@ -86,6 +86,8 @@ def define_filter_params(get_params, model) -> dict:
     defines the parameters to consider for the filter
     """
     filter_params = {}
+    # resolve the model's filter map once; unknown model -> empty (no filters)
+    filter_considerations = FILTER_DEFINITIONS.get(model) or {}
 
     # define the filter considerations
     for key, value in get_params.items():
@@ -94,8 +96,8 @@ def define_filter_params(get_params, model) -> dict:
             continue
         # check if the length is greater than 1
         if len(value) > 1:
-            filter_considerations = FILTER_DEFINITIONS.get(model)
-            filter_params[
-                filter_considerations[key.lower()]
-            ] = value
+            # only apply known filter keys; unknown params are skipped
+            mapped = filter_considerations.get(key.lower())
+            if mapped is not None:
+                filter_params[mapped] = value
     return filter_params

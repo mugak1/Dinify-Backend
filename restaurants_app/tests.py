@@ -1548,6 +1548,16 @@ class TenantReadIsolationTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn(str(self.table_a.id), self._record_ids(r))
 
+    def test_unknown_query_param_does_not_500(self):
+        # A stray/unknown query param must be ignored, not crash the list (500);
+        # the known ?restaurant= scoping still returns the caller's own table.
+        r = self._get(
+            self.owner_a,
+            f'{self.BASE}/tables/?restaurant={self.restaurant_a.id}&foo=barbar',
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(str(self.table_a.id), self._record_ids(r))
+
     def test_owner_of_a_can_read_own_diningareas(self):
         r = self._get(self.owner_a, f'{self.BASE}/diningareas/?restaurant={self.restaurant_a.id}')
         self.assertEqual(r.status_code, 200)

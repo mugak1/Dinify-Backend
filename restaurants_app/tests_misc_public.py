@@ -79,6 +79,27 @@ class MiscPublicRestaurantsTests(TestCase):
         for leaked in (OWNER_FIRST_NAME, OWNER_LAST_NAME, OWNER_EMAIL, OWNER_PHONE):
             self.assertNotIn(leaked, raw)
 
+    def test_unknown_query_param_is_ignored_not_500(self):
+        # A stray/unknown query param must be silently skipped by
+        # define_filter_params, never crash the listing with a 500.
+        response = self.client.get(RESTAURANTS_URL, {'foo': 'barbar'})
+        self.assertEqual(response.status_code, 200)
+        ids = [record['id'] for record in response.json()['data']['records']]
+        self.assertIn(str(self.restaurant.id), ids)
+
+    def test_known_name_param_filters(self):
+        # A known param (name -> name__icontains) still maps and filters.
+        other = Restaurant.objects.create(
+            name='Zeta Public Grill', location='loc-z',
+            status=RestaurantStatus_Active, owner=self.owner,
+        )
+        response = self.client.get(RESTAURANTS_URL, {'name': 'Zeta'})
+        self.assertEqual(response.status_code, 200)
+        ids = [record['id'] for record in response.json()['data']['records']]
+        self.assertIn(str(other.id), ids)
+        # 'PII Test Restaurant' does not match name__icontains='Zeta'.
+        self.assertNotIn(str(self.restaurant.id), ids)
+
 
 class MiscPublicTablesTests(TestCase):
     """The tables listing is restaurant-scoped and diner-safe."""
