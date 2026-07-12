@@ -16,6 +16,7 @@ from restaurants_app.controllers.create_restaurant import (
     create_restaurant, admin_register_restaurant
 )
 from restaurants_app.controllers.create_employee import create_employee
+from restaurants_app.controllers.dining_areas import create_dining_area
 from restaurants_app.controllers.menu_sections import ConMenuSection
 from restaurants_app.endpoints.restaurant_setup import normalize_ordered_section_ids
 from restaurants_app.models import (
@@ -1124,6 +1125,46 @@ class TenantIsolationTests(TestCase):
         # JWT auth itself rejects inactive users; the contract is "not 200".
         self.assertNotEqual(response.status_code, 200)
         self.assertFalse(MenuSection.objects.filter(name='Should Fail').exists())
+
+    # -- section-tables verb retirement (BUG-P3-10) --------------------------
+
+    def test_section_tables_verb_is_retired(self):
+        """BUG-P3-10: the dead 'section-tables' POST verb is retired. A dinify
+        admin (the only caller RBAC ever let past the gate) no longer creates
+        tables — the request falls through to the generic unmapped-verb
+        handling. Guards against anyone re-adding a live section-tables verb."""
+        # An unmapped verb reaching a dinify admin now 500s in Secretary (None
+        # serializer); capture it as a response rather than letting it propagate.
+        self.client.raise_request_exception = False
+        before = Table.objects.filter(restaurant=self.restaurant_a).count()
+        response = self._request(
+            self.dinify_admin, 'post', 'section-tables',
+            {'restaurant': str(self.restaurant_a.id), 'number': 3,
+             'consideration': 'count'},
+        )
+        self.assertNotEqual(response.status_code, 200)
+        self.assertEqual(
+            Table.objects.filter(restaurant=self.restaurant_a).count(), before,
+        )
+
+    def test_create_dining_area_still_creates_section_tables(self):
+        """Regression guard for the surviving create_tables_in_section caller:
+        create_dining_area(create_tables=True) must still populate the area."""
+        result = create_dining_area(
+            restaurant_id=str(self.restaurant_a.id),
+            dining_area_name='Rooftop',
+            smoking_zone=False,
+            outdoor_seating=True,
+            user=self.owner_a,
+            create_tables=True,
+            consideration='count',
+            no_tables=3,
+        )
+        self.assertEqual(result['status'], 200)
+        area = DiningArea.objects.get(name='Rooftop', restaurant=self.restaurant_a)
+        self.assertEqual(
+            Table.objects.filter(dining_area=area, deleted=False).count(), 3,
+        )
 
     # -- happy path ----------------------------------------------------------
 
