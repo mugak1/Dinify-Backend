@@ -3822,12 +3822,14 @@ class DinerTableScanTests(TestCase):
         self.assertEqual(socials['facebook'], '')  # empty rides through raw
 
     def test_occupied_table_still_scannable(self):
-        # An ongoing order must NOT block a scan — the diner resumes it.
+        # An ongoing (SUBMITTED) order must NOT block a scan — the diner resumes
+        # it. order_status is 'pending' because an 'initiated' draft no longer
+        # occupies the table (it claims the table only at submit).
         from orders_app.models import Order
         order = Order.objects.create(
             restaurant=self.restaurant, table=self.table,
             total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
-            payment_status='pending', order_status='initiated',
+            payment_status='pending', order_status='pending',
             fulfilment_status='new',
         )
         response = self._scan(str(self.table.id))

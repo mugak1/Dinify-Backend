@@ -19,6 +19,7 @@ from rest_framework.test import APIClient
 from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
 from orders_app.controllers.con_orders import ConOrder
 from orders_app.controllers.initiate_order import any_present_ongoing_order
+from orders_app.controllers.manage_order import update_order_status
 from orders_app.controllers.services.create_order import (
     _create_order,
     allocate_daily_order_number,
@@ -289,9 +290,12 @@ class KitchenActiveEndpointTests(KitchenTestBase):
         return {row['id'] for row in response.json()['data']}
 
     def test_active_set_filtering(self):
-        new_order = self._make_order(self.table1, fulfilment_status='new')
-        preparing_order = self._make_order(self.table2, fulfilment_status='preparing')
-        ready_order = self._make_order(self.table3, fulfilment_status='ready')
+        new_order = self._make_order(
+            self.table1, fulfilment_status='new', order_status=OrderStatus_Pending)
+        preparing_order = self._make_order(
+            self.table2, fulfilment_status='preparing', order_status=OrderStatus_Pending)
+        ready_order = self._make_order(
+            self.table3, fulfilment_status='ready', order_status=OrderStatus_Pending)
         # served leaves the board immediately — it lives in the Completed feed
         served_just_now = self._make_order(
             self.table4, fulfilment_status='served', served_at=timezone.now(),
@@ -323,6 +327,13 @@ class KitchenActiveEndpointTests(KitchenTestBase):
         )
         self.assertEqual(created['status'], 200)
         order_id = created['data']['order_details']['id']
+
+        # A draft is invisible to the kitchen — submit it so the ticket reaches
+        # the board (order_status initiated -> pending; fulfilment stays 'new').
+        submitted = update_order_status(
+            Order.objects.get(pk=order_id), OrderStatus_Pending, None,
+        )
+        self.assertEqual(submitted['status'], 200)
 
         self.client.force_authenticate(user=self.kitchen_user)
         response = self.client.get(ACTIVE_URL, {'restaurant': str(self.restaurant.id)})
@@ -627,7 +638,10 @@ class TableGatingTests(KitchenTestBase):
         return con
 
     def test_non_served_order_blocks_new_order(self):
-        order = self._make_order(self.table1, fulfilment_status='new')
+        # A SUBMITTED (pending) non-served order occupies the table.
+        order = self._make_order(
+            self.table1, fulfilment_status='new', order_status=OrderStatus_Pending,
+        )
         self._assert_both(self.table1, {'present': True, 'order_id': str(order.id)})
 
         # A genuinely new submission on the same table is gated.
@@ -639,7 +653,9 @@ class TableGatingTests(KitchenTestBase):
         self.assertEqual(str(result['data']['order_id']), str(order.id))
 
     def test_served_order_frees_the_same_table(self):
-        order = self._make_order(self.table1, fulfilment_status='new')
+        order = self._make_order(
+            self.table1, fulfilment_status='new', order_status=OrderStatus_Pending,
+        )
         self._assert_both(self.table1, {'present': True, 'order_id': str(order.id)})
 
         # Kitchen serves the order — only the fulfilment axis moves.
@@ -669,8 +685,12 @@ class TableGatingTests(KitchenTestBase):
         self._assert_both(self.table1, {'present': False})
 
     def test_returns_most_recent_ongoing_order(self):
-        older = self._make_order(self.table1, fulfilment_status='new')
-        newer = self._make_order(self.table1, fulfilment_status='preparing')
+        older = self._make_order(
+            self.table1, fulfilment_status='new', order_status=OrderStatus_Pending,
+        )
+        newer = self._make_order(
+            self.table1, fulfilment_status='preparing', order_status=OrderStatus_Pending,
+        )
         # Force distinct creation timestamps so "most recent" is deterministic
         # (time_created is auto_now_add, so override via .update()).
         now = timezone.now()
@@ -697,14 +717,21 @@ class TableLockTests(KitchenTestBase):
         }]
 
     def test_second_new_submission_same_table_is_gated(self):
-        # Two genuinely-new submissions (DIFFERENT client_order_ids) on one table.
-        # The first occupies the table; the second, past the lock, is gated.
+        # A SUBMITTED order occupies the table; a genuinely-new submission
+        # (DIFFERENT client_order_id) on the same table is then gated at create
+        # time. (A draft no longer occupies — two drafts coexist until one is
+        # submitted; see SubmitClaimsTableTests.)
         first = _create_order(
             restaurant=self.restaurant, table=self.table1, items=self._items(),
             client_order_id=uuid.uuid4(),
         )
         self.assertEqual(first['status'], 200)
         self.assertFalse(first['idempotent'])
+        # submit the first order so it claims the table
+        self.assertEqual(
+            update_order_status(first['order'], OrderStatus_Pending, None)['status'],
+            200,
+        )
 
         second = _create_order(
             restaurant=self.restaurant, table=self.table1, items=self._items(),
@@ -770,6 +797,178 @@ class TableLockTests(KitchenTestBase):
         # The lock sits AFTER the idempotency short-circuit, so a replay never
         # reaches it.
         self.assertFalse(spy.called)
+
+
+class SubmitClaimsTableTests(KitchenTestBase):
+    """
+    BUG-P2-2: an 'initiated' order is an unconfirmed DRAFT — it does not occupy
+    the table and does not reach the kitchen. The order becomes real, and CLAIMS
+    the table, only at SUBMIT (order_status 'initiated' -> 'pending'), which is
+    therefore where the race-safe occupancy gate lives. Two diners submitting for
+    the same table serialize on the table lock: the first claims it, the second
+    gets a clean 400.
+    """
+
+    def _items(self):
+        return [{
+            'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk),
+            'quantity': 1,
+        }]
+
+    def _active_ids(self, user):
+        self.client.force_authenticate(user=user)
+        response = self.client.get(ACTIVE_URL, {'restaurant': str(self.restaurant.id)})
+        self.assertEqual(response.status_code, 200)
+        return {row['id'] for row in response.json()['data']}
+
+    def _draft(self, table, client_order_id=None):
+        result = _create_order(
+            restaurant=self.restaurant, table=table, items=self._items(),
+            client_order_id=client_order_id,
+        )
+        self.assertEqual(result['status'], 200)
+        return result
+
+    def _submit(self, order):
+        return update_order_status(order, OrderStatus_Pending, None)
+
+    def _assert_free(self, table):
+        # both copies of the occupancy gate must agree the table is free
+        con = ConOrder.any_present_ongoing_order(table)
+        standalone = any_present_ongoing_order(table)
+        self.assertEqual(con, standalone)
+        self.assertFalse(con['present'])
+
+    # --- a draft is invisible ---------------------------------------------
+
+    def test_draft_does_not_occupy_table(self):
+        # A never-submitted draft does not occupy: the table reads as free, and
+        # a SECOND initiate on the same table succeeds instead of a 400.
+        first = self._draft(self.table1, client_order_id=uuid.uuid4())
+        self.assertFalse(first['idempotent'])
+        self._assert_free(self.table1)
+
+        second = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+            client_order_id=uuid.uuid4(),
+        )
+        self.assertEqual(second['status'], 200)
+        self.assertFalse(second['idempotent'])
+        self.assertNotEqual(str(second['order'].id), str(first['order'].id))
+
+    def test_draft_not_on_kitchen_board_until_submitted(self):
+        order = self._draft(self.table1)['order']
+        # invisible to the kitchen while a draft
+        self.assertNotIn(str(order.id), self._active_ids(self.kitchen_user))
+        # visible once submitted
+        self.assertEqual(self._submit(order)['status'], 200)
+        self.assertIn(str(order.id), self._active_ids(self.kitchen_user))
+
+    def test_p2_2_repro_abandoned_draft_does_not_lock_out(self):
+        # THE reported bug: a diner initiates, abandons (no submit), then
+        # re-initiates with a NEW client_order_id. The stale draft must NOT lock
+        # them out of their own table with a 400 'ongoing order'.
+        self._draft(self.table1, client_order_id=uuid.uuid4())  # abandoned draft
+        resume = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+            client_order_id=uuid.uuid4(),
+        )
+        self.assertEqual(resume['status'], 200)
+        self.assertFalse(resume['idempotent'])
+
+    # --- the table is claimed at submit -----------------------------------
+
+    def test_submit_claims_the_table(self):
+        order = self._draft(self.table1)['order']
+        self.assertEqual(self._submit(order)['status'], 200)
+
+        present = ConOrder.any_present_ongoing_order(self.table1)
+        self.assertTrue(present['present'])
+        self.assertEqual(str(present['order_id']), str(order.id))
+
+        # a fresh initiate on the now-claimed table is gated
+        blocked = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+            client_order_id=uuid.uuid4(),
+        )
+        self.assertEqual(blocked['status'], 400)
+        self.assertEqual(blocked['message'], 'The table has an ongoing order')
+
+    def test_two_drafts_submit_serialize_second_gated(self):
+        # Two drafts on one table (different client_order_ids). Submit both: the
+        # first claims the table, the second is cleanly gated by the new gate.
+        a = self._draft(self.table1, client_order_id=uuid.uuid4())['order']
+        b = self._draft(self.table1, client_order_id=uuid.uuid4())['order']
+
+        first = self._submit(a)
+        self.assertEqual(first['status'], 200)
+
+        second = self._submit(b)
+        self.assertEqual(second['status'], 400)
+        self.assertEqual(second['message'], 'The table has an ongoing order')
+
+    def test_submit_locks_the_table_row(self):
+        # The submit path takes the same Table row lock the create path does
+        # (mirrors TableLockTests.test_create_locks_the_table_row). `wraps` spies
+        # without replacing, so the real select_for_update still runs.
+        order = self._draft(self.table1)['order']
+        with mock.patch.object(
+            Table.objects, 'select_for_update',
+            wraps=Table.objects.select_for_update,
+        ) as spy:
+            result = self._submit(order)
+        self.assertEqual(result['status'], 200)
+        self.assertTrue(spy.called)
+
+    def test_double_submit_same_order_is_rejected(self):
+        # The status is re-checked on the FRESH row under the lock, so a second
+        # submit of an already-submitted order gets today's 400.
+        order = self._draft(self.table1)['order']
+        self.assertEqual(self._submit(order)['status'], 200)
+        second = self._submit(order)
+        self.assertEqual(second['status'], 400)
+        self.assertEqual(second['message'], 'This order cannot be submitted.')
+
+    def test_idempotent_resume_then_submit(self):
+        # initiate K -> abandon -> initiate SAME K returns the existing draft (no
+        # second order) -> submit succeeds.
+        k = uuid.uuid4()
+        first = self._draft(self.table1, client_order_id=k)
+        replay = _create_order(
+            restaurant=self.restaurant, table=self.table1, items=self._items(),
+            client_order_id=k,
+        )
+        self.assertEqual(replay['status'], 200)
+        self.assertTrue(replay['idempotent'])
+        self.assertEqual(str(replay['order'].id), str(first['order'].id))
+        self.assertEqual(
+            Order.objects.filter(
+                restaurant=self.restaurant, table=self.table1,
+            ).count(),
+            1,
+        )
+        self.assertEqual(self._submit(replay['order'])['status'], 200)
+
+    def test_end_to_end_submit_prepare_serve_frees_table(self):
+        # Regression: a submitted order reaches the KDS, advances through the
+        # fulfilment axis, and serving frees the table (occupancy keys off
+        # fulfilment) and drops it from the active board.
+        order = self._draft(self.table1)['order']
+        self.assertEqual(self._submit(order)['status'], 200)
+        self.assertIn(str(order.id), self._active_ids(self.kitchen_user))
+
+        self.client.force_authenticate(user=self.kitchen_user)
+        for target in ('preparing', 'ready', 'served'):
+            resp = self.client.put(
+                _fulfilment_url(order.id),
+                {'fulfilment_status': target}, format='json',
+            )
+            self.assertEqual(resp.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, 'served')
+
+        self._assert_free(self.table1)
+        self.assertNotIn(str(order.id), self._active_ids(self.kitchen_user))
 
 
 class KitchenMenuItemStockTests(KitchenTestBase):
@@ -894,7 +1093,9 @@ class KitchenCancelTests(KitchenTestBase):
             self.assertEqual(order.fulfilment_status, 'new')
 
     def test_cancel_frees_table_and_drops_from_active_set(self):
-        order = self._make_order(self.table1, fulfilment_status='new')
+        order = self._make_order(
+            self.table1, fulfilment_status='new', order_status=OrderStatus_Pending,
+        )
         # occupied and on the board before cancellation
         self.assertTrue(any_present_ongoing_order(self.table1)['present'])
         self.assertIn(str(order.id), self._active_ids(self.kitchen_user))

@@ -34,6 +34,7 @@ from users_app.controllers.permissions_check import (
 from dinify_backend.configss.string_definitions import (
     MODULE_KITCHEN,
     OrderStatus_Cancelled,
+    OrderStatus_Initiated,
     OrderStatus_Served,
     OrderStatus_Pending,
     CANCELLATION_REASONS,
@@ -92,7 +93,9 @@ class ActiveKitchenOrdersView(APIView):
 
         # Served tickets leave the board immediately — they live in the
         # Completed feed (CompletedKitchenOrdersView) until COMPLETED_WINDOW
-        # lapses. The board only ever shows new / preparing / ready.
+        # lapses. The board only ever shows SUBMITTED tickets that are
+        # new / preparing / ready — an 'initiated' order is an unconfirmed
+        # draft and never reaches the kitchen until it is submitted.
         qs = (
             Order.objects
             .filter(
@@ -101,6 +104,7 @@ class ActiveKitchenOrdersView(APIView):
                 restaurant=restaurant_id,
             )
             .exclude(order_status=OrderStatus_Cancelled)
+            .exclude(order_status=OrderStatus_Initiated)
             .select_related('table')
             .prefetch_related(
                 Prefetch(
