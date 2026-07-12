@@ -1,5 +1,7 @@
 import uuid
 
+from django.core.exceptions import ValidationError
+
 from restaurants_app.models import Table, MenuSection, UpsellConfig, Restaurant
 from restaurants_app.serializers import (
     SerializerPublicGetTableDetails, SerializerGetFullMenu, UpsellConfigSerializer
@@ -123,7 +125,15 @@ def handle_show_order_details(order_id: str) -> dict:
         }
         return response
 
-    order = Order.objects.get(id=order_id)
+    # Public AllowAny path with a client-supplied id: a malformed (non-UUID) or
+    # nonexistent id must return a clean 4xx, not a 500.
+    try:
+        order = Order.objects.get(id=order_id)
+    except ValidationError:
+        return {'status': 400, 'message': 'Invalid order id'}
+    except Order.DoesNotExist:
+        return {'status': 404, 'message': 'Order not found'}
+
     response = {
         'status': 200,
         'message': 'Successfully retrieved the order details',
@@ -140,9 +150,16 @@ def handle_show_transaction_details(transaction_id: str) -> dict:
         }
         return response
 
-    transaction_record = DinifyTransaction.objects.values(
-        'id', 'order', 'transaction_amount', 'transaction_status'
-    ).get(id=transaction_id)
+    # Public AllowAny path with a client-supplied id: a malformed (non-UUID) or
+    # nonexistent id must return a clean 4xx, not a 500.
+    try:
+        transaction_record = DinifyTransaction.objects.values(
+            'id', 'order', 'transaction_amount', 'transaction_status'
+        ).get(id=transaction_id)
+    except ValidationError:
+        return {'status': 400, 'message': 'Invalid transaction reference'}
+    except DinifyTransaction.DoesNotExist:
+        return {'status': 404, 'message': 'Transaction not found'}
 
     response = {
         'status': 200,

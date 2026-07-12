@@ -485,6 +485,34 @@ class TestAnonymousOrderPaths(TestCase):
         response = self.client.get(f'/api/v2/orders/details/?order={order_id}')
         self.assertEqual(response.status_code, 404)
 
+    def test_submit_missing_order_returns_400(self):
+        # No 'order' in the body: the guard returns 400 without calling
+        # .get(id=None), rather than surfacing a 500.
+        response = self.client.put('/api/v1/orders/submit/', {}, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_submit_malformed_order_id_returns_400(self):
+        # A non-UUID order id raises ValidationError in the ORM lookup and is
+        # converted to a clean 400, not a 500.
+        response = self.client.put(
+            '/api/v1/orders/submit/', {'order': 'not-a-uuid'}, format='json',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_submit_nonexistent_order_id_returns_404(self):
+        # A well-formed but unknown order id raises DoesNotExist -> 404, not 500.
+        response = self.client.put(
+            '/api/v1/orders/submit/', {'order': str(uuid4())}, format='json',
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_submit_unknown_action_still_404(self):
+        # Any action other than 'submit' still 404s (unchanged dispatch).
+        response = self.client.put(
+            '/api/v1/orders/frobnicate/', {'order': str(uuid4())}, format='json',
+        )
+        self.assertEqual(response.status_code, 404)
+
 
 class TestDiscountActivationPricing(TestCase):
     """The effective unit price honours the single, timezone-aware discount
