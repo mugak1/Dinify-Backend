@@ -7,8 +7,9 @@ priority), the finance/kitchen field isolation, and that the retired KDS routes
 are gone.
 """
 import uuid
+import warnings
 from decimal import Decimal
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from unittest import mock
 
 from django.db import IntegrityError
@@ -117,7 +118,7 @@ class KitchenTestBase(TestCase):
             restaurant=self.restaurant,
             table=table or self.table1,
             total_cost=0, discounted_cost=0, savings=0, actual_cost=0,
-            order_status=OrderStatus_Initiated,
+            order_status=OrderStatus_Pending,
             payment_status=PaymentStatus_Pending,
             fulfilment_status='new',
             order_date=timezone.localdate(),
@@ -1116,7 +1117,7 @@ class KitchenCancelTests(KitchenTestBase):
     def test_preparing_or_ready_requires_manager(self):
         for status in ('preparing', 'ready'):
             # a kitchen-only user is denied once preparation has started
-            order = self._make_order(fulfilment_status=status)
+            order = self._make_order(fulfilment_status=status, order_status=OrderStatus_Initiated)
             response = self._cancel(order, self.kitchen_user, cancellation_reason=self.VALID_REASON)
             self.assertEqual(response.status_code, 403, msg=f'kitchen denied for {status}')
             order.refresh_from_db()
@@ -1136,7 +1137,7 @@ class KitchenCancelTests(KitchenTestBase):
 
     def test_served_order_not_cancellable(self):
         # 'served' is blocked even for a manager with a valid reason; recall first.
-        order = self._make_order(fulfilment_status='served', served_at=timezone.now())
+        order = self._make_order(fulfilment_status='served', served_at=timezone.now(), order_status=OrderStatus_Initiated)
         response = self._cancel(order, self.manager_user, cancellation_reason=self.VALID_REASON)
         self.assertEqual(response.status_code, 400)
         order.refresh_from_db()
@@ -1148,7 +1149,7 @@ class KitchenCancelTests(KitchenTestBase):
         self.assertEqual(response.status_code, 400)
 
     def test_missing_or_invalid_reason_returns_400(self):
-        order = self._make_order(fulfilment_status='new')
+        order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Initiated)
         # missing reason
         self.assertEqual(self._cancel(order, self.kitchen_user).status_code, 400)
         order.refresh_from_db()
@@ -1162,7 +1163,7 @@ class KitchenCancelTests(KitchenTestBase):
         self.assertEqual(order.order_status, OrderStatus_Initiated)
 
     def test_denied_for_user_without_kitchen_role(self):
-        order = self._make_order(fulfilment_status='new')
+        order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Initiated)
         for user in (self.waiter_user, self.outsider_user):
             response = self._cancel(order, user, cancellation_reason=self.VALID_REASON)
             self.assertEqual(response.status_code, 403, msg=f'expected 403 for {user.username}')
@@ -1373,3 +1374,31 @@ class KitchenServeAdvancesOrderStatusTests(KitchenTestBase):
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.order_status, OrderStatus_Served)
+
+
+class KitchenClockTests(KitchenTestBase):
+    """
+    Class B: the manual ``time_last_updated = datetime.now()`` writes were removed
+    from manage_order — ``BaseModel.time_last_updated`` is ``auto_now=True``, so the
+    save (not a hand-rolled naive assignment) stamps it with an aware
+    ``timezone.now()``. Freeze the clock and assert a live submit transition stamps
+    the frozen aware instant and emits no naive-datetime RuntimeWarning.
+    """
+
+    FROZEN = datetime(2026, 7, 31, 22, 30, tzinfo=dt_timezone.utc)
+
+    @mock.patch('django.utils.timezone.now')
+    def test_submit_stamps_aware_time_last_updated_without_warning(self, mock_now):
+        mock_now.return_value = self.FROZEN
+        order = self._make_order(order_status=OrderStatus_Initiated)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            result = update_order_status(order, OrderStatus_Pending, self.owner_user)
+        self.assertEqual(result['status'], 200)
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, OrderStatus_Pending)
+        # auto_now stamped it with the aware, frozen instant.
+        self.assertTrue(timezone.is_aware(order.time_last_updated))
+        self.assertEqual(order.time_last_updated, self.FROZEN)
+        naive = [w for w in caught if 'received a naive datetime' in str(w.message)]
+        self.assertEqual(naive, [])

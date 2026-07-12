@@ -3,7 +3,6 @@ handle the submission of an order
 """
 import logging
 
-from datetime import datetime
 from typing import Union
 from django.db import transaction
 from users_app.models import User
@@ -55,7 +54,7 @@ def update_order_status(
                 item.status = OrderItemStatus_Preparing
                 item.last_updated_by = user
                 item.save()
-        order.time_last_updated = datetime.now()
+        # time_last_updated is auto_now on BaseModel — the save stamps it.
         order.save()
         return {
             'status': 200,
@@ -134,7 +133,7 @@ def _submit_order(order: Order, user: Union[User, None]) -> dict:
         order.order_status = OrderStatus_Pending
         if user is not None:
             order.last_updated_by = user
-        order.time_last_updated = datetime.now()
+        # time_last_updated is auto_now on BaseModel — the save stamps it.
         order.save()
 
     return {
@@ -166,11 +165,9 @@ def update_item_status(
                 'message': ERR_ORDER_ITEM_NOT_AVAILABLE
             }
 
-        time_now = datetime.now()
-
+        # time_last_updated is auto_now on BaseModel — each save stamps it.
         item.status = new_status
         item.last_updated_by = user
-        item.time_last_updated = time_now
         item.save()
 
         # check if to set the order status to served
@@ -186,7 +183,6 @@ def update_item_status(
             if available_order_items.count() == updated_items.count():
                 order.order_status = new_status  # OrderStatus_Served
                 order.last_updated_by = user
-                order.time_last_updated = time_now
                 order.save()
 
         return {

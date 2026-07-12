@@ -1,7 +1,7 @@
 """
 endpoints to handle order
 """
-from datetime import datetime
+from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from users_app.controllers.permissions_check import can_user_access_module
@@ -45,7 +45,10 @@ class RestaurantReportsEndpoint(APIView):
         ):
             return Response({'status': 404, 'message': 'Not found'}, status=404)
 
-        date_today = datetime.now().date()
+        # Default the from/to window to *today in EAT*. A naive datetime.now()
+        # returns the server's UTC wall clock, so between 00:00-03:00 EAT it
+        # would report yesterday; timezone.localdate() resolves in EAT.
+        date_today = timezone.localdate()
         if report_name == 'dashboard':
             response = generate_restaurant_dashboard_details(
                 restaurant_id=request.GET.get('restaurant', None),

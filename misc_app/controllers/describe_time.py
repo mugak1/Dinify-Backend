@@ -1,11 +1,15 @@
 import datetime
 from dateutil import parser
+from django.utils import timezone
 
 day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 
 def describe_time() -> dict:
-    now = datetime.datetime.now()
+    # EAT wall clock as a naive value — corrects the date/hour fields while
+    # preserving the dict shape (utc_offset/timezone stay None). A naive
+    # datetime.now() on the UTC server would otherwise stamp UTC values.
+    now = timezone.localtime(timezone.now()).replace(tzinfo=None)
     time_dict = {
         'date': now.day,
         'month': now.month,

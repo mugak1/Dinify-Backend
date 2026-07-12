@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
+from django.utils import timezone
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from finance_app.models import DinifyTransaction
 from orders_app.models import Order
@@ -24,9 +25,12 @@ def summarize_restaurants():
         RestaurantStatus_Rejected
     ]
     summary = {'total': restaurants.count()}
+    # "This month" in EAT — the DB extracts time_created in EAT, so the
+    # comparison values must be EAT too (naive datetime.now() is UTC wall clock).
+    local_now = timezone.localtime(timezone.now())
     summary['monthly'] = Restaurant.objects.filter(
-        time_created__month=datetime.now().month,
-        time_created__year=datetime.now().year
+        time_created__month=local_now.month,
+        time_created__year=local_now.year
     ).count()
     summary['month_growth'] = 'up'
     status_breakdown = {}
@@ -40,9 +44,10 @@ def summarize_restaurants():
 def summarize_orders():
     orders = Order.objects.all()
     summary = {'total': orders.count()}
+    local_now = timezone.localtime(timezone.now())
     summary['monthly'] = orders.filter(
-        time_created__month=datetime.now().month,
-        time_created__year=datetime.now().year
+        time_created__month=local_now.month,
+        time_created__year=local_now.year
     ).count()
     summary['month_growth'] = 'up'
     status_breakdown = {}
@@ -62,9 +67,10 @@ def summarize_orders():
 def summarize_users():
     users = User.objects.all()
     summary = {'total': users.count()}
+    local_now = timezone.localtime(timezone.now())
     summary['monthly'] = users.filter(
-        date_joined__month=datetime.now().month,
-        date_joined__year=datetime.now().year
+        date_joined__month=local_now.month,
+        date_joined__year=local_now.year
     ).count()
     summary['month_growth'] = 'up'
     # filter for users where the roles have the word 'dinify' in them
@@ -80,9 +86,10 @@ def summarize_dinify_earnings():
     )
 
     cum_dinify_revenue = dinify_revenue.aggregate(Sum('transaction_amount'))['transaction_amount__sum']
+    local_now = timezone.localtime(timezone.now())
     monthly_dinify_revenue = dinify_revenue.filter(
-        time_created__month=datetime.now().month,
-        time_created__year=datetime.now().year
+        time_created__month=local_now.month,
+        time_created__year=local_now.year
     ).aggregate(Sum('transaction_amount'))['transaction_amount__sum']
 
     summary = {'total': cum_dinify_revenue if cum_dinify_revenue else 0.0}
@@ -137,8 +144,8 @@ def generate_dinify_dashboard() -> dict:
 
 
 def generate_dinify_dashboard_trend() -> dict:
-    # get the last 7 days
-    date_today = datetime.now().date()
+    # get the last 7 days (in EAT — naive datetime.now() is UTC wall clock)
+    date_today = timezone.localdate()
     date_from = date_today - timedelta(days=7)
     date_to = date_today
     days = []

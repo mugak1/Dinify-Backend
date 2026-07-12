@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 import statistics
 
@@ -124,9 +124,12 @@ def summarize_revenue(restaurant_id: str):
         payment_status=PaymentStatus_Paid
     )
     total_revenue = orders.aggregate(total_revenue=Sum('actual_cost'))['total_revenue']
+    # Resolve "this month" in EAT — the DB extracts time_created in EAT, so the
+    # comparison values must be EAT too (naive datetime.now() is UTC wall clock).
+    local_now = timezone.localtime(timezone.now())
     this_month_revenue = orders.filter(
-        time_created__month=datetime.now().month,
-        time_created__year=datetime.now().year
+        time_created__month=local_now.month,
+        time_created__year=local_now.year
     ).aggregate(total_revenue=Sum('actual_cost'))['total_revenue']
     # last_month_revenue = orders.filter(
     #     time_created__month=datetime.now().month - 1
@@ -144,9 +147,11 @@ def summarize_orders(restaurant_id: str):
         restaurant=restaurant_id
     )
     num_orders = orders.count()
+    # Resolve "this month" in EAT (see summarize_revenue).
+    local_now = timezone.localtime(timezone.now())
     this_month_orders = orders.filter(
-        time_created__month=datetime.now().month,
-        time_created__year=datetime.now().year
+        time_created__month=local_now.month,
+        time_created__year=local_now.year
     ).count()
     # last_month_orders = orders.filter(
     #     time_created__month=datetime.now().month - 1
@@ -193,8 +198,8 @@ def summarize_orders(restaurant_id: str):
 
     diners = closed_orders.values('customer').distinct().count()
     monthly_diners = closed_orders.filter(
-        time_created__month=datetime.now().month,
-        time_created__year=datetime.now().year
+        time_created__month=local_now.month,
+        time_created__year=local_now.year
     ).values('customer').distinct().count()
 
     return {
