@@ -209,8 +209,13 @@ Response: { "access": "<new-access-token>" }
   for a stabilization pass.
 
 ### Permissions
-- `OrderPaymentsEndpoint` uses `AllowAny` — intentional for anonymous web
-  payments but should be reviewed for whether unauthenticated users should be
-  able to initiate payments.
+- `OrderPaymentsEndpoint` (the `AllowAny` `initiate-order-payment/` write path)
+  has been **RETIRED** — the endpoint, its route, and the
+  `OrderPaymentTransaction` controller were deleted. It created a
+  `DinifyTransaction` for any order UUID with no authentication, no ownership
+  check, and a client-supplied `split` amount. The order-payment path will be
+  rebuilt at PSP integration (authenticated, ownership-gated, server-bounded
+  amounts, non-custodial). The record-only `DinifyTransaction` model remains
+  (subscriptions + Transactions reports).
 - `MsisdnLookupEndpoint` uses `AllowAny` — may allow user enumeration by
   phone number. Needs product decision.

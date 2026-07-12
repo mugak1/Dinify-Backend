@@ -229,7 +229,7 @@ These are issues acknowledged in the codebase as of the current state:
 
 **Hardcoded payment URLs:** Yo Uganda sandbox (`sandbox.yo.co.ug`) and Pesapal sandbox (`cybqa.pesapal.com`) URLs are hardcoded. DPO redirect URL (`https://dinify-web`) is incomplete/placeholder. These need environment-based configuration before production use.
 
-**Permissions:** `OrderPaymentsEndpoint` and `MsisdnLookupEndpoint` use `AllowAny` — intentional for their use cases but warrant review for whether unauthenticated access is appropriate.
+**Permissions:** `MsisdnLookupEndpoint` uses `AllowAny` — intentional for its use case but warrants review for whether unauthenticated access is appropriate. (The former `AllowAny` `OrderPaymentsEndpoint` / `initiate-order-payment/` write path was retired — endpoint, route, and `OrderPaymentTransaction` controller deleted — to be rebuilt authenticated + ownership-gated at PSP integration.)
 
 **Test gaps:** Two apps have no tests at all (`notifications_app`, `reports_app`). The full suite now runs in CI against PostgreSQL 15, so every app that *does* have tests is exercised there.
 

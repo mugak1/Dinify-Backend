@@ -1,24 +1,18 @@
 from decimal import Decimal
 from unittest.mock import patch
 from django.test import TestCase
-from users_app.models import User
-from users_app.tests import TEST_PHONE, seed_user
+from users_app.tests import seed_user
 from finance_app.models import DinifyTransaction
-from restaurants_app.models import Restaurant, Table
+from restaurants_app.models import Restaurant
 from dinify_backend.configss.string_definitions import (
     ProcessingStatus_Pending,
     PaymentMode_MobileMoney,
-    PaymentMode_Card,
 )
 from orders_app.tests import seed_order
-from orders_app.models import Order
 from restaurants_app.tests import (
     seed_restaurant, seed_menu_section, seed_menu_items, seed_tables,
-    TEST_RESTAURANT_NAME, TEST_TABLE_NUMBER4
+    TEST_RESTAURANT_NAME,
 )
-from users_app.controllers.otp_manager import OtpManager
-
-from finance_app.controllers.tx_order_payment import OrderPaymentTransaction
 from finance_app.controllers.tx_subscription import SubscriptionPaymentTransaction
 
 TEST_MSISDN = '256700000000'
@@ -62,66 +56,6 @@ class FinanceAppTestFunctions(TestCase):
         seed_tables()
         seed_order()
 
-    def test_momo_payment_full_no_tip(self, *mocks):
-        """MoMo initiate now stubs to a pending transaction (no aggregator call)."""
-        restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-        table = Table.objects.get(number=TEST_TABLE_NUMBER4)
-        user = User.objects.get(username=TEST_PHONE)
-
-        order = Order.objects.create(
-            restaurant=restaurant,
-            table=table,
-            customer=user,
-            total_cost=100000,
-            discounted_cost=100000,
-            savings=0,
-            actual_cost=100000,
-            prepayment_required=True,
-            order_status='served'
-        )
-
-        # Without OTP/amount — should be rejected
-        result = OrderPaymentTransaction().initiate(
-            order=order,
-            payment_mode=PaymentMode_MobileMoney,
-            msisdn=TEST_MSISDN
-        )
-        self.assertEqual(result['status'], 400)
-
-        # Request OTP — mocked to avoid the user=None crash in resend_otp
-        # (the bug: resend_otp with identification='msisdn' leaves user=None,
-        #  then tries to access user.phone_number on line 183)
-        OtpManager().resend_otp(
-            identification='msisdn',
-            identifier=TEST_MSISDN
-        )
-
-        # With OTP — initiate returns a plain pending response and records the
-        # transaction; the aggregator collection call was retired in 8a.
-        result = OrderPaymentTransaction().initiate(
-            order=order,
-            payment_mode=PaymentMode_MobileMoney,
-            msisdn=TEST_MSISDN,
-            otp='1234',
-            amount=100000
-        )
-        self.assertEqual(result['status'], 200)
-        self.assertIn('transaction_id', result['data'])
-
-        tx = DinifyTransaction.objects.get(id=result['data']['transaction_id'])
-        self.assertEqual(tx.processing_status, ProcessingStatus_Pending)
-
-        # Card path now returns the same plain pending response — no DPO
-        # redirect/token (deliberate contract change; frontend follow-up).
-        card_result = OrderPaymentTransaction().initiate(
-            order=order,
-            payment_mode=PaymentMode_Card,
-            amount=100000
-        )
-        self.assertEqual(card_result['status'], 200)
-        self.assertNotIn('redirect_url', card_result['data'])
-        self.assertNotIn('dpo_token', card_result['data'])
-
     def test_subscription_payment(self, *mocks):
         """Subscription initiate now stubs to a pending transaction (no aggregator call)."""
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
@@ -163,3 +97,17 @@ class FinanceAppTestFunctions(TestCase):
             restaurant=restaurant
         )
         self.assertTrue(revenue_txs.exists())
+
+
+class RetiredOrderPaymentRouteTests(TestCase):
+    """The anonymous ``initiate-order-payment`` write path (OrderPaymentsEndpoint
+    + OrderPaymentTransaction) was retired. The route must no longer resolve — a
+    POST returns 404 (no route), not 500/200.
+    """
+
+    def test_initiate_order_payment_route_returns_404(self):
+        response = self.client.post(
+            '/api/v1/finances/initiate-order-payment/', {},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 404)

@@ -99,7 +99,7 @@ don't run on `.create()`), so tip rows exist unvalidated. Minor data-integrity n
 | C3 | `controllers/tx_subscription.py` `SubscriptionPaymentTransaction.process()` OVA branch (`:186-222`) | When `payment_mode==ova`: DEBIT restaurant `DinifyAccount` (`amount_out`) then CREDIT `dinify_revenue` account (`amount_in`) + 2nd DinifyTransaction. **Textbook fee-netting from held funds.** | A,B,E,F | HIGH | REMOVE OVA path; bill subscription separately (invoice), never net from held balance |
 | C4 | `controllers/tx_subscription.py` momo/card branch (`:92-170`) | Collects subscription via Yo/DPO on Dinify credentials; on confirm CREDITS the account balance. | A,D,F | MED | RE-SCOPE: subscription billing decoupled from any held balance; Dinify-direct billing |
 | C5 | `controllers/initiate_refund.py` `initiate_refund()` | Creates `OrderRefund` DinifyTransaction vs restaurant account; for momo fires `Flutterwave(...).send_mobile_money()` to pay the customer **from Dinify's Flutterwave float**. Dinify decides/executes the refund. | A,G | HIGH | REPLACE: relay/record a restaurant/PSP refund decision only; never push from a Dinify float |
-| C6 | `controllers/tx_order_payment.py` `OrderPaymentTransaction.initiate()/process()` | Records order payment vs restaurant `DinifyAccount`; calls Yo/DPO on Dinify credentials; on success CREDITS restaurant balance + writes `Order.total_paid`/`balance_payable`/`payment_status`; triggers tip collection. | A,B,D,H | HIGH | REPLACE-WITH-RESTAURANT-DIRECT for collection; KEEP only the Order-state update (re-scoped to reflect aggregator callback, not a balance credit) |
+| C6 | `controllers/tx_order_payment.py` `OrderPaymentTransaction.initiate()/process()` | Records order payment vs restaurant `DinifyAccount`; calls Yo/DPO on Dinify credentials; on success CREDITS restaurant balance + writes `Order.total_paid`/`balance_payable`/`payment_status`; triggers tip collection. | A,B,D,H | HIGH | REPLACE-WITH-RESTAURANT-DIRECT for collection; KEEP only the Order-state update (re-scoped to reflect aggregator callback, not a balance credit) — **RETIRED:** `tx_order_payment.py` DELETED (order-payment write path removed; no Order-state update remained to keep). Rebuild at PSP integration. |
 | C7 | `controllers/tx_tip.py` `TipTransaction.initiate()` | Creates/credits a waiter `DinifyAccount` (`AccountType_User`) and records a `Tip` transaction — tips held in a Dinify wallet. | A,B,E | MED | REPLACE-WITH-RESTAURANT-DIRECT (tip settles to waiter/restaurant directly) |
 | C8 | `controllers/process_order_payment.py` `process_order_payment()`/`collect_tip()` | Updates Order paid/balance/payment_status on success; `collect_tip()` credits waiter wallet. Legacy-ish; depends on custodial transaction state. | A,B | MED | KEEP order-state logic, RE-SCOPE to aggregator-callback driven; drop wallet credit |
 | C9 | `controllers/process_payment_feedback.py`, `process_yo_feedback.py` | Route aggregator responses to transaction processors; mark confirmed; trigger balance updates. | A,B | MED | RE-SCOPE-TO-RECORD-ONLY (record callback; no balance mutation) |
@@ -112,10 +112,23 @@ don't run on `.create()`), so tip rows exist unvalidated. Minor data-integrity n
 |---|---|---|---|---|---|
 | E1 | root `dinify_backend/urls.py:29` → `finance_app/urls.py` | Mounts at `api/v1/finances/`: `initiate-order-payment/` (`OrderPaymentsEndpoint`), `transactions/` (`TransactionsEndpoint` — routes subscription/disbursement/refund), `bank-accounts/` (`BankAccountRecordsEndpoint`). | A,C,D,G | HIGH | RE-SCOPE: keep payment-initiation (restaurant-direct) + records; REMOVE disbursement/refund routes |
 | E2 | `endpoints/transactions.py` `TransactionsEndpoint` | Single endpoint dispatching subscription / **disbursement** / **refund** to the custodial controllers (C2/C3/C5). | A,C,G | HIGH | REMOVE disbursement+refund dispatch; re-scope subscription |
-| E3 | `endpoints/order_payments.py` `OrderPaymentsEndpoint` | POST initiates order payment (→ C6). | A,D | HIGH | REPLACE-WITH-RESTAURANT-DIRECT |
+| E3 | `endpoints/order_payments.py` `OrderPaymentsEndpoint` | POST initiates order payment (→ C6). | A,D | HIGH | REPLACE-WITH-RESTAURANT-DIRECT — **RETIRED:** `OrderPaymentsEndpoint` + the `initiate-order-payment/` route DELETED (POST now 404s). |
 | E4 | `endpoints/bank_account.py` `BankAccountRecordsEndpoint` | CRUD for `BankAccountRecord` incl. `yo_reference` lifecycle (used for Dinify-controlled disbursement). | C,H | MED-HIGH | REPLACE-WITH-RESTAURANT-DIRECT (settlement-destination config) |
 | E5 | `serializers.py` `SerializerGetRestaurantTransactionListing` / `SerializerGetDinifyTransactionListing` | Both expose `account_balances` (Dinify-held balance snapshot) over the API; restaurant listing also derives `amount_in`/`amount_out`. | B,I | MED | REMOVE `account_balances`/`amount_in`/`amount_out` from API; keep neutral record fields |
 | E6 | `serializers.py` `SerializerPutAccount` / `SerializerPutDinifyTransaction` | `fields='__all__'` over `DinifyAccount`/`DinifyTransaction` — exposes/writes every balance field. | A,B | MED | REMOVE/restrict once models re-scoped |
+
+> **Update — order-payment write path RETIRED (post-audit):** The anonymous
+> `AllowAny` `initiate-order-payment/` route, `OrderPaymentsEndpoint` (E3), and
+> `OrderPaymentTransaction` (C6) have been **DELETED** — the endpoint wrote a
+> `DinifyTransaction` for any order UUID with no auth, no ownership check, and a
+> client-supplied `split` amount (closes BUG-P2-3e / BUG-P2-7). The record-only
+> `DinifyTransaction` model, its serializers, the subscription writer
+> `tx_subscription.py` (via the surviving `TransactionsEndpoint`), and both
+> Transactions reports remain in use and are unchanged. The order-payment
+> collection path will be rebuilt at PSP integration: authenticated,
+> ownership-gated, server-bounded amounts, non-custodial Pattern A. This note
+> annotates the frozen AS-WAS inventory; the rows above are left intact as the
+> historical record.
 
 ### 4) finance_app management commands (scheduled jobs — HIGH/MED)
 
