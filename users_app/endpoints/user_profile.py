@@ -6,7 +6,6 @@ from users_app.controllers.update_user_profile import (
     self_update_user_profile,
     update_user_profile
 )
-from users_app.controllers.profile_update_approvals import get_pending_profile_updates
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +33,6 @@ class UserProfileEndpoint(APIView):
 
 
 class V2UserProfileEndpoint(APIView):
-    def get(self, request, intention):
-        if intention == 'pending-approvals':
-            response = get_pending_profile_updates(
-                user=request.user,
-                restaurant=request.query_params.get('restaurant')
-            )
-            return Response(response, status=response.get('status', 200))
-
     def put(self, request, action):
         if action == 'update-profile':
             try:

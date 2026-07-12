@@ -7,8 +7,8 @@ Three explicit-field serializers (never ``__all__``):
   ``internal_notes`` and ``assigned_to``.
 - ``SupportIssueAdminReadSerializer``  -> Dinify-staff reads; full fields.
 
-All name helpers are NULL-SAFE — the legacy ``crm_app`` ``get_created_by``
-crashes when ``created_by`` is null; we must not repeat that.
+All name helpers are NULL-SAFE — a ``get_created_by`` that dereferences a null
+``created_by`` crashes; we must not repeat that.
 """
 from rest_framework import serializers
 

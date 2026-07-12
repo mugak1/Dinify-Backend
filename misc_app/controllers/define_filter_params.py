@@ -54,18 +54,6 @@ ORDER_FILTERS = {
     'payment_status': 'payment_status'
 }
 
-SERVICE_TICKET_FILTERS = {
-    'ticket_type': 'ticket_type',
-    'ticket_title': 'ticket_title__icontains',
-    'ticket_description': 'ticket_description__icontains',
-    'ticket_status': 'ticket_status',
-    'ticket_priority': 'ticket_priority',
-    'restaurant': 'restaurant',
-    'assigned_to': 'assigned_to',
-    'assigned_by': 'assigned_by',
-    'resolution_notes': 'resolution_notes__icontains',
-}
-
 DINING_AREA_FILTERS = {
     'name': 'name__icontains',
     'outdoor_seating': 'outdoor_seating',
@@ -88,7 +76,6 @@ FILTER_DEFINITIONS = {
     'menuitems': MENU_ITEM_FILTERS,
     'tables': TABLE_FILTERS,
     'orders': ORDER_FILTERS,
-    'servicetickets': SERVICE_TICKET_FILTERS,
     'diningareas': DINING_AREA_FILTERS,
     'supportissues': SUPPORT_ISSUE_FILTERS
 }
@@ -99,6 +86,8 @@ def define_filter_params(get_params, model) -> dict:
     defines the parameters to consider for the filter
     """
     filter_params = {}
+    # resolve the model's filter map once; unknown model -> empty (no filters)
+    filter_considerations = FILTER_DEFINITIONS.get(model) or {}
 
     # define the filter considerations
     for key, value in get_params.items():
@@ -107,8 +96,8 @@ def define_filter_params(get_params, model) -> dict:
             continue
         # check if the length is greater than 1
         if len(value) > 1:
-            filter_considerations = FILTER_DEFINITIONS.get(model)
-            filter_params[
-                filter_considerations[key.lower()]
-            ] = value
+            # only apply known filter keys; unknown params are skipped
+            mapped = filter_considerations.get(key.lower())
+            if mapped is not None:
+                filter_params[mapped] = value
     return filter_params

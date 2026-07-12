@@ -7,9 +7,10 @@ owner-configured Roles & Access grid for the `kitchen` module
 takes server-side effect. The in-progress goodwill-cancel escalation defers to
 the manage-level gate (can_manage_restaurant), which is intentionally NOT
 module-granular. All views are authenticated via the global SimpleJWT default —
-there is no AllowAny here. Kitchen writes ONLY the fulfilment axis
-(fulfilment_status, priority, served_at and the fulfilment timestamps);
-order_status / payment_status stay finance-owned.
+there is no AllowAny here. Kitchen writes the fulfilment axis (fulfilment_status,
+priority, served_at and the fulfilment timestamps) and, on the serve/recall
+completion transition and on cancel, order_status; payment_status stays
+finance-owned.
 """
 import logging
 from datetime import timedelta
@@ -33,6 +34,9 @@ from users_app.controllers.permissions_check import (
 from dinify_backend.configss.string_definitions import (
     MODULE_KITCHEN,
     OrderStatus_Cancelled,
+    OrderStatus_Initiated,
+    OrderStatus_Served,
+    OrderStatus_Pending,
     CANCELLATION_REASONS,
 )
 
@@ -89,7 +93,9 @@ class ActiveKitchenOrdersView(APIView):
 
         # Served tickets leave the board immediately — they live in the
         # Completed feed (CompletedKitchenOrdersView) until COMPLETED_WINDOW
-        # lapses. The board only ever shows new / preparing / ready.
+        # lapses. The board only ever shows SUBMITTED tickets that are
+        # new / preparing / ready — an 'initiated' order is an unconfirmed
+        # draft and never reaches the kitchen until it is submitted.
         qs = (
             Order.objects
             .filter(
@@ -98,6 +104,7 @@ class ActiveKitchenOrdersView(APIView):
                 restaurant=restaurant_id,
             )
             .exclude(order_status=OrderStatus_Cancelled)
+            .exclude(order_status=OrderStatus_Initiated)
             .select_related('table')
             .prefetch_related(
                 Prefetch(
@@ -186,14 +193,29 @@ class KitchenOrderFulfilmentStatusView(APIView):
         current = order.fulfilment_status
         now = timezone.now()
 
+        # The completion transition couples the finance-owned order_status to
+        # the fulfilment axis: serving completes the sale (-> 'served');
+        # recalling reverts it (-> 'pending'). Tracked here so order_status is
+        # added to update_fields ONLY on the branch where it actually changed.
+        order_status_changed = False
+
         if FORWARD_TRANSITIONS.get(current) == target:
-            # forward one step; entering served stamps served_at
+            # forward one step; entering served stamps served_at and advances
+            # order_status — but never resurrect a cancelled order into a sale.
             if target == 'served':
                 order.served_at = now
+                if order.order_status != OrderStatus_Cancelled:
+                    order.order_status = OrderStatus_Served
+                    order_status_changed = True
         elif current == 'served' and target == 'ready':
             # recall from the Completed feed — no age gate (the feed's own
-            # COMPLETED_WINDOW already bounds what's visible/recallable)
+            # COMPLETED_WINDOW already bounds what's visible/recallable). Undo
+            # ONLY the coupling we set (order_status == 'served'); never touch a
+            # cancelled/other state.
             order.served_at = None
+            if order.order_status == OrderStatus_Served:
+                order.order_status = OrderStatus_Pending
+                order_status_changed = True
         elif current == 'ready' and target == 'preparing':
             # recall back to preparing is allowed whenever ready (served_at null)
             pass
@@ -206,16 +228,22 @@ class KitchenOrderFulfilmentStatusView(APIView):
         order.fulfilment_status = target
         order.fulfilment_status_updated_at = now
         order.fulfilment_status_updated_by = request.user
-        # Limit the write to the fulfilment axis so finance-owned order_status /
-        # payment_status are never clobbered. time_last_updated is listed so its
-        # auto_now fires on this partial save.
-        order.save(update_fields=[
+        # The fulfilment axis is written on every transition; the completion
+        # transition also writes order_status (serve -> 'served', recall ->
+        # 'pending'), appended to update_fields only on the branch where it
+        # changed so non-completion transitions leave finance-owned order_status
+        # untouched. payment_status is never written here. time_last_updated is
+        # listed so its auto_now fires on this partial save.
+        update_fields = [
             'fulfilment_status',
             'served_at',
             'fulfilment_status_updated_at',
             'fulfilment_status_updated_by',
             'time_last_updated',
-        ])
+        ]
+        if order_status_changed:
+            update_fields.append('order_status')
+        order.save(update_fields=update_fields)
 
         return Response(
             {

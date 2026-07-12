@@ -64,7 +64,6 @@ INSTALLED_APPS = [
     'payment_integrations_app',
     'reports_app',
     'notifications_app',
-    'crm_app',
     'support_app',
     'reviews_app'
 ]
@@ -222,6 +221,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'auth_login': config('THROTTLE_AUTH_LOGIN', default='10/min'),
         'auth_otp': config('THROTTLE_AUTH_OTP', default='5/min'),
+        'auth_otp_identifier': config('THROTTLE_AUTH_OTP_IDENTIFIER', default='10/min'),
         'auth_password_reset': config('THROTTLE_AUTH_RESET', default='5/min'),
     },
 }

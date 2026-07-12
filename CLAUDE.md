@@ -86,7 +86,7 @@ with PostgreSQL on AWS RDS.
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
   still exists
 - Support module: ✅ `support_app` — restaurant-facing `SupportIssue`
-  ticketing (supersedes legacy `crm_app.ServiceTicket`), Secretary-pattern
+  ticketing, Secretary-pattern
   endpoints at `api/v1/support/` (`support_app/urls.py`): `issues/`,
   `issues/<uuid:issue_id>/`, and dinify-admin `admin/issues/`. Support is an
   UNGATED module: list/detail/create are widened to ANY active employee of the
@@ -135,7 +135,18 @@ with PostgreSQL on AWS RDS.
   `DinifyTransaction` survives, as a record-only structure. Funds must settle
   restaurant-direct — do NOT reintroduce held balances, disbursement,
   Dinify-initiated refunds, the OVA wallet, tip wallets, or the
-  `DinifyAccount` / `BankAccountRecord` custodial models
+  `DinifyAccount` / `BankAccountRecord` custodial models. The orphaned,
+  AllowAny order-payment WRITE PATH is now RETIRED — the
+  `initiate-order-payment/` route, `OrderPaymentsEndpoint`
+  (`finance_app/endpoints/order_payments.py`), and `OrderPaymentTransaction`
+  (`finance_app/controllers/tx_order_payment.py`) were DELETED; it wrote a
+  `DinifyTransaction` for any order UUID with no auth, no ownership check, and a
+  client-supplied `split` amount (closing BUG-P2-3e / BUG-P2-7). It will be
+  REBUILT at PSP integration (authenticated, ownership-gated, server-bounded
+  amounts, non-custodial Pattern A). The record-only `DinifyTransaction` model,
+  its serializers, the subscription writer (`tx_subscription.py` via the
+  surviving `TransactionsEndpoint`), and BOTH Transactions reports are UNCHANGED
+  — do NOT delete or migrate the model
 - Reports module — rebuilt on the clean contract: ✅ Complete. All four
   restaurant reports (`api/v1/reports/restaurant/<name>/` →
   `RestaurantReportsEndpoint`, `{status, message, data}` envelope) are rebuilt on

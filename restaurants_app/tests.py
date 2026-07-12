@@ -1548,6 +1548,16 @@ class TenantReadIsolationTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn(str(self.table_a.id), self._record_ids(r))
 
+    def test_unknown_query_param_does_not_500(self):
+        # A stray/unknown query param must be ignored, not crash the list (500);
+        # the known ?restaurant= scoping still returns the caller's own table.
+        r = self._get(
+            self.owner_a,
+            f'{self.BASE}/tables/?restaurant={self.restaurant_a.id}&foo=barbar',
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(str(self.table_a.id), self._record_ids(r))
+
     def test_owner_of_a_can_read_own_diningareas(self):
         r = self._get(self.owner_a, f'{self.BASE}/diningareas/?restaurant={self.restaurant_a.id}')
         self.assertEqual(r.status_code, 200)
@@ -3812,12 +3822,14 @@ class DinerTableScanTests(TestCase):
         self.assertEqual(socials['facebook'], '')  # empty rides through raw
 
     def test_occupied_table_still_scannable(self):
-        # An ongoing order must NOT block a scan — the diner resumes it.
+        # An ongoing (SUBMITTED) order must NOT block a scan — the diner resumes
+        # it. order_status is 'pending' because an 'initiated' draft no longer
+        # occupies the table (it claims the table only at submit).
         from orders_app.models import Order
         order = Order.objects.create(
             restaurant=self.restaurant, table=self.table,
             total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
-            payment_status='pending', order_status='initiated',
+            payment_status='pending', order_status='pending',
             fulfilment_status='new',
         )
         response = self._scan(str(self.table.id))
@@ -4114,3 +4126,412 @@ class UpdateFloorPlanEndpointTests(TestCase):
             content_type='application/json',
         )
         self.assertEqual(resp.status_code, 401)
+
+
+class SubscriptionDetailsGateTests(TestCase):
+    """
+    Authorization + validation for the subscription-details capability at
+    ``/api/v1/restaurant-setup/subscription-details/``.
+
+    WRITE (PUT) is Dinify-admin ONLY — subscription validity/expiry is
+    system/billing state that no restaurant user (owner included) may self-set;
+    the gate lives inside ``RestaurantSubscription.update``. READ (GET) stays
+    gated upstream on the settings module (owner + manager + admin, 404 on
+    denial); these tests also cover the controller's input hardening (missing
+    restaurant -> 400, unknown restaurant -> 404, never a 500).
+    """
+
+    BASE = '/api/v1/restaurant-setup'
+
+    def setUp(self):
+        self.owner_a = User.objects.create_user(
+            first_name='Owner', last_name='A',
+            email='sub_owner_a@test.com', phone_number='256700000210',
+            username='256700000210', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_a = Restaurant.objects.create(
+            name='Sub Restaurant A', location='loc-a',
+            status=RestaurantStatus_Active, owner=self.owner_a,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        self.manager_a = User.objects.create_user(
+            first_name='Manager', last_name='A',
+            email='sub_manager_a@test.com', phone_number='256700000211',
+            username='256700000211', country='Uganda', password='password',
+            roles=[],
+        )
+        RestaurantEmployee.objects.create(
+            user=self.manager_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_MANAGER')],
+        )
+
+        self.owner_b = User.objects.create_user(
+            first_name='Owner', last_name='B',
+            email='sub_owner_b@test.com', phone_number='256700000220',
+            username='256700000220', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_b = Restaurant.objects.create(
+            name='Sub Restaurant B', location='loc-b',
+            status=RestaurantStatus_Active, owner=self.owner_b,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_b, restaurant=self.restaurant_b,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # Independent dinify admin, employed at neither restaurant.
+        self.dinify_admin = User.objects.create_user(
+            first_name='Dinify', last_name='Admin',
+            email='sub_admin@test.com', phone_number='256700000240',
+            username='256700000240', country='Uganda', password='password',
+            roles=['dinify_admin'],
+        )
+
+    # -- helpers --------------------------------------------------------------
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _put(self, user, body):
+        return self.client.put(
+            f'{self.BASE}/subscription-details/',
+            data=json.dumps(body),
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(user)}',
+        )
+
+    def _get(self, user, restaurant_id):
+        return self.client.get(
+            f'{self.BASE}/subscription-details/?restaurant={restaurant_id}',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(user)}',
+        )
+
+    def _valid_body(self, restaurant_id):
+        return {
+            'restaurant': str(restaurant_id),
+            'subscription_validity': True,
+            'subscription_expiry_date': '2030-12-31',
+        }
+
+    # -- PUT: write gate (the P0) --------------------------------------------
+
+    def test_put_owner_of_target_restaurant_forbidden(self):
+        response = self._put(self.owner_a, self._valid_body(self.restaurant_a.id))
+        self.assertEqual(response.status_code, 403)
+
+    def test_put_user_of_different_restaurant_forbidden(self):
+        response = self._put(self.owner_b, self._valid_body(self.restaurant_a.id))
+        self.assertEqual(response.status_code, 403)
+
+    def test_put_dinify_admin_succeeds_and_persists(self):
+        self.assertTrue(self.restaurant_a.subscription_validity)
+        response = self._put(self.dinify_admin, {
+            'restaurant': str(self.restaurant_a.id),
+            'subscription_validity': False,
+            'subscription_expiry_date': '2031-01-15T10:00:00Z',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.restaurant_a.refresh_from_db()
+        self.assertFalse(self.restaurant_a.subscription_validity)
+        self.assertIsNotNone(self.restaurant_a.subscription_expiry_date)
+        self.assertEqual(self.restaurant_a.subscription_expiry_date.year, 2031)
+
+    def test_put_owner_forbidden_before_any_db_write(self):
+        original = self.restaurant_a.subscription_validity
+        self._put(self.owner_a, {
+            'restaurant': str(self.restaurant_a.id),
+            'subscription_validity': not original,
+            'subscription_expiry_date': '2030-12-31',
+        })
+        self.restaurant_a.refresh_from_db()
+        self.assertEqual(self.restaurant_a.subscription_validity, original)
+
+    def test_put_admin_missing_field_returns_400(self):
+        response = self._put(self.dinify_admin, {
+            'restaurant': str(self.restaurant_a.id),
+            'subscription_validity': True,
+            # subscription_expiry_date deliberately omitted
+        })
+        self.assertEqual(response.status_code, 400)
+
+    def test_put_admin_non_boolean_validity_returns_400(self):
+        response = self._put(self.dinify_admin, {
+            'restaurant': str(self.restaurant_a.id),
+            'subscription_validity': 'yes',
+            'subscription_expiry_date': '2030-12-31',
+        })
+        self.assertEqual(response.status_code, 400)
+
+    def test_put_admin_nonexistent_restaurant_returns_404(self):
+        import uuid
+        response = self._put(self.dinify_admin, self._valid_body(uuid.uuid4()))
+        self.assertEqual(response.status_code, 404)
+
+    # -- GET: read gate preserved (settings) + input hardening ---------------
+
+    def test_get_owner_reads_own_succeeds(self):
+        response = self._get(self.owner_a, self.restaurant_a.id)
+        self.assertEqual(response.status_code, 200)
+
+    def test_get_manager_reads_own_succeeds(self):
+        # Managers keep subscription read access (settings module) under the
+        # chosen "keep read as-is" approach.
+        response = self._get(self.manager_a, self.restaurant_a.id)
+        self.assertEqual(response.status_code, 200)
+
+    def test_get_user_of_different_restaurant_denied(self):
+        response = self._get(self.owner_b, self.restaurant_a.id)
+        self.assertEqual(response.status_code, 404)
+
+    def test_get_dinify_admin_reads_any(self):
+        response = self._get(self.dinify_admin, self.restaurant_a.id)
+        self.assertEqual(response.status_code, 200)
+
+    def test_get_admin_missing_restaurant_returns_400(self):
+        response = self.client.get(
+            f'{self.BASE}/subscription-details/',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(self.dinify_admin)}',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_get_admin_nonexistent_restaurant_returns_404(self):
+        import uuid
+        response = self._get(self.dinify_admin, uuid.uuid4())
+        self.assertEqual(response.status_code, 404)
+
+
+class AdminRegisterRestaurantAuthorizationTests(TestCase):
+    """
+    Endpoint-level authorization for the admin restaurant-registration
+    capability at ``POST /api/v1/restaurant-setup/admin-register-restaurant/``.
+
+    This branch creates a restaurant, mints an owner ``User`` account and
+    dispatches credential SMS/email (``self_register`` with ``skip_otp=True`` —
+    no phone-ownership check), so it is Dinify-admin ONLY. The gate lives at the
+    endpoint (the trust boundary, and the only place ``request.user`` exists —
+    the controller receives an ``auth_info`` dict). Any other authenticated
+    user (a restaurant owner or a plain diner) must get a side-effect-free 403.
+
+    The existing controller-unit test ``test_admin_register_restaurant`` calls
+    the controller directly and is unaffected — the gate is at the endpoint.
+    """
+
+    BASE = '/api/v1/restaurant-setup'
+
+    # A restaurant/owner that the admin-register call would mint on success.
+    NEW_RESTAURANT_NAME = 'Admin Registered Restaurant'
+    NEW_OWNER_PHONE = '256788888888'
+
+    def setUp(self):
+        # Dinify admin, employed at no restaurant.
+        self.dinify_admin = User.objects.create_user(
+            first_name='Dinify', last_name='Admin',
+            email='ar_admin@test.com', phone_number='256700000310',
+            username='256700000310', country='Uganda', password='password',
+            roles=['dinify_admin'],
+        )
+
+        # A restaurant owner (non-admin): a plain user plus an active
+        # owner employment on their own restaurant.
+        self.owner = User.objects.create_user(
+            first_name='Owner', last_name='AR',
+            email='ar_owner@test.com', phone_number='256700000320',
+            username='256700000320', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant = Restaurant.objects.create(
+            name='AR Existing Restaurant', location='ar-loc',
+            status=RestaurantStatus_Active, owner=self.owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # A plain authenticated user: no admin role, no employment.
+        self.plain_user = User.objects.create_user(
+            first_name='Plain', last_name='User',
+            email='ar_plain@test.com', phone_number='256700000330',
+            username='256700000330', country='Uganda', password='password',
+            roles=[],
+        )
+
+    # -- helpers --------------------------------------------------------------
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _post(self, user, body):
+        return self.client.post(
+            f'{self.BASE}/admin-register-restaurant/',
+            data=json.dumps(body),
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(user)}',
+        )
+
+    def _valid_body(self):
+        return {
+            'name': self.NEW_RESTAURANT_NAME,
+            'location': 'AR Test Location',
+            'first_name': 'New',
+            'last_name': 'Owner',
+            'email': 'ar_new_owner@test.com',
+            'phone_number': self.NEW_OWNER_PHONE,
+            'country': 'UG',
+        }
+
+    def _assert_nothing_minted(self):
+        self.assertFalse(
+            Restaurant.objects.filter(name=self.NEW_RESTAURANT_NAME).exists()
+        )
+        self.assertFalse(
+            User.objects.filter(phone_number=self.NEW_OWNER_PHONE).exists()
+        )
+
+    # -- the gate (the P1) ----------------------------------------------------
+
+    def test_restaurant_owner_forbidden(self):
+        response = self._post(self.owner, self._valid_body())
+        self.assertEqual(response.status_code, 403)
+        # The real harm is minting an account + credential SMS: assert the
+        # denial happened with no side effects.
+        self._assert_nothing_minted()
+
+    def test_plain_user_forbidden(self):
+        response = self._post(self.plain_user, self._valid_body())
+        self.assertEqual(response.status_code, 403)
+        self._assert_nothing_minted()
+
+    def test_dinify_admin_succeeds(self):
+        response = self._post(self.dinify_admin, self._valid_body())
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertTrue(
+            Restaurant.objects.filter(name=self.NEW_RESTAURANT_NAME).exists()
+        )
+        self.assertTrue(
+            User.objects.filter(phone_number=self.NEW_OWNER_PHONE).exists()
+        )
+
+
+class TestDinerJourneyDetailHardening(TestCase):
+    """(BUG-P2-3d) The public order-details / transaction-details journey
+    controllers are AllowAny and take a client-supplied id. A malformed
+    (non-UUID) or nonexistent id must return a clean 4xx dict — the endpoint
+    maps the dict's status straight to the HTTP code — instead of letting
+    ValidationError / DoesNotExist surface as a 500. The None-guards ("please
+    provide ...") and the valid lookups are unchanged."""
+
+    # A syntactically valid UUID that is never seeded -> DoesNotExist -> 404.
+    NONEXISTENT_ID = '00000000-0000-4000-8000-000000000000'
+    # Not a UUID at all -> UUIDField ValidationError -> 400.
+    MALFORMED_ID = 'not-a-uuid'
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant(seed_owner=True)
+        seed_tables()
+        self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        self.table = Table.objects.get(number=TEST_TABLE_NUMBER1)
+
+    # --- order-details ---
+
+    def test_order_details_malformed_id_returns_400(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_order_details,
+        )
+        self.assertEqual(
+            handle_show_order_details(order_id=self.MALFORMED_ID)['status'], 400
+        )
+
+    def test_order_details_nonexistent_id_returns_404(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_order_details,
+        )
+        self.assertEqual(
+            handle_show_order_details(order_id=self.NONEXISTENT_ID)['status'], 404
+        )
+
+    def test_order_details_missing_id_returns_400(self):
+        # None short-circuits at the existing "please provide" guard.
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_order_details,
+        )
+        self.assertEqual(
+            handle_show_order_details(order_id=None)['status'], 400
+        )
+
+    def test_order_details_valid_id_succeeds(self):
+        from orders_app.models import Order
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_order_details,
+        )
+        order = Order.objects.create(
+            restaurant=self.restaurant, table=self.table,
+            total_cost=0, discounted_cost=0, savings=0, actual_cost=0,
+            prepayment_required=False,
+            payment_status='pending', order_status='initiated',
+        )
+        result = handle_show_order_details(order_id=str(order.id))
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['data']['id'], str(order.id))
+
+    # --- transaction-details ---
+
+    def test_transaction_details_malformed_id_returns_400(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_transaction_details,
+        )
+        self.assertEqual(
+            handle_show_transaction_details(
+                transaction_id=self.MALFORMED_ID
+            )['status'],
+            400,
+        )
+
+    def test_transaction_details_nonexistent_id_returns_404(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_transaction_details,
+        )
+        self.assertEqual(
+            handle_show_transaction_details(
+                transaction_id=self.NONEXISTENT_ID
+            )['status'],
+            404,
+        )
+
+    def test_transaction_details_missing_id_returns_400(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_transaction_details,
+        )
+        self.assertEqual(
+            handle_show_transaction_details(transaction_id=None)['status'], 400
+        )
+
+    def test_transaction_details_valid_id_succeeds(self):
+        from decimal import Decimal
+        from finance_app.models import DinifyTransaction
+        from dinify_backend.configss.string_definitions import (
+            TransactionType_OrderPayment, TransactionStatus_Success,
+            TransactionPlatform_Web,
+        )
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_transaction_details,
+        )
+        txn = DinifyTransaction.objects.create(
+            restaurant=self.restaurant,
+            transaction_type=TransactionType_OrderPayment,
+            transaction_status=TransactionStatus_Success,
+            transaction_platform=TransactionPlatform_Web,
+            transaction_amount=Decimal('1000.00'),
+        )
+        result = handle_show_transaction_details(transaction_id=str(txn.id))
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(str(result['data']['id']), str(txn.id))

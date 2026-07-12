@@ -90,6 +90,18 @@ def _create_order(*, restaurant, table, items,
             if existing is not None:
                 return {'status': 200, 'order': existing, 'idempotent': True}
 
+        # 1b. Lock the table row so concurrent same-table submissions serialize.
+        #     Mirrors allocate_daily_order_number's select_for_update in this file:
+        #     the second creator blocks here until the first commits, then its
+        #     step-2 gate below sees the first order and returns the 400. Placed
+        #     AFTER step 1 so idempotent replays return without taking the lock.
+        #     Lazy import keeps this module import-cycle-free (as with ConOrder).
+        from restaurants_app.models import Table
+        try:
+            table = Table.objects.select_for_update().get(pk=table.pk)
+        except Table.DoesNotExist:
+            return {'status': 400, 'message': 'Invalid table for this restaurant'}
+
         # 2. table-gating — only for genuinely new submissions
         ongoing = ConOrder.any_present_ongoing_order(table)
         if ongoing.get('present'):
@@ -106,29 +118,56 @@ def _create_order(*, restaurant, table, items,
         # 4. create the order with the fulfilment axis initialised.
         #    Kitchen owns fulfilment_status; order_status/payment_status stay
         #    finance-owned and are only seeded here at creation.
-        order = Order.objects.create(
-            restaurant=restaurant,
-            table=table,
+        #
+        #    The INSERT is wrapped in a savepoint (nested atomic) so a concurrent
+        #    double-tap — two requests carrying the same client_order_id, both past
+        #    the step-1 lookup before either committed — degrades to the same
+        #    idempotent replay as the sequential case instead of a raw 500. The
+        #    partial unique constraint uniq_order_restaurant_client_order_id lets
+        #    exactly one INSERT win; the loser catches the IntegrityError below.
+        #    As in allocate_daily_order_number, the try/except deliberately WRAPS
+        #    the atomic block so the failed savepoint is rolled back before the
+        #    re-query, leaving the outer transaction usable.
+        try:
+            with transaction.atomic():
+                order = Order.objects.create(
+                    restaurant=restaurant,
+                    table=table,
 
-            total_cost=0,
-            discounted_cost=0,
-            savings=0,
-            actual_cost=0,
-            prepayment_required=table.prepayment_required,
+                    total_cost=0,
+                    discounted_cost=0,
+                    savings=0,
+                    actual_cost=0,
+                    prepayment_required=table.prepayment_required,
 
-            order_status=OrderStatus_Initiated,
-            payment_status=PaymentStatus_Pending,
+                    order_status=OrderStatus_Initiated,
+                    payment_status=PaymentStatus_Pending,
 
-            customer=customer,
-            created_by=created_by,
+                    customer=customer,
+                    created_by=created_by,
 
-            order_source=order_source,
-            client_order_id=client_order_id,
-            order_number=order_number,
-            order_date=order_date,
-            fulfilment_status='new',
-            fulfilment_status_updated_at=timezone.now(),
-        )
+                    order_source=order_source,
+                    client_order_id=client_order_id,
+                    order_number=order_number,
+                    order_date=order_date,
+                    fulfilment_status='new',
+                    fulfilment_status_updated_at=timezone.now(),
+                )
+        except IntegrityError:
+            # concurrent double-tap: a racing request with the same
+            # client_order_id committed between our step-1 lookup and this INSERT.
+            # Return the winner as the idempotent result — the SAME shape step 1
+            # returns.
+            if client_order_id:
+                existing = Order.objects.filter(
+                    restaurant=restaurant,
+                    client_order_id=client_order_id,
+                ).first()
+                if existing is not None:
+                    return {'status': 200, 'order': existing, 'idempotent': True}
+            # not the client_order_id constraint (no existing row) — re-raise so a
+            # genuinely unexpected IntegrityError is never silently swallowed.
+            raise
 
         # 5. items + amount roll-up
         for item in items:

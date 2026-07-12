@@ -1,15 +1,17 @@
 import logging
 
+from uuid import UUID
 from decimal import Decimal
 from django.db import transaction
 from django.db.models import Sum
 from typing import Optional, Union
 from users_app.models import User
 from dinify_backend.configss.messages import MESSAGES
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from restaurants_app.models import Restaurant, MenuItem, Table
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Cancelled,
+    OrderStatus_Initiated,
     TransactionStatus_Success
 )
 from orders_app.models import Order, OrderItem
@@ -102,15 +104,18 @@ class ConOrder:
         """
         Determine whether a table is occupied by an ongoing order.
 
-        A table is occupied iff it has an order that is not deleted, not
-        cancelled, and whose fulfilment_status is not 'served'. Gating keys
-        off the kitchen-owned fulfilment axis (not order_status /
-        payment_status), so a table frees up once the kitchen serves its
-        order. Returns the most recent such order.
+        A table is occupied iff it has a SUBMITTED order — one that is not a
+        draft (order_status != 'initiated'), not deleted, not cancelled, and
+        whose fulfilment_status is not 'served'. An 'initiated' order is an
+        unconfirmed draft that does NOT occupy the table (it claims the table
+        only at submit). Occupancy otherwise keys off the kitchen-owned
+        fulfilment axis (not payment_status), so a table frees up once the
+        kitchen serves its order. Returns the most recent such order.
         """
         ongoing_order = (
             Order.objects
             .filter(table=table, deleted=False)
+            .exclude(order_status=OrderStatus_Initiated)
             .exclude(order_status=OrderStatus_Cancelled)
             .exclude(fulfilment_status='served')
             .order_by('-time_created')
@@ -125,15 +130,23 @@ class ConOrder:
         return {'present': False}
 
     @staticmethod
-    def determine_existing_order_item(item:dict, order_id: str) -> bool:
+    def find_existing_order_item(item: dict, order_id: str):
+        # Returns the matching OrderItem line (so the caller can bump it directly)
+        # or None. Returning the resolved row — instead of a bare bool — is what
+        # lets update_item_quantity avoid a non-unique re-lookup: the same menu
+        # item can sit on an order as several lines (different modifiers/extras),
+        # so an OrderItem.objects.get(order, item) would raise
+        # MultipleObjectsReturned. The `existing_item` binding stays on the parent
+        # line throughout (the extras loops iterate a separate `extra` variable) so
+        # every match path returns that parent line, never a child-extra row.
         menu_item = MenuItem.objects.get(pk=item['item'])
-        existing_item = OrderItem.objects.filter(
+        existing_items = OrderItem.objects.filter(
             order__id=order_id,
             item=menu_item,
             deleted=False
         )
-        if existing_item.count() > 0:
-            existing_item = existing_item[0]
+        if existing_items.count() > 0:
+            existing_item = existing_items[0]
             extras = item.get('extras')
             existing_item_extras = OrderItem.objects.filter(parent_item=existing_item)
             incoming_modifiers = item.get('selected_modifiers') or {}
@@ -142,33 +155,33 @@ class ConOrder:
 
             # no extras and no options
             if existing_item_extras.count() == 0 and not has_modifiers:
-                return True
+                return existing_item
 
             # only extras but no item_options
             if existing_item_extras.count() > 0 and not has_modifiers:
                 logger.debug("checking only extras with no items")
                 if len(extras) == existing_item_extras.count():
-                    for existing_item in existing_item_extras:
-                        if str(existing_item.item.pk) not in extras:
-                            return False
-                    return True
+                    for extra in existing_item_extras:
+                        if str(extra.item.pk) not in extras:
+                            return None
+                    return existing_item
 
             # only options but no extras
             if existing_item_extras.count() == 0 and has_modifiers:
                 if existing_modifiers == incoming_modifiers:
-                    return True
-                return False
+                    return existing_item
+                return None
 
             # both extras and options
             if existing_item_extras.count() > 0 and has_modifiers:
                 if len(extras) == existing_item_extras.count():
-                    for existing_item in existing_item_extras:
-                        if str(existing_item.item.pk) not in extras:
-                            return False
+                    for extra in existing_item_extras:
+                        if str(extra.item.pk) not in extras:
+                            return None
                     if existing_modifiers == incoming_modifiers:
-                        return True
+                        return existing_item
 
-        return False
+        return None
 
     @staticmethod
     def determine_effective_unit_price(menu_item: MenuItem, selected_modifiers: dict = None) -> dict:
@@ -282,27 +295,28 @@ class ConOrder:
             extra_record.save()
 
     @staticmethod
-    def update_item_quantity(item: dict, order_id: str) -> dict:
-        menu_item = MenuItem.objects.get(pk=item['item'])
-
-        existing_item = OrderItem.objects.get(
-            order__id=order_id,
-            item=menu_item,
-            deleted=False
-        )
-        new_quantity = existing_item.quantity + item['quantity']
-        new_total_cost = existing_item.unit_price * new_quantity
-        new_cost_of_options = existing_item.cost_of_options * new_quantity
-        new_discounted_cost = existing_item.discounted_price * new_quantity
+    def update_item_quantity(order_item, item: dict) -> dict:
+        # The caller (find_existing_order_item) already resolved the exact matching
+        # line, so bump it directly. Do NOT re-fetch it via
+        # OrderItem.objects.get(order, item): that filter is non-unique once the
+        # same menu item is on the order as more than one line and raises
+        # MultipleObjectsReturned (BUG-P2-5). The recompute is left exactly as
+        # before (per-unit unit_price/discounted_price scaled to the new quantity;
+        # cost_of_options carried verbatim) — this is a crash-only fix, not a
+        # pricing change.
+        new_quantity = order_item.quantity + item['quantity']
+        new_total_cost = order_item.unit_price * new_quantity
+        new_cost_of_options = order_item.cost_of_options * new_quantity
+        new_discounted_cost = order_item.discounted_price * new_quantity
         new_savings = new_total_cost - new_discounted_cost
 
-        existing_item.quantity = new_quantity
-        existing_item.total_cost = new_total_cost
-        existing_item.discounted_cost = new_discounted_cost
-        existing_item.cost_of_options = new_cost_of_options
-        existing_item.savings = new_savings
+        order_item.quantity = new_quantity
+        order_item.total_cost = new_total_cost
+        order_item.discounted_cost = new_discounted_cost
+        order_item.cost_of_options = new_cost_of_options
+        order_item.savings = new_savings
 
-        existing_item.save()
+        order_item.save()
 
         return {
             'status': 200,
@@ -311,13 +325,43 @@ class ConOrder:
 
     @staticmethod
     def add_order_item(item: dict, order_id: str):
-        menu_item = MenuItem.objects.get(pk=item['item'])
+        # defense-in-depth: this chokepoint self-guards for every caller. A
+        # malformed payload or an item that does not belong to the order's
+        # restaurant returns a 400 dict instead of raising 500 downstream.
+        if (
+            not isinstance(item, dict)
+            or item.get('item') is None
+            or item.get('quantity') is None
+        ):
+            return {
+                'status': 400,
+                'message': 'Each order item must include an item and a quantity.'
+            }
+
+        try:
+            order = Order.objects.get(pk=order_id)
+        except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+            return {
+                'status': 400,
+                'message': 'Invalid order selected'
+            }
+
+        try:
+            menu_item = MenuItem.objects.get(
+                pk=item['item'], section__restaurant=order.restaurant
+            )
+        except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+            return {
+                'status': 400,
+                'message': "One or more items are not on this restaurant's menu."
+            }
+
         unit_price = menu_item.primary_price
 
         # check if the item already exists in the order so that we just update the quantity
-        existing_item = ConOrder.determine_existing_order_item(item=item, order_id=order_id)
-        if existing_item:
-            return ConOrder.update_item_quantity(item=item, order_id=order_id)
+        existing_item = ConOrder.find_existing_order_item(item=item, order_id=order_id)
+        if existing_item is not None:
+            return ConOrder.update_item_quantity(order_item=existing_item, item=item)
 
         # handling modifiers
         selected_modifiers = item.get('selected_modifiers') or {}
@@ -462,6 +506,15 @@ class ConOrder:
                 'message': MESSAGES.get('GENERAL_ERROR')
             }
 
+        # availability: a diner cannot place an order while the restaurant has
+        # paused ordering (accepting_orders=False). Staff/admin orders
+        # (created_by set) are a management action and bypass this gate.
+        if created_by is None and not restaurant.accepting_orders:
+            return {
+                'status': 400,
+                'message': 'This restaurant is not currently accepting orders'
+            }
+
         # check that order items are provided
         if items is None:
             return {
@@ -475,6 +528,41 @@ class ConOrder:
                 'message': MESSAGES.get('NO_ORDER_ITEMS')
             }
 
+        # tenant consistency: every requested item must belong to THIS
+        # restaurant's menu. Runs BEFORE the options/extras pre-checks (which
+        # resolve each item by bare pk) so a missing/foreign/malformed item id
+        # fails fast with a 400 here instead of raising 500 downstream, and no
+        # Order row is ever created for a cross-tenant submission.
+        requested_uuids = set()
+        for entry in items:
+            if (
+                not isinstance(entry, dict)
+                or entry.get('item') is None
+                or entry.get('quantity') is None
+            ):
+                return {
+                    'status': 400,
+                    'message': 'Each order item must include an item and a quantity.'
+                }
+            try:
+                requested_uuids.add(UUID(str(entry['item'])))
+            except (ValueError, TypeError):
+                return {
+                    'status': 400,
+                    'message': "One or more items are not on this restaurant's menu."
+                }
+
+        owned_uuids = set(
+            MenuItem.objects
+            .filter(pk__in=requested_uuids, section__restaurant=restaurant)
+            .values_list('pk', flat=True)
+        )
+        if requested_uuids - owned_uuids:
+            return {
+                'status': 400,
+                'message': "One or more items are not on this restaurant's menu."
+            }
+
         # for each order item, check if the options are applicable
         options_check = ConOrder.check_options_requirements(items)
         if options_check.get('status') != 200:
@@ -485,7 +573,37 @@ class ConOrder:
         if extras_check.get('status') != 200:
             return extras_check
 
-        table = Table.objects.get(pk=table_id)
+        # tenant consistency: the table must belong to this restaurant. Scoped
+        # fetch validates existence AND ownership in one query, so a
+        # foreign/nonexistent/malformed table id → 400 (never 500, never a
+        # silent order against another restaurant's floor).
+        try:
+            table = Table.objects.get(pk=table_id, restaurant=restaurant)
+        except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+            return {
+                'status': 400,
+                'message': 'Invalid table for this restaurant'
+            }
+
+        # availability: a diner may only order at a table whose QR mode permits
+        # ordering. Whitelist the ordering modes so any future non-ordering mode
+        # fails safe rather than accidentally permitting orders. Staff/admin
+        # orders (created_by set) bypass this gate.
+        ORDERING_QR_MODES = ('order_pay', 'order_only')  # 'menu_only' is view-only
+        if created_by is None and table.qr_mode not in ORDERING_QR_MODES:
+            return {
+                'status': 400,
+                'message': 'Ordering is not available at this table'
+            }
+
+        # availability: a diner cannot order at a table that is not available for
+        # a scan (soft-deleted, disabled, inactive, or out of service). Reuse the
+        # same predicate the diner QR-scan flow uses so the two stay consistent.
+        if created_by is None and not table.is_available_for_scan():
+            return {
+                'status': 400,
+                'message': 'This table is not available for ordering'
+            }
 
         # idempotency, table-gating, daily numbering and creation are all
         # handled atomically by the order-creation service.

@@ -114,7 +114,9 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
     """
     When an admin is creating a restaurant
     """
-    # TODO check that the user is an admin
+    # Authorization is enforced at the endpoint (admin-only): the
+    # admin-register-restaurant POST branch gates on is_dinify_admin(request.user)
+    # before calling this. This function assumes an admin caller.
 
     # add a random password
     data['password'] = ''.join(random.choices(
