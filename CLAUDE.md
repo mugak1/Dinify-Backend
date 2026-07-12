@@ -39,7 +39,23 @@ with PostgreSQL on AWS RDS.
   finally take effect for kitchen. The old hardcoded
   `user_can_access_kitchen`/`user_can_manage_restaurant` local helpers were
   removed (behaviour-neutral for the seeded owner/manager/kitchen default
-  matrix; no migration)
+  matrix; no migration). Kitchen serve/recall now also couples
+  `Order.order_status` to the completion transition (PR #206): serving sets
+  `order_status='served'` (unless the order is cancelled — never resurrect a
+  cancelled order into a sale), recall reverts it to `pending`, so served orders
+  satisfy the reports `SALE_STATUSES` {served, paid} and count as sales.
+  `order_status` is written from server constants (never the request body) and
+  `payment_status` is never touched; every non-completion transition still
+  writes only the fulfilment axis
+- Order-creation hardening: ✅ (PRs #198–#201, #210) — the live v2 `initiate`
+  create path enforces tenant consistency (table + menu items must belong to the
+  same restaurant, BUG-P1-1), rejects orders when the restaurant is not
+  `accepting_orders` (BUG-P2-1), is idempotent under concurrent
+  same-`client_order_id` double-taps, and serializes concurrent same-table
+  creation/submit with a table row lock (BUG-P2-4). An `initiated` order is now a
+  true DRAFT that neither occupies its table nor reaches the kitchen board — the
+  table is claimed only at `submit` (BUG-P2-2), whose transition is transactional
+  and race-safe. Preserve these invariants in any future order-create work
 - Restaurant tag catalog: ✅ Per-restaurant tag catalog (migrations 0044–0045) +
   `restaurant_tags.py` endpoint + `EI_RESTAURANT_TAG`; menu items reference
   catalog tags via `tag_ids`
@@ -55,12 +71,35 @@ with PostgreSQL on AWS RDS.
   `{closed, open, close}` shape)
 - Auth: ✅ Refresh-token rotation + blacklist-on-logout + 7-day refresh lifetime
   (SimpleJWT, `JWT_REFRESH_LIFETIME_DAYS`)
+- OTP verification hardening: ✅ (PR #192) — the OTP verify path is no longer
+  brute-forceable. `UserOtp` gains `attempts`/`consumed_at`/`salt`/`identifier`
+  (migration `users_app/0009_otp_hardening`, which also purges pre-existing
+  short-lived old-scheme rows for a clean cutover). `make_otp` uses a `secrets`
+  RNG + per-row salt + server-pepper HMAC-SHA256 (pepper from `OTP_HMAC_PEPPER`,
+  else derived deterministically from `SECRET_KEY` — zero config for prod/CI).
+  `verify_otp` fetches the single active challenge BY IDENTITY under
+  `select_for_update`, locks out at `OTP_MAX_ATTEMPTS=5`, marks it single-use
+  (`consumed_at`), and compares with `hmac.compare_digest`. A per-identifier
+  `OtpIdentifierThrottle` (`users_app/throttles.py`) sits alongside the per-IP
+  throttle on `verify-otp`/`resend-otp` so brute force can't be spread across
+  IPs. The dev `ENV=dev` `1234` override, threaded SMS dispatch, and MSISDN
+  canonicalisation are all preserved
 - MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
   `+`) is the canonical stored/compared form for `User.phone_number` /
   `User.username`, enforced at every write site (registration, profile update,
   payment intake, OTP create/verify) via `normalise_msisdn()` and backfilled by
   migration `users_app/0008_backfill_canonical_msisdn`. See the "Phone Numbers /
   MSISDN" CRITICAL section below
+- Self-service profile update: ✅ (PR #208) — `PUT users/user-profile/`
+  (`self_update_user_profile`) now applies for EVERY role (owner/manager/staff/
+  admin, previously blocked with a "refer to your manager" stub; only role-less
+  diners could edit). Phone is NOT self-editable (canonicalised via
+  `normalise_msisdn`; a real change is 400, an echo of the stored value is a
+  no-op) and an email already held by another user is rejected 400. The
+  never-finished profile-update approval queue was DELETED (the
+  `V2UserProfileEndpoint` GET now 405s; `profile_update_approvals.py` and
+  `COL_PROFILE_UPDATE_APPROVALS` removed). The manager path `update_user_profile`
+  (with OTP) is untouched
 - Tenant isolation / role-permission ENFORCEMENT: ✅ Portal gates enforce
   per-module access via `can_user_access_module` / `get_module_restaurant_ids`
   (`users_app/controllers/permissions_check.py`) — see the "Tenant Isolation /
@@ -92,7 +131,12 @@ with PostgreSQL on AWS RDS.
   UNGATED module: list/detail/create are widened to ANY active employee of the
   restaurant via `get_employed_restaurant_ids` (dinify-admin excluded from
   create); references are sequential, collision-safe `SUP-000123`. Migration
-  `support_app/0001_initial`
+  `support_app/0001_initial`. The legacy `crm_app.ServiceTicket` app it
+  superseded was fully DELETED (PR #193) — its `api/v1/crm/service-tickets/`
+  endpoint was `IsAuthenticated`-only with no tenant scoping (any token,
+  including a diner's, could read/rewrite EVERY restaurant's tickets);
+  `misc_app/0004_drop_service_tickets` drops the orphaned `service_tickets`
+  table. Do not reintroduce crm_app
 - Reviews module: ✅ `reviews_app` — visit-level `Review` model (one per
   `Order`, `OneToOneField` via `related_name='review_record'`,
   `db_table='reviews'`), Secretary-pattern endpoints at `api/v1/reviews/`
@@ -232,7 +276,10 @@ with PostgreSQL on AWS RDS.
 - `api/v1/restaurant-setup/` → RestaurantSetupEndpoint (catch-all) +
   dedicated endpoints for: preset-tags, restaurant-tags, upsell-config,
   upsell-config/items, reservations, waitlist, table-actions/<action>/,
-  role-permissions
+  role-permissions. The dead `section-tables` write verb was removed (PR #213,
+  BUG-P3-10) — a retired/unknown verb falls through to the generic unmapped
+  handling; dining-area creation with tables goes through
+  `create_dining_area(create_tables=True)`
 - `api/v1/reports/restaurant/<report_name>/` → RestaurantReportsEndpoint
 - `api/v1/orders/` → v1 orders (urls.py) — only `submit` (PUT) is live; the
   orphaned, unscoped `prepare`/`cancel`/`update-item` write actions were
@@ -242,7 +289,12 @@ with PostgreSQL on AWS RDS.
 - `api/v2/orders/` → v2 orders (v2_urls.py) — separate file, don't confuse;
   only `initiate` (POST) is live. `add-items` (POST/DELETE) was retired
   (PR #181) and the AllowAny, unscoped `details/` GET was retired (finding C1,
-  PR #182) — both 404 via the hardened dispatch
+  PR #182) — both 404 via the hardened dispatch. An `initiate`d order is a true
+  DRAFT (`order_status='initiated'`) that does NOT occupy its table or reach the
+  kitchen board; the table is claimed only at `submit` (PR #210) — that
+  transition locks the table row and re-checks draft status + occupancy on the
+  fresh row, so two diners submitting for the same table serialize (first claims,
+  second gets a clean 400)
 - `api/v1/kitchen/` → Kitchen endpoints (urls_kitchen.py) — separate file
 - `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
   `issues/`, `issues/<uuid:issue_id>/`, `admin/issues/` — separate app
@@ -280,6 +332,15 @@ the catch-all `<str:config_detail>/` route.
   only thing that can register a file edit — it keys on `key in self.data` (NOT
   "value is non-null"), so an explicit `null`-clear of a file field counts as a
   change and persists (HTTP 200), rather than collapsing to "no changes detected"
+- `status` (approval / payment-enforcement axis) and `flat_fee` (the Dinify
+  subscription price billed by `finance_app.tx_subscription`) are registered in
+  `EDIT_INFORMATION['restaurants']` but are PLATFORM-owned — the restaurant-setup
+  write path STRIPS both keys from a non-admin's `restaurants` PUT payload AFTER
+  `check_permission` and BEFORE the Secretary dispatch (PR #211), so an
+  owner/settings-manager of an active restaurant cannot zero `flat_fee` or
+  rewrite the approval `status`. Dinify admins keep full write access (the admin
+  `changeApprovalStatus` flow is unchanged). This is a post-gate payload strip,
+  NOT an EDIT_INFORMATION removal — do not delete them from EDIT_INFORMATION
 - Check this file before adding any editable field — it may already be there
 
 ## Tenant Isolation / Role-Permission ENFORCEMENT — CRITICAL
@@ -434,7 +495,11 @@ the catch-all `<str:config_detail>/` route.
   "every day"). Use `get_discount_percentage` (returns positive magnitude) — do
   not invert the sign in callers. A menu-item PUT with an inverted date window
   (`end_date` < `start_date`) is rejected 400 by `SerializerPutMenuItem`
-  (end-date stays inclusive; `end_date == start_date` is a valid one-day window)
+  (end-date stays inclusive; `end_date == start_date` is a valid one-day window).
+  The per-extra `discounted` flag persisted on an order item is likewise derived
+  from `is_discount_active()`, NOT the raw `running_discount` column (PR #214,
+  BUG-P3-4) — a configured-but-not-live extra discount charges full price and
+  reads `discounted=False`, matching the parent-item path
 - `Restaurant.branding_configuration` uses the four-key shape (post-0041).
   Do not regress to the legacy nested shape
 - `MenuItem.listing_position` and `MenuSection.listing_position` are
@@ -459,11 +524,13 @@ the catch-all `<str:config_detail>/` route.
   `branding_configuration` — do not drop it (no migration/EDIT_INFORMATION
   needed; `socials` is already a Secretary-editable `JSONField`). Its
   `get_current_order` delegates to `ConOrder.any_present_ongoing_order` — the
-  FULFILMENT-axis occupancy gate (not deleted, not cancelled, `fulfilment_status
-  != 'served'`) the kitchen board and order-create path already share — so a
-  served order FREES the table for diner checkout instead of blocking forever on
-  the stale payment axis (PR #186; diner payment is unwired, so `payment_status`
-  never leaves `'pending'`). Do NOT regress `get_current_order` to the
+  occupancy gate the kitchen board and order-create path already share. A table
+  is occupied iff it has a SUBMITTED order: `order_status != 'initiated'` (an
+  `initiated` order is an unconfirmed draft that does NOT occupy — PR #210), not
+  deleted, not cancelled, and `fulfilment_status != 'served'` — so a served order
+  FREES the table for diner checkout instead of blocking forever on the stale
+  payment axis (PR #186; diner payment is unwired, so `payment_status` never
+  leaves `'pending'`). Do NOT regress `get_current_order` to the
   `order_status`/`payment_status` axis
 
 ## Existing Management Commands
@@ -482,7 +549,8 @@ the catch-all `<str:config_detail>/` route.
   `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
-  `users_app/migrations/0008_backfill_canonical_msisdn.py`
+  `users_app/migrations/0009_otp_hardening.py`,
+  `misc_app/migrations/0004_drop_service_tickets.py`
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
