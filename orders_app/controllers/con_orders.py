@@ -263,7 +263,9 @@ class ConOrder:
                 'unit_price': unit_price,
                 'discounted_price': effective_unit_price,
                 'actual_price': effective_unit_price,
-                'discounted': extra_item.running_discount,
+                # Truthful only when the discount is actually live (same predicate
+                # that set the price above), not merely when the flag is on.
+                'discounted': extra_item.is_discount_active(),
                 'unit_cost_of_options': 0,
 
                 'total_cost': total_cost,

@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 
 from orders_app.models import Order, OrderItem
 from orders_app.controllers.con_orders import ConOrder, handle_add_order_items
+from orders_app.controllers.orders.serializers import serialize_order_item_details
 from users_app.tests import seed_user, TEST_PHONE
 from users_app.models import User
 from restaurants_app.tests import (
@@ -844,3 +845,114 @@ class TestOrderingAvailabilityGates(TestCase):
         self.assertTrue(
             OrderItem.objects.filter(order__id=order_id, item=self.item).exists()
         )
+
+
+class TestExtrasDiscountedFlag(TestCase):
+    """BUG-P3-4: an extra's persisted/serialized `discounted` flag must reflect
+    the live-discount predicate (is_discount_active()), not the raw
+    running_discount column — mirroring the parent-item derivation at
+    con_orders.py:408. The extra's CHARGE is already gated on the predicate
+    (determine_effective_unit_price -> effective_base_price), so an out-of-window
+    discount charges primary_price; the flag must agree, so a full-price extra is
+    never badged "discounted"."""
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant(seed_owner=True)
+        seed_menu_section()
+        seed_menu_items()
+        seed_tables()
+        # seed_order() deliberately NOT called → TEST_TABLE_NUMBER4 stays free.
+        self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        self.section = MenuSection.objects.get(name=TEST_MENU_SECTION_NAME)
+        self.table = Table.objects.get(number=TEST_TABLE_NUMBER4)
+        # A plain parent item: check_extras_requirements only enforces min/max
+        # when has_extras=True, so no extras config is needed to carry an extra.
+        self.parent = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+
+    def _make_extra(self, name, discount_details):
+        # discounted_price is set to a stale 8000 on purpose — neither the flag
+        # nor the charge reads that stored column; the window predicate decides
+        # both (mirrors TestDiscountActivationPricing._make_item).
+        return MenuItem.objects.create(
+            name=name,
+            section=self.section,
+            primary_price=Decimal('10000'),
+            discounted_price=Decimal('8000'),
+            running_discount=True,
+            consider_discount_object=True,
+            discount_details=discount_details,
+        )
+
+    def _place_order_with_extra(self, extra_item):
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant.pk),
+            table_id=str(self.table.pk),
+            items=[{
+                'item': str(self.parent.pk),
+                'quantity': 1,
+                'extras': [str(extra_item.pk)],
+            }],
+        )
+        self.assertEqual(response['status'], 200)
+        order_id = response['data']['order_details']['id']
+        return OrderItem.objects.get(
+            order__id=order_id,
+            item=extra_item,
+            parent_item__isnull=False,
+        )
+
+    def test_lapsed_discount_extra_is_not_flagged_and_charged_full(self):
+        # THE REPRO: a window that ended yesterday. The extra is charged the full
+        # primary_price (unchanged) and — after the fix — reads discounted=False
+        # both persisted and serialized (it previously read True off
+        # running_discount).
+        yesterday = (timezone.localdate() - timedelta(days=1)).isoformat()
+        extra = self._make_extra('Lapsed Discount Extra', {
+            'discount_type': 'percentage', 'discount_percentage': 20.0,
+            'discount_amount': 0.0, 'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+            'start_date': '', 'end_date': yesterday,
+            'start_time': '', 'end_time': '',
+        })
+        row = self._place_order_with_extra(extra)
+
+        # persisted flag is now truthful (was extra_item.running_discount=True)
+        self.assertFalse(row.discounted)
+        # charge is the full price — the fix moves no money
+        self.assertEqual(row.actual_cost, Decimal('10000.00'))
+        self.assertEqual(row.total_cost, Decimal('10000.00'))
+        self.assertEqual(row.savings, Decimal('0.00'))
+        # serialized to the diner: no false "discounted" badge
+        self.assertFalse(serialize_order_item_details(item=row)['discounted'])
+
+    def test_active_discount_extra_is_flagged_and_charged_discounted(self):
+        # An active window: unchanged behaviour — discounted=True and the 20%
+        # discounted price applies.
+        extra = self._make_extra('Active Discount Extra', {
+            'discount_type': 'percentage', 'discount_percentage': 20.0,
+            'discount_amount': 0.0, 'recurring_days': [1, 2, 3, 4, 5, 6, 7],
+            'start_date': '', 'end_date': '',
+            'start_time': '', 'end_time': '',
+        })
+        row = self._place_order_with_extra(extra)
+
+        self.assertTrue(row.discounted)
+        self.assertEqual(row.actual_cost, Decimal('8000.00'))  # 20% off 10000
+        self.assertEqual(row.savings, Decimal('2000.00'))
+        self.assertTrue(serialize_order_item_details(item=row)['discounted'])
+
+    def test_extra_with_no_discount_is_not_flagged_and_charged_full(self):
+        # No discount configured at all: is_discount_active() subsumes the
+        # presence check → False, and the full price is charged.
+        extra = MenuItem.objects.create(
+            name='Plain Extra',
+            section=self.section,
+            primary_price=Decimal('5000'),
+            running_discount=False,
+        )
+        row = self._place_order_with_extra(extra)
+
+        self.assertFalse(row.discounted)
+        self.assertEqual(row.actual_cost, Decimal('5000.00'))
+        self.assertEqual(row.savings, Decimal('0.00'))
+        self.assertFalse(serialize_order_item_details(item=row)['discounted'])
