@@ -1,6 +1,7 @@
 # functions that support the generation of reports
 import calendar
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
+from django.utils import timezone
 
 
 def make_graph_series_data(
@@ -121,7 +122,9 @@ def make_quarter_range(start: int, end: int) -> dict:
     quarter_dates = []
 
     present_year = start
-    today_date = datetime.now().date()
+    # Compare quarter starts against today's EAT calendar date (naive
+    # datetime.now() would be the server's UTC wall clock).
+    today_date = timezone.localdate()
     while present_year <= end:
         for quarter in quarters:
             q_start_date = date(

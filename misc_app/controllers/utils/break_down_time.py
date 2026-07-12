@@ -1,5 +1,6 @@
 from datetime import datetime
 from dateutil import parser
+from django.utils import timezone
 day_names = [
     'Mon', 'Tue', 'Wed',
     'Thu', 'Fri', 'Sat',
@@ -12,7 +13,9 @@ def append_time_details(data: dict, just_return=None) -> dict:
     - Adds the date, year, month, day, timestamp to the ime provided
     """
 
-    right_now = datetime.now()
+    # EAT wall clock as a naive value — keeps the dict shape while correcting
+    # the date/hour fields (a naive datetime.now() on the UTC server stamps UTC).
+    right_now = timezone.localtime(timezone.now()).replace(tzinfo=None)
     time_detail = {}
     if just_return:
         time_detail['date'] = right_now.day
