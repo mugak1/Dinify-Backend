@@ -4,7 +4,11 @@ from django.db import transaction
 from django.test import TestCase
 from dinify_backend.configs import ROLES
 from dinify_backend.configss.messages import MESSAGES
-from dinify_backend.configss.string_definitions import RestaurantStatus_Active
+from dinify_backend.configss.string_definitions import (
+    RestaurantStatus_Active,
+    RestaurantStatus_Pending,
+    RestaurantStatus_Blocked,
+)
 from misc_app.controllers.secretary import Secretary
 from users_app.tests import TEST_PHONE, seed_user
 from users_app.models import User
@@ -4535,3 +4539,198 @@ class TestDinerJourneyDetailHardening(TestCase):
         result = handle_show_transaction_details(transaction_id=str(txn.id))
         self.assertEqual(result['status'], 200)
         self.assertEqual(str(result['data']['id']), str(txn.id))
+
+
+class RestaurantAdminOnlyFieldGuardTests(TestCase):
+    """
+    BUG-P3-2: `status` and `flat_fee` are platform-owned restaurant fields only a
+    Dinify admin may write through the restaurant-setup PUT path. `status` is the
+    approval / payment-enforcement axis; `flat_fee` is the Dinify subscription
+    price billed by finance_app tx_subscription. A tenant (owner/manager) PUT that
+    carries either field must have it silently stripped (matching how Secretary
+    ignores non-applicable fields) while the rest of the edit still applies; the
+    admin keeps full write access (the changeApprovalStatus flow).
+
+    Reachability: module access (the write gate) requires an ACTIVE restaurant
+    (get_user_restaurant_roles filters restaurant__status='active'), so a tenant
+    at a pending/blocked restaurant is already denied 403 at the gate — the strip
+    only bites for an owner of an already-active restaurant. Both layers covered.
+    """
+
+    def setUp(self):
+        from decimal import Decimal
+        # Active restaurant + owner: the reachable case (owner has settings-module
+        # access precisely because the restaurant is active).
+        self.owner = User.objects.create_user(
+            first_name='Owner', last_name='Active',
+            email='owner_active_p3@test.com', phone_number='256700000210',
+            username='256700000210', country='Uganda', password='password',
+            roles=[],
+        )
+        self.active_restaurant = Restaurant.objects.create(
+            name='Active Bistro', location='loc-active',
+            status=RestaurantStatus_Active, owner=self.owner,
+            flat_fee=Decimal('2500.00'),
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.active_restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # Pending restaurant + owner: tenant write is blocked at the gate.
+        self.pending_owner = User.objects.create_user(
+            first_name='Owner', last_name='Pending',
+            email='owner_pending_p3@test.com', phone_number='256700000211',
+            username='256700000211', country='Uganda', password='password',
+            roles=[],
+        )
+        self.pending_restaurant = Restaurant.objects.create(
+            name='Pending Bistro', location='loc-pending',
+            status=RestaurantStatus_Pending, owner=self.pending_owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.pending_owner, restaurant=self.pending_restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # Blocked restaurant + owner: the enforcement lever; write blocked at gate.
+        self.blocked_owner = User.objects.create_user(
+            first_name='Owner', last_name='Blocked',
+            email='owner_blocked_p3@test.com', phone_number='256700000212',
+            username='256700000212', country='Uganda', password='password',
+            roles=[],
+        )
+        self.blocked_restaurant = Restaurant.objects.create(
+            name='Blocked Bistro', location='loc-blocked',
+            status=RestaurantStatus_Blocked, owner=self.blocked_owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.blocked_owner, restaurant=self.blocked_restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # Independent Dinify admin (no employment anywhere).
+        self.dinify_admin = User.objects.create_user(
+            first_name='Dinify', last_name='Admin',
+            email='admin_p3@test.com', phone_number='256700000213',
+            username='256700000213', country='Uganda', password='password',
+            roles=['dinify_admin'],
+        )
+
+    def _token_for(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _put_restaurant(self, user, body):
+        token = self._token_for(user)
+        return self.client.put(
+            '/api/v1/restaurant-setup/restaurants/',
+            data=body,
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+
+    # -- tenant strip on an active restaurant (the reachable case) -----------
+
+    def test_tenant_status_and_flat_fee_stripped_name_applies(self):
+        """Field-level strip: a normal field applies; status + flat_fee do not."""
+        from decimal import Decimal
+        response = self._put_restaurant(self.owner, {
+            'id': str(self.active_restaurant.id),
+            'name': 'Renamed Bistro',
+            'status': 'inactive',
+            'flat_fee': '0.00',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.active_restaurant.refresh_from_db()
+        self.assertEqual(self.active_restaurant.name, 'Renamed Bistro')
+        self.assertEqual(self.active_restaurant.status, RestaurantStatus_Active)
+        self.assertEqual(self.active_restaurant.flat_fee, Decimal('2500.00'))
+
+    def test_tenant_status_only_write_is_stripped_noop(self):
+        """
+        A status-only tenant PUT is fully stripped, so Secretary finds no
+        applicable field and returns 400 'No changes detected' — crucially,
+        status is NOT applied. Tenants never send status-only in the real
+        portal; realistic edits carry other fields (see the test above).
+        """
+        response = self._put_restaurant(self.owner, {
+            'id': str(self.active_restaurant.id),
+            'status': 'inactive',
+        })
+        self.assertEqual(response.status_code, 400)
+        self.active_restaurant.refresh_from_db()
+        self.assertEqual(self.active_restaurant.status, RestaurantStatus_Active)
+
+    def test_tenant_flat_fee_only_write_is_stripped_noop(self):
+        """flat_fee-only tenant PUT is stripped: 400 no-op, subscription price unchanged."""
+        from decimal import Decimal
+        response = self._put_restaurant(self.owner, {
+            'id': str(self.active_restaurant.id),
+            'flat_fee': '0.00',
+        })
+        self.assertEqual(response.status_code, 400)
+        self.active_restaurant.refresh_from_db()
+        self.assertEqual(self.active_restaurant.flat_fee, Decimal('2500.00'))
+
+    def test_tenant_normal_edit_without_admin_fields_unaffected(self):
+        """Regression: an edit carrying no admin-only field behaves exactly as before."""
+        response = self._put_restaurant(self.owner, {
+            'id': str(self.active_restaurant.id),
+            'name': 'Just A Rename',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.active_restaurant.refresh_from_db()
+        self.assertEqual(self.active_restaurant.name, 'Just A Rename')
+
+    # -- dinify admin retains full write (the legitimate path) ---------------
+
+    def test_admin_status_write_on_pending_restaurant_applies(self):
+        """changeApprovalStatus: admin PUT {id, status} approves a pending restaurant."""
+        from unittest.mock import patch
+        with patch('misc_app.controllers.secretary.Notification') as MockNotification:
+            MockNotification.return_value.create_notification.return_value = None
+            response = self._put_restaurant(self.dinify_admin, {
+                'id': str(self.pending_restaurant.id),
+                'status': 'active',
+            })
+        self.assertEqual(response.status_code, 200)
+        self.pending_restaurant.refresh_from_db()
+        self.assertEqual(self.pending_restaurant.status, RestaurantStatus_Active)
+
+    def test_admin_flat_fee_write_applies(self):
+        """Admin retains flat_fee (subscription price) write access."""
+        from decimal import Decimal
+        response = self._put_restaurant(self.dinify_admin, {
+            'id': str(self.active_restaurant.id),
+            'flat_fee': '1500.00',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.active_restaurant.refresh_from_db()
+        self.assertEqual(self.active_restaurant.flat_fee, Decimal('1500.00'))
+
+    # -- existing gate already blocks non-active restaurants (documentation) -
+
+    def test_tenant_put_on_pending_restaurant_forbidden_at_gate(self):
+        """
+        A tenant PUT on a pending restaurant is denied 403 at check_permission
+        (module access requires an active restaurant), so the self-approval write
+        never reaches the strip. Status is unchanged.
+        """
+        response = self._put_restaurant(self.pending_owner, {
+            'id': str(self.pending_restaurant.id),
+            'status': 'active',
+        })
+        self.assertEqual(response.status_code, 403)
+        self.pending_restaurant.refresh_from_db()
+        self.assertEqual(self.pending_restaurant.status, RestaurantStatus_Pending)
+
+    def test_tenant_put_on_blocked_restaurant_forbidden_at_gate(self):
+        """The enforcement lever holds: a blocked restaurant denies the tenant at the gate."""
+        response = self._put_restaurant(self.blocked_owner, {
+            'id': str(self.blocked_restaurant.id),
+            'status': 'active',
+        })
+        self.assertEqual(response.status_code, 403)
+        self.blocked_restaurant.refresh_from_db()
+        self.assertEqual(self.blocked_restaurant.status, RestaurantStatus_Blocked)
