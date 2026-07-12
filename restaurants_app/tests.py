@@ -4417,3 +4417,119 @@ class AdminRegisterRestaurantAuthorizationTests(TestCase):
         self.assertTrue(
             User.objects.filter(phone_number=self.NEW_OWNER_PHONE).exists()
         )
+
+
+class TestDinerJourneyDetailHardening(TestCase):
+    """(BUG-P2-3d) The public order-details / transaction-details journey
+    controllers are AllowAny and take a client-supplied id. A malformed
+    (non-UUID) or nonexistent id must return a clean 4xx dict — the endpoint
+    maps the dict's status straight to the HTTP code — instead of letting
+    ValidationError / DoesNotExist surface as a 500. The None-guards ("please
+    provide ...") and the valid lookups are unchanged."""
+
+    # A syntactically valid UUID that is never seeded -> DoesNotExist -> 404.
+    NONEXISTENT_ID = '00000000-0000-4000-8000-000000000000'
+    # Not a UUID at all -> UUIDField ValidationError -> 400.
+    MALFORMED_ID = 'not-a-uuid'
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant(seed_owner=True)
+        seed_tables()
+        self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        self.table = Table.objects.get(number=TEST_TABLE_NUMBER1)
+
+    # --- order-details ---
+
+    def test_order_details_malformed_id_returns_400(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_order_details,
+        )
+        self.assertEqual(
+            handle_show_order_details(order_id=self.MALFORMED_ID)['status'], 400
+        )
+
+    def test_order_details_nonexistent_id_returns_404(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_order_details,
+        )
+        self.assertEqual(
+            handle_show_order_details(order_id=self.NONEXISTENT_ID)['status'], 404
+        )
+
+    def test_order_details_missing_id_returns_400(self):
+        # None short-circuits at the existing "please provide" guard.
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_order_details,
+        )
+        self.assertEqual(
+            handle_show_order_details(order_id=None)['status'], 400
+        )
+
+    def test_order_details_valid_id_succeeds(self):
+        from orders_app.models import Order
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_order_details,
+        )
+        order = Order.objects.create(
+            restaurant=self.restaurant, table=self.table,
+            total_cost=0, discounted_cost=0, savings=0, actual_cost=0,
+            prepayment_required=False,
+            payment_status='pending', order_status='initiated',
+        )
+        result = handle_show_order_details(order_id=str(order.id))
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['data']['id'], str(order.id))
+
+    # --- transaction-details ---
+
+    def test_transaction_details_malformed_id_returns_400(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_transaction_details,
+        )
+        self.assertEqual(
+            handle_show_transaction_details(
+                transaction_id=self.MALFORMED_ID
+            )['status'],
+            400,
+        )
+
+    def test_transaction_details_nonexistent_id_returns_404(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_transaction_details,
+        )
+        self.assertEqual(
+            handle_show_transaction_details(
+                transaction_id=self.NONEXISTENT_ID
+            )['status'],
+            404,
+        )
+
+    def test_transaction_details_missing_id_returns_400(self):
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_transaction_details,
+        )
+        self.assertEqual(
+            handle_show_transaction_details(transaction_id=None)['status'], 400
+        )
+
+    def test_transaction_details_valid_id_succeeds(self):
+        from decimal import Decimal
+        from finance_app.models import DinifyTransaction
+        from dinify_backend.configss.string_definitions import (
+            TransactionType_OrderPayment, TransactionStatus_Success,
+            TransactionPlatform_Web,
+        )
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_show_transaction_details,
+        )
+        txn = DinifyTransaction.objects.create(
+            restaurant=self.restaurant,
+            transaction_type=TransactionType_OrderPayment,
+            transaction_status=TransactionStatus_Success,
+            transaction_platform=TransactionPlatform_Web,
+            transaction_amount=Decimal('1000.00'),
+        )
+        result = handle_show_transaction_details(transaction_id=str(txn.id))
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(str(result['data']['id']), str(txn.id))

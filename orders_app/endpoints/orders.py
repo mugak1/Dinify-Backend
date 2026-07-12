@@ -4,6 +4,7 @@ endpoints to handle order
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
+from django.core.exceptions import ValidationError
 from orders_app.models import Order
 from orders_app.controllers.manage_order import update_order_status
 from dinify_backend.configss.string_definitions import OrderStatus_Pending
@@ -34,7 +35,27 @@ class OrdersEndpoint(APIView):
             if user is None or user.is_anonymous:
                 user = None
 
-            order = Order.objects.get(id=data.get('order'))
+            # Anonymous, client-supplied order id: guard the lookup so a
+            # missing / malformed / nonexistent id returns a clean 4xx instead
+            # of a 500. Don't call .get(id=None).
+            order_id = data.get('order')
+            if not order_id:
+                return Response(
+                    {'status': 400, 'message': 'Invalid order id'},
+                    status=400,
+                )
+            try:
+                order = Order.objects.get(id=order_id)
+            except ValidationError:
+                return Response(
+                    {'status': 400, 'message': 'Invalid order id'},
+                    status=400,
+                )
+            except Order.DoesNotExist:
+                return Response(
+                    {'status': 404, 'message': 'Order not found'},
+                    status=404,
+                )
             response = update_order_status(
                 order=order,
                 new_status=OrderStatus_Pending,

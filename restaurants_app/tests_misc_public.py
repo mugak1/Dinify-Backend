@@ -170,3 +170,46 @@ class MiscPublicTablesTests(TestCase):
         self.assertIsNotNone(by_number[1]['dining_area'])
         self.assertEqual(by_number[1]['dining_area']['name'], 'Patio')
         self.assertIsNone(by_number[2]['dining_area'])
+
+
+class MiscPublicUnknownConfigTests(TestCase):
+    """(BUG-P2-3g) An unrecognised config_detail returns a clean 404, never a
+    500. Covers the removed 'details' value — whose handler (self.get_detail)
+    never existed, so it raised AttributeError -> 500 — and any other unknown
+    value, which used to fall through into Secretary with a None serializer. The
+    two real listings still resolve."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            first_name='Cfg', last_name='Owner',
+            email='cfg_owner@example.com', phone_number='256700000903',
+            username='256700000903', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant = Restaurant.objects.create(
+            name='Config Guard Restaurant', location='loc-cfg',
+            status=RestaurantStatus_Active, owner=self.owner,
+        )
+
+    def test_details_config_detail_returns_404_not_500(self):
+        # 'details' used to call an undefined self.get_detail -> AttributeError
+        # -> 500. It has no frontend caller and is now a plain 404.
+        response = self.client.get(
+            '/api/v1/restaurant-setup/misc-public/details/'
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_unrelated_unknown_config_detail_returns_404(self):
+        # Any other unknown value hits the same whitelist fallback (used to fall
+        # through into Secretary with a None serializer).
+        response = self.client.get(
+            '/api/v1/restaurant-setup/misc-public/frobnicate/'
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_known_restaurants_listing_still_resolves(self):
+        # The whitelist guard must not break the two real listings.
+        response = self.client.get(RESTAURANTS_URL)
+        self.assertEqual(response.status_code, 200)
+        ids = [record['id'] for record in response.json()['data']['records']]
+        self.assertIn(str(self.restaurant.id), ids)

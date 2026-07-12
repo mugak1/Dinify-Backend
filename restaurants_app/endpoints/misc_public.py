@@ -27,8 +27,16 @@ class MiscPublicEndpoint(APIView):
         # decode the token
         # auth = decode_jwt_token(request)
 
-        if config_detail == 'details':
-            return self.get_detail(request)
+        # Only these two public listings exist. Any other config_detail —
+        # including the removed 'details' value (whose handler never existed and
+        # had no frontend caller) — returns a clean 404 rather than an
+        # AttributeError 500 or a fall-through into Secretary with a None
+        # serializer.
+        if config_detail not in ('restaurants', 'tables'):
+            return Response(
+                {'status': 404, 'message': 'Not found'},
+                status=404,
+            )
 
         orm_filter = define_filter_params(request.GET, config_detail)
 
