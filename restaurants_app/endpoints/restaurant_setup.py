@@ -1016,6 +1016,38 @@ class RestaurantSetupEndpoint(APIView):
             }
             return Response(response, status=403)
 
+        # `status` and `flat_fee` are platform-owned state a tenant must never
+        # write; a non-admin's values for them are silently stripped here (Dinify
+        # admins keep full write access):
+        #   * `status` is the approval / payment-enforcement axis — pending->active
+        #     approval, plus inactive/blocked/rejected enforcement (e.g. blocking
+        #     for non-payment). Readers: orders_app con_orders ('blocked' blocks
+        #     ordering), notifications send_messages ('active' gate), and the
+        #     module resolver (restaurant__status='active' gates portal access).
+        #   * `flat_fee` is the Dinify subscription price charged to the restaurant
+        #     (finance_app tx_subscription bills restaurant.flat_fee) — a tenant
+        #     must not set their own subscription price.
+        # The Dinify admin portal legitimately writes these through THIS path
+        # (e.g. changeApprovalStatus sets status), so we strip per-field for
+        # non-admins rather than drop the fields from EDIT_INFORMATION. Stripping
+        # (not 403) matches how Secretary already ignores non-applicable fields;
+        # the tenant portal never sends either field, so nothing legitimate breaks.
+        if config_detail == 'restaurants' and not is_dinify_admin(request.user):
+            admin_only_fields = [
+                key for key in ('status', 'flat_fee') if key in put_data
+            ]
+            if admin_only_fields:
+                # request.data is uncopied on this path and may be an immutable
+                # QueryDict (form/multipart) — copy before mutating.
+                put_data = put_data.copy()
+                for key in admin_only_fields:
+                    put_data.pop(key, None)
+                logger.warning(
+                    'Stripped tenant-supplied admin-only restaurant field(s) %s. '
+                    'user=%s restaurant=%s',
+                    admin_only_fields, auth.get('id'), put_data.get('id'),
+                )
+
         # if editing a menu item,
         # convert the options and extras_applicable to a list
         if config_detail == 'menuitems':
