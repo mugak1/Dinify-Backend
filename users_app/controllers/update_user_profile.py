@@ -2,8 +2,6 @@ from typing import Optional
 from users_app.models import User
 from users_app.serializers import SerPutUserProfile, SerGetUserProfile
 from restaurants_app.models import RestaurantEmployee
-from dinify_backend.mongo_db import COL_PROFILE_UPDATE_APPROVALS
-from misc_app.controllers.save_to_mongo import save_to_mongodb
 from users_app.controllers.permissions_check import (
     is_dinify_admin,
     get_user_restaurant_roles
@@ -11,8 +9,6 @@ from users_app.controllers.permissions_check import (
 from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER,
     RESTAURANT_MANAGER,
-    DINIFY_ACCOUNT_MANAGER,
-    DINIFY_ADMIN
 )
 from misc_app.controllers.secretary import Secretary
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
@@ -31,12 +27,12 @@ def self_update_user_profile(
     """
     Update the user profile
     """
-    require_approval = False
-    # check if the user has dinify or restaurant roles
     user = User.objects.get(id=user_id)
 
-    # Canonicalise the phone number (256XXXXXXXXX, no '+') before it is written
-    # to phone_number/username below.
+    # Phone number is NOT self-editable here. Canonicalise the submission
+    # (256XXXXXXXXX, no '+') and accept it only when it echoes the stored value;
+    # any real change is rejected. Phone changes go through the manager path
+    # (update_user_profile) with an OTP.
     if phone_number is not None:
         try:
             phone_number = normalise_msisdn(
@@ -47,86 +43,22 @@ def self_update_user_profile(
                 'status': 400,
                 'message': 'Please provide a valid Ugandan phone number.',
             }
-    res_roles = RestaurantEmployee.objects.filter(
-        user=user_id,
-        deleted=False
-    )
+        if phone_number != user.phone_number:
+            return {
+                'status': 400,
+                'message': 'Phone number cannot be changed here.',
+            }
 
-    dinify_roles = [DINIFY_ACCOUNT_MANAGER, DINIFY_ADMIN]
-    if any(role in dinify_roles for role in user.roles):
-        require_approval = True
-
-    if res_roles.count() > 0:
-        require_approval = True
-
-    if require_approval:
-        return {
-            'status': 200,
-            'message': 'Kindly refer to your manager to update the profile.'
-        }
-
-        profile_changes = []
-        if country is not None:
-            if user.country != country:
-                profile_changes.append({
-                    'user_id': str(user_id),
-                    'detail': 'country',
-                    'old': user.country,
-                    'new': country
-                })
-        if first_name is not None:
-            if user.first_name != first_name:
-                profile_changes.append({
-                    'user_id': str(user_id),
-                    'detail': 'first_name',
-                    'old': user.first_name,
-                    'new': first_name
-                })
-        if last_name is not None:
-            if user.last_name != last_name:
-                profile_changes.append({
-                    'user_id': str(user_id),
-                    'detail': 'last_name',
-                    'old': user.last_name,
-                    'new': last_name
-                })
-        if other_names is not None:
-            if user.other_names != other_names:
-                profile_changes.append({
-                    'user_id': str(user_id),
-                    'detail': 'other_names',
-                    'old': user.other_names,
-                    'new': other_names
-                })
-        if email is not None:
-            if user.email != email:
-                profile_changes.append({
-                    'user_id': str(user_id),
-                    'detail': 'email',
-                    'old': user.email,
-                    'new': email
-                })
-        if phone_number is not None:
-            if user.phone_number != phone_number:
-                profile_changes.append({
-                    'user_id': str(user_id),
-                    'detail': 'phone_number',
-                    'old': user.phone_number,
-                    'new': phone_number
-                })
-
-        # TODO replace with batch insert
-        # which should still consider the inclusion of record creation time
-        if len(profile_changes) > 0:
-            for profile_change in profile_changes:
-                save_to_mongodb(
-                    collection=COL_PROFILE_UPDATE_APPROVALS,
-                    data=profile_change
-                )
-        return {
-            'status': 200,
-            'message': 'Your changes have been saved. However, your profile update requires approval.'
-        }
+    # Email is not unique on the model, yet reset_password._resolve_user looks it
+    # up with User.objects.get(email=...). Reject a change that would duplicate
+    # another user's email, otherwise that user's password reset would 500 with
+    # MultipleObjectsReturned.
+    if email is not None and email != user.email:
+        if User.objects.filter(email=email).exclude(id=user.id).exists():
+            return {
+                'status': 400,
+                'message': 'This email is already in use.',
+            }
 
     if country is not None:
         user.country = country
@@ -138,12 +70,7 @@ def self_update_user_profile(
         user.other_names = other_names
     if email is not None:
         user.email = email
-    if phone_number is not None:
-        user.phone_number = phone_number
-        user.username = phone_number
     user.save()
-
-    # user = user.refresh_from_db()
 
     response = {
         'status': 200,
