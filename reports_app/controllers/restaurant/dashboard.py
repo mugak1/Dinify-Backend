@@ -13,6 +13,7 @@ from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Served, PaymentStatus_Paid, OrderStatus_Cancelled,
     OrderStatus_Refunded, OrderStatus_Preparing, OrderStatus_Pending,
+    OrderStatus_Initiated,
     PaymentStatus_Pending,
     TransactionType_OrderPayment, TransactionStatus_Success,
 )
@@ -380,7 +381,9 @@ def _build_orders(restaurant_id, date_from, date_to, trunc_fn,
         {'status': 'open', 'count': base.filter(
             payment_status=PaymentStatus_Pending,
         ).exclude(
-            order_status__in=[OrderStatus_Cancelled, OrderStatus_Refunded],
+            order_status__in=[
+                OrderStatus_Initiated, OrderStatus_Cancelled, OrderStatus_Refunded,
+            ],
         ).count()},
         {'status': 'cancelled', 'count': base.filter(order_status=OrderStatus_Cancelled).count()},
         {'status': 'refunded', 'count': base.filter(order_status=OrderStatus_Refunded).count()},
@@ -433,7 +436,9 @@ def _build_tables(restaurant_id):
         restaurant=restaurant_id,
         payment_status=PaymentStatus_Pending,
     ).exclude(
-        order_status__in=[OrderStatus_Cancelled, OrderStatus_Refunded],
+        order_status__in=[
+            OrderStatus_Initiated, OrderStatus_Cancelled, OrderStatus_Refunded,
+        ],
     )
     occupied = active_orders.values('table').distinct().count()
     occupancy_pct = (
@@ -507,7 +512,9 @@ def _build_kds(restaurant_id):
         restaurant=restaurant_id,
         fulfilment_status__in=['new', 'preparing', 'ready'],
         deleted=False,
-    ).exclude(order_status=OrderStatus_Cancelled)
+    ).exclude(
+        order_status__in=[OrderStatus_Initiated, OrderStatus_Cancelled],
+    )
     open_count = open_orders.count()
 
     over_sla = 0

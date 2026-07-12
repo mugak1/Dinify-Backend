@@ -33,17 +33,12 @@ def update_order_status(
     update an order
     """
     try:
-        # if the status is submitted
-        # check if the order requires prepayment before updating
-
-        # if the new status is to submit,
-        # check that the current status is initiated
+        # SUBMIT (initiated -> pending) is the transition that turns a draft
+        # into a real order and CLAIMS the table, so it must be race-safe.
+        # It is handled by its own transactional helper; every other status
+        # change below is left exactly as it was (no new locking/transaction).
         if new_status == OrderStatus_Pending:
-            if order.order_status != OrderItemStatus_Initiated:
-                return {
-                    'status': 400,
-                    'message': 'This order cannot be submitted.'
-                }
+            return _submit_order(order, user)
         # an unauthenticated diner arrives as AnonymousUser (not None); never
         # assign it to a User FK — normalise to None so attribution stays null.
         if user is not None and user.is_anonymous:
@@ -74,6 +69,78 @@ def update_order_status(
             'status': 400,
             'message': ERR_ORDER_UPDATED
         }
+
+
+def _submit_order(order: Order, user: Union[User, None]) -> dict:
+    """
+    Submit a draft order (order_status 'initiated' -> 'pending').
+
+    This is the transition that turns a draft into a real order and CLAIMS the
+    table, so it is transactional and race-safe:
+      * lock the order's table row FIRST (matching _create_order's table->order
+        lock order),
+      * RE-READ the order under that lock — the instance handed in was fetched
+        outside the transaction and may be stale,
+      * re-check the "must still be a draft" rule and table occupancy on the
+        FRESH row before flipping.
+    Two diners submitting for the same table therefore serialize on the table
+    lock: the first claims it, the second gets a clean 400.
+    """
+    # Local imports keep this off the module import graph and dodge the
+    # con_orders <-> create_order import cycle.
+    from restaurants_app.models import Table
+    from orders_app.controllers.con_orders import ConOrder
+
+    # an unauthenticated diner arrives as AnonymousUser (not None); never
+    # assign it to a User FK — normalise to None so attribution stays null.
+    if user is not None and user.is_anonymous:
+        user = None
+
+    with transaction.atomic():
+        if order.table_id is not None:
+            # Table-first lock, then re-read the order under the same lock.
+            locked_table = (
+                Table.objects.select_for_update().get(pk=order.table_id)
+            )
+            order = Order.objects.select_for_update().get(pk=order.pk)
+
+            # Status check on the FRESH row: a concurrent double-submit that
+            # already flipped this order loses here with the existing 400.
+            if order.order_status != OrderItemStatus_Initiated:
+                return {
+                    'status': 400,
+                    'message': 'This order cannot be submitted.'
+                }
+
+            # Re-check occupancy under the lock. After the drafts-are-invisible
+            # change this order (still 'initiated') is excluded from the
+            # predicate anyway; the not-this-order guard is defense-in-depth.
+            ongoing = ConOrder.any_present_ongoing_order(locked_table)
+            if ongoing.get('present') and ongoing.get('order_id') != order.id:
+                return {
+                    'status': 400,
+                    'message': 'The table has an ongoing order'
+                }
+        else:
+            # No table to claim (defensive — Order.table is non-nullable today,
+            # so this branch is currently unreachable). Re-read and flip.
+            order = Order.objects.select_for_update().get(pk=order.pk)
+            if order.order_status != OrderItemStatus_Initiated:
+                return {
+                    'status': 400,
+                    'message': 'This order cannot be submitted.'
+                }
+
+        order.order_status = OrderStatus_Pending
+        if user is not None:
+            order.last_updated_by = user
+        order.time_last_updated = datetime.now()
+        order.save()
+
+    return {
+        'status': 200,
+        'message': OK_ORDER_UPDATED
+    }
 
 
 def update_item_status(
