@@ -7,8 +7,11 @@ from django.utils import timezone
 from django.db.models.deletion import ProtectedError
 from rest_framework.test import APIClient
 
-from orders_app.models import Order, OrderItem
-from orders_app.controllers.con_orders import ConOrder, handle_add_order_items
+from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
+from orders_app.controllers.con_orders import (
+    ConOrder, handle_add_order_items, NOT_ON_MENU_MESSAGE,
+)
+from orders_app.controllers.services.create_order import _create_order
 from orders_app.controllers.orders.serializers import serialize_order_item_details
 from users_app.tests import seed_user, TEST_PHONE
 from users_app.models import User
@@ -327,11 +330,13 @@ class TestOrderFunctions(TestCase):
         order = Order.objects.get(table=Table.objects.get(number=TEST_TABLE_NUMBER3))
         menu_item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
 
-        # new item -> create path (returns None), exactly one line at quantity 1
+        # new item -> create path (returns the uniform 200 envelope, so the
+        # _create_order chokepoint can status-check every call), exactly one
+        # line at quantity 1
         create_result = ConOrder.add_order_item(
             item={'item': str(menu_item1.pk), 'quantity': 1}, order_id=str(order.pk)
         )
-        self.assertIsNone(create_result)
+        self.assertEqual(create_result['status'], 200)
         line = OrderItem.objects.get(
             order__id=order.pk, item=menu_item1, deleted=False
         )
@@ -714,6 +719,257 @@ class TestOrderTenantConsistency(TestCase):
         )
         self.assertTrue(
             OrderItem.objects.filter(order__id=order_id, item=self.item_a2).exists()
+        )
+
+    # ---- extras tenant boundary (BUG-P1-1 follow-up) --------------------
+    # Extras are MenuItems referenced by bare UUID strings inside each item
+    # entry's `extras` list; #198 closed the boundary for the table and the
+    # parent items but missed them. Every rejection below must be the SAME
+    # opaque 400 (NOT_ON_MENU_MESSAGE) regardless of whether the id is
+    # foreign, nonexistent, malformed or of the wrong type, and must leave
+    # NOTHING persisted — the whole order aborts, never a partial write.
+
+    def test_extra_from_other_restaurant_rejected_atomically(self):
+        orders_before = Order.objects.count()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[{
+                'item': str(self.item_a.pk),
+                'quantity': 1,
+                'extras': [str(self.item_b.pk)],
+            }],
+        )
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(response['message'], NOT_ON_MENU_MESSAGE)
+        # nothing persisted anywhere — no order, no items, table A untouched
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), 0)
+        self.assertFalse(Order.objects.filter(table=self.table_a).exists())
+
+    def test_mixed_valid_and_foreign_extras_rejected(self):
+        orders_before = Order.objects.count()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[{
+                'item': str(self.item_a.pk),
+                'quantity': 1,
+                'extras': [str(self.item_a2.pk), str(self.item_b.pk)],
+            }],
+        )
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(response['message'], NOT_ON_MENU_MESSAGE)
+        # all or nothing: the valid sibling extra did not persist either
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), 0)
+
+    def test_malformed_extra_uuid_returns_400_not_500(self):
+        # a raise here would fail the test with an error — pinning "never 500"
+        orders_before = Order.objects.count()
+        for bad_member in ('not-a-uuid', None, 123):
+            response = ConOrder.initiate_order(
+                restaurant_id=str(self.restaurant_a.pk),
+                table_id=str(self.table_a.pk),
+                items=[{
+                    'item': str(self.item_a.pk),
+                    'quantity': 1,
+                    'extras': [bad_member],
+                }],
+            )
+            self.assertEqual(response['status'], 400)
+            self.assertEqual(response['message'], NOT_ON_MENU_MESSAGE)
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), 0)
+
+    def test_nonexistent_extra_indistinguishable_from_foreign(self):
+        orders_before = Order.objects.count()
+        foreign = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[{'item': str(self.item_a.pk), 'quantity': 1,
+                    'extras': [str(self.item_b.pk)]}],
+        )
+        nonexistent = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[{'item': str(self.item_a.pk), 'quantity': 1,
+                    'extras': [str(uuid4())]}],
+        )
+        self.assertEqual(foreign['status'], 400)
+        self.assertEqual(nonexistent['status'], 400)
+        # identical outward response — a prober cannot learn whether an id
+        # exists on another tenant's menu
+        self.assertEqual(nonexistent['message'], foreign['message'])
+        self.assertEqual(Order.objects.count(), orders_before)
+
+    def test_valid_same_tenant_extra_creates_parent_and_child(self):
+        orders_before = Order.objects.count()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[{
+                'item': str(self.item_a.pk),
+                'quantity': 2,
+                'extras': [str(self.item_a2.pk)],
+            }],
+        )
+        self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), orders_before + 1)
+        order_id = str(response['data']['order_details']['id'])
+        parent = OrderItem.objects.get(
+            order__id=order_id, item=self.item_a, parent_item__isnull=True
+        )
+        child = OrderItem.objects.get(
+            order__id=order_id, item=self.item_a2, parent_item__isnull=False
+        )
+        self.assertEqual(child.parent_item_id, parent.pk)
+        self.assertEqual(child.quantity, 1)
+        # priced server-side from A's menu item, never from client input
+        self.assertEqual(child.unit_price, Decimal('1000.00'))
+        self.assertEqual(child.actual_cost, Decimal('1000.00'))
+
+    def test_chokepoint_rolls_back_whole_transaction(self):
+        # Drive the service directly (bypassing initiate_order's batch gate)
+        # so the rejection fires INSIDE the transaction at the SECOND item's
+        # extras: the first, valid item's already-written rows must unwind too.
+        orders_before = Order.objects.count()
+        result = _create_order(
+            restaurant=self.restaurant_a,
+            table=self.table_a,
+            items=[
+                {'item': str(self.item_a.pk), 'quantity': 1},
+                {'item': str(self.item_a2.pk), 'quantity': 1,
+                 'extras': [str(self.item_b.pk)]},
+            ],
+        )
+        self.assertEqual(result['status'], 400)
+        self.assertEqual(result['message'], NOT_ON_MENU_MESSAGE)
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), 0)
+        # even the daily-number allocation unwound with the transaction
+        self.assertFalse(
+            RestaurantDailyOrderCounter.objects.filter(
+                restaurant=self.restaurant_a
+            ).exists()
+        )
+
+    def test_valid_retry_same_client_order_id_still_one_order(self):
+        orders_before = Order.objects.count()
+        key = uuid4()
+        payload = dict(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[{
+                'item': str(self.item_a.pk),
+                'quantity': 1,
+                'extras': [str(self.item_a2.pk)],
+            }],
+            client_order_id=str(key),
+        )
+        first = ConOrder.initiate_order(**payload)
+        second = ConOrder.initiate_order(**payload)
+        self.assertEqual(first['status'], 200)
+        self.assertEqual(second['status'], 200)
+        self.assertEqual(Order.objects.count(), orders_before + 1)
+        order = Order.objects.get(client_order_id=key)
+        # the replay re-fetched the draft; it did not re-add the items
+        self.assertEqual(OrderItem.objects.filter(order=order).count(), 2)
+
+    def test_rejected_draft_leaves_no_poisoned_row_for_client_order_id(self):
+        # Post-#210 _create_order writes a DRAFT row that idempotent retries
+        # re-fetch by client_order_id. A rejected attempt must leave NO such
+        # row behind, and the valid retry must build a fresh clean order —
+        # never resurrect anything from the rejected attempt.
+        key = uuid4()
+        first = _create_order(
+            restaurant=self.restaurant_a,
+            table=self.table_a,
+            items=[{'item': str(self.item_a.pk), 'quantity': 1,
+                    'extras': [str(self.item_b.pk)]}],
+            client_order_id=key,
+        )
+        self.assertEqual(first['status'], 400)
+        self.assertEqual(Order.objects.filter(client_order_id=key).count(), 0)
+
+        second = _create_order(
+            restaurant=self.restaurant_a,
+            table=self.table_a,
+            items=[{'item': str(self.item_a.pk), 'quantity': 1,
+                    'extras': [str(self.item_a2.pk)]}],
+            client_order_id=key,
+        )
+        self.assertEqual(second['status'], 200)
+        self.assertFalse(second['idempotent'])  # fresh creation, not a replay
+        self.assertEqual(Order.objects.filter(client_order_id=key).count(), 1)
+        order_items = OrderItem.objects.filter(order=second['order'])
+        self.assertEqual(order_items.count(), 2)
+        self.assertFalse(order_items.filter(item=self.item_b).exists())
+
+    def test_direct_add_order_item_foreign_extra_defense_in_depth(self):
+        # The guard holds standalone, without initiate_order's batch gate in
+        # front: the foreign extra is rejected with the same opaque 400 and no
+        # cross-tenant row is ever written. (Whole-order atomicity on
+        # rejection is the service's contract — _create_order — not this
+        # helper's.)
+        order = Order.objects.get(
+            table=Table.objects.get(number=TEST_TABLE_NUMBER3)
+        )
+        result = ConOrder.add_order_item(
+            item={'item': str(self.item_a.pk), 'quantity': 1,
+                  'extras': [str(self.item_b.pk)]},
+            order_id=str(order.pk),
+        )
+        self.assertEqual(result['status'], 400)
+        self.assertEqual(result['message'], NOT_ON_MENU_MESSAGE)
+        self.assertFalse(OrderItem.objects.filter(item=self.item_b).exists())
+
+    def test_extras_not_a_list_returns_400(self):
+        orders_before = Order.objects.count()
+        for bad_extras in (5, 'abc', {'k': 'v'}):
+            response = ConOrder.initiate_order(
+                restaurant_id=str(self.restaurant_a.pk),
+                table_id=str(self.table_a.pk),
+                items=[{'item': str(self.item_a.pk), 'quantity': 1,
+                        'extras': bad_extras}],
+            )
+            self.assertEqual(response['status'], 400)
+            self.assertEqual(response['message'], NOT_ON_MENU_MESSAGE)
+        self.assertEqual(Order.objects.count(), orders_before)
+
+        # an empty list ("no extras selected") and an explicit null both stay
+        # valid — the boundary only rejects what it cannot resolve. Drafts do
+        # not occupy the table (post-#210), so both creations share table A.
+        for valid_extras in ([], None):
+            response = ConOrder.initiate_order(
+                restaurant_id=str(self.restaurant_a.pk),
+                table_id=str(self.table_a.pk),
+                items=[{'item': str(self.item_a.pk), 'quantity': 1,
+                        'extras': valid_extras}],
+            )
+            self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), orders_before + 2)
+
+    def test_duplicate_extras_accepted_as_two_child_rows(self):
+        # The set-based batch gate must validate duplicates without collapsing
+        # them: two occurrences of the same valid extra still produce two
+        # child rows (pre-existing duplicate semantics are unchanged).
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant_a.pk),
+            table_id=str(self.table_a.pk),
+            items=[{
+                'item': str(self.item_a.pk),
+                'quantity': 1,
+                'extras': [str(self.item_a2.pk), str(self.item_a2.pk)],
+            }],
+        )
+        self.assertEqual(response['status'], 200)
+        order_id = str(response['data']['order_details']['id'])
+        self.assertEqual(
+            OrderItem.objects.filter(
+                order__id=order_id, item=self.item_a2, parent_item__isnull=False
+            ).count(),
+            2,
         )
 
 

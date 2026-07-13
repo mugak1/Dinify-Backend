@@ -22,6 +22,13 @@ from orders_app.controllers.services.create_order import _create_order
 
 logger = logging.getLogger(__name__)
 
+# One canonical rejection for anything that cannot be resolved on this
+# restaurant's menu (foreign, nonexistent, malformed, wrong type) — parents
+# and extras alike. A single opaque string by design: the response must not
+# reveal whether an id exists on another tenant (no tenant enumeration), so
+# every layer that rejects an item id must use EXACTLY this message.
+NOT_ON_MENU_MESSAGE = "One or more items are not on this restaurant's menu."
+
 
 class ConOrder:
     @staticmethod
@@ -224,14 +231,38 @@ class ConOrder:
         }
 
     @staticmethod
-    def process_item_extras(item: dict, order_id: str, order_item_id: str ) -> dict:
+    def process_item_extras(item: dict, order_id: str, order_item_id: str,
+                            restaurant: Restaurant) -> dict:
+        # `restaurant` is required and comes already-resolved from the caller
+        # (add_order_item passes order.restaurant), so every extra is fetched
+        # restaurant-scoped — a caller cannot forget the tenant boundary.
+        # Always returns a status dict; callers must propagate any non-200.
         extras = item.get('extras', None)
 
         if extras is None:
-            return
+            return {'status': 200}
+
+        if not isinstance(extras, list):
+            return {
+                'status': 400,
+                'message': NOT_ON_MENU_MESSAGE
+            }
 
         for extra in extras:
-            extra_item = MenuItem.objects.get(pk=extra)
+            # defense-in-depth mirror of add_order_item's parent-item guard:
+            # the scoped fetch proves ownership, and the exception tuple turns
+            # a foreign / nonexistent / malformed id into a 400 dict instead
+            # of an uncaught 500 (initiate_order's batch gate already rejects
+            # these on the live path; this holds for any other caller).
+            try:
+                extra_item = MenuItem.objects.get(
+                    pk=extra, section__restaurant=restaurant
+                )
+            except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+                return {
+                    'status': 400,
+                    'message': NOT_ON_MENU_MESSAGE
+                }
             unit_price = extra_item.primary_price
             quantity = 1  # extra['quantity']
 
@@ -296,6 +327,8 @@ class ConOrder:
                 raise Exception(extra_record.errors)
             extra_record.save()
 
+        return {'status': 200}
+
     @staticmethod
     def update_item_quantity(order_item, item: dict) -> dict:
         # The caller (find_existing_order_item) already resolved the exact matching
@@ -355,7 +388,7 @@ class ConOrder:
         except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
             return {
                 'status': 400,
-                'message': "One or more items are not on this restaurant's menu."
+                'message': NOT_ON_MENU_MESSAGE
             }
 
         unit_price = menu_item.primary_price
@@ -441,12 +474,19 @@ class ConOrder:
             raise Exception(item_record.errors)
         item_record.save()
 
-        # process the item extras
-        ConOrder.process_item_extras(
+        # process the item extras — capture and propagate: a rejected extra
+        # rejects the whole item so the service chokepoint (_create_order)
+        # can abort the whole order instead of silently dropping the failure.
+        extras_result = ConOrder.process_item_extras(
             item=item,
             order_id=order_id,
-            order_item_id=str(item_record.data['id'])
+            order_item_id=str(item_record.data['id']),
+            restaurant=order.restaurant,
         )
+        if extras_result.get('status') != 200:
+            return extras_result
+
+        return {'status': 200, 'message': 'Order item added successfully.'}
 
     @staticmethod
     def update_order_amounts(order: Order) -> dict:
@@ -530,8 +570,9 @@ class ConOrder:
                 'message': MESSAGES.get('NO_ORDER_ITEMS')
             }
 
-        # tenant consistency: every requested item must belong to THIS
-        # restaurant's menu. Runs BEFORE the options/extras pre-checks (which
+        # tenant consistency: every requested item — parent AND extra — must
+        # belong to THIS restaurant's menu. Runs BEFORE the options/extras
+        # pre-checks (which
         # resolve each item by bare pk) so a missing/foreign/malformed item id
         # fails fast with a 400 here instead of raising 500 downstream, and no
         # Order row is ever created for a cross-tenant submission.
@@ -551,8 +592,31 @@ class ConOrder:
             except (ValueError, TypeError):
                 return {
                     'status': 400,
-                    'message': "One or more items are not on this restaurant's menu."
+                    'message': NOT_ON_MENU_MESSAGE
                 }
+
+            # BUG-P1-1 follow-up: extras are MenuItems referenced by bare UUID
+            # strings, so they cross the same tenant boundary as the parent
+            # item. Collect them into the SAME batch so the single scoped query
+            # below proves ownership for parents and extras alike. Absent /
+            # None / [] extras stay valid; anything unresolvable (non-list,
+            # non-UUID member) gets the same opaque 400 as a foreign id.
+            extras = entry.get('extras')
+            if extras is None:
+                continue
+            if not isinstance(extras, list):
+                return {
+                    'status': 400,
+                    'message': NOT_ON_MENU_MESSAGE
+                }
+            for extra_id in extras:
+                try:
+                    requested_uuids.add(UUID(str(extra_id)))
+                except (ValueError, TypeError):
+                    return {
+                        'status': 400,
+                        'message': NOT_ON_MENU_MESSAGE
+                    }
 
         owned_uuids = set(
             MenuItem.objects
@@ -562,7 +626,7 @@ class ConOrder:
         if requested_uuids - owned_uuids:
             return {
                 'status': 400,
-                'message': "One or more items are not on this restaurant's menu."
+                'message': NOT_ON_MENU_MESSAGE
             }
 
         # for each order item, check if the options are applicable
