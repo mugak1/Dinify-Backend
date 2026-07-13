@@ -21,7 +21,7 @@ from restaurants_app.controllers.menu_sections import ConMenuSection
 from restaurants_app.endpoints.restaurant_setup import normalize_ordered_section_ids
 from restaurants_app.models import (
     Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table,
-    SectionGroup, DiningArea,
+    SectionGroup, DiningArea, Reservation, WaitlistEntry,
 )
 from users_app.controllers.otp_manager import OtpManager
 
@@ -5046,3 +5046,411 @@ class MenuFkTenantBoundaryTests(TestCase):
         self.assertEqual(resp.status_code, 400, resp.content)
         self.item_a.refresh_from_db()
         self.assertEqual(self.item_a.section_id, self.section_a.id)
+
+
+class TablesNestedFkTenantBoundaryTests(TestCase):
+    """
+    Cross-tenant nested-FK isolation for tables-domain writes (TENANT-P2-01).
+
+    The reservations / waitlist / tables write paths gate the PARENT record's
+    restaurant and never re-scope the nested FKs (reservation table/server,
+    waitlist seated_table, table dining_area) or the parent `restaurant` on a
+    reassigning PUT. A shared validator (assert_fks_belong_to_restaurant) wired
+    into the three serializers' validate(), plus a scoped reservation fetch in
+    _seat, binds every nested FK to the gated restaurant.
+
+    LOAD-BEARING: the reservation/waitlist `restaurant` pin, all nested FKs, and
+    the _seat scope. DEFENSE-IN-DEPTH: the SerializerPutTable `restaurant` pin —
+    Secretary strips `restaurant` (not an EDIT_INFORMATION['table'] key), so it is
+    exercised only by the direct serializer test + the EI tripwire, never a table
+    endpoint PUT. A green table-endpoint test is NOT evidence the table pin fired.
+    """
+
+    def setUp(self):
+        from django.utils import timezone
+        # --- Tenant A ---
+        self.owner_a = User.objects.create_user(
+            first_name='TFk', last_name='OwnerA',
+            email='tfk_owner_a@test.com', phone_number='256700000530',
+            username='256700000530', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_a = Restaurant.objects.create(
+            name='TFK Restaurant A', location='loc-a',
+            status=RestaurantStatus_Active, owner=self.owner_a,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        self.server_user_a = User.objects.create_user(
+            first_name='TFk', last_name='ServerA',
+            email='tfk_server_a@test.com', phone_number='256700000531',
+            username='256700000531', country='Uganda', password='password',
+            roles=[],
+        )
+        self.server_a = RestaurantEmployee.objects.create(
+            user=self.server_user_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_WAITER')],
+        )
+        self.dining_area_a = DiningArea.objects.create(
+            name='A Patio', restaurant=self.restaurant_a,
+        )
+        self.dining_area_a2 = DiningArea.objects.create(
+            name='A Garden', restaurant=self.restaurant_a,
+        )
+        self.table_a = Table.objects.create(
+            number=1, str_number='1', restaurant=self.restaurant_a,
+            dining_area=self.dining_area_a,
+        )
+        self.table_a2 = Table.objects.create(
+            number=2, str_number='2', restaurant=self.restaurant_a,
+        )
+        self.reservation_a = Reservation.objects.create(
+            restaurant=self.restaurant_a, guest_name='Alice A',
+            date_time=timezone.now(), party_size=2,
+            table=self.table_a, server=self.server_a,
+        )
+        self.waitlist_a = WaitlistEntry.objects.create(
+            restaurant=self.restaurant_a, guest_name='Wait A', party_size=3,
+            seated_table=self.table_a,
+        )
+
+        # --- Tenant B (the cross-tenant targets) ---
+        self.owner_b = User.objects.create_user(
+            first_name='TFk', last_name='OwnerB',
+            email='tfk_owner_b@test.com', phone_number='256700000540',
+            username='256700000540', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_b = Restaurant.objects.create(
+            name='TFK Restaurant B', location='loc-b',
+            status=RestaurantStatus_Active, owner=self.owner_b,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_b, restaurant=self.restaurant_b,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        self.server_user_b = User.objects.create_user(
+            first_name='TFk', last_name='ServerB',
+            email='tfk_server_b@test.com', phone_number='256700000541',
+            username='256700000541', country='Uganda', password='password',
+            roles=[],
+        )
+        self.server_b = RestaurantEmployee.objects.create(
+            user=self.server_user_b, restaurant=self.restaurant_b,
+            roles=[ROLES.get('RESTAURANT_WAITER')],
+        )
+        self.dining_area_b = DiningArea.objects.create(
+            name='B Patio', restaurant=self.restaurant_b,
+        )
+        self.table_b = Table.objects.create(
+            number=1, str_number='1', restaurant=self.restaurant_b,
+        )
+        self.reservation_b = Reservation.objects.create(
+            restaurant=self.restaurant_b, guest_name='Bob B',
+            date_time=timezone.now(), party_size=2,
+        )
+        self.waitlist_b = WaitlistEntry.objects.create(
+            restaurant=self.restaurant_b, guest_name='Wait B',
+        )
+
+    # --- helpers --------------------------------------------------------
+    def _token(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        return str(RefreshToken.for_user(user).access_token)
+
+    def _request(self, user, method, config_detail, body):
+        return getattr(self.client, method)(
+            f'/api/v1/restaurant-setup/{config_detail}/',
+            data=body, content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {self._token(user)}',
+        )
+
+    # --- 1. reservation row-move (LOAD-BEARING parent pin) --------------
+    def test_reservation_put_foreign_restaurant_rejected(self):
+        resp = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id), 'restaurant': str(self.restaurant_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.reservation_a.refresh_from_db()
+        self.assertEqual(self.reservation_a.restaurant_id, self.restaurant_a.id)
+
+    # --- 2. reservation foreign table (POST + PUT) ---------------------
+    def test_reservation_post_foreign_table_rejected(self):
+        resp = self._request(
+            self.owner_a, 'post', 'reservations',
+            {'restaurant': str(self.restaurant_a.id), 'guest_name': 'NewTbl',
+             'date_time': '2026-07-14T19:00:00Z', 'table': str(self.table_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(Reservation.objects.filter(guest_name='NewTbl').exists())
+
+    def test_reservation_put_foreign_table_rejected(self):
+        resp = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id), 'table': str(self.table_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.reservation_a.refresh_from_db()
+        self.assertEqual(self.reservation_a.table_id, self.table_a.id)
+
+    # --- 3. reservation foreign server (POST + PUT) --------------------
+    def test_reservation_post_foreign_server_rejected(self):
+        resp = self._request(
+            self.owner_a, 'post', 'reservations',
+            {'restaurant': str(self.restaurant_a.id), 'guest_name': 'NewSrv',
+             'date_time': '2026-07-14T19:00:00Z', 'server': str(self.server_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(Reservation.objects.filter(guest_name='NewSrv').exists())
+
+    def test_reservation_put_foreign_server_rejected(self):
+        resp = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id), 'server': str(self.server_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.reservation_a.refresh_from_db()
+        self.assertEqual(self.reservation_a.server_id, self.server_a.id)
+
+    # --- 4. waitlist row-move (LOAD-BEARING parent pin) ----------------
+    def test_waitlist_put_foreign_restaurant_rejected(self):
+        resp = self._request(
+            self.owner_a, 'put', 'waitlist',
+            {'id': str(self.waitlist_a.id), 'restaurant': str(self.restaurant_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.waitlist_a.refresh_from_db()
+        self.assertEqual(self.waitlist_a.restaurant_id, self.restaurant_a.id)
+
+    # --- 5. waitlist foreign seated_table (POST + PUT) ----------------
+    def test_waitlist_post_foreign_seated_table_rejected(self):
+        resp = self._request(
+            self.owner_a, 'post', 'waitlist',
+            {'restaurant': str(self.restaurant_a.id), 'guest_name': 'WNew',
+             'seated_table': str(self.table_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(WaitlistEntry.objects.filter(guest_name='WNew').exists())
+
+    def test_waitlist_put_foreign_seated_table_rejected(self):
+        resp = self._request(
+            self.owner_a, 'put', 'waitlist',
+            {'id': str(self.waitlist_a.id), 'seated_table': str(self.table_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.waitlist_a.refresh_from_db()
+        self.assertEqual(self.waitlist_a.seated_table_id, self.table_a.id)
+
+    # --- 6. table foreign dining_area on PUT (LOAD-BEARING) -----------
+    def test_table_put_foreign_dining_area_rejected(self):
+        resp = self._request(
+            self.owner_a, 'put', 'tables',
+            {'id': str(self.table_a.id), 'dining_area': str(self.dining_area_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.table_a.refresh_from_db()
+        self.assertEqual(self.table_a.dining_area_id, self.dining_area_a.id)
+
+    # --- 7. table foreign dining_area on CREATE ----------------------
+    def test_table_post_foreign_dining_area_rejected(self):
+        resp = self._request(
+            self.owner_a, 'post', 'tables',
+            {'number': 99, 'restaurant': str(self.restaurant_a.id),
+             'dining_area': str(self.dining_area_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(
+            Table.objects.filter(number=99, restaurant=self.restaurant_a).exists())
+
+    # --- 8. _seat with a foreign reservation leaves B untouched -------
+    def test_seat_foreign_reservation_leaves_it_untouched(self):
+        original_status = self.reservation_b.status
+        resp = self._request(
+            self.owner_a, 'post', 'table-actions/seat',
+            {'table_id': str(self.table_a.id),
+             'reservation_id': str(self.reservation_b.id)},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.reservation_b.refresh_from_db()
+        self.assertEqual(self.reservation_b.status, original_status)
+        self.assertNotEqual(self.reservation_b.status, 'seated')
+        self.assertIsNone(self.reservation_b.seated_at)
+        self.assertIsNone(self.reservation_b.table_id)
+        self.table_a.refresh_from_db()
+        self.assertEqual(self.table_a.status, 'seated')  # table still seats
+
+    # --- 9. _seat with a same-tenant reservation still works ----------
+    def test_seat_same_tenant_reservation_succeeds(self):
+        resp = self._request(
+            self.owner_a, 'post', 'table-actions/seat',
+            {'table_id': str(self.table_a.id),
+             'reservation_id': str(self.reservation_a.id)},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.reservation_a.refresh_from_db()
+        self.assertEqual(self.reservation_a.status, 'seated')
+        self.assertIsNotNone(self.reservation_a.seated_at)
+        self.assertEqual(self.reservation_a.table_id, self.table_a.id)
+
+    # --- 10. positive controls: same-tenant FKs + own-restaurant PUT --
+    def test_reservation_post_same_tenant_table_and_server_succeeds(self):
+        resp = self._request(
+            self.owner_a, 'post', 'reservations',
+            {'restaurant': str(self.restaurant_a.id), 'guest_name': 'OkRes',
+             'date_time': '2026-07-14T19:00:00Z',
+             'table': str(self.table_a2.id), 'server': str(self.server_a.id)},
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        created = Reservation.objects.get(guest_name='OkRes')
+        self.assertEqual(created.table_id, self.table_a2.id)
+        self.assertEqual(created.server_id, self.server_a.id)
+
+    def test_reservation_put_same_tenant_table_succeeds(self):
+        resp = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id), 'table': str(self.table_a2.id)},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.reservation_a.refresh_from_db()
+        self.assertEqual(self.reservation_a.table_id, self.table_a2.id)
+
+    def test_waitlist_put_same_tenant_seated_table_succeeds(self):
+        resp = self._request(
+            self.owner_a, 'put', 'waitlist',
+            {'id': str(self.waitlist_a.id), 'seated_table': str(self.table_a2.id)},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.waitlist_a.refresh_from_db()
+        self.assertEqual(self.waitlist_a.seated_table_id, self.table_a2.id)
+
+    def test_table_put_same_tenant_dining_area_succeeds(self):
+        resp = self._request(
+            self.owner_a, 'put', 'tables',
+            {'id': str(self.table_a.id), 'dining_area': str(self.dining_area_a2.id)},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.table_a.refresh_from_db()
+        self.assertEqual(self.table_a.dining_area_id, self.dining_area_a2.id)
+
+    def test_reservation_put_own_restaurant_still_succeeds(self):
+        # Guards the "reject on presence" mistake: the frontend re-sends the row's
+        # own `restaurant` on PUT; an EQUAL value must be a no-op that still passes.
+        resp = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id),
+             'restaurant': str(self.restaurant_a.id), 'party_size': 5},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.reservation_a.refresh_from_db()
+        self.assertEqual(self.reservation_a.party_size, 5)
+        self.assertEqual(self.reservation_a.restaurant_id, self.restaurant_a.id)
+
+    # --- 11. clearing SET_NULL FKs to None still works ----------------
+    def test_reservation_put_clear_table_succeeds(self):
+        resp = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id), 'table': None},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.reservation_a.refresh_from_db()
+        self.assertIsNone(self.reservation_a.table_id)
+
+    def test_waitlist_put_clear_seated_table_succeeds(self):
+        resp = self._request(
+            self.owner_a, 'put', 'waitlist',
+            {'id': str(self.waitlist_a.id), 'seated_table': None},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.waitlist_a.refresh_from_db()
+        self.assertIsNone(self.waitlist_a.seated_table_id)
+
+    def test_table_put_clear_dining_area_succeeds(self):
+        resp = self._request(
+            self.owner_a, 'put', 'tables',
+            {'id': str(self.table_a.id), 'dining_area': None},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.table_a.refresh_from_db()
+        self.assertIsNone(self.table_a.dining_area_id)
+
+    # --- 12. table restaurant pin: tripwire + DIRECT serializer test --
+    def test_table_restaurant_is_not_editable(self):
+        """Tripwire. Table.restaurant is the tenancy anchor. Secretary filters PUT
+        data to EI keys, so `restaurant` being ABSENT from EDIT_INFORMATION['table']
+        is what prevents a cross-tenant table move today. If you add it, the
+        SerializerPutTable restaurant pin becomes load-bearing — prove it fires
+        end-to-end before changing this test."""
+        from dinify_backend.configss.edit_information import EDIT_INFORMATION
+        self.assertNotIn('restaurant', {k['key'] for k in EDIT_INFORMATION['table']})
+
+    def test_table_serializer_rejects_foreign_restaurant(self):
+        # The ONLY test that reaches the SerializerPutTable restaurant pin — the
+        # endpoint strips `restaurant` (see the tripwire). Defense-in-depth.
+        # Use table_a2 (number=2, str_number='2'): restaurant B has no matching
+        # (number, str_number), so the unique-together validator passes and it is
+        # the restaurant pin — not an incidental unique clash — that rejects.
+        from restaurants_app.serializers import SerializerPutTable
+        serializer = SerializerPutTable(
+            instance=self.table_a2,
+            data={'restaurant': str(self.restaurant_b.id)},
+            partial=True,
+        )
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('restaurant', serializer.errors)
+        self.table_a2.refresh_from_db()
+        self.assertEqual(self.table_a2.restaurant_id, self.restaurant_a.id)
+
+    # --- 13. foreign vs unknown/malformed id: equivalent, no enumeration
+    def test_foreign_and_unknown_table_both_rejected_no_enumeration(self):
+        import uuid
+        foreign = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id), 'table': str(self.table_b.id)},
+        )
+        unknown = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id), 'table': str(uuid.uuid4())},
+        )
+        self.assertEqual(foreign.status_code, 400, foreign.content)
+        self.assertEqual(unknown.status_code, 400, unknown.content)
+        self.reservation_a.refresh_from_db()
+        self.assertEqual(self.reservation_a.table_id, self.table_a.id)
+        # No tenant enumeration: the foreign rejection reveals neither B's id nor name.
+        body = foreign.content.decode()
+        self.assertNotIn(str(self.restaurant_b.id), body)
+        self.assertNotIn('TFK Restaurant B', body)
+
+    def test_malformed_table_uuid_is_4xx_not_500(self):
+        resp = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id), 'table': 'not-a-uuid'},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.reservation_a.refresh_from_db()
+        self.assertEqual(self.reservation_a.table_id, self.table_a.id)
+
+    # --- adversarial: both nested FKs foreign; POST restaurant gate ----
+    def test_reservation_put_foreign_table_and_server_together_rejected(self):
+        resp = self._request(
+            self.owner_a, 'put', 'reservations',
+            {'id': str(self.reservation_a.id),
+             'table': str(self.table_b.id), 'server': str(self.server_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.reservation_a.refresh_from_db()
+        self.assertEqual(self.reservation_a.table_id, self.table_a.id)
+        self.assertEqual(self.reservation_a.server_id, self.server_a.id)
+
+    def test_reservation_post_into_foreign_restaurant_denied_at_gate(self):
+        # POST gates on the body restaurant, so owner_a can't create into B at all
+        # (403 at the gate, before the serializer). Pins the existing behaviour.
+        resp = self._request(
+            self.owner_a, 'post', 'reservations',
+            {'restaurant': str(self.restaurant_b.id), 'guest_name': 'GateX',
+             'date_time': '2026-07-14T19:00:00Z'},
+        )
+        self.assertIn(resp.status_code, (401, 403), resp.content)
+        self.assertFalse(Reservation.objects.filter(guest_name='GateX').exists())

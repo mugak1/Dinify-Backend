@@ -78,8 +78,15 @@ class TableActionsEndpoint(APIView):
         reservation_id = data.get('reservation_id')
         if reservation_id:
             try:
+                # Scope the reservation to the gated table's restaurant so a
+                # foreign reservation_id can't be mutated into another tenant's
+                # row. A foreign id now falls into the same non-fatal silent-ignore
+                # path an unknown id already did: the table still seats and the
+                # attacker learns nothing.
                 reservation = Reservation.objects.get(
-                    id=reservation_id, deleted=False
+                    id=reservation_id,
+                    restaurant_id=table.restaurant_id,
+                    deleted=False,
                 )
                 reservation.status = 'seated'
                 reservation.seated_at = timezone.now()
