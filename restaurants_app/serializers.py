@@ -195,6 +195,28 @@ class SerializerPutSectionGroup(ModelSerializer):
         model = SectionGroup
         fields = '__all__'
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # Defense-in-depth: SectionGroup.section is the tenancy path
+        # (section__restaurant). UNREACHABLE via the endpoint today — `section`
+        # is not in EI_SECTION_GROUP, so Secretary strips it before this
+        # serializer runs (see test_section_group_section_is_not_editable). This
+        # guard is here so a cross-tenant group move is already blocked if
+        # `section` ever becomes editable. On create the endpoint gate
+        # (_resolve_sectiongroups('create')) authorizes the supplied section, so
+        # this is instance-only.
+        if self.instance is not None:
+            incoming_section = attrs.get('section')
+            if incoming_section is not None:
+                current_restaurant_id = MenuSection.objects.values_list(
+                    'restaurant_id', flat=True
+                ).get(id=self.instance.section_id)
+                if incoming_section.restaurant_id != current_restaurant_id:
+                    raise serializers.ValidationError({
+                        'section': "Cannot move a section group to another restaurant's section."
+                    })
+        return attrs
+
 
 class SerializerPublicGetSectionGroup(ModelSerializer):
     item_count = SerializerMethodField()
@@ -262,6 +284,36 @@ class SerializerPutMenuItem(ModelSerializer):
                 if start_date and end_date and end_date < start_date:
                     raise serializers.ValidationError(
                         {'discount_details': 'End date must be on or after the start date.'})
+
+        # Tenant-boundary guard for FK reassignment on UPDATE. Runs on EVERY
+        # update — placed ABOVE the tag_ids early-return below, which an attacker
+        # bypasses by omitting tag_ids. A reassigned section / section_group must
+        # resolve to the SAME restaurant as the item's current tenant; a
+        # cross-tenant move injects the item into another restaurant's menu graph
+        # (and removes it from its own). On create the endpoint gate
+        # (_resolve_menuitems('create')) authorizes the supplied section, so this
+        # is instance-only. DRF has already resolved the FK fields to instances,
+        # so an unknown/malformed id is a field-level 400 before validate() runs.
+        if self.instance is not None:
+            incoming_section = attrs.get('section')
+            incoming_group = attrs.get('section_group')
+            if incoming_section is not None or incoming_group is not None:
+                current_restaurant_id = MenuSection.objects.values_list(
+                    'restaurant_id', flat=True
+                ).get(id=self.instance.section_id)
+                if (incoming_section is not None
+                        and incoming_section.restaurant_id != current_restaurant_id):
+                    raise serializers.ValidationError({
+                        'section': "Cannot move a menu item to another restaurant's section."
+                    })
+                if incoming_group is not None:
+                    group_restaurant_id = MenuSection.objects.values_list(
+                        'restaurant_id', flat=True
+                    ).get(id=incoming_group.section_id)
+                    if group_restaurant_id != current_restaurant_id:
+                        raise serializers.ValidationError({
+                            'section_group': "Cannot move a menu item to another restaurant's section group."
+                        })
 
         tag_ids = attrs.get('tag_ids')
         if tag_ids is None:

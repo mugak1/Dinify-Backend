@@ -4775,3 +4775,274 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.blocked_restaurant.refresh_from_db()
         self.assertEqual(self.blocked_restaurant.status, RestaurantStatus_Blocked)
+
+
+class MenuFkTenantBoundaryTests(TestCase):
+    """
+    Cross-tenant section / section_group reassignment on menu writes (TENANT-P1-03).
+
+    The restaurant-setup UPDATE gate authorizes against the record's CURRENT tenant
+    (existing section__restaurant) and never evaluates the DESTINATION restaurant
+    implied by a reassigned FK. SerializerPutMenuItem.validate() previously reached
+    the section->restaurant resolution only BELOW an ``if tag_ids is None: return
+    attrs`` early-return, so a menu-item PUT that omitted tag_ids moved section /
+    section_group across tenants unchecked. Those two guards are LOAD-BEARING — they
+    close a live exploit.
+
+    SerializerPutSectionGroup.validate() is DEFENSE-IN-DEPTH: ``section`` is not in
+    EI_SECTION_GROUP, so Secretary strips it before the serializer runs and the
+    endpoint path is already closed. It is exercised only by a direct serializer
+    test (test_sectiongroup_serializer_rejects_foreign_section); the EI-contract
+    tripwire (test_section_group_section_is_not_editable) is what actually protects
+    that path today. A green section-group ENDPOINT test is NOT evidence an exploit
+    was closed.
+    """
+
+    def setUp(self):
+        self.owner_a = User.objects.create_user(
+            first_name='Fk', last_name='OwnerA',
+            email='fk_owner_a@test.com', phone_number='256700000410',
+            username='256700000410', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_a = Restaurant.objects.create(
+            name='FK Restaurant A', location='loc-a',
+            status=RestaurantStatus_Active, owner=self.owner_a,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        self.owner_b = User.objects.create_user(
+            first_name='Fk', last_name='OwnerB',
+            email='fk_owner_b@test.com', phone_number='256700000420',
+            username='256700000420', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_b = Restaurant.objects.create(
+            name='FK Restaurant B', location='loc-b',
+            status=RestaurantStatus_Active, owner=self.owner_b,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_b, restaurant=self.restaurant_b,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # A-side menu graph: two sections + two groups (distinct same-tenant
+        # destinations for the positive-control moves), plus the item under attack.
+        self.section_a = MenuSection.objects.create(
+            name='A Mains', restaurant=self.restaurant_a, listing_position=0,
+        )
+        self.section_a2 = MenuSection.objects.create(
+            name='A Sides', restaurant=self.restaurant_a, listing_position=1,
+        )
+        self.group_a = SectionGroup.objects.create(
+            name='A Group', section=self.section_a,
+        )
+        self.group_a2 = SectionGroup.objects.create(
+            name='A Group 2', section=self.section_a,
+        )
+        self.item_a = MenuItem.objects.create(
+            name='A Item', section=self.section_a,
+            section_group=self.group_a, primary_price=1000,
+        )
+
+        # B-side menu graph — the cross-tenant targets owner_a will try to reach.
+        self.section_b = MenuSection.objects.create(
+            name='B Mains', restaurant=self.restaurant_b, listing_position=0,
+        )
+        self.group_b = SectionGroup.objects.create(
+            name='B Group', section=self.section_b,
+        )
+
+    # --- helpers --------------------------------------------------------
+    def _auth(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        token = str(RefreshToken.for_user(user).access_token)
+        return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
+
+    def _put(self, user, config_detail, body):
+        return self.client.put(
+            f'/api/v1/restaurant-setup/{config_detail}/',
+            data=body, content_type='application/json', **self._auth(user),
+        )
+
+    def _post(self, user, config_detail, body):
+        return self.client.post(
+            f'/api/v1/restaurant-setup/{config_detail}/',
+            data=body, content_type='application/json', **self._auth(user),
+        )
+
+    # --- 1. LOAD-BEARING: foreign section on menu-item PUT rejected ------
+    def test_foreign_section_on_menuitem_put_rejected(self):
+        # tag_ids OMITTED — the exact bypass path (the old early-return skipped
+        # the only section resolution). The new guard runs above it.
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item_a.id), 'section': str(self.section_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.item_a.refresh_from_db()
+        self.assertEqual(self.item_a.section_id, self.section_a.id)
+
+    # --- 2. LOAD-BEARING: foreign section_group on menu-item PUT rejected -
+    def test_foreign_section_group_on_menuitem_put_rejected(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item_a.id), 'section_group': str(self.group_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.item_a.refresh_from_db()
+        self.assertEqual(self.item_a.section_group_id, self.group_a.id)
+
+    # --- 3a. section-group current behaviour (truthful; NOT via the guard) -
+    def test_sectiongroup_foreign_section_put_current_behaviour(self):
+        # `section` is not in EI_SECTION_GROUP, so Secretary strips it before the
+        # serializer runs; the PUT is a no-op (400 "No changes detected"). This
+        # pins CURRENT behaviour — closed today by EI field-filtering, NOT by
+        # SerializerPutSectionGroup.validate() (which 3b tests directly).
+        resp = self._put(
+            self.owner_a, 'sectiongroups',
+            {'id': str(self.group_a.id), 'section': str(self.section_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.group_a.refresh_from_db()
+        self.assertEqual(self.group_a.section_id, self.section_a.id)
+
+    # --- 3b. section-group guard — DIRECT serializer test (exercises the code) -
+    def test_sectiongroup_serializer_rejects_foreign_section(self):
+        # The ONLY test that reaches SerializerPutSectionGroup.validate() — the
+        # endpoint can't (see 3a). Proves the defense-in-depth guard fires.
+        from restaurants_app.serializers import SerializerPutSectionGroup
+        serializer = SerializerPutSectionGroup(
+            instance=self.group_a,
+            data={'section': str(self.section_b.id)},
+            partial=True,
+        )
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('section', serializer.errors)
+        self.group_a.refresh_from_db()
+        self.assertEqual(self.group_a.section_id, self.section_a.id)
+
+    # --- 3c. EI-contract tripwire (what actually protects the path today) -
+    def test_section_group_section_is_not_editable(self):
+        """Tripwire. SectionGroup.section is the tenancy path (section__restaurant).
+        Secretary filters PUT data to EI keys, so `section` being ABSENT from
+        EI_SECTION_GROUP is what prevents a cross-tenant group move today. If you
+        add it, SerializerPutSectionGroup.validate() becomes load-bearing — prove
+        it fires end-to-end before changing this test."""
+        from dinify_backend.configss.edit_information import EI_SECTION_GROUP
+        self.assertNotIn('section', {k['key'] for k in EI_SECTION_GROUP})
+
+    # --- 4a/4b. same-tenant reassignment still works (positive control) --
+    def test_same_tenant_section_move_succeeds(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item_a.id), 'section': str(self.section_a2.id)},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.item_a.refresh_from_db()
+        self.assertEqual(self.item_a.section_id, self.section_a2.id)
+
+    def test_same_tenant_section_group_move_succeeds(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item_a.id), 'section_group': str(self.group_a2.id)},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.item_a.refresh_from_db()
+        self.assertEqual(self.item_a.section_group_id, self.group_a2.id)
+
+    # --- 5. clearing section_group still works --------------------------
+    def test_clearing_section_group_succeeds(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item_a.id), 'section_group': None},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.item_a.refresh_from_db()
+        self.assertIsNone(self.item_a.section_group_id)
+
+    # --- 6a/6b. tag_ids scoping unregressed (block below the early-return) -
+    def test_foreign_tag_ids_still_rejected(self):
+        from restaurants_app.models import RestaurantTag, MenuItemTag
+        b_tag = RestaurantTag.objects.get(restaurant=self.restaurant_b, name='Vegan')
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item_a.id), 'tag_ids': [str(b_tag.id)]},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(MenuItemTag.objects.filter(menu_item=self.item_a).exists())
+
+    def test_same_tenant_tag_ids_still_succeeds(self):
+        from restaurants_app.models import RestaurantTag, MenuItemTag
+        a_tag = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Vegan')
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item_a.id), 'tag_ids': [str(a_tag.id)]},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        tagged = set(
+            MenuItemTag.objects.filter(menu_item=self.item_a).values_list('tag_id', flat=True)
+        )
+        self.assertEqual(tagged, {a_tag.id})
+
+    # --- 7a/7b. create path already safe (pin it; do NOT "fix" create) --
+    def test_create_menuitem_with_foreign_section_denied(self):
+        # _resolve_menuitems('create') authorizes against the SUPPLIED section's
+        # restaurant (B), so owner_a is denied at the gate — create was already safe.
+        before = MenuItem.objects.filter(section=self.section_b).count()
+        resp = self._post(
+            self.owner_a, 'menuitems',
+            {'name': 'Injected', 'section': str(self.section_b.id),
+             'primary_price': '1000.00'},
+        )
+        self.assertIn(resp.status_code, (401, 403), resp.content)
+        self.assertEqual(MenuItem.objects.filter(section=self.section_b).count(), before)
+
+    def test_create_sectiongroup_with_foreign_section_denied(self):
+        before = SectionGroup.objects.filter(section=self.section_b).count()
+        resp = self._post(
+            self.owner_a, 'sectiongroups',
+            {'name': 'Injected Group', 'section': str(self.section_b.id)},
+        )
+        self.assertIn(resp.status_code, (401, 403), resp.content)
+        self.assertEqual(SectionGroup.objects.filter(section=self.section_b).count(), before)
+
+    # --- 8. malformed / unknown section id -> clean 4xx, never a 500 ----
+    def test_malformed_and_unknown_section_are_4xx_not_500(self):
+        import uuid
+        for bad in ['not-a-uuid', str(uuid.uuid4())]:
+            resp = self._put(
+                self.owner_a, 'menuitems',
+                {'id': str(self.item_a.id), 'section': bad},
+            )
+            self.assertEqual(resp.status_code, 400, f'{bad}: {resp.content}')
+            self.item_a.refresh_from_db()
+            self.assertEqual(self.item_a.section_id, self.section_a.id)
+
+    # --- adversarial: both FKs foreign together; and with tag_ids present -
+    def test_foreign_section_and_group_together_rejected(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item_a.id), 'section': str(self.section_b.id),
+             'section_group': str(self.group_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.item_a.refresh_from_db()
+        self.assertEqual(self.item_a.section_id, self.section_a.id)
+        self.assertEqual(self.item_a.section_group_id, self.group_a.id)
+
+    def test_foreign_section_rejected_even_with_valid_tag_ids(self):
+        # The guard fires ABOVE the tag_ids early-return, so a present same-tenant
+        # tag_ids does not let a foreign section slip through.
+        from restaurants_app.models import RestaurantTag
+        a_tag = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Vegan')
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item_a.id), 'section': str(self.section_b.id),
+             'tag_ids': [str(a_tag.id)]},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.item_a.refresh_from_db()
+        self.assertEqual(self.item_a.section_id, self.section_a.id)
