@@ -121,3 +121,79 @@ class ReportsTenantScopeTests(TestCase):
         # Authorized caller + invalid report name → the normal 400 branch.
         resp = self.get_report(self.owner_a, self.restaurant_a.id, name='not-a-report')
         self.assertEqual(resp.status_code, 400, resp.content)
+
+
+class DinifyReportsAdminGateTests(TestCase):
+    """
+    Platform-admin reports (``/api/v1/reports/dinify/<name>/``) must be
+    dinify-admin-only. ``DinifyReportsEndpoint`` inherited only the global
+    IsAuthenticated default, so any authenticated principal — a self-registered
+    diner, or a real restaurant owner — could read cross-tenant revenue, owner
+    PII (restaurant-listing) and the entire transaction ledger. The gate denies
+    non-admins with 404 (existence non-disclosure), mirroring
+    RestaurantReportsEndpoint, and fires before the invalid-name 400 branch so
+    report-name validity is never leaked. The three controllers are unchanged.
+    """
+
+    SLUGS = ('dashboard', 'restaurant-listing', 'transactions-listing')
+
+    def setUp(self):
+        # A real restaurant with a real owner — a genuine tenant principal that
+        # nonetheless holds no dinify-admin role. The seeded restaurant also
+        # backs the restaurant-listing row assertion below.
+        self.owner = make_user('256700000251')
+        self.restaurant = Restaurant.objects.create(
+            name='Gate Restaurant', location='loc-gate',
+            status=RestaurantStatus_Active, owner=self.owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.restaurant,
+            roles=[RESTAURANT_OWNER],
+        )
+        # Role-less authenticated diner (valid JWT, no roles, employed nowhere).
+        self.diner = make_user('256700000252')
+        # Dinify admin — the only principal allowed to read platform reports.
+        self.admin = make_user('256700000250', roles=[DINIFY_ADMIN])
+
+    # --- request helpers ------------------------------------------------
+    def auth(self, user):
+        token = str(RefreshToken.for_user(user).access_token)
+        return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
+
+    def get_dinify(self, user, name):
+        headers = self.auth(user) if user is not None else {}
+        return self.client.get(f'/api/v1/reports/dinify/{name}/', **headers)
+
+    # --- denied: role-less diner (404 on all three slugs) ---------------
+    def test_roleless_diner_denied_on_all_slugs(self):
+        for name in self.SLUGS:
+            resp = self.get_dinify(self.diner, name)
+            self.assertEqual(resp.status_code, 404, f'{name}: {resp.content}')
+
+    # --- denied: non-admin owner (404 on all three slugs) ---------------
+    def test_non_admin_owner_denied_on_all_slugs(self):
+        for name in self.SLUGS:
+            resp = self.get_dinify(self.owner, name)
+            self.assertEqual(resp.status_code, 404, f'{name}: {resp.content}')
+
+    # --- allowed: dinify admin (200 on all three slugs) -----------------
+    def test_admin_allowed_on_all_slugs(self):
+        for name in self.SLUGS:
+            resp = self.get_dinify(self.admin, name)
+            self.assertEqual(resp.status_code, 200, f'{name}: {resp.content}')
+
+    def test_admin_restaurant_listing_returns_seeded_row(self):
+        resp = self.get_dinify(self.admin, 'restaurant-listing')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        ids = [row['id'] for row in resp.json()['data']]
+        self.assertIn(str(self.restaurant.id), ids)
+
+    # --- non-disclosure: gate answers before the invalid-name 400 -------
+    def test_non_admin_unknown_and_valid_name_both_404(self):
+        # For a non-admin, an unknown report name and a valid one are BOTH 404 —
+        # the gate (not the report-name branch) answers, so report validity is
+        # never leaked (an authorized invalid name would be 400).
+        unknown = self.get_dinify(self.diner, 'not-a-report')
+        valid = self.get_dinify(self.diner, 'dashboard')
+        self.assertEqual(unknown.status_code, 404, unknown.content)
+        self.assertEqual(valid.status_code, 404, valid.content)
