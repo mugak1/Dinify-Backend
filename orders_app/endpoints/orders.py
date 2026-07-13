@@ -7,8 +7,9 @@ from rest_framework.permissions import AllowAny
 from django.core.exceptions import ValidationError
 from orders_app.models import Order
 from orders_app.controllers.manage_order import update_order_status
-from dinify_backend.configss.string_definitions import OrderStatus_Pending
+from dinify_backend.configss.string_definitions import OrderStatus_Pending, MODULE_TABLES
 from orders_app.controllers.con_orders import ConOrder
+from users_app.controllers.permissions_check import can_user_access_module
 
 
 class OrdersEndpoint(APIView):
@@ -86,6 +87,7 @@ class V2OrdersEndpoint(APIView):
 
             customer = None
             created_by = None
+            restaurant_id = data.get('restaurant')
 
             if source == 'admin':
                 if user is None:
@@ -94,13 +96,25 @@ class V2OrdersEndpoint(APIView):
                         'message': 'Please log in'
                     }
                     return Response(response, status=401)
+                # Authorize the caller against the target restaurant BEFORE
+                # trusting them as staff. Without this, any authenticated
+                # principal (a self-registered diner) could set created_by and
+                # thereby skip every availability gate in initiate_order
+                # (accepting_orders, qr_mode, is_available_for_scan) at any
+                # restaurant. 404 (not 403) mirrors the reports/finance
+                # non-disclosure gates — a non-member must not learn whether the
+                # restaurant exists. can_user_access_module already returns True
+                # for dinify admins and fails closed on a missing/empty id.
+                if not can_user_access_module(
+                    request.user, restaurant_id, MODULE_TABLES,
+                ):
+                    return Response({'status': 404, 'message': 'Not found'}, status=404)
                 created_by = request.user
             else:
                 if user is not None:
                     user = str(user)
                     customer = request.user
 
-            restaurant_id = data.get('restaurant')
             table_id = data.get('table')
             items = data.get('items')
             # idempotency key supplied by the diner app (Phase 3); absent today
