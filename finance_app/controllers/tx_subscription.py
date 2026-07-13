@@ -1,5 +1,6 @@
 import logging
 from typing import Optional
+from django.core.exceptions import ValidationError
 from restaurants_app.models import Restaurant
 from users_app.models import User
 from finance_app.models import DinifyTransaction
@@ -24,7 +25,15 @@ class SubscriptionPaymentTransaction:
         msisdn: Optional[str] = None,
         otp: Optional[str] = None,
     ) -> dict:
-        restaurant = Restaurant.objects.get(id=restaurant_id)
+        try:
+            restaurant = Restaurant.objects.get(id=restaurant_id)
+        except (Restaurant.DoesNotExist, ValidationError):
+            # A well-formed-but-unknown UUID (DoesNotExist) or a malformed id
+            # (ValidationError from UUIDField conversion) both resolve to the
+            # same 404 the endpoint gate emits — a bad id never 500s, and an
+            # authorized caller's unknown-id 404 is byte-for-byte identical to a
+            # non-member's gate 404.
+            return {'status': 404, 'message': 'Not found'}
         if restaurant.preferred_subscription_method == 'per_order':
             return {
                 'status': 400,
