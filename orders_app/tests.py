@@ -30,10 +30,13 @@ from restaurants_app.tests import (
     TEST_OPTION_CHOICE_LARGE_ID,
     TEST_OPTION_CHOICE_SMALL_COST,
 )
-from restaurants_app.models import Restaurant, Table, MenuItem, MenuSection
+from restaurants_app.models import (
+    Restaurant, Table, MenuItem, MenuSection, RestaurantEmployee,
+)
 from dinify_backend.configss.messages import OK_ORDER_UPDATED
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated, OrderStatus_Pending,
+    RestaurantStatus_Active, DINIFY_ADMIN, RESTAURANT_OWNER, RESTAURANT_STAFF,
 )
 
 
@@ -1212,3 +1215,205 @@ class TestExtrasDiscountedFlag(TestCase):
         self.assertEqual(row.actual_cost, Decimal('5000.00'))
         self.assertEqual(row.savings, Decimal('0.00'))
         self.assertFalse(serialize_order_item_details(item=row)['discounted'])
+
+
+class AdminSourceOrderInitiationAuthTests(TestCase):
+    """
+    source='admin' order initiation must be authorized at the target restaurant
+    (TENANT-P2-02).
+
+    V2OrdersEndpoint is AllowAny (anonymous QR diner ordering). The source=='admin'
+    branch previously only AUTHENTICATED — any authenticated principal (a
+    self-registered diner) could set created_by and thereby skip all three diner
+    availability gates in initiate_order (accepting_orders, qr_mode,
+    is_available_for_scan) at ANY restaurant, then submit to occupy a foreign table
+    and push a ticket to a foreign kitchen. The gate now requires
+    can_user_access_module(user, restaurant, MODULE_TABLES) before created_by is
+    set, returning 404 (non-disclosure) for a non-member. Anonymous/authenticated
+    DINER ordering (source != 'admin') is untouched, and genuine staff still
+    legitimately bypass the availability gates (a staff feature, not a diner one).
+    """
+
+    def _make_user(self, phone, roles=None):
+        return User.objects.create_user(
+            first_name='OSrc', last_name='User',
+            email=f'{phone}@test.com', phone_number=phone,
+            username=phone, country='Uganda', password='password',
+            roles=roles or [],
+        )
+
+    def _seed_tenant(self, tag, owner_phone):
+        owner = self._make_user(owner_phone)
+        restaurant = Restaurant.objects.create(
+            name=f'OSrc Restaurant {tag}', location=f'loc-{tag}',
+            status=RestaurantStatus_Active, owner=owner, accepting_orders=True,
+        )
+        RestaurantEmployee.objects.create(
+            user=owner, restaurant=restaurant, roles=[RESTAURANT_OWNER],
+        )
+        section = MenuSection.objects.create(
+            name=f'OSrc Section {tag}', restaurant=restaurant,
+        )
+        item = MenuItem.objects.create(
+            name=f'OSrc Item {tag}', section=section, primary_price=1000,
+        )
+        table = Table.objects.create(
+            number=1, str_number='1', restaurant=restaurant,
+        )
+        return owner, restaurant, item, table
+
+    def setUp(self):
+        self.owner_a, self.restaurant_a, self.item_a, self.table_a = \
+            self._seed_tenant('A', '256700000610')
+        self.owner_b, self.restaurant_b, self.item_b, self.table_b = \
+            self._seed_tenant('B', '256700000620')
+        # Genuine B staff with the minimal tables-only role (grants MODULE_TABLES).
+        self.staff_b = self._make_user('256700000631')
+        RestaurantEmployee.objects.create(
+            user=self.staff_b, restaurant=self.restaurant_b, roles=[RESTAURANT_STAFF],
+        )
+        # Role-less authenticated diner (employed nowhere).
+        self.diner = self._make_user('256700000640')
+        # Dinify admin.
+        self.admin = self._make_user('256700000650', roles=[DINIFY_ADMIN])
+
+    # --- helpers --------------------------------------------------------
+    def _client(self, user=None):
+        client = APIClient()
+        if user is not None:
+            from rest_framework_simplejwt.tokens import RefreshToken
+            token = str(RefreshToken.for_user(user).access_token)
+            client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        return client
+
+    def _initiate(self, user, restaurant, table, item, source='admin'):
+        body = {
+            'restaurant': str(restaurant.pk),
+            'table': str(table.pk),
+            'items': [{'item': str(item.pk), 'quantity': 1}],
+        }
+        if source is not None:
+            body['source'] = source
+        return self._client(user).post(
+            '/api/v2/orders/initiate/', body, format='json',
+        )
+
+    def _order_id(self, resp):
+        return resp.json()['data']['order_details']['id']
+
+    # --- 1. role-less diner denied -------------------------------------
+    def test_diner_admin_source_denied_no_order(self):
+        before = Order.objects.count()
+        resp = self._initiate(self.diner, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.assertEqual(Order.objects.count(), before)
+
+    # --- 2. cross-tenant employee denied -------------------------------
+    def test_cross_tenant_employee_admin_source_denied(self):
+        # owner_a is an authorized employee of A, but has no access to B.
+        resp = self._initiate(self.owner_a, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.assertFalse(Order.objects.filter(restaurant=self.restaurant_b).exists())
+
+    # --- 3. target staff with MODULE_TABLES allowed, created_by set ----
+    def test_target_staff_admin_source_succeeds(self):
+        resp = self._initiate(self.staff_b, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        order = Order.objects.get(id=self._order_id(resp))
+        self.assertEqual(order.created_by_id, self.staff_b.id)
+        self.assertIsNone(order.customer_id)
+
+    # --- 4. gate bypass closed for non-members; staff bypass intact ----
+    def test_paused_restaurant_diner_admin_source_denied_no_order(self):
+        self.restaurant_b.accepting_orders = False
+        self.restaurant_b.save()
+        before = Order.objects.count()
+        resp = self._initiate(self.diner, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_paused_restaurant_staff_admin_source_still_bypasses(self):
+        self.restaurant_b.accepting_orders = False
+        self.restaurant_b.save()
+        resp = self._initiate(self.staff_b, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            Order.objects.get(id=self._order_id(resp)).created_by_id, self.staff_b.id)
+
+    # --- 5. same for menu_only + out_of_service tables -----------------
+    def test_menu_only_table_diner_admin_source_denied(self):
+        self.table_b.qr_mode = 'menu_only'
+        self.table_b.save()
+        before = Order.objects.count()
+        resp = self._initiate(self.diner, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_menu_only_table_staff_admin_source_still_bypasses(self):
+        self.table_b.qr_mode = 'menu_only'
+        self.table_b.save()
+        resp = self._initiate(self.staff_b, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            Order.objects.get(id=self._order_id(resp)).created_by_id, self.staff_b.id)
+
+    def test_out_of_service_table_diner_admin_source_denied(self):
+        self.table_b.status = 'out_of_service'
+        self.table_b.save()
+        before = Order.objects.count()
+        resp = self._initiate(self.diner, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_out_of_service_table_staff_admin_source_still_bypasses(self):
+        self.table_b.status = 'out_of_service'
+        self.table_b.save()
+        resp = self._initiate(self.staff_b, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            Order.objects.get(id=self._order_id(resp)).created_by_id, self.staff_b.id)
+
+    # --- 6. dinify-admin allowed for any restaurant --------------------
+    def test_dinify_admin_admin_source_succeeds(self):
+        resp = self._initiate(self.admin, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            Order.objects.get(id=self._order_id(resp)).created_by_id, self.admin.id)
+
+    # --- 7. diner flow unregressed -------------------------------------
+    def test_anonymous_diner_initiate_still_works(self):
+        resp = self._initiate(None, self.restaurant_a, self.table_a, self.item_a, source=None)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        order = Order.objects.get(id=self._order_id(resp))
+        self.assertIsNone(order.created_by_id)
+        self.assertIsNone(order.customer_id)
+
+    def test_authenticated_diner_initiate_sets_customer_not_created_by(self):
+        resp = self._initiate(self.diner, self.restaurant_a, self.table_a, self.item_a, source=None)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        order = Order.objects.get(id=self._order_id(resp))
+        self.assertIsNone(order.created_by_id)
+        self.assertEqual(order.customer_id, self.diner.id)
+
+    def test_diner_still_rejected_at_paused_restaurant(self):
+        self.restaurant_a.accepting_orders = False
+        self.restaurant_a.save()
+        resp = self._initiate(None, self.restaurant_a, self.table_a, self.item_a, source=None)
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_diner_still_rejected_at_menu_only_table(self):
+        self.table_a.qr_mode = 'menu_only'
+        self.table_a.save()
+        resp = self._initiate(None, self.restaurant_a, self.table_a, self.item_a, source=None)
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_diner_still_rejected_at_out_of_service_table(self):
+        self.table_a.status = 'out_of_service'
+        self.table_a.save()
+        resp = self._initiate(None, self.restaurant_a, self.table_a, self.item_a, source=None)
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    # --- 8. unauthenticated source='admin' → 401 (not 404) -------------
+    def test_unauthenticated_admin_source_is_401(self):
+        resp = self._initiate(None, self.restaurant_b, self.table_b, self.item_b, source='admin')
+        self.assertEqual(resp.status_code, 401, resp.content)
