@@ -18,6 +18,7 @@ from restaurants_app.models import (
 )
 from misc_app.serializers.fields import JSONStringCompatField, JSONStringCompatListField
 from restaurants_app.controllers.tables import get_table_availability
+from restaurants_app.controllers.tenant_scope import assert_fks_belong_to_restaurant
 
 
 class SerializerGetRestaurantDetail(ModelSerializer):
@@ -515,6 +516,29 @@ class SerializerPutTable(ModelSerializer):
         model = Table
         fields = '__all__'
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # Bind the nested `dining_area` FK to the restaurant the caller was gated
+        # against. The parent `restaurant` pin here is DEFENSE-IN-DEPTH — the
+        # tables PUT flows through Secretary, which strips `restaurant` (not an
+        # EDIT_INFORMATION['table'] key) before this serializer runs (see the
+        # tripwire test). It exists so a cross-tenant table move is already
+        # blocked if `restaurant` ever becomes editable, mirroring the #219
+        # section-group guard. Reject only a DIFFERING value — an EQUAL one is a
+        # no-op that must still pass.
+        if self.instance is not None:
+            restaurant_id = self.instance.restaurant_id
+            incoming = attrs.get('restaurant')
+            if incoming is not None and incoming.id != restaurant_id:
+                raise serializers.ValidationError(
+                    {'restaurant': 'Cannot move this record to another restaurant.'})
+        else:
+            incoming = attrs.get('restaurant')
+            restaurant_id = incoming.id if incoming is not None else None
+        if restaurant_id is not None:
+            assert_fks_belong_to_restaurant(restaurant_id, attrs, ('dining_area',))
+        return attrs
+
 
 class SerializerPublicGetTable(ModelSerializer):
     """
@@ -863,6 +887,26 @@ class SerializerPutReservation(ModelSerializer):
         model = Reservation
         fields = '__all__'
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # Bind the nested FKs (table, server) to the restaurant the caller was
+        # gated against. On update the parent `restaurant` is PINNED to the row's
+        # own restaurant (LOAD-BEARING — closes the cross-tenant row-move): a
+        # DIFFERING value is rejected, an EQUAL one (the frontend re-sends the
+        # row's own restaurant on PUT) is a no-op that must still pass.
+        if self.instance is not None:
+            restaurant_id = self.instance.restaurant_id
+            incoming = attrs.get('restaurant')
+            if incoming is not None and incoming.id != restaurant_id:
+                raise serializers.ValidationError(
+                    {'restaurant': 'Cannot move this record to another restaurant.'})
+        else:
+            incoming = attrs.get('restaurant')
+            restaurant_id = incoming.id if incoming is not None else None
+        if restaurant_id is not None:
+            assert_fks_belong_to_restaurant(restaurant_id, attrs, ('table', 'server'))
+        return attrs
+
 
 class SerializerGetReservation(ModelSerializer):
     table_info = SerializerMethodField()
@@ -892,6 +936,26 @@ class SerializerPutWaitlistEntry(ModelSerializer):
     class Meta:
         model = WaitlistEntry
         fields = '__all__'
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # Bind the nested `seated_table` FK to the restaurant the caller was gated
+        # against. On update the parent `restaurant` is PINNED to the row's own
+        # restaurant (LOAD-BEARING — closes the cross-tenant row-move): a DIFFERING
+        # value is rejected, an EQUAL one (the frontend re-sends the row's own
+        # restaurant on PUT) is a no-op that must still pass.
+        if self.instance is not None:
+            restaurant_id = self.instance.restaurant_id
+            incoming = attrs.get('restaurant')
+            if incoming is not None and incoming.id != restaurant_id:
+                raise serializers.ValidationError(
+                    {'restaurant': 'Cannot move this record to another restaurant.'})
+        else:
+            incoming = attrs.get('restaurant')
+            restaurant_id = incoming.id if incoming is not None else None
+        if restaurant_id is not None:
+            assert_fks_belong_to_restaurant(restaurant_id, attrs, ('seated_table',))
+        return attrs
 
 
 class SerializerGetWaitlistEntry(ModelSerializer):
