@@ -10,7 +10,8 @@
 #   1. django check
 #   2. makemigrations --check --dry-run  (fails if a model changed w/o a migration)
 #   3. money-field guard                 (fails if a monetary model field is a FloatField)
-#   4. test                              (full Django test suite)
+#   4. tenant-relation ratchet           (fails if the tenant-relation baseline grew)
+#   5. test                              (full Django test suite)
 #
 # test_settings falls back to SQLite in-memory, so no local Postgres is
 # needed. Export DATABASE_ENGINE/NAME/USER/... to run against another database,
@@ -59,6 +60,7 @@ run_step() {
 run_step "django check"         "${PYTHON}" -m django check --settings="${SETTINGS}"
 run_step "makemigrations check" "${PYTHON}" -m django makemigrations --check --dry-run --settings="${SETTINGS}"
 run_step "money-field guard"    "${PYTHON}" scripts/check_money_fields.py
+run_step "tenant-relation ratchet" "${PYTHON}" scripts/check_tenant_relation_ratchet.py
 run_step "tests"                "${PYTHON}" -m django test --settings="${SETTINGS}" --verbosity=2
 
 echo
