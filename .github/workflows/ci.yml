@@ -58,6 +58,14 @@ jobs:
       - name: Money-field guard
         run: python scripts/check_money_fields.py
 
+      - name: Tenant-relation ratchet
+        # The committed tenant-relation baseline may only SHRINK — a new writable
+        # relation must be classified, not baselined. Reads the baseline on the
+        # base branch via git (fetched at runtime by the script); fails closed in
+        # CI if the base can't be read. TEMPORARY: delete this step, the script,
+        # and the baseline file when the baseline reaches zero (TENANT-STRUCT-00).
+        run: python scripts/check_tenant_relation_ratchet.py
+
       - name: Run tests
         env:
           DATABASE_ENGINE: django.db.backends.postgresql
