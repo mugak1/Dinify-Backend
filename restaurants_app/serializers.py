@@ -286,35 +286,54 @@ class SerializerPutMenuItem(ModelSerializer):
                     raise serializers.ValidationError(
                         {'discount_details': 'End date must be on or after the start date.'})
 
-        # Tenant-boundary guard for FK reassignment on UPDATE. Runs on EVERY
-        # update — placed ABOVE the tag_ids early-return below, which an attacker
-        # bypasses by omitting tag_ids. A reassigned section / section_group must
-        # resolve to the SAME restaurant as the item's current tenant; a
-        # cross-tenant move injects the item into another restaurant's menu graph
-        # (and removes it from its own). On create the endpoint gate
-        # (_resolve_menuitems('create')) authorizes the supplied section, so this
-        # is instance-only. DRF has already resolved the FK fields to instances,
-        # so an unknown/malformed id is a field-level 400 before validate() runs.
-        if self.instance is not None:
-            incoming_section = attrs.get('section')
-            incoming_group = attrs.get('section_group')
-            if incoming_section is not None or incoming_group is not None:
-                current_restaurant_id = MenuSection.objects.values_list(
-                    'restaurant_id', flat=True
-                ).get(id=self.instance.section_id)
-                if (incoming_section is not None
-                        and incoming_section.restaurant_id != current_restaurant_id):
-                    raise serializers.ValidationError({
-                        'section': "Cannot move a menu item to another restaurant's section."
-                    })
-                if incoming_group is not None:
-                    group_restaurant_id = MenuSection.objects.values_list(
-                        'restaurant_id', flat=True
-                    ).get(id=incoming_group.section_id)
-                    if group_restaurant_id != current_restaurant_id:
-                        raise serializers.ValidationError({
-                            'section_group': "Cannot move a menu item to another restaurant's section group."
-                        })
+        # FK tenancy + section-group cohesion guard. Runs on CREATE and UPDATE,
+        # placed ABOVE the tag_ids early-return below (which an attacker bypasses
+        # by omitting tag_ids). DRF has already resolved the FK fields to
+        # instances, so an unknown/malformed id is a field-level 400 before
+        # validate() runs.
+        #
+        # Invariant: a menu item's section_group, when present, must belong to the
+        # EXACT section assigned to the item (section_group.section == item.section).
+        # This section-level rule is stronger than same-restaurant and AUTOMATICALLY
+        # guarantees same-tenant ownership (if the group's section is the item's
+        # section, they trivially share a restaurant). It closes the create-path gap
+        # (the endpoint gate _resolve_menuitems('create') authorizes on `section`
+        # only, and the auto-generated FK fields resolve globally, so a foreign
+        # section_group could otherwise be injected on create) and tightens the
+        # update path (previously only same-restaurant was required).
+        incoming_section = attrs.get('section')
+        incoming_group = attrs.get('section_group')
+
+        # The EFFECTIVE section: the submitted section when present (create, or an
+        # update that reassigns section), else the item's current section (partial
+        # update leaving section untouched). None only on a create that omitted the
+        # required section — the field-level 400 has already fired.
+        if incoming_section is not None:
+            effective_section_id = incoming_section.id
+        elif self.instance is not None:
+            effective_section_id = self.instance.section_id
+        else:
+            effective_section_id = None
+
+        # Section reassignment guard (UPDATE only): a menu item may not be moved to
+        # another restaurant's section. On create the endpoint gate already
+        # authorized the submitted section's restaurant.
+        if self.instance is not None and incoming_section is not None:
+            current_restaurant_id = MenuSection.objects.values_list(
+                'restaurant_id', flat=True
+            ).get(id=self.instance.section_id)
+            if incoming_section.restaurant_id != current_restaurant_id:
+                raise serializers.ValidationError({
+                    'section': "Cannot move a menu item to another restaurant's section."
+                })
+
+        # Section-group cohesion invariant (CREATE + UPDATE): a supplied, non-null
+        # section_group must belong to the effective section.
+        if incoming_group is not None and effective_section_id is not None:
+            if incoming_group.section_id != effective_section_id:
+                raise serializers.ValidationError({
+                    'section_group': "A section group must belong to the menu item's section."
+                })
 
         tag_ids = attrs.get('tag_ids')
         if tag_ids is None:
