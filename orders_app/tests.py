@@ -31,7 +31,7 @@ from restaurants_app.tests import (
     TEST_OPTION_CHOICE_SMALL_COST,
 )
 from restaurants_app.models import (
-    Restaurant, Table, MenuItem, MenuSection, RestaurantEmployee,
+    Restaurant, Table, MenuItem, MenuSection, SectionGroup, RestaurantEmployee,
 )
 from dinify_backend.configss.messages import OK_ORDER_UPDATED
 from dinify_backend.configss.string_definitions import (
@@ -1136,6 +1136,10 @@ class TestExtrasDiscountedFlag(TestCase):
         return MenuItem.objects.create(
             name=name,
             section=self.section,
+            # Published so the diner-path order clears the publication gate;
+            # this suite is about the discount flag, not publication.
+            approved=True,
+            enabled=True,
             primary_price=Decimal('10000'),
             discounted_price=Decimal('8000'),
             running_discount=True,
@@ -1206,6 +1210,8 @@ class TestExtrasDiscountedFlag(TestCase):
         extra = MenuItem.objects.create(
             name='Plain Extra',
             section=self.section,
+            approved=True,
+            enabled=True,
             primary_price=Decimal('5000'),
             running_discount=False,
         )
@@ -1251,11 +1257,15 @@ class AdminSourceOrderInitiationAuthTests(TestCase):
         RestaurantEmployee.objects.create(
             user=owner, restaurant=restaurant, roles=[RESTAURANT_OWNER],
         )
+        # Published section + item so the DINER-path tests in this suite clear
+        # the publication gate; the staff/admin-source tests bypass it anyway.
         section = MenuSection.objects.create(
             name=f'OSrc Section {tag}', restaurant=restaurant,
+            approved=True, enabled=True,
         )
         item = MenuItem.objects.create(
             name=f'OSrc Item {tag}', section=section, primary_price=1000,
+            approved=True, enabled=True,
         )
         table = Table.objects.create(
             number=1, str_number='1', restaurant=restaurant,
@@ -1417,3 +1427,201 @@ class AdminSourceOrderInitiationAuthTests(TestCase):
     def test_unauthenticated_admin_source_is_401(self):
         resp = self._initiate(None, self.restaurant_b, self.table_b, self.item_b, source='admin')
         self.assertEqual(resp.status_code, 401, resp.content)
+
+
+class TestOrderPublicationGate(TestCase):
+    """PR 1A (write side): an anonymous diner (created_by is None) may order
+    ONLY published, diner-orderable records. An unpublished parent item, an
+    unpublished parent SECTION, an item beneath a soft-deleted group, or an
+    unpublished extra must fail — atomically, before any Order row is written.
+    Malformed ids and foreign-tenant ids keep their existing clean-400
+    handling, and the authorised staff/admin path (created_by set) is
+    unaffected. available / in_stock are deliberately NOT gated here (they stay
+    on the existing zero-and-flag reconciliation)."""
+
+    def setUp(self):
+        seed_user()
+        seed_restaurant(seed_owner=True)
+        seed_menu_section()
+        seed_menu_items()
+        seed_tables()
+        # seed_order() deliberately NOT called → TEST_TABLE_NUMBER4 stays free.
+        self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        self.section = MenuSection.objects.get(name=TEST_MENU_SECTION_NAME)
+        self.table = Table.objects.get(number=TEST_TABLE_NUMBER4)
+        self.staff = User.objects.get(username=TEST_PHONE)
+        self.published_item = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+
+        # Unpublished parent variants in the (published) seeded section.
+        self.unapproved_item = MenuItem.objects.create(
+            name='Gate Unapproved', section=self.section, primary_price=1000,
+            approved=False, enabled=True,
+        )
+        self.disabled_item = MenuItem.objects.create(
+            name='Gate Disabled', section=self.section, primary_price=1000,
+            approved=True, enabled=False,
+        )
+        self.deleted_item = MenuItem.objects.create(
+            name='Gate Deleted', section=self.section, primary_price=1000,
+            approved=True, enabled=True, deleted=True,
+        )
+
+        # A published-looking item under an UNPUBLISHED section.
+        self.unapproved_section = MenuSection.objects.create(
+            name='Gate Unapproved Section', restaurant=self.restaurant,
+            approved=False, enabled=True, available=True,
+        )
+        self.item_in_unapproved_section = MenuItem.objects.create(
+            name='Gate Item In Unapproved Section',
+            section=self.unapproved_section, primary_price=1000,
+            approved=True, enabled=True,
+        )
+
+        # A published-looking item beneath a soft-deleted group.
+        self.deleted_group = SectionGroup.objects.create(
+            name='Gate Deleted Group', section=self.section,
+            approved=True, enabled=True, deleted=True,
+        )
+        self.item_under_deleted_group = MenuItem.objects.create(
+            name='Gate Item Under Deleted Group', section=self.section,
+            section_group=self.deleted_group, primary_price=1000,
+            approved=True, enabled=True,
+        )
+
+        # Extras (published + unpublished).
+        self.published_extra = MenuItem.objects.create(
+            name='Gate Published Extra', section=self.section, primary_price=500,
+            approved=True, enabled=True, is_extra=True,
+        )
+        self.unpublished_extra = MenuItem.objects.create(
+            name='Gate Unpublished Extra', section=self.section,
+            primary_price=500, approved=False, enabled=False, is_extra=True,
+        )
+
+        # A second tenant with its own published item (foreign-tenant control).
+        other_owner = User.objects.create_user(
+            first_name='Other', last_name='Owner',
+            email='gate_other@example.com', phone_number='256700000970',
+            username='256700000970', country='Uganda', password='password',
+            roles=[],
+        )
+        self.other_restaurant = Restaurant.objects.create(
+            name='Gate Other Tenant', location='gate-other', owner=other_owner,
+        )
+        other_section = MenuSection.objects.create(
+            name='Gate Other Section', restaurant=self.other_restaurant,
+            approved=True, enabled=True, available=True,
+        )
+        self.foreign_item = MenuItem.objects.create(
+            name='Gate Foreign Item', section=other_section, primary_price=1000,
+            approved=True, enabled=True,
+        )
+
+    def _order(self, items, created_by=None):
+        return ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant.pk),
+            table_id=str(self.table.pk),
+            items=items,
+            created_by=created_by,
+        )
+
+    def _assert_rejected_no_row(self, items, created_by=None):
+        orders_before = Order.objects.count()
+        items_before = OrderItem.objects.count()
+        response = self._order(items, created_by=created_by)
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(response['message'], NOT_ON_MENU_MESSAGE)
+        # Atomic: no Order and no OrderItem row committed.
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), items_before)
+        return response
+
+    # --- 10. happy path ---------------------------------------------------
+    def test_published_diner_order_succeeds(self):
+        before = Order.objects.count()
+        response = self._order(
+            [{'item': str(self.published_item.pk), 'quantity': 1}]
+        )
+        self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), before + 1)
+
+    # --- 11-12 (+). unpublished / deleted parent -------------------------
+    def test_unapproved_parent_rejected_no_row(self):
+        self._assert_rejected_no_row(
+            [{'item': str(self.unapproved_item.pk), 'quantity': 1}]
+        )
+
+    def test_disabled_parent_rejected_atomically(self):
+        self._assert_rejected_no_row(
+            [{'item': str(self.disabled_item.pk), 'quantity': 1}]
+        )
+
+    def test_soft_deleted_parent_rejected(self):
+        self._assert_rejected_no_row(
+            [{'item': str(self.deleted_item.pk), 'quantity': 1}]
+        )
+
+    def test_item_in_unapproved_section_rejected(self):
+        self._assert_rejected_no_row(
+            [{'item': str(self.item_in_unapproved_section.pk), 'quantity': 1}]
+        )
+
+    def test_item_under_soft_deleted_group_rejected(self):
+        self._assert_rejected_no_row(
+            [{'item': str(self.item_under_deleted_group.pk), 'quantity': 1}]
+        )
+
+    # --- 13. unpublished extra -------------------------------------------
+    def test_unpublished_extra_rejected_atomically(self):
+        self._assert_rejected_no_row([{
+            'item': str(self.published_item.pk), 'quantity': 1,
+            'extras': [str(self.unpublished_extra.pk)],
+        }])
+
+    def test_published_extra_accepted(self):
+        before = Order.objects.count()
+        response = self._order([{
+            'item': str(self.published_item.pk), 'quantity': 1,
+            'extras': [str(self.published_extra.pk)],
+        }])
+        self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), before + 1)
+
+    # --- 14. mixed array fails atomically --------------------------------
+    def test_mixed_published_and_unpublished_parents_rejected_atomically(self):
+        self._assert_rejected_no_row([
+            {'item': str(self.published_item.pk), 'quantity': 1},
+            {'item': str(self.unapproved_item.pk), 'quantity': 1},
+        ])
+
+    # --- 15. foreign tenant ----------------------------------------------
+    def test_foreign_tenant_item_rejected(self):
+        self._assert_rejected_no_row(
+            [{'item': str(self.foreign_item.pk), 'quantity': 1}]
+        )
+
+    # --- 16. malformed uuids ---------------------------------------------
+    def test_malformed_parent_uuid_rejected(self):
+        response = self._order([{'item': 'not-a-uuid', 'quantity': 1}])
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(response['message'], NOT_ON_MENU_MESSAGE)
+
+    def test_malformed_extra_uuid_rejected(self):
+        response = self._order([{
+            'item': str(self.published_item.pk), 'quantity': 1,
+            'extras': ['not-a-uuid'],
+        }])
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(response['message'], NOT_ON_MENU_MESSAGE)
+
+    # --- 17. authorised staff bypass -------------------------------------
+    def test_staff_can_order_unapproved_item(self):
+        # Staff/admin (created_by set) keep pre-existing behaviour: an
+        # unpublished item is orderable via the authorised management path.
+        before = Order.objects.count()
+        response = self._order(
+            [{'item': str(self.unapproved_item.pk), 'quantity': 1}],
+            created_by=self.staff,
+        )
+        self.assertEqual(response['status'], 200)
+        self.assertEqual(Order.objects.count(), before + 1)

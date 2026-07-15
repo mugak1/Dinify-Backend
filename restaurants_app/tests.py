@@ -73,9 +73,14 @@ def seed_menu_section():
     seed the menu section
     """
     restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+    # Seeded menus represent a PUBLISHED, diner-orderable menu: the diner menu
+    # read path and the order publication gate both require approved + enabled,
+    # so the shared happy-path fixtures must be published.
     MenuSection.objects.create(
         name=TEST_MENU_SECTION_NAME,
-        restaurant=restaurant
+        restaurant=restaurant,
+        approved=True,
+        enabled=True,
     )
 
 
@@ -190,6 +195,12 @@ def seed_menu_items():
             }
         ),
     ]
+    # Publish the seeded items so they satisfy the diner menu read path and the
+    # order publication gate (both require approved + enabled). The deliberately
+    # unavailable item keeps available=False to exercise stock reconciliation.
+    for menu_item in menu_items:
+        menu_item.approved = True
+        menu_item.enabled = True
     MenuItem.objects.bulk_create(menu_items)
 
 
@@ -788,7 +799,7 @@ class MenuItemSortModeTests(TestCase):
         )
         self.restaurant.menu_item_sort_mode = 'price-high'
         self.restaurant.save(update_fields=['menu_item_sort_mode'])
-        response = handle_show_menu(str(self.restaurant.id), 'false')
+        response = handle_show_menu(str(self.restaurant.id))
         self.assertEqual(response['status'], 200)
         self.assertIn('item_sort_mode', response)
         self.assertEqual(response['item_sort_mode'], 'price-high')
@@ -797,7 +808,7 @@ class MenuItemSortModeTests(TestCase):
         from restaurants_app.controllers.handle_diner_journey import (
             handle_show_menu,
         )
-        response = handle_show_menu(str(self.restaurant.id), 'false')
+        response = handle_show_menu(str(self.restaurant.id))
         self.assertEqual(response.get('item_sort_mode'), 'manual')
 
 
@@ -1863,7 +1874,7 @@ class MenuSectionScheduleTests(TestCase):
             'restaurants_app.controllers.utils.schedule_utils.datetime'
         ) as mock_datetime:
             mock_datetime.now.return_value = monday_10am
-            response = handle_show_menu(str(restaurant.id), 'false')
+            response = handle_show_menu(str(restaurant.id))
 
         self.assertEqual(response['status'], 200)
         returned_ids = [section['id'] for section in response['data']]
@@ -2793,12 +2804,17 @@ class SerializerPublicGetMenuItemExtrasDiscountTests(TestCase):
             'start_time': '',
             'end_time': '',
         }
+        # Extras must be published to surface via get_extras (the read path now
+        # mirrors the order path's publication contract); this suite is about
+        # the discount_details shape, not publication.
         discounted_extra = MenuItem.objects.create(
             name='Discounted Extra', section=section, primary_price=1000,
             running_discount=True, discount_details=discount,
+            approved=True, enabled=True,
         )
         plain_extra = MenuItem.objects.create(
             name='Plain Extra', section=section, primary_price=500,
+            approved=True, enabled=True,
         )
         parent = MenuItem.objects.create(
             name='Parent With Extras', section=section, primary_price=5000,
