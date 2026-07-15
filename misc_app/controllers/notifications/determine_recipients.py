@@ -22,14 +22,18 @@ def determine_receipients(
             'restaurant-activated',
             'restaurant-rejected',
         ]:
-            employees = RestaurantEmployee.objects.filter(restaurant_id=restaurant_id)
-            owners = [employee.user.email for employee in employees if RESTAURANT_OWNER in employee.roles]  # noqa
-            managers = [employee.user.email for employee in employees if RESTAURANT_MANAGER in employee.roles]  # noqa
+            employees = RestaurantEmployee.objects.filter(
+                restaurant_id=restaurant_id
+            ).exclude(user__email__isnull=True).exclude(user__email='')
+            owners = [employee.user.email for employee in employees if RESTAURANT_OWNER in employee.roles and employee.user.email]  # noqa
+            managers = [employee.user.email for employee in employees if RESTAURANT_MANAGER in employee.roles and employee.user.email]  # noqa
             tos = owners + managers
 
     if message_type in ['admin-new-restaurant', 'new-restaurant']:
-        dinify_admins = User.objects.filter(roles__contains=[DINIFY_ADMIN])
-        ccs += [admin.email for admin in dinify_admins]
+        dinify_admins = User.objects.filter(
+            roles__contains=[DINIFY_ADMIN], email__isnull=False
+        ).exclude(email='')
+        ccs += [admin.email for admin in dinify_admins if admin.email]
 
     if message_type in [
         'forgot-password',
@@ -39,7 +43,10 @@ def determine_receipients(
         'new-user-credentials'
     ]:
         user = User.objects.values('phone_number', 'email').get(id=user_id)
-        tos = user['email']
+        # A self-registered user may have email=None; never pass a null/falsy
+        # value downstream as a "to" (it can degenerate a recipient predicate
+        # into email IS NULL). Empty string keeps the scalar shape and stays falsy.
+        tos = user['email'] or ''
         msisdn = user['phone_number']
 
     return {

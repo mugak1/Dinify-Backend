@@ -710,7 +710,10 @@ class SerializerGetFullMenu(ModelSerializer):
         filters = {
             'section': section,
             'approved': True,
-            'enabled': True
+            'enabled': True,
+            # deleted is NOT popped with the approval flags below, so a
+            # soft-deleted group stays hidden even in ignore-approval/preview mode.
+            'deleted': False,
         }
         if self.context.get('ignore_approval') == 'true':
             filters.pop('approved')
@@ -728,7 +731,6 @@ class SerializerGetFullMenu(ModelSerializer):
             'section': section,
             'approved': True,
             'enabled': True,
-            # 'section_group__deleted': False,
             # 'section_group__available': True,
             'deleted': False,
             'available': True
@@ -736,7 +738,13 @@ class SerializerGetFullMenu(ModelSerializer):
         if self.context.get('ignore_approval') in ['true', True]:
             filters.pop('approved')
             filters.pop('enabled')
-        items = MenuItem.objects.filter(**filters)
+        # Hide items whose group is soft-deleted while keeping group-less items.
+        # section_group is nullable, so a dict-key `section_group__deleted=False`
+        # would inner-join and silently drop null-group rows; exclude() is the
+        # null-safe anti-join (a NULL FK never matches deleted=True).
+        items = MenuItem.objects.filter(**filters).exclude(
+            section_group__deleted=True
+        )
         return SerializerPublicGetMenuItem(
             items, many=True
         ).data
@@ -746,7 +754,6 @@ class SerializerGetFullMenu(ModelSerializer):
             'section': section,
             'approved': True,
             'enabled': True,
-            # 'section_group__deleted': False,
             # 'section_group__available': True,
             'deleted': False,
             'available': True
@@ -754,7 +761,11 @@ class SerializerGetFullMenu(ModelSerializer):
         if self.context.get('ignore_approval') in ['true', True]:
             filters.pop('approved')
             filters.pop('enabled')
-        return MenuItem.objects.filter(**filters).count()
+        # Null-safe anti-join (see get_items): drop items under a soft-deleted
+        # group without excluding group-less items via an inner join.
+        return MenuItem.objects.filter(**filters).exclude(
+            section_group__deleted=True
+        ).count()
 
 
 class SerializerPutDiningArea(ModelSerializer):
@@ -777,10 +788,12 @@ class SerializerGetDiningArea(ModelSerializer):
         )
 
     def get_no_tables(self, dining_area):
-        return Table.objects.filter(dining_area=dining_area).count()
+        return Table.objects.filter(
+            dining_area=dining_area, deleted=False
+        ).count()
 
     def get_tables(self, dining_area):
-        tables = Table.objects.filter(dining_area=dining_area)
+        tables = Table.objects.filter(dining_area=dining_area, deleted=False)
         return [
             {
                 'id': str(table.pk),
