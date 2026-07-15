@@ -26,7 +26,9 @@ from restaurants_app.models import Restaurant, RestaurantEmployee, Table
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Active, RESTAURANT_OWNER, RESTAURANT_MANAGER,
-    OrderStatus_Cancelled,
+    OrderStatus_Cancelled, OrderStatus_Served, OrderStatus_Paid,
+    OrderStatus_Pending, OrderStatus_Preparing, OrderStatus_Initiated,
+    OrderStatus_Refunded,
 )
 from reviews_app.models import PUBLIC_RATING_THRESHOLD, Review, ReviewTag
 from reviews_app.serializers import ReviewRestaurantReadSerializer
@@ -140,9 +142,13 @@ class ReviewApiTestBase(TestCase):
 
     # --- fixtures -------------------------------------------------------
     def make_order(self, restaurant, table, **kwargs):
-        # A fresh order per review — Review.order is one-per-order.
+        # A fresh order per review — Review.order is one-per-order. Default to a
+        # SERVED (completed-service) order because a review is only accepted for
+        # a completed order (order_status in SALE_STATUSES = {served, paid});
+        # tests that need a non-reviewable state pass order_status= explicitly.
         defaults = dict(
             total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
+            order_status=OrderStatus_Served,
         )
         defaults.update(kwargs)
         return Order.objects.create(
@@ -209,6 +215,11 @@ class ReviewSubmissionTests(ReviewApiTestBase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()['status'], 404)
 
+    # --- review eligibility: only a completed service (served/paid) ------
+    # A review is accepted iff order_status is in SALE_STATUSES ({served, paid}).
+    # Every in-flight state (initiated/pending/preparing) and every reversed
+    # state (cancelled/refunded) is rejected 400 with ONE restrained message
+    # that does not disclose the specific lifecycle state.
     def test_cancelled_order_returns_400(self):
         order = self.make_order(
             self.restaurant_a, self.table_a,
@@ -217,6 +228,61 @@ class ReviewSubmissionTests(ReviewApiTestBase):
         resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
         self.assertEqual(resp.status_code, 400)
         self.assertFalse(Review.objects.filter(order=order).exists())
+
+    def test_initiated_order_cannot_be_reviewed(self):
+        order = self.make_order(
+            self.restaurant_a, self.table_a,
+            order_status=OrderStatus_Initiated,
+        )
+        resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Review.objects.filter(order=order).exists())
+
+    def test_active_pending_order_cannot_be_reviewed(self):
+        order = self.make_order(
+            self.restaurant_a, self.table_a,
+            order_status=OrderStatus_Pending,
+        )
+        resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Review.objects.filter(order=order).exists())
+
+    def test_preparing_order_cannot_be_reviewed(self):
+        order = self.make_order(
+            self.restaurant_a, self.table_a,
+            order_status=OrderStatus_Preparing,
+        )
+        resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Review.objects.filter(order=order).exists())
+
+    def test_refunded_order_cannot_be_reviewed(self):
+        order = self.make_order(
+            self.restaurant_a, self.table_a,
+            order_status=OrderStatus_Refunded,
+        )
+        resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Review.objects.filter(order=order).exists())
+
+    def test_served_order_can_be_reviewed_once(self):
+        order = self.make_order(
+            self.restaurant_a, self.table_a,
+            order_status=OrderStatus_Served,
+        )
+        resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertTrue(Review.objects.filter(order=order).exists())
+
+    def test_paid_order_can_be_reviewed(self):
+        # 'paid' is also a completed sale (SALE_STATUSES) -> reviewable.
+        order = self.make_order(
+            self.restaurant_a, self.table_a,
+            order_status=OrderStatus_Paid,
+        )
+        resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertTrue(Review.objects.filter(order=order).exists())
 
     def test_second_submission_returns_409(self):
         order = self.make_order(self.restaurant_a, self.table_a)

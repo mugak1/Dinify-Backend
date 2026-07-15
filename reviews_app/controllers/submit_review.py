@@ -9,9 +9,10 @@ code instead of a raw DRF error.
 import logging
 
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 
 from orders_app.models import Order
-from dinify_backend.configss.string_definitions import OrderStatus_Cancelled
+from reports_app.controllers.common.sale_filters import SALE_STATUSES
 from reviews_app.serializers import (
     ReviewWriteSerializer,
     ReviewRestaurantReadSerializer,
@@ -61,11 +62,17 @@ def submit_review(order_id, rating_fields, comment=None, tags=None):
     except (Order.DoesNotExist, ValidationError, ValueError):
         return {'status': 404, 'message': 'We could not find that order.'}
 
-    # 2. Cancelled orders cannot be reviewed (400).
-    if order.order_status == OrderStatus_Cancelled:
+    # 2. Only a completed service may be reviewed (400). SALE_STATUSES
+    #    ({served, paid}) is the canonical "completed service" predicate
+    #    (reports_app.controllers.common.sale_filters). Every other state —
+    #    initiated / pending / preparing (in-flight and reversible) and
+    #    cancelled / refunded (reversed) — is rejected with ONE restrained
+    #    message that deliberately does not disclose which lifecycle state the
+    #    order is in to an unauthorised caller.
+    if order.order_status not in SALE_STATUSES:
         return {
             'status': 400,
-            'message': 'This order was cancelled and cannot be reviewed.',
+            'message': 'This order is not eligible for review.',
         }
 
     # 3. Already reviewed (409). The reverse OneToOne raises
@@ -104,8 +111,20 @@ def submit_review(order_id, rating_fields, comment=None, tags=None):
         }
 
     # save() denormalises restaurant + seeds is_public; submission_channel keeps
-    # its 'in_app' model default.
-    review = serializer.save()
+    # its 'in_app' model default. The Review.order OneToOne DB constraint is the
+    # atomic one-per-order backstop: if a concurrent same-order submission races
+    # past the hasattr / UniqueValidator pre-checks, the second INSERT raises
+    # IntegrityError, which we translate into the same clean 409 as the common
+    # duplicate path (never a 500). The atomic() block keeps that failed INSERT
+    # from poisoning any surrounding transaction.
+    try:
+        with transaction.atomic():
+            review = serializer.save()
+    except IntegrityError:
+        return {
+            'status': 409,
+            'message': 'This order has already been reviewed.',
+        }
     return {
         'status': 201,
         'message': 'Thank you! Your review has been submitted.',
