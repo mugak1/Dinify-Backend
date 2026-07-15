@@ -43,10 +43,15 @@ def determine_receipients(
         'new-user-credentials'
     ]:
         user = User.objects.values('phone_number', 'email').get(id=user_id)
-        # A self-registered user may have email=None; never pass a null/falsy
-        # value downstream as a "to" (it can degenerate a recipient predicate
-        # into email IS NULL). Empty string keeps the scalar shape and stays falsy.
-        tos = user['email'] or ''
+        # A self-registered user may have email=None/''. Never persist a falsy
+        # scalar "to": an empty string still lingers as a stored empty recipient
+        # that an emailless caller's own empty identity could equality-match on
+        # the read/mark-read sink. Emit the real email as the scalar recipient
+        # (unchanged — a downstream caller consumes it as a scalar), else an empty
+        # list: no recipient, consistent with the array shape the multi-recipient
+        # branches above use.
+        email_value = user['email']
+        tos = email_value if (email_value and email_value.strip()) else []
         msisdn = user['phone_number']
 
     return {
