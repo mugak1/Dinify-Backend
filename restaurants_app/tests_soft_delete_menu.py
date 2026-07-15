@@ -67,10 +67,14 @@ class SoftDeleteFullMenuGroupsTests(TestCase):
         self.assertIn(str(live.pk), ids)          # positive control
         self.assertNotIn(str(deleted.pk), ids)    # leak closed
 
-    def test_soft_deleted_group_still_hidden_in_ignore_approval_mode(self):
-        # A live-but-unapproved group appears once approval is ignored; a
-        # soft-deleted group must STAY hidden -> proves 'deleted' survived the
-        # ignore_approval pop (only 'approved'/'enabled' are popped).
+    def test_ignore_approval_flag_is_inert_no_bypass(self):
+        # The caller-controlled `ignore_approval` preview bypass was REMOVED:
+        # passing it must reveal nothing. An unapproved/disabled group stays
+        # hidden (publication is unconditional) and a soft-deleted group stays
+        # hidden. A published sibling is the positive control.
+        published = SectionGroup.objects.create(
+            name='Published', section=self.section, approved=True, enabled=True,
+        )
         live_unapproved = SectionGroup.objects.create(
             name='Live Unapproved', section=self.section,
             approved=False, enabled=False,
@@ -79,9 +83,11 @@ class SoftDeleteFullMenuGroupsTests(TestCase):
             name='Deleted Unapproved', section=self.section,
             approved=False, enabled=False, deleted=True,
         )
+        # Even when the retired flag is passed, it is ignored.
         ids = self._group_ids(ignore_approval='true')
-        self.assertIn(str(live_unapproved.pk), ids)         # approval ignored
-        self.assertNotIn(str(deleted_unapproved.pk), ids)   # deleted survives pop
+        self.assertIn(str(published.pk), ids)               # positive control
+        self.assertNotIn(str(live_unapproved.pk), ids)      # bypass removed
+        self.assertNotIn(str(deleted_unapproved.pk), ids)   # deleted still hidden
 
 
 class SoftDeleteFullMenuItemsTests(TestCase):

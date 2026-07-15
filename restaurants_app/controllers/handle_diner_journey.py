@@ -59,11 +59,14 @@ def handle_table_scan(table_id: str) -> dict:
     }
 
 
-def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
+def handle_show_menu(restaurant_id: str) -> dict:
     from restaurants_app.controllers.utils.schedule_utils import (
         is_section_currently_active,
     )
 
+    # Diner publication contract: a section only reaches a diner when it is
+    # approved, enabled, available and not soft-deleted. These predicates are
+    # unconditional — there is deliberately no caller-controlled bypass.
     filters = {
         'restaurant': restaurant_id,
         'approved': True,
@@ -72,11 +75,6 @@ def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
         'deleted': False
     }
 
-    if ignore_approval in ['true', True]:
-    # if ignore_approval is None:
-        filters.pop('approved')
-        filters.pop('enabled')
-
     sections = MenuSection.objects.filter(**filters)
     # Schedule is stored as JSON; can't filter at queryset level cleanly.
     # Section count is bounded so Python-side filter is fine.
@@ -84,8 +82,7 @@ def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
 
     menu_data = SerializerGetFullMenu(
         sections,
-        many=True,
-        context={'ignore_approval': ignore_approval}
+        many=True
     ).data
 
     # Bundle upsell config (when enabled) so the diner basket can render
@@ -94,7 +91,12 @@ def handle_show_menu(restaurant_id: str, ignore_approval: str) -> dict:
     try:
         upsell_config = UpsellConfig.objects.get(restaurant_id=restaurant_id)
         if upsell_config.enabled:
-            upsell_data = UpsellConfigSerializer(upsell_config).data
+            # public_only prunes carousel entries whose menu item is no longer
+            # published (unapproved / disabled / soft-deleted) so an unpublished
+            # item cannot re-enter the anonymous diner payload via upsell.
+            upsell_data = UpsellConfigSerializer(
+                upsell_config, context={'public_only': True}
+            ).data
     except UpsellConfig.DoesNotExist:
         pass
 

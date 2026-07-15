@@ -22,9 +22,13 @@ class OrderJourneyEndpoint(APIView):
                 table_id=request.GET.get('table')
             )
         elif stage == 'show-menu':
+            # Public AllowAny path: the diner menu must ALWAYS reflect published
+            # (approved + enabled) state. The retired `ignore-approval` query
+            # param is intentionally NOT read here — a caller-controlled preview
+            # flag must never bypass publication state. An authorised menu
+            # preview, if needed, belongs on a dedicated authenticated endpoint.
             response = handle_show_menu(
-                restaurant_id=request.GET.get('restaurant'),
-                ignore_approval=request.GET.get('ignore-approval')
+                restaurant_id=request.GET.get('restaurant')
             )
         elif stage == 'order-details':
             response = handle_show_order_details(

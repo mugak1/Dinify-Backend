@@ -577,6 +577,12 @@ class ConOrder:
         # fails fast with a 400 here instead of raising 500 downstream, and no
         # Order row is ever created for a cross-tenant submission.
         requested_uuids = set()
+        # Parents and extras are tracked separately too: the fail-closed diner
+        # publication gate below holds them to slightly different contracts (a
+        # parent must also have a published parent section; an extra is judged
+        # on its own item-level publication).
+        parent_uuids = set()
+        extra_uuids = set()
         for entry in items:
             if (
                 not isinstance(entry, dict)
@@ -588,12 +594,14 @@ class ConOrder:
                     'message': 'Each order item must include an item and a quantity.'
                 }
             try:
-                requested_uuids.add(UUID(str(entry['item'])))
+                parent_uuid = UUID(str(entry['item']))
             except (ValueError, TypeError):
                 return {
                     'status': 400,
                     'message': NOT_ON_MENU_MESSAGE
                 }
+            requested_uuids.add(parent_uuid)
+            parent_uuids.add(parent_uuid)
 
             # BUG-P1-1 follow-up: extras are MenuItems referenced by bare UUID
             # strings, so they cross the same tenant boundary as the parent
@@ -611,13 +619,18 @@ class ConOrder:
                 }
             for extra_id in extras:
                 try:
-                    requested_uuids.add(UUID(str(extra_id)))
+                    extra_uuid = UUID(str(extra_id))
                 except (ValueError, TypeError):
                     return {
                         'status': 400,
                         'message': NOT_ON_MENU_MESSAGE
                     }
+                requested_uuids.add(extra_uuid)
+                extra_uuids.add(extra_uuid)
 
+        # Tenant-ownership gate (unchanged, applies to EVERY caller): every
+        # requested item — parent and extra — must belong to this restaurant's
+        # menu. A foreign / nonexistent id fails fast here with an opaque 400.
         owned_uuids = set(
             MenuItem.objects
             .filter(pk__in=requested_uuids, section__restaurant=restaurant)
@@ -628,6 +641,54 @@ class ConOrder:
                 'status': 400,
                 'message': NOT_ON_MENU_MESSAGE
             }
+
+        # Fail-closed diner publication gate. An anonymous diner (created_by is
+        # None) may order ONLY records currently published for diner use — the
+        # same contract the diner menu read path enforces — so an item that is
+        # invisible in the menu cannot be ordered by knowing its UUID. Staff /
+        # admin orders (created_by set, already authorised against MODULE_TABLES
+        # at the endpoint) are a management action and keep the tenant-only
+        # behaviour above.
+        #
+        # NB: available / in_stock are deliberately NOT part of this gate — an
+        # unavailable or out-of-stock record still flows through the existing
+        # zero-and-flag reconciliation (add_order_item / process_item_extras).
+        # This gate is strictly about unpublished / deleted records. It runs
+        # BEFORE _create_order's transaction, so a rejection commits no rows.
+        if created_by is None:
+            # Parents: full diner-orderable contract — item publication AND a
+            # published parent section, and not beneath a soft-deleted group
+            # (null-safe anti-join keeps group-less parents).
+            orderable_parents = set(
+                MenuItem.objects
+                .filter(
+                    pk__in=parent_uuids,
+                    section__restaurant=restaurant,
+                    approved=True, enabled=True, deleted=False,
+                    section__approved=True,
+                    section__enabled=True,
+                    section__deleted=False,
+                )
+                .exclude(section_group__deleted=True)
+                .values_list('pk', flat=True)
+            )
+            # Extras: item-level publication only (an extra is nested under a
+            # parent, not browsed as a section) — matches the read contract in
+            # SerializerPublicGetMenuItem.get_extras, so read and write agree.
+            orderable_extras = set(
+                MenuItem.objects
+                .filter(
+                    pk__in=extra_uuids,
+                    section__restaurant=restaurant,
+                    approved=True, enabled=True, deleted=False,
+                )
+                .values_list('pk', flat=True)
+            )
+            if (parent_uuids - orderable_parents) or (extra_uuids - orderable_extras):
+                return {
+                    'status': 400,
+                    'message': NOT_ON_MENU_MESSAGE
+                }
 
         # for each order item, check if the options are applicable
         options_check = ConOrder.check_options_requirements(items)

@@ -462,9 +462,15 @@ class SerializerPublicGetMenuItem(ModelSerializer):
             except (ValueError, AttributeError):
                 continue
             try:
+                # Publication gate: an unpublished item referenced in
+                # extras_applicable must not re-enter the anonymous diner
+                # payload. Same predicate the order path enforces for extras, so
+                # what a diner can see matches what they can order.
                 record = MenuItem.objects.values(
                     'id', 'name', 'primary_price', 'discount_details'
-                ).get(id=extra)
+                ).get(
+                    id=extra, approved=True, enabled=True, deleted=False
+                )
                 extras.append(record)
             except MenuItem.DoesNotExist:
                 continue
@@ -707,17 +713,14 @@ class SerializerGetFullMenu(ModelSerializer):
         return is_section_currently_active(section)
 
     def get_groups(self, section):
+        # Publication is unconditional: an unapproved or disabled group never
+        # reaches a diner. There is no caller-controlled bypass.
         filters = {
             'section': section,
             'approved': True,
             'enabled': True,
-            # deleted is NOT popped with the approval flags below, so a
-            # soft-deleted group stays hidden even in ignore-approval/preview mode.
             'deleted': False,
         }
-        if self.context.get('ignore_approval') == 'true':
-            filters.pop('approved')
-            filters.pop('enabled')
         groups = SectionGroup.objects.filter(**filters)
         return [
             {
@@ -727,17 +730,15 @@ class SerializerGetFullMenu(ModelSerializer):
         ]
 
     def get_items(self, section):
+        # Publication is unconditional: an unapproved or disabled item never
+        # reaches a diner. There is no caller-controlled bypass.
         filters = {
             'section': section,
             'approved': True,
             'enabled': True,
-            # 'section_group__available': True,
             'deleted': False,
             'available': True
         }
-        if self.context.get('ignore_approval') in ['true', True]:
-            filters.pop('approved')
-            filters.pop('enabled')
         # Hide items whose group is soft-deleted while keeping group-less items.
         # section_group is nullable, so a dict-key `section_group__deleted=False`
         # would inner-join and silently drop null-group rows; exclude() is the
@@ -750,17 +751,14 @@ class SerializerGetFullMenu(ModelSerializer):
         ).data
 
     def get_item_count(self, section):
+        # Publication is unconditional (mirrors get_items); no bypass.
         filters = {
             'section': section,
             'approved': True,
             'enabled': True,
-            # 'section_group__available': True,
             'deleted': False,
             'available': True
         }
-        if self.context.get('ignore_approval') in ['true', True]:
-            filters.pop('approved')
-            filters.pop('enabled')
         # Null-safe anti-join (see get_items): drop items under a soft-deleted
         # group without excluding group-less items via an inner join.
         return MenuItem.objects.filter(**filters).exclude(
@@ -877,8 +875,16 @@ class UpsellItemSerializer(ModelSerializer):
 
 
 class UpsellConfigSerializer(ModelSerializer):
-    """Full upsell config with nested items."""
-    items = UpsellItemSerializer(source='upsell_items', many=True, read_only=True)
+    """Full upsell config with nested items.
+
+    On the anonymous diner path the caller passes context={'public_only': True},
+    which prunes carousel entries whose referenced menu item is no longer
+    published (unapproved / disabled / soft-deleted) — a soft delete leaves the
+    UpsellItem row intact (FK cascade only fires on hard delete), so without this
+    an unpublished item would re-enter the public payload. The operator-facing
+    endpoint passes no context and still sees every configured item.
+    """
+    items = SerializerMethodField()
 
     class Meta:
         model = UpsellConfig
@@ -886,6 +892,21 @@ class UpsellConfigSerializer(ModelSerializer):
             'id', 'enabled', 'title', 'max_items_to_show',
             'hide_if_in_basket', 'hide_out_of_stock', 'items'
         ]
+
+    def get_items(self, config):
+        # Manager order (listing_position) is preserved by using the related
+        # manager directly. Publication (approved/enabled/deleted) is filtered
+        # for the public payload; availability/stock stay passthrough data.
+        upsell_items = config.upsell_items.all()
+        if self.context.get('public_only'):
+            upsell_items = upsell_items.filter(
+                menu_item__approved=True,
+                menu_item__enabled=True,
+                menu_item__deleted=False,
+            )
+        return UpsellItemSerializer(
+            upsell_items, many=True, context=self.context
+        ).data
 
 
 class UpsellConfigUpdateSerializer(ModelSerializer):
