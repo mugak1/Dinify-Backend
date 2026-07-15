@@ -5064,6 +5064,263 @@ class MenuFkTenantBoundaryTests(TestCase):
         self.assertEqual(self.item_a.section_id, self.section_a.id)
 
 
+class MenuItemSectionGroupCohesionTests(TestCase):
+    """
+    Section-group cohesion on menu-item CREATE and UPDATE (TENANT-P1-03, PR 3).
+
+    Invariant: a MenuItem.section_group, when present, must belong to the EXACT
+    MenuSection assigned to the item (``SectionGroup.section == MenuItem.section``).
+    Enforced in ``SerializerPutMenuItem.validate()`` on BOTH paths. The rule is
+    stronger than same-restaurant and subsumes it — if the group's section is the
+    item's section, they share a restaurant by definition.
+
+    Prior gap: the FK guard was gated behind ``if self.instance is not None`` so it
+    never ran on create, and even on update it only required the group to resolve
+    to the same RESTAURANT (not the same section). The create-path endpoint gate
+    (``_resolve_menuitems('create')``) authorizes on the submitted ``section``
+    ONLY, so a foreign / wrong-section ``section_group`` could be injected on
+    create (it resolves globally via the auto ``PrimaryKeyRelatedField``).
+
+    Fixtures: ``section_1`` / ``section_2`` both belong to ``restaurant_a``;
+    ``group_1a`` and ``group_1b`` live in ``section_1`` and ``group_2a`` lives in
+    ``section_2`` (the same-restaurant / different-section target). ``restaurant_b``'s
+    ``section_b`` / ``group_b`` are the cross-tenant targets ``owner_a`` will reach for.
+    """
+
+    def setUp(self):
+        self.owner_a = User.objects.create_user(
+            first_name='Cohesion', last_name='OwnerA',
+            email='cohesion_owner_a@test.com', phone_number='256700000510',
+            username='256700000510', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_a = Restaurant.objects.create(
+            name='Cohesion Restaurant A', location='loc-a',
+            status=RestaurantStatus_Active, owner=self.owner_a,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_a, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        self.owner_b = User.objects.create_user(
+            first_name='Cohesion', last_name='OwnerB',
+            email='cohesion_owner_b@test.com', phone_number='256700000520',
+            username='256700000520', country='Uganda', password='password',
+            roles=[],
+        )
+        self.restaurant_b = Restaurant.objects.create(
+            name='Cohesion Restaurant B', location='loc-b',
+            status=RestaurantStatus_Active, owner=self.owner_b,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner_b, restaurant=self.restaurant_b,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+        # restaurant_a: two sections; two groups in section_1, one in section_2.
+        self.section_1 = MenuSection.objects.create(
+            name='A Section 1', restaurant=self.restaurant_a, listing_position=0,
+        )
+        self.section_2 = MenuSection.objects.create(
+            name='A Section 2', restaurant=self.restaurant_a, listing_position=1,
+        )
+        self.group_1a = SectionGroup.objects.create(
+            name='Group 1A', section=self.section_1,
+        )
+        self.group_1b = SectionGroup.objects.create(
+            name='Group 1B', section=self.section_1,
+        )
+        self.group_2a = SectionGroup.objects.create(
+            name='Group 2A', section=self.section_2,
+        )
+        self.item = MenuItem.objects.create(
+            name='Cohesion Item', section=self.section_1,
+            section_group=self.group_1a, primary_price=1000,
+        )
+
+        # restaurant_b: the foreign section + group owner_a will try to reach.
+        self.section_b = MenuSection.objects.create(
+            name='B Section', restaurant=self.restaurant_b, listing_position=0,
+        )
+        self.group_b = SectionGroup.objects.create(
+            name='B Group', section=self.section_b,
+        )
+
+    # --- helpers --------------------------------------------------------
+    def _auth(self, user):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        token = str(RefreshToken.for_user(user).access_token)
+        return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
+
+    def _put(self, user, config_detail, body):
+        return self.client.put(
+            f'/api/v1/restaurant-setup/{config_detail}/',
+            data=body, content_type='application/json', **self._auth(user),
+        )
+
+    def _post(self, user, config_detail, body):
+        return self.client.post(
+            f'/api/v1/restaurant-setup/{config_detail}/',
+            data=body, content_type='application/json', **self._auth(user),
+        )
+
+    # --- 1. create with a group from the SUBMITTED section succeeds ------
+    def test_create_with_group_from_submitted_section_succeeds(self):
+        resp = self._post(
+            self.owner_a, 'menuitems',
+            {'name': 'Grouped Create', 'section': str(self.section_1.id),
+             'section_group': str(self.group_1a.id), 'primary_price': '1000.00'},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        item = MenuItem.objects.get(name='Grouped Create', section=self.section_1)
+        self.assertEqual(item.section_group_id, self.group_1a.id)
+
+    # --- 2. create with a group from another SAME-restaurant section fails -
+    def test_create_with_group_from_other_section_same_restaurant_fails(self):
+        resp = self._post(
+            self.owner_a, 'menuitems',
+            {'name': 'Wrong Section Group', 'section': str(self.section_1.id),
+             'section_group': str(self.group_2a.id), 'primary_price': '1000.00'},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(MenuItem.objects.filter(name='Wrong Section Group').exists())
+
+    # --- 3. create with a group from ANOTHER restaurant fails ------------
+    def test_create_with_group_from_another_restaurant_fails(self):
+        # The endpoint gate authorizes on section_1 (restaurant_a), so owner_a
+        # passes the gate; validate() is what rejects the foreign group — the exact
+        # create-path hole this PR closes (section_group resolves globally).
+        resp = self._post(
+            self.owner_a, 'menuitems',
+            {'name': 'Foreign Group Create', 'section': str(self.section_1.id),
+             'section_group': str(self.group_b.id), 'primary_price': '1000.00'},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(MenuItem.objects.filter(name='Foreign Group Create').exists())
+
+    # --- 4. create WITHOUT a group succeeds -----------------------------
+    def test_create_without_group_succeeds(self):
+        resp = self._post(
+            self.owner_a, 'menuitems',
+            {'name': 'Groupless Create', 'section': str(self.section_1.id),
+             'primary_price': '1000.00'},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        item = MenuItem.objects.get(name='Groupless Create', section=self.section_1)
+        self.assertIsNone(item.section_group_id)
+
+    # --- 5. update to a VALID group succeeds ----------------------------
+    def test_update_to_valid_group_succeeds(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item.id), 'section_group': str(self.group_1b.id)},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.section_group_id, self.group_1b.id)
+
+    # --- 6. update to a same-restaurant / different-section group fails --
+    def test_update_to_same_restaurant_different_section_group_fails(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item.id), 'section_group': str(self.group_2a.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.section_group_id, self.group_1a.id)
+
+    # --- 7. update to a FOREIGN group fails -----------------------------
+    def test_update_to_foreign_group_fails(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item.id), 'section_group': str(self.group_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.section_group_id, self.group_1a.id)
+
+    # --- 8. CLEARING the group succeeds ---------------------------------
+    def test_clearing_group_succeeds(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item.id), 'section_group': None},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.item.refresh_from_db()
+        self.assertIsNone(self.item.section_group_id)
+
+    # --- 9. MOVE the item + supply a group from the NEW section succeeds -
+    def test_move_item_and_supply_group_from_new_section_succeeds(self):
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item.id), 'section': str(self.section_2.id),
+             'section_group': str(self.group_2a.id)},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.section_id, self.section_2.id)
+        self.assertEqual(self.item.section_group_id, self.group_2a.id)
+
+    # --- 10. MOVE the item but RETAIN a group from the OLD section fails -
+    def test_move_item_retaining_group_from_old_section_fails(self):
+        # Effective section becomes section_2 (submitted); group_1a still points at
+        # section_1, so the cohesion invariant rejects the whole PUT.
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item.id), 'section': str(self.section_2.id),
+             'section_group': str(self.group_1a.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.section_id, self.section_1.id)
+        self.assertEqual(self.item.section_group_id, self.group_1a.id)
+
+    # --- 11. tag scoping still enforced ALONGSIDE the cohesion invariant -
+    def test_valid_group_with_same_tenant_tag_ids_succeeds(self):
+        from restaurants_app.models import RestaurantTag, MenuItemTag
+        a_tag = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Vegan')
+        resp = self._post(
+            self.owner_a, 'menuitems',
+            {'name': 'Group And Tag', 'section': str(self.section_1.id),
+             'section_group': str(self.group_1a.id), 'primary_price': '1000.00',
+             'tag_ids': [str(a_tag.id)]},
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        item = MenuItem.objects.get(name='Group And Tag', section=self.section_1)
+        self.assertEqual(item.section_group_id, self.group_1a.id)
+        self.assertTrue(MenuItemTag.objects.filter(menu_item=item, tag=a_tag).exists())
+
+    def test_valid_group_with_foreign_tag_ids_rejected(self):
+        # Cohesion passes (group_1a is in section_1) but the foreign tag is still
+        # rejected by the tag-scoping block below the guard — proving the two checks
+        # compose and neither short-circuits the other.
+        from restaurants_app.models import RestaurantTag, MenuItemTag
+        b_tag = RestaurantTag.objects.get(restaurant=self.restaurant_b, name='Vegan')
+        resp = self._post(
+            self.owner_a, 'menuitems',
+            {'name': 'Group And Foreign Tag', 'section': str(self.section_1.id),
+             'section_group': str(self.group_1a.id), 'primary_price': '1000.00',
+             'tag_ids': [str(b_tag.id)]},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(MenuItem.objects.filter(name='Group And Foreign Tag').exists())
+        self.assertFalse(MenuItemTag.objects.filter(tag=b_tag).exists())
+
+    # --- 12. a failed request does NOT partially change the item --------
+    def test_failed_update_does_not_partially_change_item(self):
+        # A rejected foreign-group PUT that ALSO renames the item must persist
+        # neither change — Secretary only saves when the serializer is valid.
+        resp = self._put(
+            self.owner_a, 'menuitems',
+            {'id': str(self.item.id), 'name': 'Should Not Persist',
+             'section_group': str(self.group_b.id)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.name, 'Cohesion Item')
+        self.assertEqual(self.item.section_group_id, self.group_1a.id)
+
+
 class TablesNestedFkTenantBoundaryTests(TestCase):
     """
     Cross-tenant nested-FK isolation for tables-domain writes (TENANT-P2-01).
