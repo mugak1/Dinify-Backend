@@ -571,40 +571,6 @@ class SerializerPublicGetTable(ModelSerializer):
         }
 
 
-class SerializerMiscPublicTable(ModelSerializer):
-    """
-    public table listing for the AllowAny misc-public endpoint.
-
-    Diner-safe fields only: identity, capacity and availability plus the
-    dining_area summary. Deliberately excludes internal-only Table columns
-    (QR tokens, floor-plan coordinates, lifecycle/soft-delete/bookkeeping
-    fields, and the restaurant FK).
-    """
-    dining_area = SerializerMethodField()
-
-    class Meta:
-        model = Table
-        fields = (
-            "id", "number", "str_number", "display_name",
-            "min_capacity", "max_capacity", "status", "reserved",
-            "dining_area",
-        )
-
-    def get_dining_area(self, table):
-        if table.dining_area is None:
-            return None
-        return {
-            'name': table.dining_area.name,
-            'available': table.dining_area.available,
-            'smoking_zone': table.dining_area.smoking_zone,
-            'outdoor_seating': table.dining_area.outdoor_seating,
-            'is_indoor': table.dining_area.is_indoor,
-            'accessible': table.dining_area.accessible,
-            'default_server_section': table.dining_area.default_server_section,
-            'is_active': table.dining_area.is_active,
-        }
-
-
 class SerializerPublicGetTableDetails(ModelSerializer):
     """
     serializer for getting details of a single table

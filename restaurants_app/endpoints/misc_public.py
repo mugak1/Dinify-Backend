@@ -7,10 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from misc_app.controllers.define_filter_params import define_filter_params
 from misc_app.controllers.secretary import Secretary
-from restaurants_app.serializers import (
-    SerializerMiscPublicRestaurant,
-    SerializerMiscPublicTable,
-)
+from restaurants_app.serializers import SerializerMiscPublicRestaurant
 
 
 class MiscPublicEndpoint(APIView):
@@ -27,12 +24,17 @@ class MiscPublicEndpoint(APIView):
         # decode the token
         # auth = decode_jwt_token(request)
 
-        # Only these two public listings exist. Any other config_detail —
-        # including the removed 'details' value (whose handler never existed and
-        # had no frontend caller) — returns a clean 404 rather than an
-        # AttributeError 500 or a fall-through into Secretary with a None
-        # serializer.
-        if config_detail not in ('restaurants', 'tables'):
+        # Only the anonymous restaurants directory remains public. The 'tables'
+        # listing was RETIRED for tenant isolation (PR2): it handed out table
+        # UUIDs in bulk, and a table UUID is itself the order-journey table-scan
+        # token — so the public listing let an anonymous caller enumerate every
+        # restaurant's tables and chain table-scan -> active order UUID ->
+        # order-details / review submission without ever holding a QR. It had no
+        # in-repo caller. Any other config_detail — including the retired
+        # 'tables' and the long-removed 'details' — returns a clean 404 rather
+        # than an AttributeError 500 or a fall-through into Secretary with a
+        # None serializer.
+        if config_detail != 'restaurants':
             return Response(
                 {'status': 404, 'message': 'Not found'},
                 status=404,
@@ -40,23 +42,8 @@ class MiscPublicEndpoint(APIView):
 
         orm_filter = define_filter_params(request.GET, config_detail)
 
-        # update the filter based on the config_detail
-        if config_detail == 'restaurants':
-            orm_filter['status'] = 'active'
-        elif config_detail == 'tables':
-            # Require an explicit restaurant scope. The endpoint is AllowAny, so
-            # without this an anonymous caller with no filter would receive a
-            # paginated cross-tenant dump of every restaurant's tables. Set the
-            # scope explicitly rather than trusting define_filter_params, which
-            # silently drops single-character values (its `len(value) > 1`
-            # guard) — this guarantees the query is always tenant-scoped.
-            restaurant_id = request.GET.get('restaurant')
-            if not restaurant_id:
-                return Response(
-                    {'status': 400, 'message': 'restaurant is required'},
-                    status=400,
-                )
-            orm_filter['restaurant'] = restaurant_id
+        # The sole public listing is the active-restaurant directory.
+        orm_filter['status'] = 'active'
 
         # Hide soft-deleted rows by default, exactly like the authenticated
         # catch-all (restaurant_setup.py) and the admin support listing
@@ -69,17 +56,14 @@ class MiscPublicEndpoint(APIView):
 
         serializers = {
             'restaurants': SerializerMiscPublicRestaurant,
-            'tables': SerializerMiscPublicTable,
         }
 
         success_messages = {
             'restaurants': 'Successfully retrieved the restaurants',
-            'tables': 'Successfully retrieved the tables',
         }
 
         error_messages = {
             'restaurants': 'Error while retrieving restaurants',
-            'tables': 'Error while retrieving the tables',
         }
 
         # This endpoint is AllowAny, so every caller is anonymous; the narrowed
