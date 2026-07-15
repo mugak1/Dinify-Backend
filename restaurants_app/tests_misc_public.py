@@ -100,6 +100,27 @@ class MiscPublicRestaurantsTests(TestCase):
         # 'PII Test Restaurant' does not match name__icontains='Zeta'.
         self.assertNotIn(str(self.restaurant.id), ids)
 
+    def test_soft_deleted_restaurant_hidden_but_deleted_override_returns_it(self):
+        # (P3-03) A soft-deleted restaurant that is still status='active' must
+        # NOT leak into the public directory; the ?deleted=true override still
+        # surfaces it (mirrors the authenticated catch-all's default).
+        deleted_rest = Restaurant.objects.create(
+            name='Soft Deleted Active', location='loc-del',
+            status=RestaurantStatus_Active, owner=self.owner, deleted=True,
+        )
+        # Default listing: the soft-deleted restaurant is hidden, the live one
+        # is still present (positive control).
+        response = self.client.get(RESTAURANTS_URL)
+        self.assertEqual(response.status_code, 200)
+        ids = [record['id'] for record in response.json()['data']['records']]
+        self.assertNotIn(str(deleted_rest.id), ids)
+        self.assertIn(str(self.restaurant.id), ids)
+        # ?deleted=true override: the soft-deleted restaurant IS returned.
+        response = self.client.get(RESTAURANTS_URL, {'deleted': 'true'})
+        self.assertEqual(response.status_code, 200)
+        ids = [record['id'] for record in response.json()['data']['records']]
+        self.assertIn(str(deleted_rest.id), ids)
+
 
 class MiscPublicTablesTests(TestCase):
     """The tables listing is restaurant-scoped and diner-safe."""
@@ -170,6 +191,29 @@ class MiscPublicTablesTests(TestCase):
         self.assertIsNotNone(by_number[1]['dining_area'])
         self.assertEqual(by_number[1]['dining_area']['name'], 'Patio')
         self.assertIsNone(by_number[2]['dining_area'])
+
+    def test_soft_deleted_table_hidden_but_deleted_override_returns_it(self):
+        # (P3-03) A soft-deleted table must not leak into the public tables
+        # listing; the ?deleted=true override still surfaces it.
+        Table.objects.create(
+            number=7, str_number='7', restaurant=self.rest_a, deleted=True,
+        )
+        # Default: the soft-deleted table (7) is excluded; the live tables
+        # (1, 2) are still present (positive control).
+        response = self.client.get(
+            TABLES_URL, {'restaurant': str(self.rest_a.id)},
+        )
+        self.assertEqual(response.status_code, 200)
+        numbers = sorted(r['number'] for r in response.json()['data']['records'])
+        self.assertEqual(numbers, [1, 2])
+        # ?deleted=true override: the soft-deleted table (7) is returned too.
+        response = self.client.get(
+            TABLES_URL, {'restaurant': str(self.rest_a.id), 'deleted': 'true'},
+        )
+        self.assertEqual(response.status_code, 200)
+        numbers = sorted(r['number'] for r in response.json()['data']['records'])
+        self.assertIn(7, numbers)
+        self.assertIn(1, numbers)
 
 
 class MiscPublicUnknownConfigTests(TestCase):

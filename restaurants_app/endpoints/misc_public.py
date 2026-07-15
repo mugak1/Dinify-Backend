@@ -58,6 +58,15 @@ class MiscPublicEndpoint(APIView):
                 )
             orm_filter['restaurant'] = restaurant_id
 
+        # Hide soft-deleted rows by default, exactly like the authenticated
+        # catch-all (restaurant_setup.py) and the admin support listing
+        # (admin_issues.py): the endpoint owns this default, not the shared
+        # define_filter_params builder (a pure param-mapper pinned by
+        # tests_define_filter_params). An explicit ?deleted=true still opts in
+        # to seeing deleted rows.
+        if 'deleted' not in request.GET:
+            orm_filter['deleted'] = False
+
         serializers = {
             'restaurants': SerializerMiscPublicRestaurant,
             'tables': SerializerMiscPublicTable,
