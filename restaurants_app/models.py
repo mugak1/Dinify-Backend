@@ -712,6 +712,12 @@ class Table(BaseModel):
         ]
     )
     qr_regenerated_at = models.DateTimeField(null=True, blank=True)
+    # Monotonic QR generation. Every diner capability (QR credential + table
+    # session) carries this value; verification rejects a stale generation, so
+    # bumping it (regenerate-qr) revokes all outstanding credentials and live
+    # sessions for the table with zero stored secrets. Platform/regen-owned — NOT
+    # in EDIT_INFORMATION.
+    qr_version = models.PositiveIntegerField(default=1)
     floor_x = models.FloatField(default=50.0)
     floor_y = models.FloatField(default=50.0)
     floor_width = models.FloatField(default=10.0)

@@ -7,6 +7,7 @@ from restaurants_app.models import Restaurant, Table, DiningArea
 from users_app.models import User
 from django.db import transaction
 from orders_app.controllers.initiate_order import any_present_ongoing_order
+from restaurants_app.controllers.diner_capability import issue_qr_credential
 
 
 def confirm_availability_of_table_numbers(restaurant_id: str, range_from: int, range_to: int):
@@ -115,6 +116,11 @@ def get_tables_by_area(restaurant_id: str):
             'tags': table.tags,
             'has_qr': table.has_qr,
             'qr_mode': table.qr_mode,
+            # The current opaque QR credential (bound to restaurant+table+
+            # generation) so the owner UI can render/print the QR directly.
+            'qr_credential': issue_qr_credential(
+                table.restaurant_id, table.id, table.qr_version,
+            ),
             'floor_x': table.floor_x,
             'floor_y': table.floor_y,
             'is_active': table.is_active,
@@ -166,6 +172,9 @@ def get_tables_by_area(restaurant_id: str):
                 'tags': table.tags,
                 'has_qr': table.has_qr,
                 'qr_mode': table.qr_mode,
+                'qr_credential': issue_qr_credential(
+                    table.restaurant_id, table.id, table.qr_version,
+                ),
                 'floor_x': table.floor_x,
                 'floor_y': table.floor_y,
                 'is_active': table.is_active,

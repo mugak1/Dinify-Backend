@@ -10,6 +10,11 @@ from orders_app.controllers.manage_order import update_order_status
 from dinify_backend.configss.string_definitions import OrderStatus_Pending, MODULE_TABLES
 from orders_app.controllers.con_orders import ConOrder
 from users_app.controllers.permissions_check import can_user_access_module
+from misc_app.controllers.decode_auth_token import decode_jwt_token
+from restaurants_app.controllers.diner_capability import (
+    require_table_session, resolve_table_session, session_token_from_request,
+    DinerCapabilityError,
+)
 
 
 class OrdersEndpoint(APIView):
@@ -29,34 +34,60 @@ class OrdersEndpoint(APIView):
         if action == 'submit':
             data = request.data
 
-            user = request.user
-            # DRF gives unauthenticated requests an AnonymousUser (not None);
-            # normalise it to None so the anonymous diner can submit and
-            # attribution stays null.
-            if user is None or user.is_anonymous:
-                user = None
-
-            # Anonymous, client-supplied order id: guard the lookup so a
-            # missing / malformed / nonexistent id returns a clean 4xx instead
-            # of a 500. Don't call .get(id=None).
             order_id = data.get('order')
             if not order_id:
                 return Response(
                     {'status': 400, 'message': 'Invalid order id'},
                     status=400,
                 )
-            try:
-                order = Order.objects.get(id=order_id)
-            except ValidationError:
-                return Response(
-                    {'status': 400, 'message': 'Invalid order id'},
-                    status=400,
-                )
-            except Order.DoesNotExist:
-                return Response(
-                    {'status': 404, 'message': 'Order not found'},
-                    status=404,
-                )
+
+            # Authority is the table SESSION bound to this order's table — order-UUID
+            # knowledge alone is no longer enough to drive initiated->pending (BOLA
+            # fix). A staff JWT with the tables module at the order's restaurant is
+            # the separate authorised path (e.g. a manager submitting an
+            # admin-initiated order). Both unknown-order and wrong-scope collapse to
+            # one non-disclosing 404.
+            session_token = session_token_from_request(request)
+            if session_token:
+                try:
+                    table = resolve_table_session(session_token)
+                except DinerCapabilityError as exc:
+                    return Response(
+                        {'status': exc.status, 'message': exc.message},
+                        status=exc.status,
+                    )
+                try:
+                    order = Order.objects.get(
+                        id=order_id,
+                        restaurant_id=table.restaurant_id,
+                        table_id=table.id,
+                    )
+                except (Order.DoesNotExist, ValidationError, ValueError):
+                    return Response(
+                        {'status': 404, 'message': 'Order not found'}, status=404,
+                    )
+                user = None  # anonymous diner — attribution stays null
+            else:
+                # No diner session: fall back to an authorised staff caller.
+                try:
+                    decode_jwt_token(request)
+                except Exception:
+                    return Response(
+                        {'status': 400, 'message': 'A diner table session is required.'},
+                        status=400,
+                    )
+                try:
+                    order = Order.objects.get(id=order_id)
+                except (Order.DoesNotExist, ValidationError, ValueError):
+                    return Response(
+                        {'status': 404, 'message': 'Order not found'}, status=404,
+                    )
+                if not can_user_access_module(
+                    request.user, str(order.restaurant_id), MODULE_TABLES,
+                ):
+                    return Response({'status': 404, 'message': 'Not found'}, status=404)
+                user = request.user
+
             response = update_order_status(
                 order=order,
                 new_status=OrderStatus_Pending,
@@ -79,7 +110,6 @@ class V2OrdersEndpoint(APIView):
         if action == 'initiate':
             data = request.data
             source = data.get('source')
-            user = request.user
             try:
                 user = request.user.pk
             except Exception:
@@ -87,44 +117,67 @@ class V2OrdersEndpoint(APIView):
 
             customer = None
             created_by = None
-            restaurant_id = data.get('restaurant')
+            items = data.get('items')
+            # idempotency key supplied by the diner app (Phase 3); absent today
+            client_order_id = data.get('client_order_id')
 
             if source == 'admin':
                 if user is None:
-                    response = {
-                        'status': 401,
-                        'message': 'Please log in'
-                    }
-                    return Response(response, status=401)
+                    return Response(
+                        {'status': 401, 'message': 'Please log in'}, status=401,
+                    )
+                restaurant_id = data.get('restaurant')
                 # Authorize the caller against the target restaurant BEFORE
                 # trusting them as staff. Without this, any authenticated
                 # principal (a self-registered diner) could set created_by and
                 # thereby skip every availability gate in initiate_order
                 # (accepting_orders, qr_mode, is_available_for_scan) at any
                 # restaurant. 404 (not 403) mirrors the reports/finance
-                # non-disclosure gates — a non-member must not learn whether the
-                # restaurant exists. can_user_access_module already returns True
-                # for dinify admins and fails closed on a missing/empty id.
+                # non-disclosure gates. can_user_access_module returns True for
+                # dinify admins and fails closed on a missing/empty id.
                 if not can_user_access_module(
                     request.user, restaurant_id, MODULE_TABLES,
                 ):
                     return Response({'status': 404, 'message': 'Not found'}, status=404)
                 created_by = request.user
+                table_id = data.get('table')
+                if restaurant_id is None or table_id is None:
+                    return Response(
+                        {'status': 400,
+                         'message': 'Please provide the restaurant and table ID'},
+                        status=400,
+                    )
             else:
+                # Anonymous diner: authority is the opaque table SESSION, not the
+                # body-supplied restaurant/table ids. Derive them from the session.
                 if user is not None:
-                    user = str(user)
                     customer = request.user
+                try:
+                    table = require_table_session(request)
+                except DinerCapabilityError as exc:
+                    return Response(
+                        {'status': exc.status, 'message': exc.message},
+                        status=exc.status,
+                    )
+                restaurant_id = str(table.restaurant_id)
+                table_id = str(table.id)
+                # Transitional: the body may STILL carry restaurant/table, but they
+                # may only MATCH the session — never override it. Reject a mismatch.
+                body_restaurant = data.get('restaurant')
+                body_table = data.get('table')
+                if body_restaurant is not None and str(body_restaurant) != restaurant_id:
+                    return Response(
+                        {'status': 400,
+                         'message': 'restaurant does not match your table session'},
+                        status=400,
+                    )
+                if body_table is not None and str(body_table) != table_id:
+                    return Response(
+                        {'status': 400,
+                         'message': 'table does not match your table session'},
+                        status=400,
+                    )
 
-            table_id = data.get('table')
-            items = data.get('items')
-            # idempotency key supplied by the diner app (Phase 3); absent today
-            client_order_id = data.get('client_order_id')
-            if restaurant_id is None or table_id is None:
-                response = {
-                    'status': 400,
-                    'message': 'Please provide the restaurant and table ID'
-                }
-                return Response(response, status=400)
             response = ConOrder.initiate_order(
                 restaurant_id=restaurant_id,
                 table_id=table_id,

@@ -3407,9 +3407,20 @@ class PublicTableScanPresetTagsTests(TestCase):
             number=901, restaurant=self.restaurant,
         )
 
+    def _scan(self, table_id):
+        # handle_table_scan takes the request (PR 7A); drive the legacy
+        # raw-?table= grace path (default-on) for these preset-tag assertions.
+        from rest_framework.test import APIRequestFactory
+        from restaurants_app.controllers.handle_diner_journey import (
+            handle_table_scan,
+        )
+        request = APIRequestFactory().get(
+            '/api/v1/orders/journey/table-scan/', {'table': table_id},
+        )
+        return handle_table_scan(request)
+
     def test_table_scan_returns_restaurant_tag_rows_not_jsonfield(self):
-        from restaurants_app.controllers.handle_diner_journey import handle_table_scan
-        result = handle_table_scan(table_id=str(self.table.id))
+        result = self._scan(str(self.table.id))
         self.assertEqual(result['status'], 200)
         preset_tags = result['data']['restaurant']['preset_tags']
         self.assertEqual(len(preset_tags), 14)
@@ -3423,20 +3434,18 @@ class PublicTableScanPresetTagsTests(TestCase):
 
     def test_table_scan_omits_soft_deleted_tags(self):
         from restaurants_app.models import RestaurantTag
-        from restaurants_app.controllers.handle_diner_journey import handle_table_scan
         tag = RestaurantTag.objects.filter(restaurant=self.restaurant).first()
         tag.deleted = True
         tag.save(update_fields=['deleted'])
-        result = handle_table_scan(table_id=str(self.table.id))
+        result = self._scan(str(self.table.id))
         ids = [t['id'] for t in result['data']['restaurant']['preset_tags']]
         self.assertNotIn(str(tag.id), ids)
         self.assertEqual(len(result['data']['restaurant']['preset_tags']), 13)
 
     def test_table_scan_ignores_legacy_jsonfield(self):
-        from restaurants_app.controllers.handle_diner_journey import handle_table_scan
         self.restaurant.preset_tags = [{'id': 'stale-uuid', 'name': 'Stale'}]
         self.restaurant.save(update_fields=['preset_tags'])
-        result = handle_table_scan(table_id=str(self.table.id))
+        result = self._scan(str(self.table.id))
         names = [t['name'] for t in result['data']['restaurant']['preset_tags']]
         self.assertNotIn('Stale', names)
         self.assertEqual(len(result['data']['restaurant']['preset_tags']), 14)
@@ -3795,10 +3804,17 @@ class DinerTableScanTests(TestCase):
         )
 
     def _scan(self, table_id):
+        # handle_table_scan now takes the request (PR 7A). These cases exercise
+        # the LEGACY raw-?table= grace path (DINER_ALLOW_LEGACY_TABLE_SCAN is
+        # default-on), which preserves the same input-validation / state-gating
+        # behaviour a raw UUID used to get.
+        from rest_framework.test import APIRequestFactory
         from restaurants_app.controllers.handle_diner_journey import (
             handle_table_scan,
         )
-        return handle_table_scan(table_id)
+        params = {} if table_id is None else {'table': table_id}
+        request = APIRequestFactory().get(self.SCAN_PATH, params)
+        return handle_table_scan(request)
 
     # ── input validation: never 500 ───────────────────────
     def test_missing_param_returns_400_not_500(self):
@@ -3997,21 +4013,13 @@ class DinerTableScanTests(TestCase):
             },
             'reserved': False,
             'dining_area': None,
-            'enabled': True,
             'display_name': '',
             'min_capacity': 1,
             'max_capacity': 4,
             'shape': 'square',
             'status': 'available',
             'tags': [],
-            'has_qr': False,
             'qr_mode': 'order_pay',
-            'qr_regenerated_at': None,
-            'floor_x': 50.0,
-            'floor_y': 50.0,
-            'floor_width': 10.0,
-            'floor_height': 10.0,
-            'is_active': True,
         })
 
     def test_scan_read_query_count_flat_with_multiple_orders(self):
@@ -4483,16 +4491,19 @@ class AdminRegisterRestaurantAuthorizationTests(TestCase):
 
 
 class TestDinerJourneyDetailHardening(TestCase):
-    """(BUG-P2-3d) The public order-details / transaction-details journey
-    controllers are AllowAny and take a client-supplied id. A malformed
-    (non-UUID) or nonexistent id must return a clean 4xx dict — the endpoint
-    maps the dict's status straight to the HTTP code — instead of letting
-    ValidationError / DoesNotExist surface as a 500. The None-guards ("please
-    provide ...") and the valid lookups are unchanged."""
+    """(BUG-P2-3d + PR 7A) The public order-details / transaction-details journey
+    controllers now require an opaque diner table SESSION (not raw id knowledge)
+    and scope every lookup to the session's restaurant+table. A malformed
+    (non-UUID), nonexistent or foreign id must return a clean, NON-DISCLOSING 404
+    dict — the endpoint maps the dict's status straight to the HTTP code — instead
+    of letting ValidationError / DoesNotExist surface as a 500 (and instead of the
+    old distinct 400-for-malformed, which would confirm the id was junk). The
+    None-guards ("please provide ...") still fire once the session resolves, and a
+    valid id on the session's own table still succeeds."""
 
     # A syntactically valid UUID that is never seeded -> DoesNotExist -> 404.
     NONEXISTENT_ID = '00000000-0000-4000-8000-000000000000'
-    # Not a UUID at all -> UUIDField ValidationError -> 400.
+    # Not a UUID at all -> UUIDField ValidationError, folded into the 404.
     MALFORMED_ID = 'not-a-uuid'
 
     def setUp(self):
@@ -4502,14 +4513,31 @@ class TestDinerJourneyDetailHardening(TestCase):
         self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         self.table = Table.objects.get(number=TEST_TABLE_NUMBER1)
 
+    def _request(self, **params):
+        # A GET request carrying a valid diner session for self.table in the
+        # X-Diner-Session header, plus any query params the controller reads.
+        from rest_framework.test import APIRequestFactory
+        from restaurants_app.controllers.diner_capability import (
+            issue_table_session,
+        )
+        # Drop None-valued params so a "missing id" case sends no query key.
+        query = {k: v for k, v in params.items() if v is not None}
+        return APIRequestFactory().get(
+            '/api/v1/orders/journey/', query,
+            HTTP_X_DINER_SESSION=issue_table_session(self.table),
+        )
+
     # --- order-details ---
 
-    def test_order_details_malformed_id_returns_400(self):
+    def test_order_details_malformed_id_folds_into_404(self):
         from restaurants_app.controllers.handle_diner_journey import (
             handle_show_order_details,
         )
         self.assertEqual(
-            handle_show_order_details(order_id=self.MALFORMED_ID)['status'], 400
+            handle_show_order_details(
+                self._request(order=self.MALFORMED_ID)
+            )['status'],
+            404,
         )
 
     def test_order_details_nonexistent_id_returns_404(self):
@@ -4517,16 +4545,20 @@ class TestDinerJourneyDetailHardening(TestCase):
             handle_show_order_details,
         )
         self.assertEqual(
-            handle_show_order_details(order_id=self.NONEXISTENT_ID)['status'], 404
+            handle_show_order_details(
+                self._request(order=self.NONEXISTENT_ID)
+            )['status'],
+            404,
         )
 
     def test_order_details_missing_id_returns_400(self):
-        # None short-circuits at the existing "please provide" guard.
+        # None short-circuits at the existing "please provide" guard (which runs
+        # AFTER the session resolves).
         from restaurants_app.controllers.handle_diner_journey import (
             handle_show_order_details,
         )
         self.assertEqual(
-            handle_show_order_details(order_id=None)['status'], 400
+            handle_show_order_details(self._request(order=None))['status'], 400
         )
 
     def test_order_details_valid_id_succeeds(self):
@@ -4540,21 +4572,21 @@ class TestDinerJourneyDetailHardening(TestCase):
             prepayment_required=False,
             payment_status='pending', order_status='initiated',
         )
-        result = handle_show_order_details(order_id=str(order.id))
+        result = handle_show_order_details(self._request(order=str(order.id)))
         self.assertEqual(result['status'], 200)
         self.assertEqual(result['data']['id'], str(order.id))
 
     # --- transaction-details ---
 
-    def test_transaction_details_malformed_id_returns_400(self):
+    def test_transaction_details_malformed_id_folds_into_404(self):
         from restaurants_app.controllers.handle_diner_journey import (
             handle_show_transaction_details,
         )
         self.assertEqual(
             handle_show_transaction_details(
-                transaction_id=self.MALFORMED_ID
+                self._request(transaction=self.MALFORMED_ID)
             )['status'],
-            400,
+            404,
         )
 
     def test_transaction_details_nonexistent_id_returns_404(self):
@@ -4563,7 +4595,7 @@ class TestDinerJourneyDetailHardening(TestCase):
         )
         self.assertEqual(
             handle_show_transaction_details(
-                transaction_id=self.NONEXISTENT_ID
+                self._request(transaction=self.NONEXISTENT_ID)
             )['status'],
             404,
         )
@@ -4573,11 +4605,15 @@ class TestDinerJourneyDetailHardening(TestCase):
             handle_show_transaction_details,
         )
         self.assertEqual(
-            handle_show_transaction_details(transaction_id=None)['status'], 400
+            handle_show_transaction_details(
+                self._request(transaction=None)
+            )['status'],
+            400,
         )
 
     def test_transaction_details_valid_id_succeeds(self):
         from decimal import Decimal
+        from orders_app.models import Order
         from finance_app.models import DinifyTransaction
         from dinify_backend.configss.string_definitions import (
             TransactionType_OrderPayment, TransactionStatus_Success,
@@ -4586,14 +4622,23 @@ class TestDinerJourneyDetailHardening(TestCase):
         from restaurants_app.controllers.handle_diner_journey import (
             handle_show_transaction_details,
         )
+        # The transaction is diner-visible only through its order, which must be
+        # on the session's table.
+        order = Order.objects.create(
+            restaurant=self.restaurant, table=self.table,
+            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
+            payment_status='pending', order_status='served',
+        )
         txn = DinifyTransaction.objects.create(
-            restaurant=self.restaurant,
+            restaurant=self.restaurant, order=order,
             transaction_type=TransactionType_OrderPayment,
             transaction_status=TransactionStatus_Success,
             transaction_platform=TransactionPlatform_Web,
             transaction_amount=Decimal('1000.00'),
         )
-        result = handle_show_transaction_details(transaction_id=str(txn.id))
+        result = handle_show_transaction_details(
+            self._request(transaction=str(txn.id))
+        )
         self.assertEqual(result['status'], 200)
         self.assertEqual(str(result['data']['id']), str(txn.id))
 

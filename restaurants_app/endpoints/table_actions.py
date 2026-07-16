@@ -1,4 +1,5 @@
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -8,6 +9,7 @@ from users_app.controllers.permissions_check import can_user_access_module
 from dinify_backend.configss.string_definitions import MODULE_TABLES
 from restaurants_app.models import Table, Reservation
 from restaurants_app.serializers import SerializerPublicGetTable
+from restaurants_app.controllers.diner_capability import issue_qr_credential
 
 
 TABLE_STATUS_CHOICES = {
@@ -30,6 +32,7 @@ class TableActionsEndpoint(APIView):
             'transfer': self._transfer,
             'update-status': self._update_status,
             'update-floor-plan': self._update_floor_plan,
+            'regenerate-qr': self._regenerate_qr,
         }
 
         handler = dispatch.get(action)
@@ -282,4 +285,57 @@ class TableActionsEndpoint(APIView):
             'status': 200,
             'message': f'{updated} table(s) updated successfully',
             'data': {'updated_count': updated}
+        }, status=200)
+
+    # ------------------------------------------------------------------
+    # action = "regenerate-qr"
+    # ------------------------------------------------------------------
+    def _regenerate_qr(self, request):
+        # Rotate the table's QR generation. Bumping qr_version invalidates every
+        # outstanding QR credential AND live diner session for this table (they
+        # carry the old generation and fail the verifier's generation re-check) —
+        # a real revocation, with zero stored secrets. Owner/manager-gated via the
+        # tables module, same as every other action here.
+        data = request.data
+        table_id = data.get('table_id')
+        if not table_id:
+            return Response(
+                {'status': 400, 'message': 'table_id is required'}, status=400
+            )
+
+        table, err = self._get_table_or_error(table_id)
+        if err:
+            return err
+
+        if not can_user_access_module(
+            request.user, str(table.restaurant_id), MODULE_TABLES,
+        ):
+            return Response({'status': 403, 'message': 'Forbidden'}, status=403)
+
+        # F()-expression bump is atomic and race-safe under concurrent regen taps.
+        with transaction.atomic():
+            Table.objects.filter(id=table.id).update(
+                qr_version=F('qr_version') + 1,
+                qr_regenerated_at=timezone.now(),
+                has_qr=True,
+            )
+        table.refresh_from_db(
+            fields=['qr_version', 'qr_regenerated_at', 'has_qr']
+        )
+
+        return Response({
+            'status': 200,
+            'message': 'QR code regenerated successfully. Previously issued QR '
+                       'codes and diner sessions for this table are now invalid.',
+            'data': {
+                'id': str(table.id),
+                'number': table.number,
+                'qr_version': table.qr_version,
+                'qr_regenerated_at': table.qr_regenerated_at,
+                # The fresh opaque credential to encode into the reprinted QR
+                # sticker — bound to restaurant+table+new generation.
+                'qr_credential': issue_qr_credential(
+                    table.restaurant_id, table.id, table.qr_version,
+                ),
+            }
         }, status=200)

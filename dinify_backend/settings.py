@@ -10,6 +10,8 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
+import hashlib
+import hmac
 import os
 from decouple import config
 from pathlib import Path
@@ -85,6 +87,38 @@ CORS_ALLOWED_ORIGINS = config(
     'CORS_ALLOWED_ORIGINS',
     default='',
     cast=lambda v: [s.strip() for s in v.split(',') if s.strip()]
+)
+# The diner table-session capability is carried in custom headers; the CORS
+# preflight must allow them or the browser strips them (requests then fail
+# only in-browser, never in tests/curl).
+from corsheaders.defaults import default_headers  # noqa: E402
+CORS_ALLOW_HEADERS = (
+    *default_headers,
+    'x-diner-session',      # the short-lived diner table-session token
+    'x-diner-credential',   # the opaque QR credential presented at scan
+)
+
+# --- Diner table-session capability (PR 7A) --------------------------------
+# Anonymous diner operations are authorised by an opaque, expiring, server-issued
+# capability (django.core.signing tokens) bound to a restaurant+table — NOT by raw
+# UUID knowledge. See restaurants_app/controllers/diner_capability.py.
+#
+# Dedicated signing key, secret-separated from SIMPLE_JWT (which uses SECRET_KEY):
+# a distinct env override so QR stickers survive a SECRET_KEY rotation; otherwise
+# derived deterministically from SECRET_KEY (zero-config for prod/CI), mirroring the
+# OTP pepper precedent (users_app/controllers/otp_manager.py).
+DINER_CAP_KEY = config('DINER_CAP_KEY', default=None) or hmac.new(
+    SECRET_KEY.encode(), b'diner-capability', hashlib.sha256
+).hexdigest()
+# Short-lived session lifetime (hard cliff — re-scan is free). Default 6h.
+DINER_SESSION_TTL_SECONDS = config(
+    'DINER_SESSION_TTL_SECONDS', default=6 * 60 * 60, cast=int
+)
+# Transitional grace: accept a legacy raw table UUID at scan (still minting a
+# session, so everything downstream stays session-gated). Flip OFF once physical
+# QR codes have been reprinted with the opaque credential.
+DINER_ALLOW_LEGACY_TABLE_SCAN = config(
+    'DINER_ALLOW_LEGACY_TABLE_SCAN', default=True, cast=bool
 )
 
 ROOT_URLCONF = 'dinify_backend.urls'
