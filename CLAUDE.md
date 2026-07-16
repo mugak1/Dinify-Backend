@@ -562,6 +562,13 @@ the catch-all `<str:config_detail>/` route.
 - Spins up a real Postgres 15, runs `django check`,
   `makemigrations --check --dry-run`, then the money-field guard
   (`scripts/check_money_fields.py`) against `dinify_backend.test_settings`
+- Also runs the tenant-relation ratchet (`scripts/check_tenant_relation_ratchet.py`,
+  TENANT-STRUCT-00): the `dinify_backend/tenancy/baseline.txt` of not-yet-classified
+  writable serializer relations may only SHRINK (PR base or, on push,
+  `github.event.before` — not the branch tip). It proves conscious CLASSIFICATION,
+  not tenant isolation; the baseline count is NOT a vulnerability count. See
+  `dinify_backend/tenancy/ASSURANCE.md` for the exact assurance boundary and
+  `non_fk_tenant_inventory.py` for tenant refs outside DRF relations
 - Then runs the full Django test suite — a missing migration or a model
   change without a generated migration will fail CI
 - `scripts/verify.sh` is the committed source of truth that runs the same

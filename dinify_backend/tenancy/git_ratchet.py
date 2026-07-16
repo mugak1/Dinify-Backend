@@ -3,10 +3,23 @@ Git-backed baseline-addition check (TENANT-STRUCT-00).
 
 Detecting that a baseline entry was *added* (vs one that was always there)
 fundamentally needs a prior-state reference — a current-tree check cannot tell
-them apart. This module reads the baseline as it exists on the base branch and
+them apart. This module reads the baseline as it exists at the comparison BASE and
 compares. It is deliberately separate from ``ratchet.py`` (which stays pure/
 git-free) so the git-touching half is covered by real git integration tests, and
 so ``scripts/check_tenant_relation_ratchet.py`` can stay a thin CLI wrapper.
+
+Choosing the base (``resolve_base_ref``) is event-aware:
+  * pull_request → the PR's target branch (``GITHUB_BASE_REF``); the PR's additions
+    are not yet on it, so they are detected;
+  * push → the commit BEFORE the push (``github.event.before`` via
+    ``GITHUB_EVENT_BEFORE``), NOT the branch tip — on a push the tip already
+    includes the new commit, so comparing against it would make an addition
+    invisible (the historical push-to-main false-pass this module fixes);
+  * neither (local / manual) → the default branch ``main``.
+
+Branch-protection note: when ``main`` requires PRs (no direct pushes), the
+pull_request comparison is the authoritative gate and the push comparison is
+defense-in-depth for direct pushes and for unprotected ``claude/**`` branches.
 
 Imported only by that script and the tests.
 """
@@ -28,6 +41,28 @@ def _run_git(repo_dir, args):
 
 def in_ci() -> bool:
     return os.environ.get("GITHUB_ACTIONS") == "true" or bool(os.environ.get("CI"))
+
+
+def resolve_base_ref(env) -> str:
+    """
+    The git ref/commit to compare the baseline against, chosen from the CI ``env``
+    mapping (event-aware — see the module docstring):
+
+    * ``GITHUB_BASE_REF`` set (pull_request) → that target branch;
+    * else ``GITHUB_EVENT_BEFORE`` set and not all-zeros (push) → that pre-push
+      commit SHA;
+    * else (all-zeros new-branch first push / local / manual) → ``"main"``.
+
+    Returning a raw SHA is fine: ``_resolve_base_commit`` fetches/verifies any
+    committish, and ``_baseline_at`` reads ``<commit>:<path>`` unchanged.
+    """
+    base_ref = (env.get("GITHUB_BASE_REF") or "").strip()
+    if base_ref:
+        return base_ref
+    before = (env.get("GITHUB_EVENT_BEFORE") or "").strip()
+    if before and set(before) != {"0"}:  # not the all-zeros "no previous commit"
+        return before
+    return "main"
 
 
 def _parse_keys(text):
@@ -82,7 +117,7 @@ def check_ratchet(repo_dir, baseline_rel, base_ref, is_ci):
 
     commit = _resolve_base_commit(repo_dir, base_ref, is_ci)
     if commit is None:
-        detail = f"could not resolve base ref 'origin/{base_ref}'"
+        detail = f"could not resolve comparison base '{base_ref}'"
         if is_ci:
             lines.append(
                 f"tenant-relation ratchet: FAIL — {detail}. Refusing to pass: a "
@@ -99,7 +134,7 @@ def check_ratchet(repo_dir, baseline_rel, base_ref, is_ci):
     base = _baseline_at(repo_dir, commit, baseline_rel)
     if base is None:
         lines.append(
-            f"tenant-relation ratchet: baseline is new on 'origin/{base_ref}' "
+            f"tenant-relation ratchet: baseline is new at base '{base_ref}' "
             f"(bootstrap) — nothing to compare. Current baseline: {len(current)} entries."
         )
         return 0, lines
