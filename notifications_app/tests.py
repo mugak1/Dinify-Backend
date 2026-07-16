@@ -31,7 +31,9 @@ from django.test import TestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from users_app.models import User
-from notifications_app.controllers.notifications import flag_notification_as_read
+from notifications_app.controllers.notifications import (
+    flag_notification_as_read, get_notifications,
+)
 
 
 NOTIFICATIONS_URL = '/api/v1/notifications/'
@@ -244,3 +246,220 @@ class NotificationsEndpointPutTests(TestCase):
 
         self.assertEqual(resp.status_code, 401)
         collection.update_one.assert_not_called()
+
+
+class GetNotificationsControllerTests(TestCase):
+    """
+    Read-side recipient scoping (get_notifications).
+
+    The read sink builds the SAME identity-guarded recipient ``$or`` the mark-read
+    sink uses. A None/''/whitespace identity must never become a ``{'tos': …}`` /
+    ``{'ccs': …}`` predicate (which would match empty/null-recipient documents), and
+    a caller with NO usable identity must get an empty read WITHOUT any Mongo query.
+    """
+
+    def test_read_filter_includes_recipient_scope(self):
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.find.return_value = []
+
+            result = get_notifications(email='owner@x.com', phone='256700000001')
+
+        self.assertEqual(result, [])
+        collection.find.assert_called_once()
+        sent_filter = collection.find.call_args.kwargs['filter']
+        self.assertEqual(
+            sent_filter['$or'],
+            [
+                {'tos': 'owner@x.com'},
+                {'tos': '256700000001'},
+                {'ccs': 'owner@x.com'},
+                {'ccs': '256700000001'},
+            ],
+        )
+        # Default flags: skip_archived=True adds the archived guard; skip_read
+        # defaults False so no 'read' key. Preserves the existing read contract.
+        self.assertEqual(sent_filter['archived'], {'$exists': False})
+        self.assertNotIn('read', sent_filter)
+
+    def test_read_returns_docs_with_stringified_id(self):
+        oid = ObjectId()
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.find.return_value = [{'_id': oid, 'subject': 'Hi'}]
+
+            result = get_notifications(email='owner@x.com', phone='256700000001')
+
+        self.assertEqual(result, [{'_id': str(oid), 'subject': 'Hi'}])
+
+    def test_read_phone_only_user_matches_only_phone(self):
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.find.return_value = []
+
+            get_notifications(email=None, phone='256700000001')
+
+        sent_filter = collection.find.call_args.kwargs['filter']
+        self.assertEqual(
+            sent_filter['$or'],
+            [{'tos': '256700000001'}, {'ccs': '256700000001'}],
+        )
+
+    def test_read_null_email_has_no_null_recipient_clause(self):
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.find.return_value = []
+
+            get_notifications(email=None, phone='256700000001')
+
+        sent_filter = collection.find.call_args.kwargs['filter']
+        self.assertNotIn({'tos': None}, sent_filter['$or'])
+        self.assertNotIn({'ccs': None}, sent_filter['$or'])
+
+    def test_read_empty_email_has_no_empty_recipient_clause(self):
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.find.return_value = []
+
+            get_notifications(email='', phone='256700000001')
+
+        sent_filter = collection.find.call_args.kwargs['filter']
+        self.assertNotIn({'tos': ''}, sent_filter['$or'])
+        self.assertNotIn({'ccs': ''}, sent_filter['$or'])
+        self.assertEqual(
+            sent_filter['$or'],
+            [{'tos': '256700000001'}, {'ccs': '256700000001'}],
+        )
+
+    def test_read_whitespace_email_excluded(self):
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.find.return_value = []
+
+            get_notifications(email='   ', phone='256700000001')
+
+        sent_filter = collection.find.call_args.kwargs['filter']
+        self.assertEqual(
+            sent_filter['$or'],
+            [{'tos': '256700000001'}, {'ccs': '256700000001'}],
+        )
+
+    def test_read_missing_phone_excluded(self):
+        # Email-only caller → only email clauses, no empty/None phone clause.
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.find.return_value = []
+
+            get_notifications(email='owner@x.com', phone='')
+
+        sent_filter = collection.find.call_args.kwargs['filter']
+        self.assertEqual(
+            sent_filter['$or'],
+            [{'tos': 'owner@x.com'}, {'ccs': 'owner@x.com'}],
+        )
+
+    def test_read_no_identity_returns_empty_without_query(self):
+        with patch(PATCH_TARGET) as mongo:
+            result = get_notifications(email=None, phone=None)
+
+        self.assertEqual(result, [])
+        # No broad / match-anything query is ever issued.
+        mongo.__getitem__.assert_not_called()
+
+    def test_read_empty_identity_strings_return_empty_without_query(self):
+        with patch(PATCH_TARGET) as mongo:
+            result = get_notifications(email='', phone='   ')
+
+        self.assertEqual(result, [])
+        mongo.__getitem__.assert_not_called()
+
+
+class FlagNotificationIdentityGuardTests(TestCase):
+    """
+    Mark-read applies the SAME identity guard as the read side: a None/''/whitespace
+    identity is never a recipient clause, and a caller with no usable identity
+    cannot mark ANY notification (returns False without touching Mongo).
+    """
+
+    def test_null_email_excludes_null_recipient_clause(self):
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.update_one.return_value.matched_count = 0
+
+            flag_notification_as_read(
+                str(ObjectId()), email=None, phone='256700000001'
+            )
+
+        sent_filter = collection.update_one.call_args.kwargs['filter']
+        self.assertNotIn({'tos': None}, sent_filter['$or'])
+        self.assertEqual(
+            sent_filter['$or'],
+            [{'tos': '256700000001'}, {'ccs': '256700000001'}],
+        )
+
+    def test_empty_email_excludes_empty_recipient_clause(self):
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.update_one.return_value.matched_count = 0
+
+            flag_notification_as_read(
+                str(ObjectId()), email='', phone='256700000001'
+            )
+
+        sent_filter = collection.update_one.call_args.kwargs['filter']
+        self.assertNotIn({'tos': ''}, sent_filter['$or'])
+        self.assertNotIn({'ccs': ''}, sent_filter['$or'])
+        self.assertEqual(
+            sent_filter['$or'],
+            [{'tos': '256700000001'}, {'ccs': '256700000001'}],
+        )
+
+    def test_whitespace_email_excluded(self):
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.update_one.return_value.matched_count = 1
+
+            flag_notification_as_read(
+                str(ObjectId()), email='  ', phone='256700000001'
+            )
+
+        sent_filter = collection.update_one.call_args.kwargs['filter']
+        self.assertEqual(
+            sent_filter['$or'],
+            [{'tos': '256700000001'}, {'ccs': '256700000001'}],
+        )
+
+    def test_phone_only_user_matches_only_phone(self):
+        with patch(PATCH_TARGET) as mongo:
+            collection = mongo.__getitem__.return_value
+            collection.update_one.return_value.matched_count = 1
+
+            result = flag_notification_as_read(
+                str(ObjectId()), email=None, phone='256700000001'
+            )
+
+        self.assertTrue(result)
+        sent_filter = collection.update_one.call_args.kwargs['filter']
+        self.assertEqual(
+            sent_filter['$or'],
+            [{'tos': '256700000001'}, {'ccs': '256700000001'}],
+        )
+
+    def test_no_identity_returns_false_without_query(self):
+        with patch(PATCH_TARGET) as mongo:
+            result = flag_notification_as_read(
+                str(ObjectId()), email=None, phone=None
+            )
+
+        self.assertFalse(result)
+        # No write — and no collection access at all.
+        mongo.__getitem__.assert_not_called()
+
+    def test_empty_identity_strings_return_false_without_query(self):
+        with patch(PATCH_TARGET) as mongo:
+            result = flag_notification_as_read(
+                str(ObjectId()), email='', phone='   '
+            )
+
+        self.assertFalse(result)
+        mongo.__getitem__.assert_not_called()
