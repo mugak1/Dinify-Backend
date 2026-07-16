@@ -45,14 +45,14 @@ class MiscPublicEndpoint(APIView):
         # The sole public listing is the active-restaurant directory.
         orm_filter['status'] = 'active'
 
-        # Hide soft-deleted rows by default, exactly like the authenticated
-        # catch-all (restaurant_setup.py) and the admin support listing
-        # (admin_issues.py): the endpoint owns this default, not the shared
-        # define_filter_params builder (a pure param-mapper pinned by
-        # tests_define_filter_params). An explicit ?deleted=true still opts in
-        # to seeing deleted rows.
-        if 'deleted' not in request.GET:
-            orm_filter['deleted'] = False
+        # This ANONYMOUS listing ALWAYS excludes soft-deleted rows. Unlike the
+        # authenticated catch-all (restaurant_setup.py), there is NO ?deleted
+        # opt-in here: a caller-supplied `deleted` param is ignored, never
+        # honoured, so an anonymous client can never surface soft-deleted records.
+        # The endpoint owns this filter — define_filter_params does not map
+        # `deleted` (a pure param-mapper pinned by tests_define_filter_params) —
+        # so setting it unconditionally is the sole and complete guard.
+        orm_filter['deleted'] = False
 
         serializers = {
             'restaurants': SerializerMiscPublicRestaurant,

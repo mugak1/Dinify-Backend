@@ -13,8 +13,9 @@ import json
 
 from django.test import TestCase
 
+from dinify_backend.configs import ROLES
 from dinify_backend.configss.string_definitions import RestaurantStatus_Active
-from restaurants_app.models import Restaurant, Table
+from restaurants_app.models import Restaurant, RestaurantEmployee, Table
 from users_app.models import User
 
 
@@ -85,26 +86,49 @@ class MiscPublicRestaurantsTests(TestCase):
         # 'PII Test Restaurant' does not match name__icontains='Zeta'.
         self.assertNotIn(str(self.restaurant.id), ids)
 
-    def test_soft_deleted_restaurant_hidden_but_deleted_override_returns_it(self):
-        # (P3-03) A soft-deleted restaurant that is still status='active' must
-        # NOT leak into the public directory; the ?deleted=true override still
-        # surfaces it (mirrors the authenticated catch-all's default).
+    def test_soft_deleted_restaurant_hidden_and_deleted_param_cannot_reveal_it(self):
+        # (PR5) A soft-deleted restaurant that is still status='active' must NEVER
+        # leak into the anonymous public directory. Unlike the authenticated
+        # catch-all, there is NO ?deleted opt-in here: any caller-supplied
+        # `deleted` value is ignored, so it can never surface the deleted row.
         deleted_rest = Restaurant.objects.create(
             name='Soft Deleted Active', location='loc-del',
             status=RestaurantStatus_Active, owner=self.owner, deleted=True,
         )
-        # Default listing: the soft-deleted restaurant is hidden, the live one
-        # is still present (positive control).
-        response = self.client.get(RESTAURANTS_URL)
+
+        def visible_ids(params=None):
+            response = self.client.get(RESTAURANTS_URL, params or {})
+            self.assertEqual(response.status_code, 200)
+            return [record['id'] for record in response.json()['data']['records']]
+
+        # Default listing: the soft-deleted restaurant is hidden, the live one is
+        # still present (positive control).
+        ids = visible_ids()
+        self.assertNotIn(str(deleted_rest.id), ids)
+        self.assertIn(str(self.restaurant.id), ids)
+
+        # No `deleted` value (true / false / garbage) may reveal it — the fix is
+        # value-independent (presence no longer bypasses the guard), and the live
+        # restaurant stays visible throughout.
+        for value in ('true', 'True', 'false', 'zzz', '1'):
+            ids = visible_ids({'deleted': value})
+            self.assertNotIn(
+                str(deleted_rest.id), ids,
+                msg=f'?deleted={value} leaked the soft-deleted restaurant',
+            )
+            self.assertIn(str(self.restaurant.id), ids)
+
+    def test_unknown_param_with_deleted_present_keeps_it_hidden(self):
+        # (req 7) An unknown query param must not weaken the soft-delete filter.
+        deleted_rest = Restaurant.objects.create(
+            name='Soft Deleted Unknown Param', location='loc-del2',
+            status=RestaurantStatus_Active, owner=self.owner, deleted=True,
+        )
+        response = self.client.get(RESTAURANTS_URL, {'foo': 'barbar'})
         self.assertEqual(response.status_code, 200)
         ids = [record['id'] for record in response.json()['data']['records']]
         self.assertNotIn(str(deleted_rest.id), ids)
         self.assertIn(str(self.restaurant.id), ids)
-        # ?deleted=true override: the soft-deleted restaurant IS returned.
-        response = self.client.get(RESTAURANTS_URL, {'deleted': 'true'})
-        self.assertEqual(response.status_code, 200)
-        ids = [record['id'] for record in response.json()['data']['records']]
-        self.assertIn(str(deleted_rest.id), ids)
 
 
 class MiscPublicTablesRetiredTests(TestCase):
@@ -174,6 +198,20 @@ class MiscPublicTablesRetiredTests(TestCase):
         )
         self.assertEqual(tables.status_code, 404)
 
+    def test_deleted_table_not_reachable_even_with_deleted_param(self):
+        # (req 4/5) The public tables listing is retired, so there is no anonymous
+        # route to ANY table data — deleted or live — and a `?deleted=true` param
+        # cannot re-open one. A soft-deleted table stays completely unreachable.
+        deleted_table = Table.objects.create(
+            number=7, str_number='7', restaurant=self.rest_a, deleted=True,
+        )
+        for params in ({'restaurant': str(self.rest_a.id)},
+                       {'restaurant': str(self.rest_a.id), 'deleted': 'true'},
+                       {'deleted': 'true'}):
+            response = self.client.get(TABLES_URL, params)
+            self.assertEqual(response.status_code, 404, msg=f'params={params}')
+            self.assertNotIn(str(deleted_table.id), json.dumps(response.json()))
+
 
 class MiscPublicUnknownConfigTests(TestCase):
     """(BUG-P2-3g) An unrecognised config_detail returns a clean 404, never a
@@ -217,3 +255,62 @@ class MiscPublicUnknownConfigTests(TestCase):
         self.assertEqual(response.status_code, 200)
         ids = [record['id'] for record in response.json()['data']['records']]
         self.assertIn(str(self.restaurant.id), ids)
+
+
+class AuthenticatedManagementDeletedAccessUnchangedTests(TestCase):
+    """(req 6) The PR5 fix is scoped to the ANONYMOUS misc-public endpoint. The
+    authenticated management catch-all (RestaurantSetupEndpoint) is a separate,
+    IsAuthenticated + tenant-scoped surface that intentionally STILL honours
+    ?deleted=true within the caller's own tenancy — that behaviour is preserved.
+    """
+
+    SETUP_RESTAURANTS_URL = '/api/v1/restaurant-setup/restaurants/'
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            first_name='Mgmt', last_name='Owner',
+            email='mgmt_owner@example.com', phone_number='256700000904',
+            username='256700000904', country='Uganda', password='password',
+            roles=[],
+        )
+        # A live restaurant the owner manages ...
+        self.live_restaurant = Restaurant.objects.create(
+            name='Mgmt Live Restaurant', location='loc-live',
+            status=RestaurantStatus_Active, owner=self.owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.live_restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        # ... and a soft-deleted (still status='active') restaurant they also
+        # manage. Module scope binds on restaurant STATUS, not the deleted flag,
+        # so it stays within the owner's tenancy and is reachable via ?deleted=true.
+        self.deleted_restaurant = Restaurant.objects.create(
+            name='Mgmt Deleted Restaurant', location='loc-del',
+            status=RestaurantStatus_Active, owner=self.owner, deleted=True,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.deleted_restaurant,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+
+    def _auth(self):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        token = str(RefreshToken.for_user(self.owner).access_token)
+        return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
+
+    def test_default_hides_deleted_for_authenticated_owner(self):
+        response = self.client.get(self.SETUP_RESTAURANTS_URL, **self._auth())
+        self.assertEqual(response.status_code, 200, response.content)
+        ids = [record['id'] for record in response.json()['data']['records']]
+        self.assertIn(str(self.live_restaurant.id), ids)
+        self.assertNotIn(str(self.deleted_restaurant.id), ids)
+
+    def test_deleted_true_still_reveals_deleted_for_authenticated_owner(self):
+        # The intentionally-supported management opt-in is unchanged by PR5.
+        response = self.client.get(
+            self.SETUP_RESTAURANTS_URL, {'deleted': 'true'}, **self._auth(),
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        ids = [record['id'] for record in response.json()['data']['records']]
+        self.assertIn(str(self.deleted_restaurant.id), ids)
