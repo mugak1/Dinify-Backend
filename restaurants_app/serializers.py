@@ -601,13 +601,18 @@ class SerializerPublicGetTableDetails(ModelSerializer):
 
     class Meta:
         model = Table
+        # Diner scan payload (PR 7A). Internal ops fields the diner never needs —
+        # floor-plan geometry, is_active/enabled, and QR ops metadata
+        # (has_qr/qr_regenerated_at) — are deliberately NOT exposed. The raw table
+        # `id` is now inert (scanning needs the credential, downstream needs the
+        # session), and `current_order.order_id` is likewise inert (order-details
+        # is session-scoped) but kept so the diner can resume.
         fields = (
             'id', 'number', 'room_name', 'prepayment_required',
             'available', 'current_order', 'restaurant', 'reserved',
-            'dining_area', 'enabled',
+            'dining_area',
             'display_name', 'min_capacity', 'max_capacity', 'shape',
-            'status', 'tags', 'has_qr', 'qr_mode', 'qr_regenerated_at',
-            'floor_x', 'floor_y', 'floor_width', 'floor_height', 'is_active',
+            'status', 'tags', 'qr_mode',
         )
 
     def get_dining_area(self, table):

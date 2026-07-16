@@ -420,6 +420,15 @@ class TestAnonymousOrderPaths(TestCase):
         self.table = Table.objects.get(number=TEST_TABLE_NUMBER1)
         self.menu_item = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
 
+    def _diner_session(self, table=None):
+        # The opaque diner table-session capability (PR 7A) an anonymous diner
+        # presents on every write. Minted for self.table by default and sent in
+        # the X-Diner-Session header the endpoints read.
+        from restaurants_app.controllers.diner_capability import (
+            issue_table_session,
+        )
+        return issue_table_session(table or self.table)
+
     def _initiate_anonymous_order(self) -> str:
         """Place an order as an anonymous diner and return its id."""
         response = self.client.post(
@@ -430,6 +439,7 @@ class TestAnonymousOrderPaths(TestCase):
                 'items': [{'item': str(self.menu_item.pk), 'quantity': 1}],
             },
             format='json',
+            HTTP_X_DINER_SESSION=self._diner_session(),
         )
         self.assertEqual(response.status_code, 200)
         return str(response.json()['data']['order_details']['id'])
@@ -441,6 +451,7 @@ class TestAnonymousOrderPaths(TestCase):
             '/api/v1/orders/submit/',
             {'order': order_id},
             format='json',
+            HTTP_X_DINER_SESSION=self._diner_session(),
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['message'], OK_ORDER_UPDATED)
@@ -496,22 +507,43 @@ class TestAnonymousOrderPaths(TestCase):
 
     def test_submit_missing_order_returns_400(self):
         # No 'order' in the body: the guard returns 400 without calling
-        # .get(id=None), rather than surfacing a 500.
+        # .get(id=None), rather than surfacing a 500. The order-id guard fires
+        # before any session logic, so no diner session is needed here.
         response = self.client.put('/api/v1/orders/submit/', {}, format='json')
         self.assertEqual(response.status_code, 400)
 
-    def test_submit_malformed_order_id_returns_400(self):
-        # A non-UUID order id raises ValidationError in the ORM lookup and is
-        # converted to a clean 400, not a 500.
+    def test_submit_without_session_or_staff_auth_returns_400(self):
+        # A well-formed order id but neither a diner session nor a staff JWT:
+        # the caller has presented no authority, so submit refuses with a clean
+        # 400 (never a 500, and deliberately not 401/403 which would trip the
+        # diner app's logout interceptor).
+        order_id = self._initiate_anonymous_order()
         response = self.client.put(
-            '/api/v1/orders/submit/', {'order': 'not-a-uuid'}, format='json',
+            '/api/v1/orders/submit/', {'order': order_id}, format='json',
         )
         self.assertEqual(response.status_code, 400)
+        # The draft is untouched — it was never transitioned.
+        self.assertEqual(
+            Order.objects.get(id=order_id).order_status, OrderStatus_Initiated,
+        )
+
+    def test_submit_malformed_order_id_under_session_returns_404(self):
+        # Under a valid diner session a non-UUID order id raises ValidationError
+        # in the scoped ORM lookup and is folded into ONE non-disclosing 404
+        # (not a 500, and no longer a distinct 400 — a junk id is simply "not
+        # found on your table").
+        response = self.client.put(
+            '/api/v1/orders/submit/', {'order': 'not-a-uuid'}, format='json',
+            HTTP_X_DINER_SESSION=self._diner_session(),
+        )
+        self.assertEqual(response.status_code, 404)
 
     def test_submit_nonexistent_order_id_returns_404(self):
-        # A well-formed but unknown order id raises DoesNotExist -> 404, not 500.
+        # A well-formed but unknown order id under a session raises DoesNotExist
+        # in the scoped lookup -> 404, not 500.
         response = self.client.put(
             '/api/v1/orders/submit/', {'order': str(uuid4())}, format='json',
+            HTTP_X_DINER_SESSION=self._diner_session(),
         )
         self.assertEqual(response.status_code, 404)
 
@@ -1304,8 +1336,17 @@ class AdminSourceOrderInitiationAuthTests(TestCase):
         }
         if source is not None:
             body['source'] = source
+        extra = {}
+        # The anonymous QR path now requires an opaque diner table session bound
+        # to the table (PR 7A); the admin path authorises via staff JWT instead.
+        # The body still carries restaurant/table, which must MATCH the session.
+        if source != 'admin':
+            from restaurants_app.controllers.diner_capability import (
+                issue_table_session,
+            )
+            extra['HTTP_X_DINER_SESSION'] = issue_table_session(table)
         return self._client(user).post(
-            '/api/v2/orders/initiate/', body, format='json',
+            '/api/v2/orders/initiate/', body, format='json', **extra,
         )
 
     def _order_id(self, resp):
@@ -1418,10 +1459,16 @@ class AdminSourceOrderInitiationAuthTests(TestCase):
         self.assertEqual(resp.status_code, 400, resp.content)
 
     def test_diner_still_rejected_at_out_of_service_table(self):
+        # An out-of-service table is now rejected EARLIER — at the diner
+        # capability layer (the session can't resolve an unavailable table) with a
+        # non-disclosing 404 — rather than at the initiate availability gate (400).
+        # Either way the diner is blocked and no order is created.
         self.table_a.status = 'out_of_service'
         self.table_a.save()
+        before = Order.objects.count()
         resp = self._initiate(None, self.restaurant_a, self.table_a, self.item_a, source=None)
-        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.assertEqual(Order.objects.count(), before)
 
     # --- 8. unauthenticated source='admin' → 401 (not 404) -------------
     def test_unauthenticated_admin_source_is_401(self):

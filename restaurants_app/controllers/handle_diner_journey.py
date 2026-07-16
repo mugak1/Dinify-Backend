@@ -1,10 +1,15 @@
 import uuid
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 
 from restaurants_app.models import Table, MenuSection, UpsellConfig, Restaurant
 from restaurants_app.serializers import (
     SerializerPublicGetTableDetails, SerializerGetFullMenu, UpsellConfigSerializer
+)
+from restaurants_app.controllers.diner_capability import (
+    resolve_qr_credential, issue_table_session, require_table_session,
+    credential_from_request, DinerCapabilityError,
 )
 from dinify_backend.configss.messages import (
     OK_SCANNED_TABLE, OK_RETRIEVED_FULL_MENU,
@@ -16,9 +21,12 @@ from orders_app.serializers import SerializerPublicOrderDetails
 from finance_app.models import DinifyTransaction
 
 
-def handle_table_scan(table_id: str) -> dict:
-    # Public AllowAny endpoint: diners aren't authenticated, so the protection
-    # here is input validation + table-state gating, not authorization.
+def _resolve_legacy_table(table_id):
+    """
+    Transitional raw-UUID table resolution. Returns a ``Table`` or an error dict.
+    Mirrors the pre-capability validation + scan gating. Reachable only while
+    ``settings.DINER_ALLOW_LEGACY_TABLE_SCAN`` is on.
+    """
     raw = '' if table_id is None else str(table_id).strip()
     if not raw:
         return {'status': 400, 'message': ERR_TABLE_REFERENCE_REQUIRED}
@@ -26,32 +34,50 @@ def handle_table_scan(table_id: str) -> dict:
         resolved_id = uuid.UUID(raw)
     except (ValueError, TypeError, AttributeError):
         return {'status': 400, 'message': ERR_TABLE_REFERENCE_INVALID}
-
-    # select_related collapses the restaurant/dining_area FK lookups the
-    # serializer would otherwise issue lazily, per row.
     table = (
         Table.objects
         .select_related('restaurant', 'dining_area')
         .filter(id=resolved_id)
         .first()
     )
-    # An unknown id or a removed/disabled/inactive/out-of-service table must
-    # not resolve into an orderable session. 404 (not 403) keeps the diner
-    # app's shared 403->logout interceptor out of it and does not confirm the
-    # existence of an unknown id.
+    # Unknown / removed / disabled / inactive / out-of-service → one 404 (never
+    # 403, which would trip the diner app's logout interceptor, and never confirms
+    # existence of an unknown id).
     if table is None or not table.is_available_for_scan():
         return {'status': 404, 'message': ERR_TABLE_UNAVAILABLE}
+    return table
 
-    # check if the table is reserved
+
+def handle_table_scan(request) -> dict:
+    # Anonymous QR entry point. Authority is the opaque QR CREDENTIAL, not the raw
+    # table UUID; a successful scan mints a short-lived diner table SESSION that
+    # every downstream anonymous op requires.
+    credential = credential_from_request(request)
+    if credential:
+        try:
+            table = resolve_qr_credential(credential)
+        except DinerCapabilityError as exc:
+            return {'status': exc.status, 'message': exc.message}
+    else:
+        # Transitional grace: a legacy raw ?table=<uuid> still resolves (and still
+        # mints a session, so downstream stays uniformly session-gated). Flip
+        # DINER_ALLOW_LEGACY_TABLE_SCAN off once physical QR codes are reprinted.
+        if not settings.DINER_ALLOW_LEGACY_TABLE_SCAN:
+            return {'status': 400, 'message': ERR_TABLE_REFERENCE_REQUIRED}
+        table = _resolve_legacy_table(request.GET.get('table'))
+        if isinstance(table, dict):  # error response
+            return table
+
+    # A reserved table blocks the diner (is_available_for_scan does not cover it).
     if table.reserved:
         return {
             'status': 400,
             'message': 'This table is reserved. Please contact the restaurant staff for assistance.', # noqa
         }
 
-    table_data = SerializerPublicGetTableDetails(
-        table, many=False
-    ).data
+    table_data = SerializerPublicGetTableDetails(table, many=False).data
+    # The short-lived capability the diner presents on every subsequent op.
+    table_data['session_token'] = issue_table_session(table)
     return {
         'status': 200,
         'message': OK_SCANNED_TABLE,
@@ -119,53 +145,70 @@ def handle_show_menu(restaurant_id: str) -> dict:
     }
 
 
-def handle_show_order_details(order_id: str) -> dict:
-    if order_id is None:
-        response = {
-            'status': 400,
-            'message': 'Please provide the order id'
-        }
-        return response
-
-    # Public AllowAny path with a client-supplied id: a malformed (non-UUID) or
-    # nonexistent id must return a clean 4xx, not a 500.
+def handle_show_order_details(request) -> dict:
+    # Bind the read to the diner SESSION and an order on that session's table —
+    # order-UUID knowledge alone is no longer authority (the BOLA fix).
     try:
-        order = Order.objects.get(id=order_id)
-    except ValidationError:
-        return {'status': 400, 'message': 'Invalid order id'}
-    except Order.DoesNotExist:
+        table = require_table_session(request)
+    except DinerCapabilityError as exc:
+        return {'status': exc.status, 'message': exc.message}
+
+    order_id = request.GET.get('order')
+    if order_id is None:
+        return {'status': 400, 'message': 'Please provide the order id'}
+
+    # Scope the lookup to the session's restaurant+table. A foreign / unknown /
+    # malformed id all collapse to ONE non-disclosing 404.
+    try:
+        order = Order.objects.get(
+            id=order_id,
+            restaurant_id=table.restaurant_id,
+            table_id=table.id,
+        )
+    except (Order.DoesNotExist, ValidationError, ValueError):
         return {'status': 404, 'message': 'Order not found'}
 
-    response = {
+    return {
         'status': 200,
         'message': 'Successfully retrieved the order details',
-        'data':  SerializerPublicOrderDetails(order, many=False).data
+        'data': SerializerPublicOrderDetails(order, many=False).data,
     }
-    return response
 
 
-def handle_show_transaction_details(transaction_id: str) -> dict:
-    if transaction_id is None:
-        response = {
-            'status': 400,
-            'message': 'Please provide the transaction reference'
-        }
-        return response
-
-    # Public AllowAny path with a client-supplied id: a malformed (non-UUID) or
-    # nonexistent id must return a clean 4xx, not a 500.
+def handle_show_transaction_details(request) -> dict:
+    # Payment-detail lookup shares the one anonymous capability boundary: require
+    # the session, and the transaction's order must belong to the session's table.
     try:
-        transaction_record = DinifyTransaction.objects.values(
-            'id', 'order', 'transaction_amount', 'transaction_status'
-        ).get(id=transaction_id)
-    except ValidationError:
-        return {'status': 400, 'message': 'Invalid transaction reference'}
-    except DinifyTransaction.DoesNotExist:
+        table = require_table_session(request)
+    except DinerCapabilityError as exc:
+        return {'status': exc.status, 'message': exc.message}
+
+    transaction_id = request.GET.get('transaction')
+    if transaction_id is None:
+        return {'status': 400, 'message': 'Please provide the transaction reference'}
+
+    try:
+        record = DinifyTransaction.objects.select_related('order').get(id=transaction_id)
+    except (DinifyTransaction.DoesNotExist, ValidationError, ValueError):
         return {'status': 404, 'message': 'Transaction not found'}
 
-    response = {
+    # A null-order transaction is not diner-scoped; a transaction whose order is on
+    # another table/restaurant is not this diner's. Both → non-disclosing 404.
+    order = record.order
+    if (
+        order is None
+        or order.restaurant_id != table.restaurant_id
+        or order.table_id != table.id
+    ):
+        return {'status': 404, 'message': 'Transaction not found'}
+
+    return {
         'status': 200,
         'message': 'Successfully retrieved the transaction details',
-        'data': transaction_record
+        'data': {
+            'id': str(record.id),
+            'order': str(record.order_id),
+            'transaction_amount': record.transaction_amount,
+            'transaction_status': record.transaction_status,
+        },
     }
-    return response

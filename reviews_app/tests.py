@@ -165,11 +165,23 @@ class ReviewApiTestBase(TestCase):
         token = str(RefreshToken.for_user(user).access_token)
         return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
 
-    def post_submit(self, body):
-        # Submission is AllowAny — deliberately no auth header.
+    def post_submit(self, body, table=None):
+        # A review now requires an opaque diner table SESSION bound to the order's
+        # table (PR 7A) — order-UUID knowledge alone is no longer authority. The
+        # fixtures place every submission's order on table_a, so default the
+        # session to it. Pass table=False to omit the session (the no-capability
+        # path), or a specific Table to forge a foreign session.
+        from restaurants_app.controllers.diner_capability import (
+            issue_table_session,
+        )
+        extra = {}
+        if table is not False:
+            extra['HTTP_X_DINER_SESSION'] = issue_table_session(
+                table or self.table_a
+            )
         return self.client.post(
             SUBMIT_URL, data=json.dumps(body),
-            content_type='application/json',
+            content_type='application/json', **extra,
         )
 
     def get_reviews(self, user, query=''):

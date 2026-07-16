@@ -18,12 +18,25 @@ from reviews_app.models import PUBLIC_RATING_THRESHOLD
 from reviews_app.serializers import ReviewRestaurantReadSerializer
 from reviews_app.controllers.submit_review import submit_review, RATING_FIELDS
 from reviews_app.controllers.resolve_review import resolve_review
+from restaurants_app.controllers.diner_capability import (
+    require_table_session, DinerCapabilityError,
+)
 
 
 class ReviewSubmissionEndpoint(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        # A review is authorised by a diner table SESSION bound to the order's
+        # table — not by order-UUID knowledge alone. The completed-service
+        # (SALE_STATUSES) gate and one-per-order uniqueness are preserved in
+        # submit_review.
+        try:
+            table = require_table_session(request)
+        except DinerCapabilityError as exc:
+            return Response(
+                {'status': exc.status, 'message': exc.message}, status=exc.status,
+            )
         rating_fields = {
             field: request.data.get(field) for field in RATING_FIELDS
         }
@@ -32,6 +45,8 @@ class ReviewSubmissionEndpoint(APIView):
             rating_fields=rating_fields,
             comment=request.data.get('comment'),
             tags=request.data.get('tags'),
+            session_restaurant_id=table.restaurant_id,
+            session_table_id=table.id,
         )
         return Response(response, status=response['status'])
 

@@ -42,7 +42,8 @@ def _shape_errors(errors):
     return ' '.join(parts) or 'The review could not be validated.'
 
 
-def submit_review(order_id, rating_fields, comment=None, tags=None):
+def submit_review(order_id, rating_fields, comment=None, tags=None,
+                  session_restaurant_id=None, session_table_id=None):
     """
     Submit a diner review for an order.
 
@@ -51,14 +52,25 @@ def submit_review(order_id, rating_fields, comment=None, tags=None):
     ``comment``       : optional free text.
     ``tags``          : optional list of quick-chip tag keys (validated against
                         the ``ReviewTag`` allowed set by the write serializer).
+    ``session_restaurant_id`` / ``session_table_id`` : the diner table session the
+                        review is authorised by. The order MUST belong to that
+                        restaurant+table — order-UUID knowledge alone is not
+                        authority (PR 7A). The endpoint resolves the session and
+                        passes these; a call without them fails closed (matches no
+                        order → 404).
     """
-    # 1. Order existence (404). The Order PK is a UUID — a malformed id raises
-    #    ValueError/ValidationError on the lookup; treat that as not-found so a
-    #    junk ``order`` value can never surface as a 500.
+    # 1. Order existence, SCOPED to the caller's table session (404). A foreign /
+    #    unknown / malformed id all collapse to ONE non-disclosing not-found so a
+    #    junk ``order`` value can never surface as a 500 and cross-table/tenant
+    #    order UUIDs cannot be reviewed.
     if order_id is None:
         return {'status': 404, 'message': 'We could not find that order.'}
     try:
-        order = Order.objects.get(id=order_id)
+        order = Order.objects.get(
+            id=order_id,
+            restaurant_id=session_restaurant_id,
+            table_id=session_table_id,
+        )
     except (Order.DoesNotExist, ValidationError, ValueError):
         return {'status': 404, 'message': 'We could not find that order.'}
 
