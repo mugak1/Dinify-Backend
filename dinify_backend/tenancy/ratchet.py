@@ -19,6 +19,11 @@ _HEADER = [
     "# script (scripts/check_tenant_relation_ratchet.py), and its ci.yml/verify.sh",
     "# steps — the meta-test alone then enforces everything.",
     "#",
+    "# NOT A VULNERABILITY COUNT. An entry means only 'this writable relation is",
+    "# not yet CLASSIFIED' — most are read/archival or already runtime-scoped. See",
+    "# dinify_backend/tenancy/ASSURANCE.md for what this ratchet does and does not",
+    "# guarantee.",
+    "#",
     "# Regenerate (only to REMOVE migrated entries): python scripts/gen_tenant_baseline.py",
     "",
 ]

@@ -24,8 +24,17 @@ This module is imported ONLY by the tenancy meta-test / baseline tooling — nev
 by a request path. It adds NO runtime validation on its own; enforcing a
 ``SameTenant`` at request time is the job of a serializer ``validate()`` (see
 ``restaurants_app/controllers/tenant_scope.py``), which the per-domain migration
-PRs wire up. This PR only classifies; it changes no behaviour.
+PRs wire up. This module only classifies; it changes no behaviour.
+
+RUNTIME ASSURANCE: because the classification is inert, ``SameTenant(path)`` on its
+own proves NOTHING — the path is only typo-checked. To stop a classification from
+LOOKING like a guarantee it is not, every PRODUCTION ``SameTenant`` must declare
+``verified_by`` — a dotted reference (or tuple) to the two-tenant behavioural
+test(s) that actually exercise the runtime enforcement. The meta-test verifies the
+reference resolves (``resolve_test_ref``); it does not (and cannot) re-run the
+proof, but it makes the proof's existence a reviewable, machine-checked link.
 """
+import importlib
 from dataclasses import dataclass
 
 
@@ -39,10 +48,19 @@ class SameTenant:
     ``"section__restaurant_id"`` (reached via an intermediate FK). It is a
     typo-checkable declaration, NOT a proof of correctness — the meta-test only
     verifies the path RESOLVES against the related model; whether a request-time
-    validator actually enforces it is proven by the two-tenant behavioural tests.
+    validator actually enforces it is proven by the two-tenant behavioural tests
+    named in ``verified_by``.
+
+    ``verified_by`` is a dotted reference (or tuple of them) to the two-tenant
+    behavioural test that proves this SameTenant is enforced at runtime, e.g.
+    ``"restaurants_app.tests.MenuFkTenantBoundaryTests"``. It is REQUIRED for every
+    production classification (the meta-test asserts it resolves) — the path alone
+    is inert. It defaults to ``None`` so tooling fixtures need not set it; the
+    requirement bites only on serializers reached by real discovery.
     """
 
     path: str
+    verified_by: object = None
 
     def __post_init__(self):
         if not isinstance(self.path, str) or not self.path.strip():
@@ -90,3 +108,60 @@ CLASSIFICATION_TYPES = (SameTenant, ServerDerived, GlobalRelation)
 def is_classification(value) -> bool:
     """True iff ``value`` is one of the constrained classification instances."""
     return isinstance(value, CLASSIFICATION_TYPES)
+
+
+def resolve_test_ref(ref) -> bool:
+    """
+    True iff ``ref`` — a dotted path like ``"pkg.module.TestClass"`` or
+    ``"pkg.module.TestClass.test_method"`` — resolves to a real, importable object.
+
+    Import the longest importable module prefix, then ``getattr`` the remaining
+    segments (class, then optional method). Proves the linked behavioural test
+    EXISTS; it does not run it.
+    """
+    if not isinstance(ref, str) or not ref.strip():
+        return False
+    parts = ref.strip().split(".")
+    for split in range(len(parts) - 1, 0, -1):
+        module_path = ".".join(parts[:split])
+        try:
+            obj = importlib.import_module(module_path)
+        except Exception:  # noqa: BLE001 - not a module prefix; try a shorter one
+            continue
+        try:
+            for attr in parts[split:]:
+                obj = getattr(obj, attr)
+            return True
+        except AttributeError:
+            return False
+    return False
+
+
+def same_tenant_assurance_violations(classified):
+    """
+    Human-readable violations for the runtime-assurance policy. ``classified`` is an
+    iterable of ``(key, classification)``. Every ``SameTenant`` must declare a
+    ``verified_by`` that resolves to an importable behavioural test — else the
+    classification is asserting a guarantee nothing proves. Pure logic (testable
+    with fixtures); the meta-test feeds it the production classifications.
+    """
+    violations = []
+    for key, classification in classified:
+        if not isinstance(classification, SameTenant):
+            continue
+        refs = classification.verified_by
+        if not refs:
+            violations.append(
+                f"{key}: SameTenant declares no verified_by. Link the two-tenant "
+                f"behavioural test(s) that prove runtime enforcement — the path "
+                f"alone proves nothing."
+            )
+            continue
+        refs = [refs] if isinstance(refs, str) else list(refs)
+        unresolved = [r for r in refs if not resolve_test_ref(r)]
+        if unresolved:
+            violations.append(
+                f"{key}: SameTenant.verified_by does not resolve to an importable "
+                f"test: {unresolved}."
+            )
+    return violations

@@ -60,10 +60,15 @@ jobs:
 
       - name: Tenant-relation ratchet
         # The committed tenant-relation baseline may only SHRINK — a new writable
-        # relation must be classified, not baselined. Reads the baseline on the
-        # base branch via git (fetched at runtime by the script); fails closed in
-        # CI if the base can't be read. TEMPORARY: delete this step, the script,
-        # and the baseline file when the baseline reaches zero (TENANT-STRUCT-00).
+        # relation must be classified, not baselined. Reads the baseline at the
+        # comparison base via git (fetched at runtime by the script); fails closed
+        # in CI if the base can't be read. On a PR the base is GITHUB_BASE_REF; on a
+        # PUSH it is github.event.before (the pre-push commit), plumbed below — the
+        # branch tip already contains the push and would hide an addition.
+        # TEMPORARY: delete this step, the script, and the baseline file when the
+        # baseline reaches zero (TENANT-STRUCT-00).
+        env:
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: python scripts/check_tenant_relation_ratchet.py
 
       - name: Run tests
