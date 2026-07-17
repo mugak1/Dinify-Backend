@@ -3408,14 +3408,19 @@ class PublicTableScanPresetTagsTests(TestCase):
         )
 
     def _scan(self, table_id):
-        # handle_table_scan takes the request (PR 7A); drive the legacy
-        # raw-?table= grace path (default-on) for these preset-tag assertions.
+        # The scan is credential-only: mint a QR credential for this table and
+        # present it in the X-Diner-Credential header (the only entry path).
         from rest_framework.test import APIRequestFactory
         from restaurants_app.controllers.handle_diner_journey import (
             handle_table_scan,
         )
+        from restaurants_app.controllers.diner_capability import (
+            issue_qr_credential,
+        )
+        cred = issue_qr_credential(self.restaurant.id, table_id, 1)
         request = APIRequestFactory().get(
-            '/api/v1/orders/journey/table-scan/', {'table': table_id},
+            '/api/v1/orders/journey/table-scan/',
+            HTTP_X_DINER_CREDENTIAL=cred,
         )
         return handle_table_scan(request)
 
@@ -3803,38 +3808,51 @@ class DinerTableScanTests(TestCase):
             number=101, restaurant=self.restaurant,
         )
 
-    def _scan(self, table_id):
-        # handle_table_scan now takes the request (PR 7A). These cases exercise
-        # the LEGACY raw-?table= grace path (DINER_ALLOW_LEGACY_TABLE_SCAN is
-        # default-on), which preserves the same input-validation / state-gating
-        # behaviour a raw UUID used to get.
+    def _scan(self, table_id=None, credential=None):
+        # The scan is credential-only. Mint a QR credential for the requested
+        # table id (generation 1, matching a freshly-created table) and present
+        # it in the X-Diner-Credential header — the ONLY entry path. State-gating
+        # cases mutate the table AFTER minting, so the live re-check denies them.
         from rest_framework.test import APIRequestFactory
         from restaurants_app.controllers.handle_diner_journey import (
             handle_table_scan,
         )
-        params = {} if table_id is None else {'table': table_id}
-        request = APIRequestFactory().get(self.SCAN_PATH, params)
+        from restaurants_app.controllers.diner_capability import (
+            issue_qr_credential,
+        )
+        extra = {}
+        if credential is not None:
+            extra['HTTP_X_DINER_CREDENTIAL'] = credential
+        elif table_id is not None:
+            extra['HTTP_X_DINER_CREDENTIAL'] = issue_qr_credential(
+                self.restaurant.id, table_id, 1,
+            )
+        request = APIRequestFactory().get(self.SCAN_PATH, **extra)
         return handle_table_scan(request)
 
     # ── input validation: never 500 ───────────────────────
-    def test_missing_param_returns_400_not_500(self):
-        for bad in (None, '', '   '):
-            response = self._scan(bad)
-            self.assertEqual(response['status'], 400, msg=repr(bad))
-            self.assertNotIn('data', response)
-
-    def test_malformed_param_returns_400(self):
-        response = self._scan('not-a-uuid')
+    def test_missing_credential_returns_400_not_500(self):
+        # No credential at all -> clean 400 (never 500), no session minted.
+        response = self._scan()
         self.assertEqual(response['status'], 400)
         self.assertNotIn('data', response)
 
-    def test_endpoint_missing_param_does_not_500(self):
+    def test_malformed_credential_returns_400(self):
+        response = self._scan(credential='not-a-real-token')
+        self.assertEqual(response['status'], 400)
+        self.assertNotIn('data', response)
+
+    def test_endpoint_missing_credential_does_not_500(self):
         response = self.client.get(self.SCAN_PATH)
         self.assertEqual(response.status_code, 400)
 
-    def test_endpoint_malformed_param_returns_400(self):
-        response = self.client.get(self.SCAN_PATH + '?table=not-a-uuid')
-        self.assertEqual(response.status_code, 400)
+    def test_endpoint_raw_table_query_is_ignored(self):
+        # A raw ?table= (real uuid or garbage) is not authority — with no
+        # credential the scan cleanly 400s and mints no session, either way.
+        for raw in (str(self.table.id), 'not-a-uuid'):
+            response = self.client.get(self.SCAN_PATH + '?table=' + raw)
+            self.assertEqual(response.status_code, 400, msg=raw)
+            self.assertNotIn('data', response.json())
 
     # ── state gating: dead tables must not resolve ────────
     def test_unknown_uuid_returns_404(self):
@@ -3865,9 +3883,13 @@ class DinerTableScanTests(TestCase):
     def test_endpoint_disabled_table_returns_404(self):
         self.table.enabled = False
         self.table.save(update_fields=['enabled'])
-        response = self.client.get(
-            self.SCAN_PATH + '?table=' + str(self.table.id),
+        from restaurants_app.controllers.diner_capability import (
+            issue_qr_credential,
         )
+        cred = issue_qr_credential(
+            self.restaurant.id, self.table.id, self.table.qr_version,
+        )
+        response = self.client.get(self.SCAN_PATH, HTTP_X_DINER_CREDENTIAL=cred)
         self.assertEqual(response.status_code, 404)
 
     # ── happy path / occupancy / reserved ─────────────────

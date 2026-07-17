@@ -96,6 +96,7 @@ Configured via `.env` file using `python-decouple`. See [`.env.example`](.env.ex
 | Group | Variables | Purpose |
 |---|---|---|
 | Django core | `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `ENV` | App secret, debug mode, allowed hosts, environment identifier |
+| Diner capability | `DINER_CAP_KEY`, `DINER_SESSION_TTL_SECONDS` | Signing key for anonymous diner QR credentials + table sessions (**required in production**, ≥32 chars, must differ from `SECRET_KEY`) and the session TTL (default 6h) |
 | CORS | `CORS_ORIGIN_ALLOW_ALL`, `CORS_ALLOWED_ORIGINS` | Cross-origin request policy |
 | JWT | `JWT_ACCESS_LIFETIME_MINUTES`, `JWT_REFRESH_LIFETIME_DAYS` | Token expiry configuration |
 | Database | `DATABASE_ENGINE`, `DATABASE_NAME`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_HOST`, `DATABASE_PORT` | PostgreSQL connection |

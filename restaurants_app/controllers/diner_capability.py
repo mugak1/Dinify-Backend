@@ -142,19 +142,22 @@ def resolve_table_session(token, max_age=None):
 # --- request helpers -------------------------------------------------------
 
 def credential_from_request(request):
-    """The QR credential from the header (preferred) or a ``?credential=`` fallback."""
-    return request.headers.get(CREDENTIAL_HEADER) or request.GET.get('credential')
+    """
+    The QR credential — accepted ONLY from the ``X-Diner-Credential`` header. A
+    bearer capability must never travel in a URL/query string or request body:
+    those leak into access logs, ``Referer`` headers, shared caches and browser
+    history, and would let a raw value grant anonymous authority.
+    """
+    return request.headers.get(CREDENTIAL_HEADER)
 
 
 def session_token_from_request(request):
-    """The session token from the header (preferred), else a query/body fallback."""
-    token = request.headers.get(SESSION_HEADER) or request.GET.get('session')
-    if token:
-        return token
-    try:
-        return request.data.get('session')
-    except Exception:  # noqa: BLE001 - request.data may be unavailable on some verbs
-        return None
+    """
+    The diner session token — accepted ONLY from the ``X-Diner-Session`` header
+    (never a query string or request body, for the same reasons as the QR
+    credential above).
+    """
+    return request.headers.get(SESSION_HEADER)
 
 
 def require_table_session(request):

@@ -15,7 +15,13 @@ Coverage (the 20 required scenarios + two extras), grouped by surface:
   expiry (7), session↛table (8) / session↛restaurant (9), live-state
   invalidation (17), salt cross-use, and signed-not-encrypted.
 * ``DinerTableScanCapabilityTests`` — scan endpoint: credential→session (1, 6),
-  raw-UUID rejected with grace off (2), malformed/unknown 4xx (3, 4), no PII (20).
+  raw-UUID / query / body rejected — no legacy path (1, 2, 3), malformed/unknown
+  4xx (3, 4), no PII (20).
+* ``DinerHeaderOnlyTransportTests`` — credential + session are header-only; the
+  same token in a query string or request body is rejected everywhere.
+* ``DinerResponseCacheTests``       — capability responses are no-store/private.
+* ``DinerCapKeyConfigTests``        — DINER_CAP_KEY fails closed in production.
+* ``DinerCapabilityLoggingTests``   — session tokens never reach the logs.
 * ``DinerInitiateCapabilityTests``  — v2 initiate: derives r/t (10), body/session
   mismatch (11), staff admin path intact (12), idempotency scoped (18),
   table-lock/serialization intact (19).
@@ -27,12 +33,16 @@ Coverage (the 20 required scenarios + two extras), grouped by surface:
 * ``RegenerateQrEndpointTests``     — the JWT-gated regenerate-qr action.
 """
 import json
+import logging
 from uuid import uuid4
 
-from django.test import TestCase, override_settings
+from django.test import TestCase, SimpleTestCase, override_settings
 from django.conf import settings
 from django.core import signing
+from django.core.exceptions import ImproperlyConfigured
 from rest_framework_simplejwt.tokens import RefreshToken
+
+from dinify_backend.diner_cap_config import resolve_diner_cap_key
 
 from users_app.models import User
 from restaurants_app.models import (
@@ -314,23 +324,43 @@ class DinerTableScanCapabilityTests(DinerCapabilityTestBase):
             resolve_table_session(data['session_token']).id, self.table_a.id,
         )
 
-    # (2) with the legacy grace flag OFF, a raw table UUID (even a real one) is no
-    # longer authority — only the signed credential is accepted.
-    @override_settings(DINER_ALLOW_LEGACY_TABLE_SCAN=False)
-    def test_raw_table_uuid_rejected_when_grace_off(self):
+    # (1, 2) a raw table UUID is NOT authority. Under the DEFAULT configuration —
+    # there is no legacy grace flag any more — a raw ?table=<uuid>, even a real
+    # one, mints no session. Only the signed credential is accepted.
+    def test_raw_table_uuid_is_rejected(self):
+        before = Order.objects.count()
         resp = self._scan(table=str(self.table_a.id))
         self.assertEqual(resp.status_code, 400, resp.content)
         self.assertNotIn('data', resp.json())
-        # The signed credential still works with grace off (independent path).
+        self.assertNotIn('session_token', json.dumps(resp.json()))
+        self.assertEqual(Order.objects.count(), before)
+        # The signed credential still works — the independent, only path.
         ok = self._scan(credential=self._credential(self.table_a))
         self.assertEqual(ok.status_code, 200, ok.content)
+        self.assertIn('session_token', ok.json()['data'])
 
-    # (2, cont.) with the grace flag ON (default) a raw UUID resolves but STILL
-    # mints a session, so downstream stays uniformly session-gated.
-    def test_legacy_raw_scan_still_mints_a_session(self):
-        resp = self._scan(table=str(self.table_a.id))
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertIn('session_token', resp.json()['data'])
+    def test_malformed_raw_table_is_rejected(self):
+        resp = self._scan(table='not-a-uuid')
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertNotIn('data', resp.json())
+
+    def test_raw_table_in_body_is_rejected(self):
+        # A raw table id in the request body is ignored (no body transport).
+        resp = self.client.generic(
+            'GET', SCAN_URL, data=json.dumps({'table': str(self.table_a.id)}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertNotIn('data', resp.json())
+
+    def test_missing_credential_returns_clean_400(self):
+        resp = self._scan()  # no credential, no table
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertNotIn('data', resp.json())
+
+    def test_no_legacy_scan_setting_exists(self):
+        # There must be no feature flag that re-enables raw-table scanning.
+        self.assertFalse(hasattr(settings, 'DINER_ALLOW_LEGACY_TABLE_SCAN'))
 
     # (3) malformed credential -> clean 400 (never 500).
     def test_malformed_credential_returns_400(self):
@@ -582,6 +612,39 @@ class DinerOrderDetailsCapabilityTests(DinerCapabilityTestBase):
             Order.objects.get(id=order.id).order_status, OrderStatus_Initiated,
         )
 
+    # (27) a valid staff JWT can submit WITHOUT a diner session — the separate,
+    # explicit staff path stays functional.
+    def test_staff_jwt_can_submit_without_a_session(self):
+        order = self._make_order(
+            self.restaurant_a, self.table_a, status=OrderStatus_Initiated,
+        )
+        resp = self.client.put(
+            SUBMIT_URL, data=json.dumps({'order': str(order.id)}),
+            content_type='application/json', **self._jwt(self.staff_a),
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            Order.objects.get(id=order.id).order_status, OrderStatus_Pending,
+        )
+
+    # (28) an INVALID diner session present alongside a valid staff JWT is NOT
+    # silently downgraded to staff auth — the session governs and its failure is
+    # returned. The order must not transition.
+    def test_invalid_session_does_not_fall_back_to_staff_on_submit(self):
+        order = self._make_order(
+            self.restaurant_a, self.table_a, status=OrderStatus_Initiated,
+        )
+        resp = self.client.put(
+            SUBMIT_URL, data=json.dumps({'order': str(order.id)}),
+            content_type='application/json',
+            **{**_header_kw(SESSION_HEADER, 'garbage-not-a-token'),
+               **self._jwt(self.owner_a)},
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(
+            Order.objects.get(id=order.id).order_status, OrderStatus_Initiated,
+        )
+
 
 class DinerReviewCapabilityTests(DinerCapabilityTestBase):
     """(15) a review needs an eligible (served/paid) order AND a bound session."""
@@ -720,3 +783,277 @@ class RegenerateQrEndpointTests(DinerCapabilityTestBase):
             content_type='application/json', **self._jwt(self.owner_a),
         )
         self.assertEqual(resp.status_code, 404, resp.content)
+
+
+class DinerHeaderOnlyTransportTests(DinerCapabilityTestBase):
+    """
+    Bearer capabilities are honoured ONLY from their dedicated headers. The same
+    token in a query string or request body must never grant authority — those
+    channels leak into access logs, ``Referer`` headers and shared caches. The
+    query/body fallbacks that once existed were removed.
+    """
+
+    def _make_txn(self, order):
+        return DinifyTransaction.objects.create(
+            restaurant=self.restaurant_a, order=order,
+            transaction_type=TransactionType_OrderPayment,
+            transaction_status=TransactionStatus_Success,
+            transaction_platform=TransactionPlatform_Web, transaction_amount=1000,
+        )
+
+    # --- QR credential (scan) -------------------------------------------
+    def test_credential_in_query_is_rejected(self):
+        cred = self._credential(self.table_a)
+        resp = self.client.get(f'{SCAN_URL}?credential={cred}')
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertNotIn('data', resp.json())
+
+    def test_credential_in_body_is_rejected(self):
+        cred = self._credential(self.table_a)
+        resp = self.client.generic(
+            'GET', SCAN_URL, data=json.dumps({'credential': cred}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertNotIn('data', resp.json())
+
+    # --- session token (initiate: POST) ---------------------------------
+    def test_session_in_query_is_rejected_on_initiate(self):
+        session = self._session(self.table_a)
+        before = Order.objects.count()
+        resp = self.client.post(
+            f'{INITIATE_URL}?session={session}',
+            data=json.dumps({'items': [{'item': str(self.item_a.id), 'quantity': 1}]}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Order.objects.count(), before)  # no order minted
+
+    def test_session_in_body_is_rejected_on_initiate(self):
+        session = self._session(self.table_a)
+        before = Order.objects.count()
+        resp = self.client.post(
+            INITIATE_URL,
+            data=json.dumps({'session': session,
+                             'items': [{'item': str(self.item_a.id), 'quantity': 1}]}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Order.objects.count(), before)
+
+    # --- session token (order-details: GET) -----------------------------
+    def test_session_in_query_is_rejected_on_order_details(self):
+        order = self._make_order(self.restaurant_a, self.table_a)
+        session = self._session(self.table_a)
+        resp = self.client.get(f'{ORDER_DETAILS_URL}?order={order.id}&session={session}')
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    # --- session token (payment-details: GET) ---------------------------
+    def test_session_in_query_is_rejected_on_payment_details(self):
+        order = self._make_order(self.restaurant_a, self.table_a)
+        txn = self._make_txn(order)
+        session = self._session(self.table_a)
+        resp = self.client.get(
+            f'{PAYMENT_DETAILS_URL}?transaction={txn.id}&session={session}'
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    # --- session token (review: POST body) ------------------------------
+    def test_session_in_body_is_rejected_on_review(self):
+        order = self._make_order(self.restaurant_a, self.table_a)
+        session = self._session(self.table_a)
+        resp = self.client.post(
+            REVIEW_SUBMIT_URL,
+            data=json.dumps({'order': str(order.id), 'overall_rating': 5,
+                             'session': session}),
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertFalse(Review.objects.filter(order_id=order.id).exists())
+
+    # --- session token (submit): no header -> staff fallback -> 400 ------
+    def test_session_in_body_is_rejected_on_submit(self):
+        order = self._make_order(
+            self.restaurant_a, self.table_a, status=OrderStatus_Initiated,
+        )
+        session = self._session(self.table_a)
+        resp = self.client.put(
+            SUBMIT_URL,
+            data=json.dumps({'order': str(order.id), 'session': session}),
+            content_type='application/json',
+        )
+        # No session header + no staff JWT -> the "session required" 400.
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(
+            Order.objects.get(id=order.id).order_status, OrderStatus_Initiated,
+        )
+
+
+class DinerResponseCacheTests(DinerCapabilityTestBase):
+    """
+    Capability-scoped responses must be non-cacheable (``no-store, private``) and
+    Vary on the diner capability headers (#40-42). ``show-menu`` — public and
+    session-free — is deliberately NOT stamped.
+    """
+
+    def _assert_no_store(self, resp):
+        self.assertEqual(resp['Cache-Control'], 'no-store, private')
+        self.assertEqual(resp['Pragma'], 'no-cache')
+        self.assertEqual(resp['Expires'], '0')
+        vary = resp.get('Vary', '')
+        self.assertIn('X-Diner-Session', vary)
+        self.assertIn('X-Diner-Credential', vary)
+
+    def test_table_scan_response_is_no_store(self):
+        resp = self.client.get(
+            SCAN_URL,
+            **_header_kw(CREDENTIAL_HEADER, self._credential(self.table_a)),
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self._assert_no_store(resp)
+
+    def test_order_details_response_is_no_store(self):
+        order = self._make_order(self.restaurant_a, self.table_a)
+        resp = self.client.get(
+            f'{ORDER_DETAILS_URL}?order={order.id}',
+            **_header_kw(SESSION_HEADER, self._session(self.table_a)),
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self._assert_no_store(resp)
+
+    def test_payment_details_response_is_no_store(self):
+        order = self._make_order(self.restaurant_a, self.table_a)
+        txn = DinifyTransaction.objects.create(
+            restaurant=self.restaurant_a, order=order,
+            transaction_type=TransactionType_OrderPayment,
+            transaction_status=TransactionStatus_Success,
+            transaction_platform=TransactionPlatform_Web, transaction_amount=1000,
+        )
+        resp = self.client.get(
+            f'{PAYMENT_DETAILS_URL}?transaction={txn.id}',
+            **_header_kw(SESSION_HEADER, self._session(self.table_a)),
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self._assert_no_store(resp)
+
+    def test_scan_error_response_is_also_no_store(self):
+        # The rejection path (a missing credential) is capability-scoped too.
+        resp = self.client.get(SCAN_URL)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self._assert_no_store(resp)
+
+    def test_show_menu_is_not_no_store(self):
+        resp = self.client.get(
+            f'/api/v1/orders/journey/show-menu/?restaurant={self.restaurant_a.id}'
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertNotIn('no-store', resp.get('Cache-Control', '') or '')
+
+
+class DinerCapKeyConfigTests(SimpleTestCase):
+    """
+    Fail-closed resolution of DINER_CAP_KEY (dinify_backend.diner_cap_config).
+    Pure-function tests — no DB, no settings re-import (#34-39).
+    """
+
+    def test_missing_key_in_production_fails_closed(self):
+        with self.assertRaises(ImproperlyConfigured):
+            resolve_diner_cap_key(None, 'x' * 40, debug=False)
+        with self.assertRaises(ImproperlyConfigured):
+            resolve_diner_cap_key('', 'x' * 40, debug=False)
+        with self.assertRaises(ImproperlyConfigured):
+            resolve_diner_cap_key('   ', 'x' * 40, debug=False)
+
+    def test_too_short_key_fails_closed(self):
+        with self.assertRaises(ImproperlyConfigured):
+            resolve_diner_cap_key('short-key-under-32', 'x' * 40, debug=False)
+
+    def test_key_equal_to_secret_fails_closed(self):
+        secret = 'S' * 50
+        with self.assertRaises(ImproperlyConfigured):
+            resolve_diner_cap_key(secret, secret, debug=False)
+
+    def test_placeholder_key_fails_closed(self):
+        with self.assertRaises(ImproperlyConfigured):
+            resolve_diner_cap_key('changeme', 'x' * 40, debug=False)
+        with self.assertRaises(ImproperlyConfigured):
+            resolve_diner_cap_key('SECRET', 'x' * 40, debug=False)
+
+    def test_valid_explicit_key_is_returned(self):
+        key = 'a-strong-diner-cap-key-0123456789abcdef'
+        self.assertEqual(resolve_diner_cap_key(key, 'x' * 40, debug=False), key)
+        # Whitespace is trimmed.
+        self.assertEqual(resolve_diner_cap_key(f'  {key}  ', 'x' * 40, debug=False), key)
+
+    def test_debug_fallback_derives_key_and_warns(self):
+        with self.assertWarns(UserWarning):
+            derived = resolve_diner_cap_key(None, 'x' * 40, debug=True)
+        # HMAC-SHA256 hexdigest.
+        self.assertEqual(len(derived), 64)
+        # Deterministic for a given secret.
+        with self.assertWarns(UserWarning):
+            self.assertEqual(derived, resolve_diner_cap_key(None, 'x' * 40, debug=True))
+
+    def test_error_message_never_contains_the_key(self):
+        secret = 'super-secret-value-that-must-not-leak-0123456789'
+        with self.assertRaises(ImproperlyConfigured) as ctx:
+            resolve_diner_cap_key(secret, secret, debug=False)
+        self.assertNotIn(secret, str(ctx.exception))
+
+    def test_settings_use_an_explicit_test_only_key(self):
+        # test_settings.py supplies an explicit, non-derived key (not the DEBUG
+        # fallback), unmistakably non-production.
+        self.assertEqual(
+            settings.DINER_CAP_KEY,
+            'diner-cap-test-key-0123456789abcdef0123456789abcdef',
+        )
+
+
+class DinerCapabilityLoggingTests(DinerCapabilityTestBase):
+    """Diner capability tokens must never be written to the logs (#43)."""
+
+    def test_session_values_are_not_logged(self):
+        order = self._make_order(self.restaurant_a, self.table_a)
+        valid_session = self._session(self.table_a)
+        marker = 'diner-token-marker-should-not-be-logged'
+
+        # Capture on the root AND the app loggers directly, so a record is caught
+        # whether or not the app loggers propagate to root (they do not).
+        captured = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                try:
+                    captured.append(record.getMessage())
+                except Exception:  # pragma: no cover - defensive
+                    captured.append(str(record.msg))
+
+        handler = _Capture(level=logging.DEBUG)
+        watched = [logging.getLogger()] + [
+            logging.getLogger(name) for name in
+            ('restaurants_app', 'orders_app', 'reviews_app', 'misc_app')
+        ]
+        prev_levels = [(lg, lg.level) for lg in watched]
+        for lg in watched:
+            lg.addHandler(handler)
+            lg.setLevel(logging.DEBUG)
+        try:
+            # A successful request carrying a real session in the header.
+            self.client.get(
+                f'{ORDER_DETAILS_URL}?order={order.id}',
+                **_header_kw(SESSION_HEADER, valid_session),
+            )
+            # A rejected request carrying a distinctive invalid token.
+            self.client.get(
+                f'{ORDER_DETAILS_URL}?order={order.id}',
+                **_header_kw(SESSION_HEADER, marker),
+            )
+        finally:
+            for lg in watched:
+                lg.removeHandler(handler)
+            for lg, level in prev_levels:
+                lg.setLevel(level)
+
+        blob = '\n'.join(captured)
+        self.assertNotIn(valid_session, blob)
+        self.assertNotIn(marker, blob)

@@ -10,6 +10,12 @@ from restaurants_app.controllers.handle_diner_journey import (
     handle_show_order_details, handle_show_transaction_details
 )
 from orders_app.serializers import SerializerPublicOrderDetails
+from misc_app.controllers.http import no_store
+
+# Journey stages that carry capability-scoped diner data (a session token or
+# session-bound order/payment data) and must never be cached. `show-menu` is a
+# public, session-free menu read and is deliberately excluded.
+_NO_STORE_STAGES = ('table-scan', 'order-details', 'payment-details')
 
 
 class OrderJourneyEndpoint(APIView):
@@ -37,4 +43,7 @@ class OrderJourneyEndpoint(APIView):
                 'status': 400,
                 'message': 'Error'
             }
-        return Response(response, status=response.get('status', 200))
+        resp = Response(response, status=response.get('status', 200))
+        if stage in _NO_STORE_STAGES:
+            no_store(resp)
+        return resp

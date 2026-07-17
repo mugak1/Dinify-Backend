@@ -104,6 +104,28 @@ with PostgreSQL on AWS RDS.
   per-module access via `can_user_access_module` / `get_module_restaurant_ids`
   (`users_app/controllers/permissions_check.py`) — see the "Tenant Isolation /
   Role-Permission ENFORCEMENT" section below (PR C)
+- Anonymous diner capability — capability-only, header-only entry + fail-closed
+  key: ✅ The QR scan → table-session flow
+  (`restaurants_app/controllers/diner_capability.py`; `django.core.signing`,
+  salt-separated QR credential vs table session) is the SOLE anonymous authority.
+  A signed QR credential in the `X-Diner-Credential` header is the ONLY input that
+  mints a session (`handle_table_scan`); the raw `?table=<uuid>` legacy scan, the
+  `DINER_ALLOW_LEGACY_TABLE_SCAN` flag, and `_resolve_legacy_table` were REMOVED —
+  a raw table UUID never grants authority (no setting re-enables it). Both tokens
+  travel HEADER-ONLY (`credential_from_request` → `X-Diner-Credential`,
+  `session_token_from_request` → `X-Diner-Session`); the `?credential=` /
+  `?session=` / body-`session` fallbacks were removed. `DINER_CAP_KEY` is
+  FAIL-CLOSED (`dinify_backend/diner_cap_config.py::resolve_diner_cap_key`): a
+  deployed (`DEBUG=False`) env MUST set an explicit key ≥32 chars, ≠ `SECRET_KEY`,
+  non-placeholder, or the app raises `ImproperlyConfigured` at settings import —
+  it never derives from `SECRET_KEY` in prod (DEBUG-only derived fallback +
+  warning; error messages never print the key). Capability responses
+  (table-scan / order-details / payment-details + order/review writes) are
+  `no-store` via `misc_app/controllers/http.py` (`no_store` /
+  `NoStoreResponseMixin`). Downstream ops derive scope from the session (body ids
+  may only MATCH, never widen), and an invalid diner session never falls back to
+  staff JWT. `DINER_CAP_KEY` MUST be configured in every deployed env before the
+  auto-deploy runs (migrate / check --deploy fail closed without it)
 - Role-permission MANAGEMENT surface: ✅ Owner-only GET/PUT
   `api/v1/restaurant-setup/role-permissions/` (`RolePermissionsEndpoint`,
   `restaurants_app/endpoints/role_permissions.py`) reads all four role grids and
