@@ -11,13 +11,14 @@ from dinify_backend.configss.string_definitions import OrderStatus_Pending, MODU
 from orders_app.controllers.con_orders import ConOrder
 from users_app.controllers.permissions_check import can_user_access_module
 from misc_app.controllers.decode_auth_token import decode_jwt_token
+from misc_app.controllers.http import NoStoreResponseMixin
 from restaurants_app.controllers.diner_capability import (
     require_table_session, resolve_table_session, session_token_from_request,
     DinerCapabilityError,
 )
 
 
-class OrdersEndpoint(APIView):
+class OrdersEndpoint(NoStoreResponseMixin, APIView):
     """
     The endpoint for handling orders
     """
@@ -100,7 +101,7 @@ class OrdersEndpoint(APIView):
         return Response({'status': 404, 'message': 'Not found'}, status=404)
 
 
-class V2OrdersEndpoint(APIView):
+class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
     """
     The V2 endpoint for handling orders
     """

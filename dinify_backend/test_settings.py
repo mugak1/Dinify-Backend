@@ -13,6 +13,13 @@ os.environ.setdefault('DEBUG', 'True')
 os.environ.setdefault('ALLOWED_HOSTS', '*')
 os.environ.setdefault('CORS_ORIGIN_ALLOW_ALL', 'True')
 os.environ.setdefault('ENV', 'dev')
+# Diner-capability signing key — an explicit, non-production test-only value so
+# the fail-closed resolver (dinify_backend/diner_cap_config.py) uses a real key
+# instead of the DEBUG-derived fallback during CI/local runs. >=32 chars and
+# deliberately different from SECRET_KEY.
+os.environ.setdefault(
+    'DINER_CAP_KEY', 'diner-cap-test-key-0123456789abcdef0123456789abcdef'
+)
 
 # Database — CI sets these to point at the PostgreSQL service container;
 # locally they fall back to SQLite in-memory.

@@ -21,9 +21,10 @@ from reviews_app.controllers.resolve_review import resolve_review
 from restaurants_app.controllers.diner_capability import (
     require_table_session, DinerCapabilityError,
 )
+from misc_app.controllers.http import NoStoreResponseMixin
 
 
-class ReviewSubmissionEndpoint(APIView):
+class ReviewSubmissionEndpoint(NoStoreResponseMixin, APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):

@@ -1,9 +1,6 @@
-import uuid
-
-from django.conf import settings
 from django.core.exceptions import ValidationError
 
-from restaurants_app.models import Table, MenuSection, UpsellConfig, Restaurant
+from restaurants_app.models import MenuSection, UpsellConfig, Restaurant
 from restaurants_app.serializers import (
     SerializerPublicGetTableDetails, SerializerGetFullMenu, UpsellConfigSerializer
 )
@@ -12,61 +9,26 @@ from restaurants_app.controllers.diner_capability import (
     credential_from_request, DinerCapabilityError,
 )
 from dinify_backend.configss.messages import (
-    OK_SCANNED_TABLE, OK_RETRIEVED_FULL_MENU,
-    ERR_TABLE_REFERENCE_REQUIRED, ERR_TABLE_REFERENCE_INVALID,
-    ERR_TABLE_UNAVAILABLE,
+    OK_SCANNED_TABLE, OK_RETRIEVED_FULL_MENU, ERR_TABLE_REFERENCE_REQUIRED,
 )
 from orders_app.models import Order
 from orders_app.serializers import SerializerPublicOrderDetails
 from finance_app.models import DinifyTransaction
 
 
-def _resolve_legacy_table(table_id):
-    """
-    Transitional raw-UUID table resolution. Returns a ``Table`` or an error dict.
-    Mirrors the pre-capability validation + scan gating. Reachable only while
-    ``settings.DINER_ALLOW_LEGACY_TABLE_SCAN`` is on.
-    """
-    raw = '' if table_id is None else str(table_id).strip()
-    if not raw:
+def handle_table_scan(request) -> dict:
+    # Anonymous QR entry point. The ONLY authority is the opaque, signed QR
+    # CREDENTIAL presented in the X-Diner-Credential header — never a raw table
+    # UUID (a leaked or guessed id must not mint a session). A successful scan
+    # mints a short-lived diner table SESSION that every downstream anonymous op
+    # requires.
+    credential = credential_from_request(request)
+    if not credential:
         return {'status': 400, 'message': ERR_TABLE_REFERENCE_REQUIRED}
     try:
-        resolved_id = uuid.UUID(raw)
-    except (ValueError, TypeError, AttributeError):
-        return {'status': 400, 'message': ERR_TABLE_REFERENCE_INVALID}
-    table = (
-        Table.objects
-        .select_related('restaurant', 'dining_area')
-        .filter(id=resolved_id)
-        .first()
-    )
-    # Unknown / removed / disabled / inactive / out-of-service → one 404 (never
-    # 403, which would trip the diner app's logout interceptor, and never confirms
-    # existence of an unknown id).
-    if table is None or not table.is_available_for_scan():
-        return {'status': 404, 'message': ERR_TABLE_UNAVAILABLE}
-    return table
-
-
-def handle_table_scan(request) -> dict:
-    # Anonymous QR entry point. Authority is the opaque QR CREDENTIAL, not the raw
-    # table UUID; a successful scan mints a short-lived diner table SESSION that
-    # every downstream anonymous op requires.
-    credential = credential_from_request(request)
-    if credential:
-        try:
-            table = resolve_qr_credential(credential)
-        except DinerCapabilityError as exc:
-            return {'status': exc.status, 'message': exc.message}
-    else:
-        # Transitional grace: a legacy raw ?table=<uuid> still resolves (and still
-        # mints a session, so downstream stays uniformly session-gated). Flip
-        # DINER_ALLOW_LEGACY_TABLE_SCAN off once physical QR codes are reprinted.
-        if not settings.DINER_ALLOW_LEGACY_TABLE_SCAN:
-            return {'status': 400, 'message': ERR_TABLE_REFERENCE_REQUIRED}
-        table = _resolve_legacy_table(request.GET.get('table'))
-        if isinstance(table, dict):  # error response
-            return table
+        table = resolve_qr_credential(credential)
+    except DinerCapabilityError as exc:
+        return {'status': exc.status, 'message': exc.message}
 
     # A reserved table blocks the diner (is_available_for_scan does not cover it).
     if table.reserved:

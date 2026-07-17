@@ -168,6 +168,54 @@ Response: { "access": "<new-access-token>" }
 
 ---
 
+## 6. Anonymous diner entry is capability-only and header-only; a signing key is now required
+
+**Endpoints:** `GET /api/v1/orders/journey/table-scan/` and every anonymous
+diner operation (`order-details`, `payment-details`,
+`POST /api/v2/orders/initiate/`, `PUT /api/v1/orders/submit/`,
+`POST /api/v1/reviews/submit/`).
+
+**Before:**
+- A raw table UUID could mint a diner session —
+  `GET /api/v1/orders/journey/table-scan/?table=<table-uuid>` returned a session
+  token (the transitional `DINER_ALLOW_LEGACY_TABLE_SCAN` grace, default on).
+- QR credentials and diner session tokens were also accepted from the query
+  string (`?credential=`, `?session=`) and the request body (`session`), not only
+  from their headers.
+- The diner-capability signing key silently derived from `SECRET_KEY` when
+  `DINER_CAP_KEY` was unset.
+
+**After:**
+- The **only** input that mints a session is a valid signed QR credential in the
+  `X-Diner-Credential` header. A raw `?table=<uuid>` (or any query/body value) is
+  ignored and returns a clean `400`. The legacy flag and raw-table resolver are
+  removed — no setting re-enables raw scanning.
+- QR credentials are read **only** from `X-Diner-Credential`; diner sessions
+  **only** from `X-Diner-Session`. Query-string and request-body token transport
+  is removed.
+- `DINER_CAP_KEY` must be configured in every deployed (`DEBUG=False`)
+  environment; the app fails to start (`ImproperlyConfigured`) without it and
+  never derives it from `SECRET_KEY` in production.
+- These capability responses now carry `Cache-Control: no-store, private`.
+
+**Frontend action required:**
+- Scan via a signed credential in the `X-Diner-Credential` header (already the
+  current Angular contract) — do not pass `?table=`.
+- Send the diner session in the `X-Diner-Session` header on every anonymous
+  operation; stop sending tokens in query strings or request bodies.
+
+**Deployment prerequisite (backend/ops):**
+- Set a strong explicit `DINER_CAP_KEY` (≥32 chars, ≠ `SECRET_KEY`;
+  `python -c "import secrets; print(secrets.token_urlsafe(48))"`) in the UAT and
+  production `.env` **before merging** — the auto-deploy's `migrate` and
+  `check --deploy` steps otherwise fail closed at settings import. A new key
+  invalidates existing sessions (6h TTL — diners rescan) and any QR credentials
+  signed with the old derived key; to preserve existing stickers, set
+  `DINER_CAP_KEY` to the current derived value
+  `hmac(SECRET_KEY, b'diner-capability').hexdigest()`.
+
+---
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
@@ -178,6 +226,9 @@ Response: { "access": "<new-access-token>" }
    `403`, `429`) instead of assuming all responses are `200`.
 4. **Token refresh:** Optionally use `/users/auth/token/refresh/` for session
    extension.
+5. **Diner entry:** Scan with a signed credential in the `X-Diner-Credential`
+   header (not `?table=`); send the diner session in the `X-Diner-Session`
+   header on every anonymous op (not in the query string or request body).
 
 ---
 
