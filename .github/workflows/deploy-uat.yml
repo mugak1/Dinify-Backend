@@ -37,4 +37,81 @@ jobs:
             python3 -m pip freeze | grep -Ei '^(django|asgiref|django-cors-headers|certifi|idna|urllib3|requests|sqlparse|pymongo)==' || true
             python3 manage.py migrate
             python3 manage.py check --deploy
+            # ---- Runtime-parity gates (post-incident 2026-07-17) ----
+            # Apache/mod_wsgi runs as www-data, and python-decouple reads the project
+            # .env at settings import. A .env that ubuntu can read but www-data cannot
+            # (the incident: ubuntu:ubuntu mode 600) passes every CLI check above and
+            # then kills the app at import with PermissionError after the restart.
+            # Everything below runs BEFORE the restart so a bad config aborts the
+            # deploy with the old workers still serving. No secret values are ever
+            # printed — only ownership and mode.
+            VENV_PY="$(command -v python3)"
+            env_owner="$(stat -c '%U:%G' .env)"
+            env_mode="$(stat -c '%a' .env)"
+            echo ".env ownership/mode: ${env_owner} ${env_mode}"
+            if ! sudo -u www-data test -r .env; then
+              echo "DEPLOY BLOCKED: www-data cannot read $(pwd)/.env (${env_owner} ${env_mode})." >&2
+              echo "The mod_wsgi runtime would fail at settings import with PermissionError." >&2
+              echo "Fix on the box: chown ubuntu:www-data .env && chmod 640 .env" >&2
+              exit 1
+            fi
+            # Secret-file mode policy: group-READ is how www-data is granted access,
+            # so allow it — but reject group-WRITE (www-data could rewrite the
+            # config) and every 'other' permission bit (bitmask 0027). 640 passes;
+            # 660, 644 and 642 fail. Readability itself (e.g. an unreadable 600
+            # file) is enforced by the sudo test above.
+            env_permissions=$((8#$env_mode))
+            if (( env_permissions & 0027 )); then
+              echo "DEPLOY BLOCKED: $(pwd)/.env (mode ${env_mode}) is too permissive for a secrets file:" >&2
+              echo "group-write and all 'other' permission bits are forbidden (expected e.g. 640)." >&2
+              echo "Fix on the box: chown ubuntu:www-data .env && chmod 640 .env" >&2
+              exit 1
+            fi
+            # Prove the runtime user can actually resolve the required settings from
+            # .env (presence only — values are never printed).
+            sudo -u www-data "$VENV_PY" - <<'PYCHECK'
+            from decouple import Config, RepositoryEnv
+            try:
+                cfg = Config(RepositoryEnv('.env'))
+            except OSError as exc:
+                raise SystemExit(f'DEPLOY BLOCKED: cannot read .env as the runtime user: {exc}')
+            missing = [k for k in ('SECRET_KEY', 'DINER_CAP_KEY')
+                       if not (cfg.get(k, default=None) or '').strip()]
+            if missing:
+                raise SystemExit('DEPLOY BLOCKED: .env is readable but missing/empty: '
+                                 + ', '.join(missing))
+            print('www-data can read and resolve required settings from .env')
+            PYCHECK
+            # Re-run the deploy check AS the runtime user, from the project directory,
+            # with the venv interpreter. sudo's clean environment plus the www-data
+            # identity reproduce what mod_wsgi will see at import time.
+            sudo -u www-data "$VENV_PY" manage.py check --deploy
+            # Validate the Apache configuration itself before bouncing it.
+            sudo apachectl configtest
             sudo systemctl restart apache2
+            # Health gate: the deploy is not a success unless the WSGI app boots and
+            # routes. Probe through the local Apache (--resolve pins the public vhost
+            # to 127.0.0.1 with correct SNI + certificate). A healthy app answers
+            # exactly 405 (Method Not Allowed) to a bare GET on the login route;
+            # anything else after the retries fails the deploy loudly instead of
+            # green-and-down.
+            status=000
+            for attempt in 1 2 3 4 5; do
+              sleep 3
+              status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+                --resolve api-test.dinifyapp.com:443:127.0.0.1 \
+                https://api-test.dinifyapp.com/uat/api/v1/users/auth/login/ || true)"
+              status="${status:-000}"
+              echo "Health probe attempt ${attempt}: HTTP ${status} (expect 405)"
+              if [ "$status" -eq 405 ]; then
+                break
+              fi
+            done
+            if [ "$status" -ne 405 ]; then
+              echo "UAT API failed its post-restart health probe (last HTTP status: ${status}; expected 405)." >&2
+              echo "The WSGI app is likely failing to boot or routing incorrectly. Verify the" >&2
+              echo "project .env is readable by www-data (e.g. ubuntu:www-data, mode 640) and" >&2
+              echo "carries every required setting (e.g. DINER_CAP_KEY), then re-run this" >&2
+              echo "workflow." >&2
+              exit 1
+            fi

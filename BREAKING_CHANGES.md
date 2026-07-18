@@ -213,6 +213,23 @@ diner operation (`order-details`, `payment-details`,
   signed with the old derived key; to preserve existing stickers, set
   `DINER_CAP_KEY` to the current derived value
   `hmac(SECRET_KEY, b'diner-capability').hexdigest()`.
+- The key must be in the **project `.env` file** — the deploy pipeline
+  standardizes deployed runtime secrets on that file and validates it
+  directly (as `www-data`, via `RepositoryEnv('.env')`). The file must be
+  **readable by the Apache runtime user** (`www-data`) via group-read, with
+  no group-write and no 'other' permission bits — currently
+  `ubuntu:www-data`, mode `640`. This is exactly how UAT went down on
+  2026-07-17: the key was present in `.env`, but the file was `ubuntu:ubuntu`
+  mode `600`, so the CLI `migrate`/`check --deploy` steps (run as `ubuntu`)
+  passed while mod_wsgi died at settings import with `PermissionError` —
+  every request (CORS preflights included) then returned Apache's bare 500.
+  Confirmed by running the decouple key check as `www-data`; fixed with
+  `chown ubuntu:www-data .env && chmod 640 .env`. (Shell-profile exports are
+  equally CLI-only and never reach mod_wsgi.) The deploy workflow now
+  enforces runtime parity before the restart — a `.env`
+  ownership/permission guard, a `www-data` read-and-resolve probe, a
+  `check --deploy` re-run as `www-data`, `apachectl configtest` — and a
+  post-restart probe requiring the expected `405` from the login route.
 
 ---
 

@@ -265,6 +265,23 @@ with PostgreSQL on AWS RDS.
   effect on the next deploy. The install runs after `git pull`, before
   `migrate`; with `set -e` a failed install aborts before the Apache restart,
   leaving the live API up on the old workers
+- The deploy is HEALTH-GATED (post-incident 2026-07-17, when a `.env` of mode
+  600 `ubuntu:ubuntu` let CLI checks pass while mod_wsgi — running as
+  `www-data` — died at settings import with `PermissionError`): BEFORE the
+  Apache restart it verifies `.env` is readable by `www-data` with no
+  group-write and no 'other' bits (`mode & 0027` must be 0 — `ubuntu:www-data`
+  640 passes; 660/644/642 fail), probes that `www-data` can
+  resolve required settings from `.env` (values never printed), re-runs
+  `check --deploy` AS `www-data` from the project dir with the venv Python,
+  and runs `apachectl configtest` — any failure aborts with the old workers
+  still serving. AFTER the restart an HTTP probe of the login route through
+  local Apache must return exactly 405, so a boot-dead app turns the deploy
+  red instead of green-and-down. Deployed runtime secrets (e.g.
+  `DINER_CAP_KEY`) must be stored in the project `.env` — the contract the
+  gates validate directly (`RepositoryEnv('.env')` as `www-data`) — readable
+  by `www-data` through group-read, with no group-write and no permissions
+  for other users (currently `ubuntu:www-data` mode 640); never in a shell
+  profile
 - NEVER suggest manual `git pull`, `migrate`, or Apache restart — the
   pipeline handles everything
 - Each feature must be on its own branch → PR → merge
