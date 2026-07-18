@@ -173,13 +173,27 @@ class TestOrderFunctions(TestCase):
         discounted = MenuItem.objects.get(name=TEST_DISCOUNTED_MENU_ITEM_NAME)
         options_item = MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME)
 
+        # Wire two dedicated published is_extra items into the options item's
+        # allowlist so the extras it carries pass the extra-applicability gate.
+        extra1 = MenuItem.objects.create(
+            name='Lifecycle Extra 1', section=options_item.section,
+            primary_price=Decimal('500'), approved=True, enabled=True, is_extra=True,
+        )
+        extra2 = MenuItem.objects.create(
+            name='Lifecycle Extra 2', section=options_item.section,
+            primary_price=Decimal('500'), approved=True, enabled=True, is_extra=True,
+        )
+        options_item.has_extras = True
+        options_item.extras_applicable = [str(extra1.pk), str(extra2.pk)]
+        options_item.save(update_fields=['has_extras', 'extras_applicable'])
+
         # first attempt has the options item with no selected_modifiers → rejected
         items = [
             {'item': str(menu_item1.pk), 'quantity': 2},
             {
                 'item': str(options_item.pk),
                 'quantity': 1,
-                'extras': [str(menu_item1.pk), str(menu_item2.pk)],
+                'extras': [str(extra1.pk), str(extra2.pk)],
             },
         ]
         response = ConOrder.initiate_order(
@@ -194,7 +208,7 @@ class TestOrderFunctions(TestCase):
             'item': str(options_item.pk),
             'quantity': 1,
             'selected_modifiers': {TEST_OPTION_GROUP_ID: [TEST_OPTION_CHOICE_SMALL_ID]},
-            'extras': [str(menu_item1.pk), str(menu_item2.pk)],
+            'extras': [str(extra1.pk), str(extra2.pk)],
         }
         items = [
             {'item': str(menu_item1.pk), 'quantity': 2},
@@ -654,6 +668,16 @@ class TestOrderTenantConsistency(TestCase):
         self.table_a = Table.objects.get(number=TEST_TABLE_NUMBER4)
         self.item_a = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
         self.item_a2 = MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME)
+        # A dedicated published is_extra item for restaurant A, wired into
+        # item_a's allowlist so applicability tests submit a real, valid extra.
+        self.extra_a = MenuItem.objects.create(
+            name='Tenant Extra A', section=self.item_a.section,
+            primary_price=Decimal('1000'), approved=True, enabled=True,
+            is_extra=True,
+        )
+        self.item_a.has_extras = True
+        self.item_a.extras_applicable = [str(self.extra_a.pk)]
+        self.item_a.save(update_fields=['has_extras', 'extras_applicable'])
 
         # Restaurant B — a second tenant with its own section, item and table.
         owner = User.objects.get(username=TEST_PHONE)
@@ -846,7 +870,7 @@ class TestOrderTenantConsistency(TestCase):
             items=[{
                 'item': str(self.item_a.pk),
                 'quantity': 2,
-                'extras': [str(self.item_a2.pk)],
+                'extras': [str(self.extra_a.pk)],
             }],
         )
         self.assertEqual(response['status'], 200)
@@ -856,7 +880,7 @@ class TestOrderTenantConsistency(TestCase):
             order__id=order_id, item=self.item_a, parent_item__isnull=True
         )
         child = OrderItem.objects.get(
-            order__id=order_id, item=self.item_a2, parent_item__isnull=False
+            order__id=order_id, item=self.extra_a, parent_item__isnull=False
         )
         self.assertEqual(child.parent_item_id, parent.pk)
         self.assertEqual(child.quantity, 1)
@@ -898,7 +922,7 @@ class TestOrderTenantConsistency(TestCase):
             items=[{
                 'item': str(self.item_a.pk),
                 'quantity': 1,
-                'extras': [str(self.item_a2.pk)],
+                'extras': [str(self.extra_a.pk)],
             }],
             client_order_id=str(key),
         )
@@ -931,7 +955,7 @@ class TestOrderTenantConsistency(TestCase):
             restaurant=self.restaurant_a,
             table=self.table_a,
             items=[{'item': str(self.item_a.pk), 'quantity': 1,
-                    'extras': [str(self.item_a2.pk)]}],
+                    'extras': [str(self.extra_a.pk)]}],
             client_order_id=key,
         )
         self.assertEqual(second['status'], 200)
@@ -985,27 +1009,26 @@ class TestOrderTenantConsistency(TestCase):
             self.assertEqual(response['status'], 200)
         self.assertEqual(Order.objects.count(), orders_before + 2)
 
-    def test_duplicate_extras_accepted_as_two_child_rows(self):
-        # The set-based batch gate must validate duplicates without collapsing
-        # them: two occurrences of the same valid extra still produce two
-        # child rows (pre-existing duplicate semantics are unchanged).
+    def test_duplicate_extras_rejected(self):
+        # PR2: a duplicate submitted extra id is rejected — the same extra may not
+        # be attached to one parent twice. The whole order fails with the opaque
+        # menu message and no row is committed. (This reverses the pre-PR2
+        # "accepted as two child rows" behaviour.)
+        orders_before = Order.objects.count()
+        items_before = OrderItem.objects.count()
         response = ConOrder.initiate_order(
             restaurant_id=str(self.restaurant_a.pk),
             table_id=str(self.table_a.pk),
             items=[{
                 'item': str(self.item_a.pk),
                 'quantity': 1,
-                'extras': [str(self.item_a2.pk), str(self.item_a2.pk)],
+                'extras': [str(self.extra_a.pk), str(self.extra_a.pk)],
             }],
         )
-        self.assertEqual(response['status'], 200)
-        order_id = str(response['data']['order_details']['id'])
-        self.assertEqual(
-            OrderItem.objects.filter(
-                order__id=order_id, item=self.item_a2, parent_item__isnull=False
-            ).count(),
-            2,
-        )
+        self.assertEqual(response['status'], 400)
+        self.assertEqual(response['message'], NOT_ON_MENU_MESSAGE)
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), items_before)
 
 
 class TestOrderingAvailabilityGates(TestCase):
@@ -1157,9 +1180,12 @@ class TestExtrasDiscountedFlag(TestCase):
         self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         self.section = MenuSection.objects.get(name=TEST_MENU_SECTION_NAME)
         self.table = Table.objects.get(number=TEST_TABLE_NUMBER4)
-        # A plain parent item: check_extras_requirements only enforces min/max
-        # when has_extras=True, so no extras config is needed to carry an extra.
+        # The parent accepts extras; each test wires its specific extra into the
+        # allowlist in _place_order_with_extra. Extra applicability (has_extras +
+        # extras_applicable membership + is_extra) is enforced on the order path.
         self.parent = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+        self.parent.has_extras = True
+        self.parent.save(update_fields=['has_extras'])
 
     def _make_extra(self, name, discount_details):
         # discounted_price is set to a stale 8000 on purpose — neither the flag
@@ -1168,10 +1194,11 @@ class TestExtrasDiscountedFlag(TestCase):
         return MenuItem.objects.create(
             name=name,
             section=self.section,
-            # Published so the diner-path order clears the publication gate;
-            # this suite is about the discount flag, not publication.
+            # Published + is_extra so the diner-path order clears the publication
+            # AND extra-applicability gates; this suite is about the discount flag.
             approved=True,
             enabled=True,
+            is_extra=True,
             primary_price=Decimal('10000'),
             discounted_price=Decimal('8000'),
             running_discount=True,
@@ -1180,6 +1207,10 @@ class TestExtrasDiscountedFlag(TestCase):
         )
 
     def _place_order_with_extra(self, extra_item):
+        # Wire this specific extra into the parent's allowlist so it is an
+        # applicable, published, same-restaurant is_extra item at order time.
+        self.parent.extras_applicable = [str(extra_item.pk)]
+        self.parent.save(update_fields=['extras_applicable'])
         response = ConOrder.initiate_order(
             restaurant_id=str(self.restaurant.pk),
             table_id=str(self.table.pk),
@@ -1244,6 +1275,7 @@ class TestExtrasDiscountedFlag(TestCase):
             section=self.section,
             approved=True,
             enabled=True,
+            is_extra=True,
             primary_price=Decimal('5000'),
             running_discount=False,
         )
@@ -1543,6 +1575,14 @@ class TestOrderPublicationGate(TestCase):
         self.unpublished_extra = MenuItem.objects.create(
             name='Gate Unpublished Extra', section=self.section,
             primary_price=500, approved=False, enabled=False, is_extra=True,
+        )
+        # The published parent accepts extras and lists ONLY the published extra
+        # as applicable. The unpublished extra is not in the allowlist, so it is
+        # rejected on both the applicability and the publication axes.
+        self.published_item.has_extras = True
+        self.published_item.extras_applicable = [str(self.published_extra.pk)]
+        self.published_item.save(
+            update_fields=['has_extras', 'extras_applicable']
         )
 
         # A second tenant with its own published item (foreign-tenant control).

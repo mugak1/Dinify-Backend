@@ -1,8 +1,8 @@
 import logging
 
-from uuid import UUID
 from decimal import Decimal
 from django.db import transaction
+from django.utils import timezone
 from django.db.models import Sum
 from typing import Optional, Union
 from users_app.models import User
@@ -19,15 +19,16 @@ from orders_app.serializers import SerializerPutOrderItem
 from finance_app.models import DinifyTransaction
 from orders_app.controllers.orders.serializers import serialize_order_details
 from orders_app.controllers.services.create_order import _create_order
+from restaurants_app.controllers.menu_publication import (
+    NOT_ON_MENU_MESSAGE, validate_order_selections,
+)
 
 logger = logging.getLogger(__name__)
 
-# One canonical rejection for anything that cannot be resolved on this
-# restaurant's menu (foreign, nonexistent, malformed, wrong type) — parents
-# and extras alike. A single opaque string by design: the response must not
-# reveal whether an id exists on another tenant (no tenant enumeration), so
-# every layer that rejects an item id must use EXACTLY this message.
-NOT_ON_MENU_MESSAGE = "One or more items are not on this restaurant's menu."
+# NOT_ON_MENU_MESSAGE is the canonical opaque menu-rejection string, now owned by
+# the menu-publication policy (restaurants_app/controllers/menu_publication.py) and
+# re-exported here so existing importers — and tests — keep resolving it from
+# con_orders unchanged.
 
 
 class ConOrder:
@@ -570,135 +571,46 @@ class ConOrder:
                 'message': MESSAGES.get('NO_ORDER_ITEMS')
             }
 
-        # tenant consistency: every requested item — parent AND extra — must
-        # belong to THIS restaurant's menu. Runs BEFORE the options/extras
-        # pre-checks (which
-        # resolve each item by bare pk) so a missing/foreign/malformed item id
-        # fails fast with a 400 here instead of raising 500 downstream, and no
-        # Order row is ever created for a cross-tenant submission.
-        requested_uuids = set()
-        # Parents and extras are tracked separately too: the fail-closed diner
-        # publication gate below holds them to slightly different contracts (a
-        # parent must also have a published parent section; an extra is judged
-        # on its own item-level publication).
-        parent_uuids = set()
-        extra_uuids = set()
-        for entry in items:
-            if (
-                not isinstance(entry, dict)
-                or entry.get('item') is None
-                or entry.get('quantity') is None
-            ):
-                return {
-                    'status': 400,
-                    'message': 'Each order item must include an item and a quantity.'
-                }
-            try:
-                parent_uuid = UUID(str(entry['item']))
-            except (ValueError, TypeError):
-                return {
-                    'status': 400,
-                    'message': NOT_ON_MENU_MESSAGE
-                }
-            requested_uuids.add(parent_uuid)
-            parent_uuids.add(parent_uuid)
-
-            # BUG-P1-1 follow-up: extras are MenuItems referenced by bare UUID
-            # strings, so they cross the same tenant boundary as the parent
-            # item. Collect them into the SAME batch so the single scoped query
-            # below proves ownership for parents and extras alike. Absent /
-            # None / [] extras stay valid; anything unresolvable (non-list,
-            # non-UUID member) gets the same opaque 400 as a foreign id.
-            extras = entry.get('extras')
-            if extras is None:
-                continue
-            if not isinstance(extras, list):
-                return {
-                    'status': 400,
-                    'message': NOT_ON_MENU_MESSAGE
-                }
-            for extra_id in extras:
-                try:
-                    extra_uuid = UUID(str(extra_id))
-                except (ValueError, TypeError):
-                    return {
-                        'status': 400,
-                        'message': NOT_ON_MENU_MESSAGE
-                    }
-                requested_uuids.add(extra_uuid)
-                extra_uuids.add(extra_uuid)
-
-        # Tenant-ownership gate (unchanged, applies to EVERY caller): every
-        # requested item — parent and extra — must belong to this restaurant's
-        # menu. A foreign / nonexistent id fails fast here with an opaque 400.
-        owned_uuids = set(
-            MenuItem.objects
-            .filter(pk__in=requested_uuids, section__restaurant=restaurant)
-            .values_list('pk', flat=True)
-        )
-        if requested_uuids - owned_uuids:
-            return {
-                'status': 400,
-                'message': NOT_ON_MENU_MESSAGE
-            }
-
-        # Fail-closed diner publication gate. An anonymous diner (created_by is
-        # None) may order ONLY records currently published for diner use — the
-        # same contract the diner menu read path enforces — so an item that is
-        # invisible in the menu cannot be ordered by knowing its UUID. Staff /
-        # admin orders (created_by set, already authorised against MODULE_TABLES
-        # at the endpoint) are a management action and keep the tenant-only
-        # behaviour above.
+        # Canonical selection validation (preflight, FAST FEEDBACK): one authority
+        # for tenant ownership, diner publication (anonymous only), and extra
+        # applicability — is_extra + membership in the parent's extras_applicable +
+        # has_extras + no duplicate/self-reference + min/max on the validated unique
+        # set. Every unorderable id (foreign / nonexistent / malformed / unpublished
+        # / disallowed / wrong-role) collapses to ONE opaque NOT_ON_MENU_MESSAGE so
+        # the response never reveals whether an id exists on another tenant.
         #
-        # NB: available / in_stock are deliberately NOT part of this gate — an
-        # unavailable or out-of-stock record still flows through the existing
-        # zero-and-flag reconciliation (add_order_item / process_item_extras).
-        # This gate is strictly about unpublished / deleted records. It runs
-        # BEFORE _create_order's transaction, so a rejection commits no rows.
-        if created_by is None:
-            # Parents: full diner-orderable contract — item publication AND a
-            # published parent section, and not beneath a soft-deleted group
-            # (null-safe anti-join keeps group-less parents).
-            orderable_parents = set(
-                MenuItem.objects
-                .filter(
-                    pk__in=parent_uuids,
-                    section__restaurant=restaurant,
-                    approved=True, enabled=True, deleted=False,
-                    section__approved=True,
-                    section__enabled=True,
-                    section__deleted=False,
-                )
-                .exclude(section_group__deleted=True)
-                .values_list('pk', flat=True)
+        # This is preflight only — the LOAD-BEARING re-check runs at a time captured
+        # AFTER the table lock inside _create_order's transaction, so a menu change
+        # while a request waits on that lock cannot slip a stale selection through.
+        # Extras integrity applies to EVERY caller (staff included); publication is
+        # gated on created_by (an authorised staff/admin order bypasses diner
+        # publication but never tenant or relationship integrity). available /
+        # in_stock stay OUT of this gate — they flow through the zero-and-flag
+        # reconciliation in add_order_item / process_item_extras.
+        # Idempotency-first: a replay of an already-created order is returned as-is
+        # by _create_order even if the menu has since changed, so it must NOT be
+        # re-validated here. Only a genuinely NEW submission runs the preflight;
+        # the authoritative re-check still runs inside _create_order's transaction
+        # (after the idempotency lookup and the table lock), which is the
+        # load-bearing enforcement.
+        is_replay = bool(
+            client_order_id
+            and Order.objects.filter(
+                restaurant=restaurant, client_order_id=client_order_id,
+            ).exists()
+        )
+        if not is_replay:
+            preflight = validate_order_selections(
+                restaurant, items, timezone.localtime(),
+                enforce_publication=(created_by is None),
             )
-            # Extras: item-level publication only (an extra is nested under a
-            # parent, not browsed as a section) — matches the read contract in
-            # SerializerPublicGetMenuItem.get_extras, so read and write agree.
-            orderable_extras = set(
-                MenuItem.objects
-                .filter(
-                    pk__in=extra_uuids,
-                    section__restaurant=restaurant,
-                    approved=True, enabled=True, deleted=False,
-                )
-                .values_list('pk', flat=True)
-            )
-            if (parent_uuids - orderable_parents) or (extra_uuids - orderable_extras):
-                return {
-                    'status': 400,
-                    'message': NOT_ON_MENU_MESSAGE
-                }
+            if preflight.get('status') != 200:
+                return preflight
 
-        # for each order item, check if the options are applicable
-        options_check = ConOrder.check_options_requirements(items)
-        if options_check.get('status') != 200:
-            return options_check
-
-        # for each order item, check the extras selection limits (min/max)
-        extras_check = ConOrder.check_extras_requirements(items)
-        if extras_check.get('status') != 200:
-            return extras_check
+            # Modifier (option) selection limits — separate from publication.
+            options_check = ConOrder.check_options_requirements(items)
+            if options_check.get('status') != 200:
+                return options_check
 
         # tenant consistency: the table must belong to this restaurant. Scoped
         # fetch validates existence AND ownership in one query, so a

@@ -104,6 +104,41 @@ with PostgreSQL on AWS RDS.
   per-module access via `can_user_access_module` / `get_module_restaurant_ids`
   (`users_app/controllers/permissions_check.py`) — see the "Tenant Isolation /
   Role-Permission ENFORCEMENT" section below (PR C)
+- Canonical diner menu-publication + checkout-eligibility policy: ✅ ONE
+  server-owned policy module `restaurants_app/controllers/menu_publication.py`
+  now defines "what a diner may SEE and ORDER" for BOTH the public menu read
+  (`handle_show_menu` + the public serializers) and the anonymous order path
+  (`ConOrder.initiate_order` / `_create_order`). Split into STRUCTURAL
+  (`approved`&`enabled`&not-`deleted`, identical read+order) vs OPERATIONAL
+  (`available` + section schedule) visibility; for sections & groups both are
+  enforced on both paths, and the ONLY read-vs-checkout difference is an item's
+  OWN `available`/`in_stock` (read hides, checkout keeps the established
+  zero-and-flag reconciliation — never a hard reject). Predicates:
+  `restaurant_can_serve_menu` (active + not-deleted; NOT `accepting_orders`),
+  `section_operationally_visible`, `group_operationally_visible`,
+  `item_visible_in_menu` (read), `item_orderable` (checkout),
+  `extra_publishable` (structural-only inheritance: `is_extra` + same-restaurant
+  + structural section/group, NO schedule), `normalize_extras_applicable`
+  (defensive dedup/UUID parse of the persisted allowlist), `resolve_public_restaurant`
+  (fail-closed: missing→400, malformed/unknown/deleted/non-active→one generic
+  404), `build_safe_extras_map` (batch), and `validate_order_selections`
+  (tenant + publication + extra applicability/`is_extra`/`has_extras`/no-dup/no-self
+  + min-max on the unique set; returns a dict, `_create_order` raises
+  `OrderItemRejected`). The read path threads ONE captured local `now`
+  (`timezone.localtime()`) + a `menu_policy` serializer CONTEXT that is the sole
+  switch into strict public mode (absent → operator/unit-test behaviour
+  unchanged; `SerializerPublicGetMenuItem` is shared with `restaurant_setup.py`
+  management). Anonymous checkout re-validates AUTHORITATIVELY inside
+  `_create_order`'s transaction — after the table lock, before the daily counter
+  — closing the check-then-write TOCTOU; idempotent replay stays first (a replay
+  is NOT re-validated, so it returns the original even after the menu changes).
+  `NOT_ON_MENU_MESSAGE` moved to the policy module (re-exported from
+  `con_orders`). Extras integrity applies to STAFF too (they bypass publication,
+  never tenant/relationship integrity). `MenuItem.extras_applicable` write-time
+  integrity remains a LATER PR — it stays `pending-audit` in
+  `dinify_backend/tenancy/non_fk_tenant_inventory.py`; the runtime read/order
+  paths just fail closed against existing bad data. Do NOT re-scatter these
+  predicates or gate public filtering on a caller-supplied HTTP flag
 - Anonymous diner capability — capability-only, header-only entry + fail-closed
   key: ✅ The QR scan → table-session flow
   (`restaurants_app/controllers/diner_capability.py`; `django.core.signing`,

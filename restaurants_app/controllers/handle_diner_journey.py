@@ -1,8 +1,13 @@
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
-from restaurants_app.models import MenuSection, UpsellConfig, Restaurant
+from restaurants_app.models import MenuSection, MenuItem, UpsellConfig
 from restaurants_app.serializers import (
     SerializerPublicGetTableDetails, SerializerGetFullMenu, UpsellConfigSerializer
+)
+from restaurants_app.controllers.menu_publication import (
+    resolve_public_restaurant, section_operationally_visible,
+    build_safe_extras_map,
 )
 from restaurants_app.controllers.diner_capability import (
     resolve_qr_credential, issue_table_session, require_table_session,
@@ -48,55 +53,73 @@ def handle_table_scan(request) -> dict:
 
 
 def handle_show_menu(restaurant_id: str) -> dict:
-    from restaurants_app.controllers.utils.schedule_utils import (
-        is_section_currently_active,
-    )
+    # Resolve the restaurant ONCE, failing closed (missing → 400; malformed /
+    # unknown / soft-deleted / pending / rejected / inactive / blocked → one
+    # generic non-disclosing 404). Reused below for the upsell config and sort
+    # mode — no separate unscoped lookups per response component.
+    restaurant, error = resolve_public_restaurant(restaurant_id)
+    if error is not None:
+        return error
 
-    # Diner publication contract: a section only reaches a diner when it is
-    # approved, enabled, available and not soft-deleted. These predicates are
-    # unconditional — there is deliberately no caller-controlled bypass.
-    filters = {
-        'restaurant': restaurant_id,
-        'approved': True,
-        'enabled': True,
-        'available': True,
-        'deleted': False
+    # ONE evaluation time governs the whole response — section filtering,
+    # is_currently_active, item visibility and upsell eligibility all read it — so
+    # the response can never include a section by one clock reading and then
+    # serialize it inactive by another sampled milliseconds later. Captured in the
+    # LOCAL timezone (EAT) because is_section_currently_active reads the day/hour of
+    # the supplied `now` directly (it only converts to settings.TIME_ZONE when it
+    # samples the clock itself). `timezone` is a module-level name so tests can pin it.
+    now = timezone.localtime()
+
+    # Structurally-published sections (query), then the canonical operational
+    # (available + schedule) gate at the captured time (Python — schedule is JSON,
+    # section count is bounded).
+    sections = [
+        section
+        for section in MenuSection.objects.filter(
+            restaurant=restaurant, approved=True, enabled=True, deleted=False,
+        )
+        if section_operationally_visible(section, now)
+    ]
+
+    # Batch-resolve every safe nested extra referenced across these sections' items
+    # ONCE, so the item serializer never does a per-extra global lookup.
+    referenced_items = list(
+        MenuItem.objects
+        .filter(section__in=sections, deleted=False)
+        .only('id', 'extras_applicable')
+    )
+    extras_map = build_safe_extras_map(referenced_items, restaurant.id)
+
+    # The trusted, internal publication context — NOT caller-controllable. Its
+    # presence is the ONLY thing that switches the shared serializers into strict
+    # public mode; its absence (management / unit tests) leaves them untouched.
+    menu_policy = {
+        'now': now,
+        'restaurant_id': str(restaurant.id),
+        'extras_map': extras_map,
     }
 
-    sections = MenuSection.objects.filter(**filters)
-    # Schedule is stored as JSON; can't filter at queryset level cleanly.
-    # Section count is bounded so Python-side filter is fine.
-    sections = [s for s in sections if is_section_currently_active(s)]
-
     menu_data = SerializerGetFullMenu(
-        sections,
-        many=True
+        sections, many=True, context={'menu_policy': menu_policy},
     ).data
 
-    # Bundle upsell config (when enabled) so the diner basket can render
-    # the "You might also like" carousel without an extra round-trip.
+    # Bundle upsell config (when enabled). The public carousel inherits the SAME
+    # publication policy, so an item hidden from the main menu (by its section,
+    # group, schedule or its own state) cannot re-enter via upsell.
     upsell_data = None
     try:
-        upsell_config = UpsellConfig.objects.get(restaurant_id=restaurant_id)
+        upsell_config = UpsellConfig.objects.get(restaurant=restaurant)
         if upsell_config.enabled:
-            # public_only prunes carousel entries whose menu item is no longer
-            # published (unapproved / disabled / soft-deleted) so an unpublished
-            # item cannot re-enter the anonymous diner payload via upsell.
             upsell_data = UpsellConfigSerializer(
-                upsell_config, context={'public_only': True}
+                upsell_config,
+                context={'public_only': True, 'menu_policy': menu_policy},
             ).data
     except UpsellConfig.DoesNotExist:
         pass
 
-    # Surface the operator's chosen sort mode so the diner frontend can apply
-    # the matching sort. Items themselves stay in listing_position order; the
-    # backend does not re-sort. Defaults to 'manual' if the restaurant is absent.
-    item_sort_mode = (
-        Restaurant.objects
-        .filter(id=restaurant_id)
-        .values_list('menu_item_sort_mode', flat=True)
-        .first()
-    ) or 'manual'
+    # Operator sort mode from the already-resolved restaurant (no extra query).
+    # Items themselves stay in listing_position order; the backend does not re-sort.
+    item_sort_mode = restaurant.menu_item_sort_mode or 'manual'
 
     return {
         'status': 200,

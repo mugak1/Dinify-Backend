@@ -8,6 +8,7 @@ from misc_app.controllers.determine_changes import determine_changes
 from restaurants_app.serializers import SerializerPutRestaurantEmployee, SerializerPutRestaurant
 from restaurants_app.tests import seed_restaurant, TEST_RESTAURANT_NAME
 from restaurants_app.models import Restaurant
+from dinify_backend.configss.string_definitions import RestaurantStatus_Pending
 from dinify_backend.configs import ROLES
 from dinify_backend.configss.edit_information import EDIT_INFORMATION
 from users_app.tests import seed_user, TEST_PHONE
@@ -796,6 +797,10 @@ class SecretaryUpdateNotificationTests(TestCase):
         seed_restaurant()
         self.actor = User.objects.get(username=TEST_PHONE)
         self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
+        # These tests exercise the pending -> active activation notification, so
+        # the restaurant must start pending (seed_restaurant now seeds active).
+        self.restaurant.status = RestaurantStatus_Pending
+        self.restaurant.save(update_fields=['status'])
 
     def _activate_restaurant(self):
         # Drives the same code path RestaurantSetupEndpoint.put hits when
