@@ -87,9 +87,16 @@ INVENTORY = [
         "kind": "uuid-array",
         "owner": "menu",
         "follow_up_domain": "menu-config",
-        "status": "pending-audit",
-        "note": "Array of applicable extra-item UUIDs (ast.literal_eval'd from a "
-                "string in restaurant_setup.py); cross-tenant membership unproven here.",
+        "status": "remediated",
+        "note": "Array of applicable extra-item UUIDs. Write-time integrity is now "
+                "enforced by SerializerPutMenuItem via "
+                "restaurants_app/controllers/menu_relationships.py (typed UUID-list "
+                "field; canonical lowercase strings; unique; same-restaurant, "
+                "non-deleted, is_extra, non-self), and the persisted corpus was "
+                "repaired by migration 0055_sanitize_menu_item_extras. Cross-tenant "
+                "denial is proven by the two-tenant tests in "
+                "tests_menu_relationship_integrity.py; PR #233 "
+                "(menu_publication.py) remains the runtime read/order defence.",
     },
     {
         "identifier": "MenuItem tag_ids (write payload) -> MenuItemTag",

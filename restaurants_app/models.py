@@ -274,6 +274,39 @@ class MenuSection(BaseModel):
                 optimize_image(self.section_banner_image, max_width=1200, max_height=400)
         super().save(*args, **kwargs)
 
+    def deletion_blockers(self):
+        """
+        Return a human-readable reason this section cannot be deleted, or None.
+
+        Rule: deleting a section soft-cascades its child items (see
+        vacuum_deleted_records). Block the delete while any is_extra child is still
+        referenced by an active menu item OUTSIDE this section — those references
+        would otherwise be silently orphaned by the cascade. Parents inside this
+        section are cascaded away too, so they cannot be stranded and are excluded.
+
+        Lives on the model (not the generic Secretary) so the rule survives the
+        endpoint/controller substrate; the endpoint returns 409 (never 403).
+        """
+        from restaurants_app.controllers.menu_relationships import (
+            find_blocking_inbound_references,
+        )
+        extra_ids = list(
+            MenuItem.objects.filter(
+                section=self, is_extra=True, deleted=False,
+            ).values_list('id', flat=True)
+        )
+        if not extra_ids:
+            return None
+        count = find_blocking_inbound_references(
+            item_ids=extra_ids, restaurant_id=self.restaurant_id, exclude_section=self,
+        ).count()
+        if count:
+            return (
+                f"An extra in this section is still offered on {count} menu item(s) "
+                "elsewhere. Remove those references before deleting this section."
+            )
+        return None
+
 
 class SectionGroup(BaseModel):
     """
@@ -295,6 +328,36 @@ class SectionGroup(BaseModel):
         db_table = 'section_groups'
         ordering = ['name']
         unique_together = ['name', 'section']
+
+    def deletion_blockers(self):
+        """
+        Return a human-readable reason this group cannot be deleted, or None.
+
+        Rule: deleting a group soft-cascades the items it contains. Block the delete
+        while any is_extra child of the group is still referenced by an active menu
+        item OUTSIDE this group (parents inside the group are cascaded away and
+        cannot be orphaned). Mirrors MenuSection.deletion_blockers.
+        """
+        from restaurants_app.controllers.menu_relationships import (
+            find_blocking_inbound_references,
+        )
+        extra_ids = list(
+            MenuItem.objects.filter(
+                section_group=self, is_extra=True, deleted=False,
+            ).values_list('id', flat=True)
+        )
+        if not extra_ids:
+            return None
+        count = find_blocking_inbound_references(
+            item_ids=extra_ids, restaurant_id=self.section.restaurant_id,
+            exclude_group=self,
+        ).count()
+        if count:
+            return (
+                f"An extra in this group is still offered on {count} menu item(s) "
+                "elsewhere. Remove those references before deleting this group."
+            )
+        return None
 
 
 class MenuItem(BaseModel):
@@ -401,6 +464,33 @@ class MenuItem(BaseModel):
                 )
 
         super().save(*args, **kwargs)
+
+    def deletion_blockers(self):
+        """
+        Return a human-readable reason this menu item cannot be deleted, or None.
+
+        Rule: an extra (is_extra=True) cannot be deleted while an active
+        same-restaurant menu item still lists it in extras_applicable — the
+        referencing items must drop it first. A normal (non-extra) item has no
+        inbound-extra dependents and is always deletable here.
+
+        Lives on the model (not the generic Secretary) so the rule survives the
+        endpoint/controller substrate; the endpoint returns 409 (never 403).
+        """
+        if not self.is_extra:
+            return None
+        from restaurants_app.controllers.menu_relationships import (
+            find_blocking_inbound_references,
+        )
+        count = find_blocking_inbound_references(
+            item_ids=[self.id], restaurant_id=self.section.restaurant_id,
+        ).count()
+        if count:
+            return (
+                f"This extra is still offered on {count} menu item(s). "
+                "Remove it from those items before deleting it."
+            )
+        return None
 
     def sync_tag_links(self, tag_ids):
         """Atomically replace the menu_item_tags links with the given tag IDs.

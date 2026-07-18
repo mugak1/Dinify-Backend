@@ -4,6 +4,7 @@ Refactoring needed to make it more maintainable.
 """
 import ast
 import logging
+from django.db import transaction
 from django.db.models import Max
 from rest_framework.response import Response
 
@@ -1043,10 +1044,16 @@ class RestaurantSetupEndpoint(APIView):
                 if type(put_data) is not dict:
                     put_data['options'] = ast.literal_eval(options)
 
-            extras_applicable = put_data.get('extras_applicable')
-            if extras_applicable is not None:
-                if type(put_data) is not dict:
-                    put_data['extras_applicable'] = ast.literal_eval(extras_applicable)
+            # extras_applicable is now a typed list field (JSONStringCompatListField
+            # + UUID child) that decodes a multipart stringified array itself and
+            # rejects non-JSON — the old ast.literal_eval-on-request-input path is
+            # both dead (put_data is already a dict here) and a footgun, so it is gone.
+
+            # A multipart clear of the nullable section_group arrives as '' — map it
+            # to an explicit null so it reads as "clear this group" (not an invalid
+            # pk 400) and the cohesion validator can tell it apart from an omission.
+            if put_data.get('section_group') == '':
+                put_data['section_group'] = None
 
         # Handle explicit image-clearing sentinels.
         # These must be processed before Secretary.update() runs because Secretary
@@ -1175,6 +1182,21 @@ class RestaurantSetupEndpoint(APIView):
             blocker = table.deletion_blockers() if table else None
             if blocker:
                 return Response({'status': 409, 'message': blocker}, status=409)
+        elif config_detail == 'menuitems':
+            item = MenuItem.objects.filter(id=data.get('id')).first()
+            blocker = item.deletion_blockers() if item else None
+            if blocker:
+                return Response({'status': 409, 'message': blocker}, status=409)
+        elif config_detail == 'menusections':
+            section = MenuSection.objects.filter(id=data.get('id')).first()
+            blocker = section.deletion_blockers() if section else None
+            if blocker:
+                return Response({'status': 409, 'message': blocker}, status=409)
+        elif config_detail == 'sectiongroups':
+            group = SectionGroup.objects.filter(id=data.get('id')).first()
+            blocker = group.deletion_blockers() if group else None
+            if blocker:
+                return Response({'status': 409, 'message': blocker}, status=409)
 
         secretary_args = {
             'serializer': serializer[config_detail],
@@ -1182,7 +1204,16 @@ class RestaurantSetupEndpoint(APIView):
             'user_id': auth['id'],
             'username': auth['username'],
         }
-        response = Secretary(secretary_args).delete()
+        # The menu-item soft-delete runs the referenced-extra lifecycle guard inside
+        # SerializerPutMenuItem.validate(), which takes a select_for_update row lock —
+        # so it MUST execute in a transaction (the generic Secretary.delete() is not
+        # transactional). Scoping one here also serialises a concurrent delete-extra
+        # vs assign-extra on the extra's own row, closing that race.
+        if config_detail == 'menuitems':
+            with transaction.atomic():
+                response = Secretary(secretary_args).delete()
+        else:
+            response = Secretary(secretary_args).delete()
 
         return Response(
             response,
