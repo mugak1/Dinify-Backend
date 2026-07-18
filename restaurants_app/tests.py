@@ -2815,14 +2815,15 @@ class SerializerPublicGetMenuItemExtrasDiscountTests(TestCase):
         discounted_extra = MenuItem.objects.create(
             name='Discounted Extra', section=section, primary_price=1000,
             running_discount=True, discount_details=discount,
-            approved=True, enabled=True,
+            approved=True, enabled=True, is_extra=True,
         )
         plain_extra = MenuItem.objects.create(
             name='Plain Extra', section=section, primary_price=500,
-            approved=True, enabled=True,
+            approved=True, enabled=True, is_extra=True,
         )
         parent = MenuItem.objects.create(
             name='Parent With Extras', section=section, primary_price=5000,
+            has_extras=True,
             extras_applicable=[str(discounted_extra.id), str(plain_extra.id)],
         )
 
@@ -5024,13 +5025,19 @@ class MenuFkTenantBoundaryTests(TestCase):
 
     # --- 4a/4b. same-tenant reassignment still works (positive control) --
     def test_same_tenant_section_move_succeeds(self):
+        # item_a carries group_a (which belongs to the OLD section), so a bare
+        # section move now trips the section/group cohesion invariant (PR3). A
+        # same-tenant move is still allowed — it just has to clear (or replace) the
+        # now-incompatible group; clear it here as the positive control.
         resp = self._put(
             self.owner_a, 'menuitems',
-            {'id': str(self.item_a.id), 'section': str(self.section_a2.id)},
+            {'id': str(self.item_a.id), 'section': str(self.section_a2.id),
+             'section_group': None},
         )
         self.assertEqual(resp.status_code, 200, resp.content)
         self.item_a.refresh_from_db()
         self.assertEqual(self.item_a.section_id, self.section_a2.id)
+        self.assertIsNone(self.item_a.section_group_id)
 
     def test_same_tenant_section_group_move_succeeds(self):
         resp = self._put(

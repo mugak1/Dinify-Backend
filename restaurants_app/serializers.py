@@ -19,6 +19,9 @@ from restaurants_app.models import (
 from misc_app.serializers.fields import JSONStringCompatField, JSONStringCompatListField
 from restaurants_app.controllers.tables import get_table_availability
 from restaurants_app.controllers.tenant_scope import assert_fks_belong_to_restaurant
+from restaurants_app.controllers.menu_relationships import (
+    validate_menu_item_relationships,
+)
 
 
 class SerializerGetRestaurantDetail(ModelSerializer):
@@ -242,7 +245,15 @@ class SerializerPutMenuItem(ModelSerializer):
     options = JSONStringCompatField(required=False)
     allergens = JSONStringCompatField(required=False)
     discount_details = JSONStringCompatField(required=False)
-    extras_applicable = JSONStringCompatField(required=False)
+    # Typed list of extra-item UUIDs. Accepts a JSON array or a multipart
+    # stringified array; each member is coerced to a uuid.UUID by the child, then
+    # validate() canonicalises to lowercase strings, rejects duplicates, and proves
+    # tenancy/is_extra. Omitted -> unchanged; [] -> cleared (see menu_relationships).
+    extras_applicable = JSONStringCompatListField(
+        child=serializers.UUIDField(),
+        required=False,
+        allow_empty=True,
+    )
     tag_ids = JSONStringCompatListField(
         child=serializers.UUIDField(),
         write_only=True,
@@ -256,15 +267,6 @@ class SerializerPutMenuItem(ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
-
-        # Light guard: a single global extras selection limit (min <= max).
-        # Runs on every PUT — placed before the tag_ids early-return below so
-        # extras-only updates are still validated.
-        emin = attrs.get('extras_min_selections')
-        emax = attrs.get('extras_max_selections')
-        if emin is not None and emax not in (None, 0) and emin > emax:
-            raise serializers.ValidationError(
-                {'extras_min_selections': 'Minimum extras cannot exceed maximum extras.'})
 
         # Defense-in-depth contract parity with the admin discounts form (PR #480):
         # reject a clearly-inverted date window. Placed before the tag_ids
@@ -286,54 +288,15 @@ class SerializerPutMenuItem(ModelSerializer):
                     raise serializers.ValidationError(
                         {'discount_details': 'End date must be on or after the start date.'})
 
-        # FK tenancy + section-group cohesion guard. Runs on CREATE and UPDATE,
-        # placed ABOVE the tag_ids early-return below (which an attacker bypasses
-        # by omitting tag_ids). DRF has already resolved the FK fields to
-        # instances, so an unknown/malformed id is a field-level 400 before
-        # validate() runs.
-        #
-        # Invariant: a menu item's section_group, when present, must belong to the
-        # EXACT section assigned to the item (section_group.section == item.section).
-        # This section-level rule is stronger than same-restaurant and AUTOMATICALLY
-        # guarantees same-tenant ownership (if the group's section is the item's
-        # section, they trivially share a restaurant). It closes the create-path gap
-        # (the endpoint gate _resolve_menuitems('create') authorizes on `section`
-        # only, and the auto-generated FK fields resolve globally, so a foreign
-        # section_group could otherwise be injected on create) and tightens the
-        # update path (previously only same-restaurant was required).
-        incoming_section = attrs.get('section')
-        incoming_group = attrs.get('section_group')
-
-        # The EFFECTIVE section: the submitted section when present (create, or an
-        # update that reassigns section), else the item's current section (partial
-        # update leaving section untouched). None only on a create that omitted the
-        # required section — the field-level 400 has already fired.
-        if incoming_section is not None:
-            effective_section_id = incoming_section.id
-        elif self.instance is not None:
-            effective_section_id = self.instance.section_id
-        else:
-            effective_section_id = None
-
-        # Section reassignment guard (UPDATE only): a menu item may not be moved to
-        # another restaurant's section. On create the endpoint gate already
-        # authorized the submitted section's restaurant.
-        if self.instance is not None and incoming_section is not None:
-            current_restaurant_id = MenuSection.objects.values_list(
-                'restaurant_id', flat=True
-            ).get(id=self.instance.section_id)
-            if incoming_section.restaurant_id != current_restaurant_id:
-                raise serializers.ValidationError({
-                    'section': "Cannot move a menu item to another restaurant's section."
-                })
-
-        # Section-group cohesion invariant (CREATE + UPDATE): a supplied, non-null
-        # section_group must belong to the effective section.
-        if incoming_group is not None and effective_section_id is not None:
-            if incoming_group.section_id != effective_section_id:
-                raise serializers.ValidationError({
-                    'section_group': "A section group must belong to the menu item's section."
-                })
+        # Persistent menu relationship integrity — the single write-time authority
+        # (restaurants_app/controllers/menu_relationships.py): section-move tenancy +
+        # section/group cohesion on the EFFECTIVE state (omitted vs explicit-null
+        # aware), extras canonicalisation + tenancy/is_extra/self/duplicate, the
+        # has_extras / selection-limit effective-state rules, and the referenced-extra
+        # lifecycle guard. Runs on CREATE and UPDATE, ABOVE the tag_ids early-return
+        # (which is bypassable by omitting tag_ids), and inside Secretary's
+        # transaction so the row locks it takes are held through save().
+        attrs = validate_menu_item_relationships(instance=self.instance, attrs=attrs)
 
         tag_ids = attrs.get('tag_ids')
         if tag_ids is None:
@@ -504,34 +467,37 @@ class SerializerPublicGetMenuItem(ModelSerializer):
                 })
             return extras
 
-        # No policy context (operator management / unit tests): unchanged —
-        # publication-only lookup of each configured id.
-        applicable_extras = menu_item.extras_applicable
-        if not applicable_extras:
+        # No policy context (operator management / unit tests): expose the parent's
+        # VALID configured extras so the operator editor can reopen and edit an item
+        # whose extra is not yet published WITHOUT the selection silently vanishing.
+        # Same restaurant + is_extra + not deleted — but deliberately NOT filtered on
+        # approved/enabled/available/in_stock (publication is the diner policy branch
+        # above, PR #233). ONE bounded batch query replaces the old per-id global
+        # lookup (which was also un-scoped by tenant); configured order preserved,
+        # self and foreign/corrupt references dropped.
+        from restaurants_app.controllers.menu_publication import (
+            normalize_extras_applicable,
+        )
+        canonical = normalize_extras_applicable(menu_item.extras_applicable)
+        if not canonical:
             return []
-        if isinstance(applicable_extras, str):
-            try:
-                applicable_extras = json.loads(applicable_extras)
-            except (ValueError, TypeError):
-                return []
-        if not isinstance(applicable_extras, list):
-            return []
-        extras = []
-        for extra in applicable_extras:
-            try:
-                uuid.UUID(str(extra))
-            except (ValueError, AttributeError):
-                continue
-            try:
-                record = MenuItem.objects.values(
-                    'id', 'name', 'primary_price', 'discount_details'
-                ).get(
-                    id=extra, approved=True, enabled=True, deleted=False
-                )
-                extras.append(record)
-            except MenuItem.DoesNotExist:
-                continue
-        return extras
+        parent_id = str(menu_item.id)
+        # Scope to the parent's own restaurant via a subquery keyed off its already
+        # loaded section_id, so this stays ONE query even on the list path (no
+        # per-parent section fetch, no per-extra lookup).
+        parent_restaurant = MenuSection.objects.filter(
+            pk=menu_item.section_id
+        ).values('restaurant_id')
+        rows = {
+            str(record['id']): record
+            for record in MenuItem.objects.filter(
+                pk__in=canonical,
+                section__restaurant_id__in=parent_restaurant,
+                is_extra=True,
+                deleted=False,
+            ).values('id', 'name', 'primary_price', 'discount_details')
+        }
+        return [rows[eid] for eid in canonical if eid != parent_id and eid in rows]
 
     def get_discount_percentage(self, menu_item):
         # Returns the discount magnitude as a non-negative percentage.
