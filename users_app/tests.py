@@ -545,3 +545,64 @@ class RefreshRotationAndLogoutTests(TestCase):
         response = client.post(self.LOGOUT_URL, {}, format='json')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['message'], MESSAGES['OK_LOGOUT'])
+
+
+class UserProfileMassAssignmentTests(TestCase):
+    """
+    SerPutUserProfile (the manager/admin profile-update write surface, via
+    Secretary) can NEVER set privilege / security fields on the platform-global
+    User (TENANT-ISO-PR5).
+
+    Before hardening it used ``fields=('__all__')``, exposing password,
+    is_staff, is_superuser, is_active, groups, user_permissions, roles and
+    prompt_password_change as client-writable — a profile PUT could escalate to
+    a superuser or overwrite a password hash. The serializer now enumerates only
+    the legitimate profile fields; every privilege field is out of the write set.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            first_name='Mass', last_name='Target', email='mass@test.com',
+            phone_number='256700000810', username='256700000810',
+            country='Uganda', password='password', roles=['diner'],
+        )
+
+    def test_privilege_fields_cannot_be_mass_assigned(self):
+        from users_app.serializers import SerPutUserProfile
+        original_hash = self.user.password
+        data = {
+            'first_name': 'Legit',           # a legitimate edit rides along
+            'password': 'attacker-controlled',
+            'is_staff': True,
+            'is_superuser': True,
+            'is_active': False,
+            'roles': ['dinify_admin'],
+            'prompt_password_change': False,
+        }
+        ser = SerPutUserProfile(instance=self.user, data=data, partial=True)
+        self.assertTrue(ser.is_valid(), ser.errors)
+        ser.save()
+        self.user.refresh_from_db()
+        # the legitimate field applied
+        self.assertEqual(self.user.first_name, 'Legit')
+        # every privilege / security field is untouched
+        self.assertEqual(self.user.password, original_hash)
+        self.assertFalse(self.user.is_staff)
+        self.assertFalse(self.user.is_superuser)
+        self.assertTrue(self.user.is_active)
+        self.assertEqual(self.user.roles, ['diner'])
+        self.assertTrue(self.user.prompt_password_change)
+
+    def test_privilege_fields_absent_from_validated_data(self):
+        from users_app.serializers import SerPutUserProfile
+        ser = SerPutUserProfile(instance=self.user, data={
+            'first_name': 'Legit', 'is_superuser': True, 'password': 'x',
+            'roles': ['dinify_admin'], 'is_staff': True, 'is_active': False,
+            'prompt_password_change': False, 'groups': [], 'user_permissions': [],
+        }, partial=True)
+        self.assertTrue(ser.is_valid(), ser.errors)
+        for forbidden in (
+            'is_superuser', 'is_staff', 'is_active', 'password', 'roles',
+            'prompt_password_change', 'groups', 'user_permissions',
+        ):
+            self.assertNotIn(forbidden, ser.validated_data)

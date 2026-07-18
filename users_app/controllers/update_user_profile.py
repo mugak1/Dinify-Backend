@@ -185,7 +185,12 @@ def update_user_profile(
         'user_id': str(actor.id),
         'username': str(actor.username),
         'success_message': 'The user profile has been updated successfully.',
-        'error_message': 'Sorry, an error occurred while updating the user profile.'
+        'error_message': 'Sorry, an error occurred while updating the user profile.',
+        'user': actor,
+        # User is platform-global, so an unrestricted lookup must still be an
+        # EXPLICIT caller decision: scope Secretary to exactly the target user
+        # resolved after the manager/admin permission check above.
+        'instance_queryset': User.objects.filter(pk=put_data['id']),
     }
 
     secretary_response = Secretary(secretary_args).update()

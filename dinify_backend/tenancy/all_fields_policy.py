@@ -19,27 +19,13 @@ serialize OUT (no client-driven ORM write), so ``__all__`` does not widen a writ
 surface there. The two sets below encode that classification.
 """
 
-# Production WRITE serializers that still expose ``fields='__all__'``. This is
-# LEGACY DEBT: each should migrate to an explicit field list, because ``__all__``
-# on a write serializer auto-exposes future model fields (incl. tenant FKs) to
-# client writes. The nested-FK tenant boundary is currently re-imposed at runtime
-# in each one's ``validate()`` (see restaurants_app/controllers/tenant_scope.py),
-# NOT by the field list. This set may ONLY SHRINK — a NEW write serializer must use
-# an explicit field list and must never be added here.
-WRITE_ALL_FIELDS_DEBT = frozenset({
-    "orders_app.serializers.SerializerPutOrder",  # NOTE: unused in prod (create_order bypasses it)
-    "orders_app.serializers.SerializerPutOrderItem",
-    "restaurants_app.serializers.SerializerPutDiningArea",
-    "restaurants_app.serializers.SerializerPutMenuItem",
-    "restaurants_app.serializers.SerializerPutMenuSection",
-    "restaurants_app.serializers.SerializerPutReservation",
-    "restaurants_app.serializers.SerializerPutRestaurant",
-    "restaurants_app.serializers.SerializerPutRestaurantEmployee",
-    "restaurants_app.serializers.SerializerPutSectionGroup",
-    "restaurants_app.serializers.SerializerPutTable",
-    "restaurants_app.serializers.SerializerPutWaitlistEntry",
-    "users_app.serializers.SerPutUserProfile",  # __all__ over the platform-global User model
-})
+# Production WRITE serializers exposing ``fields='__all__'``. FULLY DRAINED by
+# TENANT-ISO-PR5: every production write serializer now uses an explicit, reviewed
+# field list with server-owned fields marked read_only (see
+# dinify_backend/tenancy/write_surface_policy.py for the authoritative manifest).
+# This set MUST remain empty — a production write serializer may NEVER use
+# ``__all__`` / ``Meta.exclude``, and there is no mechanism to add new write debt.
+WRITE_ALL_FIELDS_DEBT = frozenset()
 
 # READ / ARCHIVAL serializers that expose ``fields='__all__'``. ALLOWED: they only
 # serialize OUT — never ``.save()`` from client input — so ``__all__`` does not

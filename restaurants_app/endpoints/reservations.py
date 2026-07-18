@@ -96,12 +96,11 @@ class ReservationsEndpoint(APIView):
                 {'status': 404, 'message': 'Restaurant not found'}, status=404
             )
 
-        serializer = SerializerPutReservation(data={
-            **post_data,
-            'created_by': str(request.user.id),
-        })
+        serializer = SerializerPutReservation(data=post_data)
         if serializer.is_valid():
-            reservation = serializer.save()
+            # created_by is server-derived (read_only) — set via the trusted
+            # save() channel from the resolved actor, never client input.
+            reservation = serializer.save(created_by=request.user)
             data = SerializerGetReservation(reservation).data
             return Response({
                 'status': 201,

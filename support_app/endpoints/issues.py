@@ -61,6 +61,9 @@ class RestaurantIssuesEndpoint(APIView):
             for key in ALLOWED_CREATE_FIELDS
             if key in request.data
         }
+        # Kept in data so any restaurant-required check still passes; it is
+        # read_only on the serializer, so the ACTUAL write comes from the trusted
+        # server_values channel below (never the client payload).
         data['restaurant'] = str(restaurant_id)
 
         secretary_args = {
@@ -69,8 +72,11 @@ class RestaurantIssuesEndpoint(APIView):
             'required_information': REQUIRED_INFORMATION,
             'user_id': str(request.user.pk),
             'username': str(request.user.username),
+            'user': request.user,
             'success_message': 'Your support issue has been submitted successfully.',  # noqa: E501
             'error_message': 'Sorry, an error occurred while submitting your support issue. Please try again later.',  # noqa: E501
+            # restaurant (read_only) + created_by (the actor) are server-derived.
+            'server_values': {'restaurant_id': str(restaurant_id)},
         }
         response = Secretary(secretary_args).create()
         return Response(response, status=response['status'])

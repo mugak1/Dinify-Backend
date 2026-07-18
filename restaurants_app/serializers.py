@@ -22,6 +22,18 @@ from restaurants_app.controllers.tenant_scope import assert_fks_belong_to_restau
 from restaurants_app.controllers.menu_relationships import (
     validate_menu_item_relationships,
 )
+from dinify_backend.tenancy.relations import SameTenant, GlobalRelation
+
+# Two-tenant behavioural test classes that PROVE the SameTenant runtime
+# enforcement declared below (the tenancy meta-test asserts each verified_by
+# resolves to an importable object). Menu section/group tenancy is already
+# proven by PR3's suite; the tables-domain (table/dining-area/reservation/
+# waitlist) and upsell relations are proven by tests_write_surface_tenancy.
+_MENU_FK_EVIDENCE = 'restaurants_app.tests.MenuFkTenantBoundaryTests'
+_TABLE_EVIDENCE = 'restaurants_app.tests_write_surface_tenancy.TableDiningAreaTenantTests'
+_RESERVATION_EVIDENCE = 'restaurants_app.tests_write_surface_tenancy.ReservationFkTenantTests'
+_WAITLIST_EVIDENCE = 'restaurants_app.tests_write_surface_tenancy.WaitlistFkTenantTests'
+_SECTION_GROUP_EVIDENCE = 'restaurants_app.tests_write_surface_tenancy.SectionGroupSectionTenantTests'
 
 
 class SerializerGetRestaurantDetail(ModelSerializer):
@@ -36,13 +48,41 @@ class SerializerGetRestaurantDetail(ModelSerializer):
 class SerializerPutRestaurant(ModelSerializer):
     """
     serializer for adding and editing restaurant details
+
+    Explicit write contract (TENANT-ISO-PR5): only the identity / settings / tax
+    fields in EDIT_INFORMATION['restaurants'] are client-writable. `owner` and
+    every audit / lifecycle / approval / billing-lifecycle field are server-owned
+    and read_only — `owner` is set at creation through the trusted save() channel
+    (create_restaurant), and the non-admin `status`/`flat_fee` post-gate strip
+    stays in restaurant_setup (PR#211).
     """
     class Meta:
-        """
-        the meta class for the serializers
-        """
         model = Restaurant
-        fields = '__all__'
+        fields = (
+            # client-writable (mirrors EDIT_INFORMATION['restaurants'])
+            'name', 'location', 'logo', 'cover_photo', 'status',
+            'require_order_prepayments', 'expose_order_ratings',
+            'allow_deliveries', 'allow_pickups', 'preferred_subscription_method',
+            'order_surcharge_percentage', 'order_surcharge_min_amount',
+            'order_surcharge_cap_amount', 'flat_fee', 'branding_configuration',
+            'preset_tags', 'country', 'contact_phone', 'contact_email',
+            'landmark', 'tagline', 'cuisine_types', 'socials',
+            'accepting_orders', 'opening_hours', 'vat_registered', 'vat_rate',
+            'tin', 'receipt_footer',
+            # server-owned (output-only)
+            'id', 'owner', 'menu_item_sort_mode',
+            'first_time_menu_approval', 'first_time_menu_approval_decision',
+            'subscription_validity', 'subscription_expiry_date',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'owner', 'menu_item_sort_mode',
+            'first_time_menu_approval', 'first_time_menu_approval_decision',
+            'subscription_validity', 'subscription_expiry_date',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
 
 
 class SerializerPublicGetRestaurant(ModelSerializer):
@@ -97,10 +137,30 @@ class SerializerEmployeeGetRestaurant(ModelSerializer):
 class SerializerPutRestaurantEmployee(ModelSerializer):
     """
     serializer for adding and editing restaurant employees
+
+    `restaurant` is server-derived (read_only, set via save() by create_employee)
+    so an employee can never be reassigned to another tenant; `user` is a
+    platform-global identity picked at creation (GlobalRelation), the endpoint
+    gating who may add members. Only roles / active are ordinarily editable.
     """
     class Meta:
         model = RestaurantEmployee
-        fields = '__all__'
+        fields = (
+            'id', 'user', 'restaurant', 'roles', 'active',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'restaurant', 'created_by', 'deleted', 'deleted_by',
+            'time_deleted', 'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        tenant_relations = {
+            'user': GlobalRelation(
+                reason='Users are platform-global identities; the restaurant is '
+                       'server-derived (read_only, set via save()) and the endpoint '
+                       'gates who may add a member.'
+            ),
+        }
 
 
 class SerializerGetRestaurantEmployee(ModelSerializer):
@@ -140,12 +200,27 @@ class SerializerGetRestaurantEmployee(ModelSerializer):
 class SerializerPutMenuSection(ModelSerializer):
     """
     serializer for adding menu section
+
+    `restaurant` and the publication flags (approved/enabled) are server-owned
+    (read_only) — the parent restaurant is set via save() from the authorized
+    resource, and the auto-publication defaults are set server-side on create.
     """
     schedules = JSONStringCompatField(required=False)
 
     class Meta:
         model = MenuSection
-        fields = '__all__'
+        fields = (
+            'id', 'name', 'description', 'section_banner_image', 'available',
+            'listing_position', 'availability', 'schedules',
+            'restaurant', 'approved', 'enabled',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'restaurant', 'approved', 'enabled',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
 
 
 class SerializerPublicGetMenuSection(ModelSerializer):
@@ -197,7 +272,23 @@ class SerializerPublicGetMenuSection(ModelSerializer):
 class SerializerPutSectionGroup(ModelSerializer):
     class Meta:
         model = SectionGroup
-        fields = '__all__'
+        fields = (
+            'id', 'name', 'description', 'available', 'section',
+            'approved', 'enabled',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'approved', 'enabled',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        # `section` is client-picked on create (which section owns the group) and
+        # must be same-tenant; the validate() below also pins it on update. Not in
+        # EI_SECTION_GROUP, so Secretary strips it from ordinary updates.
+        tenant_relations = {
+            'section': SameTenant('restaurant_id', verified_by=_SECTION_GROUP_EVIDENCE),
+        }
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -263,7 +354,34 @@ class SerializerPutMenuItem(ModelSerializer):
 
     class Meta:
         model = MenuItem
-        fields = '__all__'
+        fields = (
+            'id', 'section', 'section_group', 'image', 'name', 'description',
+            'calories', 'allergens', 'tags', 'tag_ids',
+            'primary_price', 'discounted_price', 'running_discount',
+            'consider_discount_object', 'discount_description', 'discount_details',
+            'available', 'in_stock', 'is_extra', 'is_special', 'is_featured',
+            'is_popular', 'is_new', 'options', 'has_extras', 'extras_applicable',
+            'age_restricted', 'extras_min_selections', 'extras_max_selections',
+            'listing_position',
+            # server-owned (output-only)
+            'approved', 'enabled',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'tags', 'approved', 'enabled',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        # section / section_group are client-writable (an operator moves an item
+        # between sections/groups) and MUST be same-tenant — enforced at runtime
+        # by validate_menu_item_relationships (PR3), proven by _MENU_FK_EVIDENCE.
+        tenant_relations = {
+            'section': SameTenant('restaurant_id', verified_by=_MENU_FK_EVIDENCE),
+            'section_group': SameTenant(
+                'section__restaurant_id', verified_by=_MENU_FK_EVIDENCE
+            ),
+        }
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -355,7 +473,11 @@ class SerializerPutMenuItem(ModelSerializer):
 
 
 class SerializerRestaurantTag(ModelSerializer):
-    """Serializer for the restaurant-scoped tag catalog."""
+    """Serializer for the restaurant-scoped tag catalog.
+
+    `restaurant` is server-derived (read_only): the endpoint resolves + gates the
+    restaurant and sets it via save() on create; it can never be reassigned.
+    """
 
     class Meta:
         model = RestaurantTag
@@ -364,7 +486,7 @@ class SerializerRestaurantTag(ModelSerializer):
             'icon', 'colour', 'filterable',
             'display_order', 'is_system_preset',
         )
-        read_only_fields = ('is_system_preset',)
+        read_only_fields = ('id', 'restaurant', 'is_system_preset',)
 
 
 class SerializerPublicGetMenuItem(ModelSerializer):
@@ -540,10 +662,35 @@ class SerializerPublicGetMenuItem(ModelSerializer):
 class SerializerPutTable(ModelSerializer):
     """
     serializer for adding a table
+
+    qr_version / qr_regenerated_at are the QR-generation counter + rotation
+    timestamp — server-owned by the regenerate-qr endpoint and read_only here, so
+    an ordinary table create/update can never rotate a credential. `restaurant` is
+    client-supplied + endpoint-gated on create and pinned on update (validate);
+    `dining_area` must be same-tenant. Audit/lifecycle fields are read_only.
     """
     class Meta:
         model = Table
-        fields = '__all__'
+        fields = (
+            'id', 'restaurant', 'dining_area', 'number', 'str_number',
+            'prepayment_required', 'room_name', 'smoking_zone', 'outdoor_seating',
+            'reserved', 'enabled', 'display_name', 'min_capacity', 'max_capacity',
+            'shape', 'status', 'tags', 'has_qr', 'qr_mode',
+            'floor_x', 'floor_y', 'floor_width', 'floor_height', 'is_active',
+            # server-owned (output-only)
+            'qr_version', 'qr_regenerated_at',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'qr_version', 'qr_regenerated_at',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        tenant_relations = {
+            'restaurant': SameTenant('id', verified_by=_TABLE_EVIDENCE),
+            'dining_area': SameTenant('restaurant_id', verified_by=_TABLE_EVIDENCE),
+        }
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -821,9 +968,24 @@ class SerializerGetFullMenu(ModelSerializer):
 
 
 class SerializerPutDiningArea(ModelSerializer):
+    """
+    `restaurant` is server-derived (read_only): set at creation by
+    create_dining_area from the authorized resource; never client-reassignable
+    (this serializer only backs the UPDATE path via Secretary).
+    """
     class Meta:
         model = DiningArea
-        fields = '__all__'
+        fields = (
+            'id', 'name', 'description', 'available', 'smoking_zone',
+            'outdoor_seating', 'is_indoor', 'accessible',
+            'default_server_section', 'is_active', 'restaurant',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'restaurant', 'created_by', 'deleted', 'deleted_by',
+            'time_deleted', 'deletion_reason', 'time_created', 'time_last_updated',
+        )
 
 
 class SerializerGetDiningArea(ModelSerializer):
@@ -900,6 +1062,11 @@ class UpsellItemSerializer(ModelSerializer):
             'item_discounted_price', 'item_running_discount', 'item_discount_percentage',
             'item_image', 'item_available', 'item_in_stock', 'listing_position'
         ]
+        # This serializer is a READ-ONLY projection — upsell items are created /
+        # reordered directly by the endpoint (_add_items validates menu_item against
+        # config.restaurant, then get_or_create). `menu_item` is therefore
+        # server-derived here (read_only), so it is not a client write surface.
+        read_only_fields = ('id', 'menu_item',)
 
     def get_item_discount_percentage(self, upsell_item):
         # Same precedence as MenuItemSerializer.get_discount_percentage:
@@ -999,7 +1166,25 @@ class UpsellConfigUpdateSerializer(ModelSerializer):
 class SerializerPutReservation(ModelSerializer):
     class Meta:
         model = Reservation
-        fields = '__all__'
+        fields = (
+            'id', 'restaurant', 'table', 'server',
+            'guest_name', 'guest_phone', 'guest_email',
+            'date_time', 'party_size', 'status',
+            'area_preference', 'notes', 'tags', 'seated_at',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        # restaurant is client-supplied + endpoint-gated on create, pinned on
+        # update (validate below); table/server must be same-tenant.
+        tenant_relations = {
+            'restaurant': SameTenant('id', verified_by=_RESERVATION_EVIDENCE),
+            'table': SameTenant('restaurant_id', verified_by=_RESERVATION_EVIDENCE),
+            'server': SameTenant('restaurant_id', verified_by=_RESERVATION_EVIDENCE),
+        }
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -1049,7 +1234,24 @@ class SerializerGetReservation(ModelSerializer):
 class SerializerPutWaitlistEntry(ModelSerializer):
     class Meta:
         model = WaitlistEntry
-        fields = '__all__'
+        fields = (
+            'id', 'restaurant', 'seated_table',
+            'guest_name', 'guest_phone', 'party_size',
+            'quoted_wait_min', 'quoted_wait_max', 'tags', 'notes',
+            'status', 'seated_at', 'added_at',
+            'created_by', 'deleted', 'deleted_by', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'added_at', 'created_by', 'deleted', 'deleted_by',
+            'time_deleted', 'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        # restaurant is client-supplied + endpoint-gated on create, pinned on
+        # update (validate below); seated_table must be same-tenant.
+        tenant_relations = {
+            'restaurant': SameTenant('id', verified_by=_WAITLIST_EVIDENCE),
+            'seated_table': SameTenant('restaurant_id', verified_by=_WAITLIST_EVIDENCE),
+        }
 
     def validate(self, attrs):
         attrs = super().validate(attrs)

@@ -4,6 +4,7 @@ implementation for crud functions to the database
 import copy
 import logging
 from django.db import transaction
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 
 logger = logging.getLogger(__name__)
 from django.utils import timezone
@@ -111,6 +112,17 @@ class Secretary:
         self.user = self.args.get('user')
         self.msg_type = self.args.get('msg_type')
 
+        # Trusted server-derived values written via serializer.save() kwargs on
+        # create (e.g. a resolved parent restaurant), never taken from request
+        # data. created_by is always injected from the resolved actor below.
+        self.server_values = self.args.get('server_values') or {}
+
+        # Authoritative, server-built queryset defining the object universe an
+        # update/delete may touch. REQUIRED for update() and delete(): they
+        # resolve the row ONLY through this queryset (locked), never through an
+        # unrestricted Model.objects.get. A missing queryset fails closed.
+        self.instance_queryset = self.args.get('instance_queryset')
+
         # for non unique handling
         self.non_unique_handling = self.args.get('non_unique_handling')
 
@@ -201,11 +213,21 @@ class Secretary:
                             self.args['data'][info['key']]
                         )
 
-            self.args['data']['created_by'] = self.user_id
+            # Server-owned values travel a TRUSTED channel (serializer.save
+            # kwargs), never the request-shaped data dict. created_by is always
+            # the resolved actor; a client-submitted created_by / parent FK in
+            # the body is ignored (those fields are read_only on the migrated
+            # write serializers) and can never override this.
+            server_values = dict(self.server_values)
+            if 'created_by' not in server_values and 'created_by_id' not in server_values:
+                if self.user is not None:
+                    server_values['created_by'] = self.user
+                elif self.user_id is not None:
+                    server_values['created_by_id'] = self.user_id
             record = self.serializer(data=self.data)
 
             if record.is_valid():
-                record.save()
+                record.save(**server_values)
                 # save the attempted action to the logs
                 save_action(
                     affected_model=self.model_name,
@@ -338,12 +360,34 @@ class Secretary:
         """
         log_data = self.formulate_log_data()
 
-        with transaction.atomic():
-            # get the current record
-            record = old_record = self.serializer.Meta.model.objects.get(
-                id=self.data.get('id')
+        # Scope-bound resolution: the caller MUST supply an authoritative,
+        # server-built queryset defining the permitted object universe. There is
+        # NO fallback to Model.objects.get — a missing queryset is a programmer
+        # error and fails closed rather than resolving a row from any tenant.
+        if self.instance_queryset is None:
+            logger.error(
+                "SecretaryError-Update: no instance_queryset supplied for %s; "
+                "refusing to resolve a row from an unrestricted model manager.",
+                self.model_name,
             )
-            # print(f"old record details: {old_record.status}")
+            return {
+                'status': 500,
+                'message': 'Server misconfiguration: update scope not provided.'
+            }
+
+        with transaction.atomic():
+            # get the current record — locked, and ONLY within the caller's
+            # scoped queryset. A malformed / unknown / foreign id resolves to
+            # nothing and returns the non-enumerating not-found posture.
+            try:
+                record = old_record = self.instance_queryset.select_for_update().get(
+                    id=self.data.get('id')
+                )
+            except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+                return {
+                    'status': 404,
+                    'message': 'Record not found.'
+                }
             # formulate the new data to consider
             new_data = {}
             edit_considerations = self.args.get('edit_considerations')
@@ -480,6 +524,7 @@ class Secretary:
         """
         flags a record as deleted
         """
+        log_data = self.formulate_log_data()
         # check if the user has provided the reason for deleting the record
         deletion_reason = self.data.get('deletion_reason')
         if deletion_reason is None:
@@ -499,45 +544,66 @@ class Secretary:
                 'message': MESSAGES.get('NO_DELETION_REASON')
             }
 
-        serializer = self.serializer
-
-        # get the record and check that it has not been deleted before
-        record = serializer.Meta.model.objects.get(
-            id=self.args.get('data').get('id')
-        )
-        if record.deleted:
-            save_action(
-                affected_model=self.model_name,
-                affected_record=self.data.get('id'),
-                action='delete',
-                narration=MESSAGES.get('ALREADY_DELETED'),
-                result=ACTION_LOG_STATUSES.get('failed'),
-                user_id=self.user_id,
-                username=self.username,
-                submitted_data=self.data,
-                changes=None,
+        # Scope-bound resolution (see update): an authoritative, server-built
+        # queryset is REQUIRED — there is NO unrestricted Model.objects.get
+        # fallback. A missing scope is a programmer error and fails closed.
+        if self.instance_queryset is None:
+            logger.error(
+                "SecretaryError-Delete: no instance_queryset supplied for %s; "
+                "refusing to resolve a row from an unrestricted model manager.",
+                self.model_name,
             )
-
             return {
-                'status': 400,
-                'message': MESSAGES.get('ALREADY_DELETED')
+                'status': 500,
+                'message': 'Server misconfiguration: delete scope not provided.'
             }
 
-        # flag the record as deleted
-        update_information = self.data
-        update_information['deleted'] = True
-        update_information['time_deleted'] = timezone.now()
-        update_information['deletion_reason'] = deletion_reason
-        update_information['deleted_by'] = self.args.get('user_id')
-        record = serializer(
-            record,
-            data=update_information,
-            partial=True
-        )
+        with transaction.atomic():
+            # lock the row within the caller's scope. A malformed / unknown /
+            # foreign id resolves to nothing → non-enumerating not-found.
+            try:
+                record = self.instance_queryset.select_for_update().get(
+                    id=self.args.get('data').get('id')
+                )
+            except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+                return {
+                    'status': 404,
+                    'message': 'Record not found.'
+                }
 
-        if record.is_valid():
-            logger.debug("Record deleted")
-            record.save()
+            if record.deleted:
+                save_action(
+                    affected_model=self.model_name,
+                    affected_record=self.data.get('id'),
+                    action='delete',
+                    narration=MESSAGES.get('ALREADY_DELETED'),
+                    result=ACTION_LOG_STATUSES.get('failed'),
+                    user_id=self.user_id,
+                    username=self.username,
+                    submitted_data=log_data,
+                    changes=None,
+                )
+                return {
+                    'status': 400,
+                    'message': MESSAGES.get('ALREADY_DELETED')
+                }
+
+            # Trusted soft-delete transition: the actor and server timestamp are
+            # written DIRECTLY on the locked instance — never accepted as
+            # serializer input (deleted / deleted_by / time_deleted / deletion_reason
+            # are read_only on the migrated write serializers).
+            record.deleted = True
+            record.time_deleted = timezone.now()
+            record.deletion_reason = deletion_reason
+            if self.user is not None:
+                record.deleted_by = self.user
+            elif self.user_id is not None:
+                record.deleted_by_id = self.user_id
+            record.save(update_fields=[
+                'deleted', 'time_deleted', 'deletion_reason',
+                'deleted_by', 'time_last_updated',
+            ])
+
             save_action(
                 affected_model=self.model_name,
                 affected_record=self.data.get('id'),
@@ -546,38 +612,16 @@ class Secretary:
                 result=ACTION_LOG_STATUSES.get('success'),
                 user_id=self.user_id,
                 username=self.username,
-                submitted_data=self.data,
+                submitted_data=log_data,
                 changes=None,
             )
 
-            # vacuum deleted records
-            # this is typically doing the cron job inline
+            # vacuum deleted records — the cron job done inline
             ConVacuumDeletedRecords().vacuum()
 
             return {
                 'status': 200,
                 'message': MESSAGES.get('OK_DELETION')
-            }
-        else:
-            logger.error("SecretaryError-Delete: %s", record.errors)
-            error_message = ""
-            for _, value in record.errors.items():
-                error_message += f"{', '.join(value)}\n"
-            save_action(
-                affected_model=self.model_name,
-                affected_record=self.data.get('id'),
-                action='delete',
-                narration=error_message,
-                result=ACTION_LOG_STATUSES.get('success'),
-                user_id=self.user_id,
-                username=self.username,
-                submitted_data=self.data,
-                changes=None,
-            )
-
-            return {
-                'status': 400,
-                'message': error_message
             }
 
     def make_notification(self, old_record, new_record):

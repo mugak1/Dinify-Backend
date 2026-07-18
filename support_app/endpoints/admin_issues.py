@@ -14,6 +14,7 @@ from support_app.serializers import (
     SupportIssueWriteSerializer,
     SupportIssueAdminReadSerializer,
 )
+from support_app.models import SupportIssue
 
 
 # EDIT_INFORMATION — fields admins may change. Anything not listed is silently
@@ -76,8 +77,13 @@ class AdminIssuesEndpoint(APIView):
             'edit_considerations': EDIT_INFORMATION,
             'user_id': str(request.user.pk),
             'username': str(request.user.username),
+            'user': request.user,
             'success_message': 'The support issue has been updated successfully.',  # noqa: E501
             'error_message': 'Sorry, an error occurred while updating the support issue. Please try again later.',  # noqa: E501
+            # Dinify-admin triage is DELIBERATELY unrestricted (is_dinify_superuser
+            # gated above): the admin may update any tenant's issue. This explicit
+            # all() is the obvious, reviewable admin-scope decision at the callsite.
+            'instance_queryset': SupportIssue.objects.all(),
         }
         response = Secretary(secretary_args).update()
         return Response(response, status=response['status'])

@@ -98,10 +98,12 @@ def submit_review(order_id, rating_fields, comment=None, tags=None,
             'message': 'This order has already been reviewed.',
         }
 
-    # 4. Validate + create. Build the payload explicitly; ``order`` must be the
-    #    PK the OneToOne resolves (the UUID string). Drop unset ratings so a
-    #    missing overall_rating surfaces the serializer's "required" 400.
-    payload = {'order': str(order.id)}
+    # 4. Validate + create. ``order`` is SERVER-DERIVED: it was resolved above
+    #    scoped to the diner's table session (knowing the order UUID is not
+    #    authority) and is passed via save(order=...); it is read_only on the
+    #    serializer so it can never be spoofed from the request body. Drop unset
+    #    ratings so a missing overall_rating surfaces the serializer's 400.
+    payload = {}
     for field in RATING_FIELDS:
         value = rating_fields.get(field)
         if value is not None:
@@ -131,7 +133,7 @@ def submit_review(order_id, rating_fields, comment=None, tags=None,
     # from poisoning any surrounding transaction.
     try:
         with transaction.atomic():
-            review = serializer.save()
+            review = serializer.save(order=order)
     except IntegrityError:
         return {
             'status': 409,

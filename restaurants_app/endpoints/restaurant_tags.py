@@ -107,7 +107,9 @@ class RestaurantTagsEndpoint(APIView):
                 'errors': serializer.errors,
             }, status=400)
 
-        serializer.save(created_by=request.user)
+        # restaurant is server-derived (read_only): bind it from the resolved,
+        # gated restaurant id via the trusted save() channel, never the payload.
+        serializer.save(created_by=request.user, restaurant_id=restaurant_id)
         return Response({
             'status': 201,
             'message': 'Restaurant tag created successfully',
@@ -158,6 +160,10 @@ class RestaurantTagDetailEndpoint(APIView):
             'username': auth['username'],
             'success_message': 'Restaurant tag updated successfully',
             'error_message': 'Failed to update restaurant tag',
+            'user': request.user,
+            # The tag was resolved and module-gated above; scope Secretary to that
+            # exact row so it can never resolve a foreign tag from a spoofed id.
+            'instance_queryset': RestaurantTag.objects.filter(pk=tag.pk),
         }
         response = Secretary(secretary_args).update()
 

@@ -1,14 +1,22 @@
+from unittest import skipUnless
 from unittest.mock import patch, MagicMock
+from django.db import connection
 from django.test import TestCase, RequestFactory
+from django.test.utils import CaptureQueriesContext
 from misc_app.controllers.check_required_information import check_required_information
 from misc_app.controllers.secretary import (
     Secretary, make_notification_for_new_entry,
 )
 from misc_app.controllers.determine_changes import determine_changes
-from restaurants_app.serializers import SerializerPutRestaurantEmployee, SerializerPutRestaurant
+from restaurants_app.serializers import (
+    SerializerPutRestaurantEmployee, SerializerPutRestaurant,
+    SerializerPutMenuSection,
+)
 from restaurants_app.tests import seed_restaurant, TEST_RESTAURANT_NAME
-from restaurants_app.models import Restaurant
-from dinify_backend.configss.string_definitions import RestaurantStatus_Pending
+from restaurants_app.models import Restaurant, RestaurantEmployee, MenuSection
+from dinify_backend.configss.string_definitions import (
+    RestaurantStatus_Pending, RestaurantStatus_Active,
+)
 from dinify_backend.configs import ROLES
 from dinify_backend.configss.edit_information import EDIT_INFORMATION
 from users_app.tests import seed_user, TEST_PHONE
@@ -92,7 +100,6 @@ class MiscAppTestFunctions(TestCase):
                 'required_information': [],
                 'data': {
                     'user': str(user.id),
-                    'restaurant': str(restaurant.id),
                     'roles': [ROLES.get('RESTAURANT_OWNER')]
                 },
                 'user_id': str(User.objects.get(username=TEST_PHONE).id),
@@ -100,7 +107,8 @@ class MiscAppTestFunctions(TestCase):
                 'user': user,
                 'msg_type': 'new-restaurant-employee',
                 'success_message': 'The restaurant employee has been added successfully.',
-                'error_message': 'An error occurred while adding the restaurant employee.'
+                'error_message': 'An error occurred while adding the restaurant employee.',
+                'server_values': {'restaurant': restaurant},
             }
             result = Secretary(data).create()
             self.assertEqual(result.get('status'), 200)
@@ -155,7 +163,8 @@ class MiscAppTestFunctions(TestCase):
                 'user_id': str(user.id),
                 'username': TEST_PHONE,
                 'success_message': 'The details of the restaurant have been updated successfully.',
-                'error_message': 'An error occurred while updating the details of the restaurant.'
+                'error_message': 'An error occurred while updating the details of the restaurant.',
+                'instance_queryset': Restaurant.objects.all(),
             }
             result = Secretary(data).update()
             self.assertEqual(result.get('status'), 200)
@@ -175,6 +184,7 @@ class MiscAppTestFunctions(TestCase):
                 },
                 'user_id': str(user.id),
                 'username': TEST_PHONE,
+                'instance_queryset': Restaurant.objects.all(),
             }
             result = Secretary(data).delete()
             self.assertEqual(result.get('status'), 200)
@@ -266,6 +276,7 @@ class SecretaryAbsentVsNullSemanticTests(TestCase):
 
     def _menu_item_args(self, data):
         from restaurants_app.serializers import SerializerPutMenuItem
+        from restaurants_app.models import MenuItem
         return {
             'serializer': SerializerPutMenuItem,
             'data': data,
@@ -274,6 +285,7 @@ class SecretaryAbsentVsNullSemanticTests(TestCase):
             'username': self.owner.username,
             'success_message': 'ok',
             'error_message': 'err',
+            'instance_queryset': MenuItem.objects.all(),
         }
 
     def test_explicit_null_clears_field(self):
@@ -339,6 +351,7 @@ class SecretaryAbsentVsNullSemanticTests(TestCase):
             'username': self.owner.username,
             'success_message': 'ok',
             'error_message': 'err',
+            'instance_queryset': Restaurant.objects.all(),
         }
 
     def test_explicit_null_clears_file_field_as_sole_change(self):
@@ -588,7 +601,6 @@ class MsgBuilderContractTests(TestCase):
             'serializer': SerializerPutRestaurantEmployee,
             'data': {
                 'user': str(self.recipient.id),
-                'restaurant': str(self.restaurant.id),
                 'roles': [ROLES.get('RESTAURANT_KITCHEN')],
             },
             'required_information': [],
@@ -598,6 +610,7 @@ class MsgBuilderContractTests(TestCase):
             'msg_type': 'new-restaurant-employee',
             'success_message': 'ok',
             'error_message': 'err',
+            'server_values': {'restaurant': self.restaurant},
         }
         secretary_logger = 'misc_app.controllers.secretary'
         with self.assertLogs(secretary_logger, level='DEBUG') as captured:
@@ -652,13 +665,14 @@ class SecretaryNotificationDispatchTests(TestCase):
             'required_information': [],
             'data': {
                 'user': str(new_user.id),
-                'restaurant': str(self.restaurant.id),
                 'roles': [ROLES.get('RESTAURANT_KITCHEN')],
             },
             'user_id': str(self.user.id),
             'username': TEST_PHONE,
             'success_message': 'ok',
             'error_message': 'err',
+            # restaurant is server-derived (read_only) — pass via server_values.
+            'server_values': {'restaurant': self.restaurant},
         }
         if include_user:
             args['user'] = self.user
@@ -816,6 +830,7 @@ class SecretaryUpdateNotificationTests(TestCase):
             'username': TEST_PHONE,
             'success_message': 'ok',
             'error_message': 'err',
+            'instance_queryset': Restaurant.objects.all(),
         }).update()
 
     def test_update_notification_with_complete_owner(self):
@@ -862,3 +877,260 @@ class SecretaryUpdateNotificationTests(TestCase):
         # Fallback greeting target so the email reads "Hello there,".
         self.assertEqual(msg_data['first_name'], 'there')
         self.assertEqual(msg_data['user_id'], str(self.actor.id))
+
+
+class SecretaryScopeBoundTests(TestCase):
+    """
+    WS9 (TENANT-ISO-PR5): the generic CRUD engine is scope-bound.
+
+    Behavioural proof behind non_fk_tenant_inventory #14 (Secretary
+    dynamic-dispatch -> remediated):
+
+      * update()/delete() resolve the row ONLY through a caller-supplied,
+        server-built ``instance_queryset`` under ``select_for_update`` — there
+        is NO fallback to an unrestricted ``Model.objects.get``. A missing
+        scope FAILS CLOSED (500); a row outside the scope is non-enumerating
+        not-found (404); the request body cannot widen the scope.
+      * create() writes server-owned values (created_by, the parent FK)
+        through the trusted ``server_values`` channel — a client-submitted
+        created_by / parent FK in the body is ignored (read_only) and can
+        never override it.
+
+    (The absent-vs-None + file null-clear contract is pinned by
+    SecretaryAbsentVsNullSemanticTests; action-log/notification integrity by
+    SecretaryNotificationDispatchTests / SecretaryUpdateNotificationTests;
+    failed-validation rollback by restaurants_app.tests_menu_relationship_integrity.)
+    """
+
+    def setUp(self):
+        self.owner_a = User.objects.create_user(
+            first_name='Sec', last_name='OwnerA', email='sec_a@test.com',
+            phone_number='256700000710', username='256700000710',
+            country='Uganda', password='password', roles=[],
+        )
+        self.owner_b = User.objects.create_user(
+            first_name='Sec', last_name='OwnerB', email='sec_b@test.com',
+            phone_number='256700000720', username='256700000720',
+            country='Uganda', password='password', roles=[],
+        )
+        self.restaurant_a = Restaurant.objects.create(
+            name='Sec Restaurant A', location='loc-a',
+            status=RestaurantStatus_Active, owner=self.owner_a,
+        )
+        self.restaurant_b = Restaurant.objects.create(
+            name='Sec Restaurant B', location='loc-b',
+            status=RestaurantStatus_Active, owner=self.owner_b,
+        )
+        self.section_a = MenuSection.objects.create(
+            name='A Section', restaurant=self.restaurant_a, listing_position=0,
+        )
+        self.section_b = MenuSection.objects.create(
+            name='B Section', restaurant=self.restaurant_b, listing_position=0,
+        )
+
+    # --- helpers -------------------------------------------------------
+    def _scoped_sections(self, *restaurant_ids):
+        """The scoped queryset the restaurant-setup endpoint builds server-side
+        from the actor's module scope (never from the request body)."""
+        return MenuSection.objects.filter(restaurant_id__in=list(restaurant_ids))
+
+    def _update_args(self, data, **over):
+        args = {
+            'serializer': SerializerPutMenuSection,
+            'data': data,
+            'edit_considerations': EDIT_INFORMATION.get('menu_section'),
+            'user_id': str(self.owner_a.id),
+            'username': self.owner_a.username,
+            'user': self.owner_a,
+            'success_message': 'ok',
+            'error_message': 'err',
+            'instance_queryset': self._scoped_sections(self.restaurant_a.id),
+        }
+        args.update(over)
+        return args
+
+    def _delete_args(self, data, **over):
+        args = {
+            'serializer': SerializerPutMenuSection,
+            'data': data,
+            'user_id': str(self.owner_a.id),
+            'username': self.owner_a.username,
+            'user': self.owner_a,
+            'instance_queryset': self._scoped_sections(self.restaurant_a.id),
+        }
+        args.update(over)
+        return args
+
+    # --- fail-closed when no scope supplied ----------------------------
+    def test_update_without_scope_fails_closed(self):
+        args = self._update_args({'id': str(self.section_a.id), 'name': 'Renamed Alpha'})
+        del args['instance_queryset']
+        result = Secretary(args).update()
+        self.assertEqual(result.get('status'), 500)
+        self.section_a.refresh_from_db()
+        self.assertEqual(self.section_a.name, 'A Section')
+
+    def test_delete_without_scope_fails_closed(self):
+        args = self._delete_args({'id': str(self.section_a.id), 'deletion_reason': 'x'})
+        del args['instance_queryset']
+        result = Secretary(args).delete()
+        self.assertEqual(result.get('status'), 500)
+        self.section_a.refresh_from_db()
+        self.assertFalse(self.section_a.deleted)
+
+    # --- scoped same-tenant succeeds -----------------------------------
+    def test_update_scoped_same_tenant_succeeds(self):
+        result = Secretary(self._update_args(
+            {'id': str(self.section_a.id), 'name': 'Renamed Alpha'}
+        )).update()
+        self.assertEqual(result.get('status'), 200)
+        self.section_a.refresh_from_db()
+        self.assertEqual(self.section_a.name, 'Renamed Alpha')
+
+    def test_delete_scoped_same_tenant_attributes_actor(self):
+        result = Secretary(self._delete_args(
+            {'id': str(self.section_a.id), 'deletion_reason': 'cleanup'}
+        )).delete()
+        self.assertEqual(result.get('status'), 200)
+        self.section_a.refresh_from_db()
+        self.assertTrue(self.section_a.deleted)
+        # attribution comes from the resolved actor, not any client input
+        self.assertEqual(self.section_a.deleted_by_id, self.owner_a.id)
+        self.assertIsNotNone(self.section_a.time_deleted)
+        self.assertEqual(self.section_a.deletion_reason, 'cleanup')
+
+    # --- scoped FOREIGN row is non-enumerating not-found ---------------
+    def test_update_scoped_foreign_id_not_found(self):
+        result = Secretary(self._update_args(
+            {'id': str(self.section_b.id), 'name': 'Hijacked Name'}
+        )).update()
+        self.assertEqual(result.get('status'), 404)
+        self.section_b.refresh_from_db()
+        self.assertEqual(self.section_b.name, 'B Section')
+
+    def test_delete_scoped_foreign_id_not_found(self):
+        result = Secretary(self._delete_args(
+            {'id': str(self.section_b.id), 'deletion_reason': 'cleanup'}
+        )).delete()
+        self.assertEqual(result.get('status'), 404)
+        self.section_b.refresh_from_db()
+        self.assertFalse(self.section_b.deleted)
+
+    def test_scope_not_body_is_the_boundary(self):
+        # With a WIDER server-built scope that includes B, the very same foreign
+        # id now resolves — proving the instance_queryset (always built from the
+        # actor's scope), NOT the request body, is the tenant boundary.
+        result = Secretary(self._update_args(
+            {'id': str(self.section_b.id), 'name': 'Widened Name'},
+            instance_queryset=self._scoped_sections(
+                self.restaurant_a.id, self.restaurant_b.id
+            ),
+        )).update()
+        self.assertEqual(result.get('status'), 200)
+        self.section_b.refresh_from_db()
+        self.assertEqual(self.section_b.name, 'Widened Name')
+
+    def test_explicit_global_scope_resolves_any_row(self):
+        # The deliberate unrestricted universe (e.g. support/admin_issues, which
+        # passes Model.objects.all() as an EXPLICIT admin decision).
+        result = Secretary(self._update_args(
+            {'id': str(self.section_b.id), 'name': 'Admin Renamed'},
+            instance_queryset=MenuSection.objects.all(),
+        )).update()
+        self.assertEqual(result.get('status'), 200)
+        self.section_b.refresh_from_db()
+        self.assertEqual(self.section_b.name, 'Admin Renamed')
+
+    # --- create: server-owned values via the trusted channel -----------
+    def test_create_binds_parent_and_created_by_from_server_values(self):
+        staffer = User.objects.create_user(
+            first_name='Sec', last_name='Staff', email='sec_staff@test.com',
+            phone_number='256700000730', username='256700000730',
+            country='Uganda', password='password', roles=[],
+        )
+        result = Secretary({
+            'serializer': SerializerPutRestaurantEmployee,
+            'data': {
+                'user': str(staffer.id),
+                'roles': [ROLES.get('RESTAURANT_OWNER')],
+                # adversarial injection — both MUST be ignored (read_only):
+                'restaurant': str(self.restaurant_b.id),
+                'created_by': str(self.owner_b.id),
+            },
+            'required_information': [],
+            'user_id': str(self.owner_a.id),
+            'username': self.owner_a.username,
+            'user': self.owner_a,
+            'success_message': 'ok',
+            'error_message': 'err',
+            'server_values': {'restaurant': self.restaurant_a},
+        }).create()
+        self.assertEqual(result.get('status'), 200, result)
+        emp = RestaurantEmployee.objects.get(user=staffer)
+        # parent bound from server_values, NOT the injected foreign restaurant
+        self.assertEqual(emp.restaurant_id, self.restaurant_a.id)
+        # created_by from the resolved actor, NOT the injected owner_b
+        self.assertEqual(emp.created_by_id, self.owner_a.id)
+
+    # --- deletion guards preserved -------------------------------------
+    def test_delete_requires_deletion_reason(self):
+        result = Secretary(self._delete_args(
+            {'id': str(self.section_a.id)}
+        )).delete()
+        self.assertEqual(result.get('status'), 400)
+        self.section_a.refresh_from_db()
+        self.assertFalse(self.section_a.deleted)
+
+    def test_delete_already_deleted_guard(self):
+        self.section_a.deleted = True
+        self.section_a.save(update_fields=['deleted'])
+        result = Secretary(self._delete_args(
+            {'id': str(self.section_a.id), 'deletion_reason': 'again'}
+        )).delete()
+        self.assertEqual(result.get('status'), 400)
+
+    # --- malformed / unknown ids are controlled, never 500 -------------
+    def test_update_malformed_id_is_404_not_500(self):
+        result = Secretary(self._update_args(
+            {'id': 'not-a-uuid', 'name': 'Whatever Name'}
+        )).update()
+        self.assertEqual(result.get('status'), 404)
+
+    def test_delete_malformed_id_is_404_not_500(self):
+        result = Secretary(self._delete_args(
+            {'id': 'not-a-uuid', 'deletion_reason': 'x'}
+        )).delete()
+        self.assertEqual(result.get('status'), 404)
+
+    def test_update_unknown_id_is_404(self):
+        import uuid
+        result = Secretary(self._update_args(
+            {'id': str(uuid.uuid4()), 'name': 'Ghost Name'}
+        )).update()
+        self.assertEqual(result.get('status'), 404)
+
+    # --- select_for_update evidence (Postgres; SQLite has no row locking) --
+    @skipUnless(
+        connection.features.has_select_for_update,
+        'backend does not support select_for_update (SQLite)',
+    )
+    def test_update_resolves_under_a_single_row_lock(self):
+        with CaptureQueriesContext(connection) as ctx:
+            Secretary(self._update_args(
+                {'id': str(self.section_a.id), 'name': 'Locked Name'}
+            )).update()
+        locked = [q for q in ctx.captured_queries if 'FOR UPDATE' in q['sql'].upper()]
+        # exactly one locked resolve — scope-bound, no per-field fan-out
+        self.assertEqual(len(locked), 1, [q['sql'] for q in ctx.captured_queries])
+
+    @skipUnless(
+        connection.features.has_select_for_update,
+        'backend does not support select_for_update (SQLite)',
+    )
+    def test_delete_resolves_under_a_single_row_lock(self):
+        with CaptureQueriesContext(connection) as ctx:
+            Secretary(self._delete_args(
+                {'id': str(self.section_a.id), 'deletion_reason': 'lock'}
+            )).delete()
+        locked = [q for q in ctx.captured_queries if 'FOR UPDATE' in q['sql'].upper()]
+        self.assertEqual(len(locked), 1, [q['sql'] for q in ctx.captured_queries])

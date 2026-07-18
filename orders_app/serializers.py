@@ -9,22 +9,37 @@ from dinify_backend.configss.string_definitions import (
 )
 
 
-class SerializerPutOrder(ModelSerializer):
-    """
-    serializer for adding and updating an order
-    """
-    class Meta:
-        model = Order
-        fields = '__all__'
-
-
 class SerializerPutOrderItem(ModelSerializer):
     """
-    serializer for adding and updating an order item
+    Internal-only serializer for creating an order item during order build.
+
+    order / item / parent_item and the audit FKs are SERVER-DERIVED: the
+    order-build service (con_orders) passes the already-resolved, tenant-scoped
+    objects via ``save()`` kwargs — they are never accepted from request input
+    (read_only). A caller therefore cannot construct an OrderItem that links a
+    foreign menu item to an order through this serializer.
     """
     class Meta:
         model = OrderItem
-        fields = '__all__'
+        fields = (
+            # server-derived relations (set via save() by the order-build service)
+            'id', 'order', 'item', 'parent_item',
+            # business values written by the order-build service
+            'available', 'option', 'option_choice', 'option_cost',
+            'quantity', 'unit_price', 'discounted_price', 'discounted',
+            'unit_cost_of_options', 'options', 'selected_modifiers',
+            'item_name_snapshot', 'modifiers_snapshot', 'allergen_tags_snapshot',
+            'total_cost', 'discounted_cost', 'savings', 'cost_of_options',
+            'actual_cost', 'status',
+            # audit / lifecycle (output-only)
+            'last_updated_by', 'created_by', 'deleted_by', 'deleted',
+            'time_deleted', 'deletion_reason', 'time_created', 'time_last_updated',
+        )
+        read_only_fields = (
+            'id', 'order', 'item', 'parent_item', 'last_updated_by',
+            'created_by', 'deleted_by', 'deleted', 'time_deleted',
+            'deletion_reason', 'time_created', 'time_last_updated',
+        )
 
 
 class SerializerListOrderItem(ModelSerializer):

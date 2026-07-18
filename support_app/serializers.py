@@ -13,6 +13,7 @@ All name helpers are NULL-SAFE — a ``get_created_by`` that dereferences a null
 from rest_framework import serializers
 
 from support_app.models import SupportIssue
+from dinify_backend.tenancy.relations import GlobalRelation
 
 
 def _full_name(user):
@@ -28,7 +29,12 @@ class SupportIssueWriteSerializer(serializers.ModelSerializer):
     ``reference`` is read-only — the model generates it in ``save()``; declaring
     it writable would attach a UniqueValidator and make it required. Keeping it
     in the output means the POST response still carries the new reference.
-    ``created_by`` is writable because Secretary.create injects it.
+
+    ``restaurant`` and ``created_by`` are SERVER-DERIVED (read_only): the
+    restaurant is resolved + gated by the endpoint and set via Secretary
+    ``server_values`` on create; ``created_by`` is the resolved actor injected by
+    Secretary through ``save()``. ``assigned_to`` is a platform-global support
+    agent, writable ONLY on the is_dinify_superuser admin path (GlobalRelation).
     """
 
     class Meta:
@@ -39,7 +45,14 @@ class SupportIssueWriteSerializer(serializers.ModelSerializer):
             'preferred_contact_method', 'page_url', 'user_agent', 'assigned_to',
             'internal_notes', 'resolution_summary', 'resolved_at', 'closed_at',
         ]
-        read_only_fields = ['id', 'reference']
+        read_only_fields = ['id', 'reference', 'restaurant', 'created_by']
+        tenant_relations = {
+            'assigned_to': GlobalRelation(
+                reason='Support agents are platform-global (not restaurant-scoped); '
+                       'assigned_to is writable only on the is_dinify_superuser admin '
+                       'triage path, which is deliberately unrestricted.'
+            ),
+        }
 
 
 class SupportIssueRestaurantReadSerializer(serializers.ModelSerializer):
