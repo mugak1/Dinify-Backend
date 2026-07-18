@@ -315,11 +315,22 @@ class KitchenActiveEndpointTests(KitchenTestBase):
         self.assertNotIn(str(deleted.id), ids)
 
     def test_active_serializer_shape(self):
+        options_item = MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME)
+        # Wire a dedicated published is_extra item into the options item's
+        # allowlist so the extra it carries passes the extra-applicability gate.
+        extra = MenuItem.objects.create(
+            name='Kitchen Shape Extra', section=options_item.section,
+            primary_price=Decimal('500'), approved=True, enabled=True, is_extra=True,
+        )
+        options_item.has_extras = True
+        options_item.extras_applicable = [str(extra.pk)]
+        options_item.save(update_fields=['has_extras', 'extras_applicable'])
+
         items = [{
-            'item': str(MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME).pk),
+            'item': str(options_item.pk),
             'quantity': 2,
             'selected_modifiers': {TEST_OPTION_GROUP_ID: [TEST_OPTION_CHOICE_SMALL_ID]},
-            'extras': [str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk)],
+            'extras': [str(extra.pk)],
         }]
         created = ConOrder.initiate_order(
             restaurant_id=str(self.restaurant.pk),

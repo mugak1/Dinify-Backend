@@ -70,6 +70,9 @@ OK_UPDATED_SECTION_GROUP = 'he details of the section group have been updated su
 ERR_UPDATED_SECTION_GROUP = 'An error occurred while updating the details of the section group.'
 
 OK_RETRIEVED_FULL_MENU = 'Successfully retrieved the restaurant menu.'
+ERR_RESTAURANT_REFERENCE_REQUIRED = (
+    'A restaurant reference is required to view the menu.'
+)
 
 
 ERR_UPDATING_ITEM_STATUS_UNSUPPORTED_STATUS = 'The provided status is not supported.'

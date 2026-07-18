@@ -58,7 +58,8 @@ def seed_restaurant(seed_owner=True):
         restaurant = Restaurant.objects.create(
             name=TEST_RESTAURANT_NAME,
             location='Seed Test location',
-            owner=owner
+            owner=owner,
+            status=RestaurantStatus_Active,
         )
         if seed_owner:
             RestaurantEmployee.objects.create(
@@ -1870,10 +1871,14 @@ class MenuSectionScheduleTests(TestCase):
         )
 
         monday_10am = self._at(2026, 1, 5, 10, 0)
+        # handle_show_menu captures ONE local `now` via timezone.localtime() and
+        # threads it into every schedule decision, so pin THAT seam. (Patching
+        # schedule_utils.datetime no longer works — the function does not sample
+        # the clock when `now` is supplied.)
         with patch(
-            'restaurants_app.controllers.utils.schedule_utils.datetime'
-        ) as mock_datetime:
-            mock_datetime.now.return_value = monday_10am
+            'restaurants_app.controllers.handle_diner_journey.timezone'
+        ) as mock_tz:
+            mock_tz.localtime.return_value = monday_10am
             response = handle_show_menu(str(restaurant.id))
 
         self.assertEqual(response['status'], 200)

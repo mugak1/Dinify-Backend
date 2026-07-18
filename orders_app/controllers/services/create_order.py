@@ -138,6 +138,27 @@ def _create_order(*, restaurant, table, items,
                     'data': {'order_id': ongoing.get('order_id')},
                 }
 
+            # 2b. AUTHORITATIVE menu-publication + extra-applicability validation at
+            #     ONE time captured AFTER the blocking table lock and BEFORE any
+            #     daily number is allocated or any row is written. This is the
+            #     load-bearing check — the endpoint preflight can go stale while a
+            #     request waits on the lock, so re-validate against committed menu
+            #     state here. A rejection RAISES OrderItemRejected so the whole
+            #     transaction unwinds (no counter increment, no Order, no items).
+            #     Anonymous orders enforce diner publication; staff/admin (created_by
+            #     set) bypass publication but never tenant / extra-applicability
+            #     integrity. This self-guards EVERY caller of _create_order, so a
+            #     future caller cannot bypass the boundary by skipping the endpoint.
+            from restaurants_app.controllers.menu_publication import (
+                validate_order_selections,
+            )
+            selection = validate_order_selections(
+                restaurant, items, timezone.localtime(),
+                enforce_publication=(created_by is None),
+            )
+            if selection.get('status') != 200:
+                raise OrderItemRejected(selection)
+
             # 3. daily numbering (local business date)
             order_date = timezone.localdate()
             order_number = allocate_daily_order_number(restaurant, order_date)

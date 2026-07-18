@@ -17,6 +17,7 @@ from restaurants_app.models import (
 )
 from restaurants_app.serializers import UpsellConfigSerializer
 from users_app.models import User
+from dinify_backend.configss.string_definitions import RestaurantStatus_Active
 
 SHOW_MENU_PATH = '/api/v1/orders/journey/show-menu/'
 
@@ -37,6 +38,7 @@ class AnonymousMenuPublicationBoundaryTests(TestCase):
         self.owner = _owner('256700000901')
         self.restaurant = Restaurant.objects.create(
             name='Pub Boundary R', location='pub-boundary', owner=self.owner,
+            status=RestaurantStatus_Active,
         )
 
         # A fully-published section holding the positive/negative controls.
@@ -208,6 +210,7 @@ class MenuExtrasReEntryTests(TestCase):
         self.owner = _owner('256700000903')
         self.restaurant = Restaurant.objects.create(
             name='Extras R', location='extras-r', owner=self.owner,
+            status=RestaurantStatus_Active,
         )
         self.section = MenuSection.objects.create(
             name='S', restaurant=self.restaurant,
@@ -255,6 +258,7 @@ class UpsellReEntryTests(TestCase):
         self.owner = _owner('256700000904')
         self.restaurant = Restaurant.objects.create(
             name='Upsell R', location='upsell-r', owner=self.owner,
+            status=RestaurantStatus_Active,
         )
         self.section = MenuSection.objects.create(
             name='S', restaurant=self.restaurant,

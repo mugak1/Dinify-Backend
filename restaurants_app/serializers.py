@@ -430,7 +430,10 @@ class SerializerPublicGetMenuItem(ModelSerializer):
         )
 
     def get_tags(self, menu_item):
-        tags = menu_item.tags.all().order_by('display_order', 'name')
+        # RestaurantTag.Meta.ordering is ['display_order', 'name'] (display_order
+        # is a non-null default-0 IntegerField), so .all() yields the same order
+        # as an explicit order_by while staying prefetch-friendly on the menu path.
+        tags = menu_item.tags.all()
         return [
             {
                 'id': str(tag.id),
@@ -456,7 +459,18 @@ class SerializerPublicGetMenuItem(ModelSerializer):
     def get_group(self, menu_item):
         if menu_item.section_group is None:
             return None
-        if menu_item.section_group.deleted:
+        policy = self.context.get('menu_policy')
+        if policy is not None:
+            # Public path: suppress a group the diner cannot currently see, so an
+            # item never leaks the id/name of a group the public group list hid
+            # (approved/enabled/available/deleted + its section's schedule).
+            from restaurants_app.controllers.menu_publication import (
+                group_operationally_visible,
+            )
+            if not group_operationally_visible(menu_item.section_group, policy['now']):
+                return None
+        elif menu_item.section_group.deleted:
+            # No policy context (operator management / unit tests): unchanged.
             return None
         return {
             'id': str(menu_item.section_group.pk),
@@ -464,6 +478,34 @@ class SerializerPublicGetMenuItem(ModelSerializer):
         }
 
     def get_extras(self, menu_item):
+        policy = self.context.get('menu_policy')
+        if policy is not None:
+            # Public path: extras come ONLY from the request-scoped safe map
+            # (same restaurant, is_extra, structurally published), filtered by
+            # THIS parent's normalized allowlist — configured order preserved,
+            # deduped, self-reference dropped. No global/cross-tenant query.
+            from restaurants_app.controllers.menu_publication import (
+                normalize_extras_applicable,
+            )
+            extras_map = policy.get('extras_map') or {}
+            parent_id = str(menu_item.id)
+            extras = []
+            for extra_id in normalize_extras_applicable(menu_item.extras_applicable):
+                if extra_id == parent_id:
+                    continue
+                extra = extras_map.get(extra_id)
+                if extra is None:
+                    continue
+                extras.append({
+                    'id': extra.id,
+                    'name': extra.name,
+                    'primary_price': extra.primary_price,
+                    'discount_details': extra.discount_details,
+                })
+            return extras
+
+        # No policy context (operator management / unit tests): unchanged —
+        # publication-only lookup of each configured id.
         applicable_extras = menu_item.extras_applicable
         if not applicable_extras:
             return []
@@ -481,10 +523,6 @@ class SerializerPublicGetMenuItem(ModelSerializer):
             except (ValueError, AttributeError):
                 continue
             try:
-                # Publication gate: an unpublished item referenced in
-                # extras_applicable must not re-enter the anonymous diner
-                # payload. Same predicate the order path enforces for extras, so
-                # what a diner can see matches what they can order.
                 record = MenuItem.objects.values(
                     'id', 'name', 'primary_price', 'discount_details'
                 ).get(
@@ -696,64 +734,124 @@ class SerializerGetFullMenu(ModelSerializer):
             'item_count', 'groups', 'items'
         )
 
+    def _menu_policy(self):
+        # The trusted internal publication context set ONLY by the public
+        # show-menu path. Its presence switches this serializer (and the nested
+        # item serializer) into strict diner mode at a single captured time; its
+        # absence (operator management, direct unit tests) preserves the prior
+        # behaviour exactly.
+        return self.context.get('menu_policy')
+
+    def _visible_items(self, section):
+        # Public path only. The section's items filtered by the canonical READ
+        # policy at the captured time, computed ONCE per section (get_item_count
+        # reuses it — no duplicate query). Items are fetched with their group
+        # (select_related) and tags (prefetch); the parent section is cached onto
+        # each item and its group so the policy predicate never re-queries a
+        # section/group row. Structural + available is filtered in the query;
+        # item_visible_in_menu adds the group-visibility + schedule check.
+        cache = getattr(self, '_visible_items_cache', None)
+        if cache is None:
+            cache = self._visible_items_cache = {}
+        if section.pk in cache:
+            return cache[section.pk]
+        from restaurants_app.controllers.menu_publication import (
+            item_visible_in_menu,
+        )
+        now = self._menu_policy()['now']
+        visible = []
+        for item in (
+            MenuItem.objects
+            .filter(
+                section=section, approved=True, enabled=True,
+                deleted=False, available=True,
+            )
+            .select_related('section_group')
+            .prefetch_related('tags')
+        ):
+            item.section = section
+            if item.section_group is not None:
+                item.section_group.section = section
+            if item_visible_in_menu(item, now):
+                visible.append(item)
+        cache[section.pk] = visible
+        return visible
+
     def get_is_currently_active(self, section):
         from restaurants_app.controllers.utils.schedule_utils import (
             is_section_currently_active
         )
-        return is_section_currently_active(section)
+        policy = self._menu_policy()
+        now = policy['now'] if policy is not None else None
+        return is_section_currently_active(section, now=now)
 
     def get_groups(self, section):
-        # Publication is unconditional: an unapproved or disabled group never
-        # reaches a diner. There is no caller-controlled bypass.
-        filters = {
-            'section': section,
-            'approved': True,
-            'enabled': True,
-            'deleted': False,
-        }
-        groups = SectionGroup.objects.filter(**filters)
-        return [
-            {
-                'id': str(group.pk),
-                'name': str(group.name)
-            } for group in groups
-        ]
+        policy = self._menu_policy()
+        if policy is None:
+            # No policy context (operator management / unit tests): unchanged.
+            filters = {
+                'section': section,
+                'approved': True,
+                'enabled': True,
+                'deleted': False,
+            }
+            groups = SectionGroup.objects.filter(**filters)
+            return [
+                {'id': str(group.pk), 'name': str(group.name)} for group in groups
+            ]
+        # Public path: only groups the diner can currently see (structural +
+        # available; the parent section is already visible). Cache the section onto
+        # each group so the operational predicate does not re-query it.
+        from restaurants_app.controllers.menu_publication import (
+            group_operationally_visible,
+        )
+        now = policy['now']
+        result = []
+        for group in SectionGroup.objects.filter(section=section):
+            group.section = section
+            if group_operationally_visible(group, now):
+                result.append({'id': str(group.pk), 'name': str(group.name)})
+        return result
 
     def get_items(self, section):
-        # Publication is unconditional: an unapproved or disabled item never
-        # reaches a diner. There is no caller-controlled bypass.
-        filters = {
-            'section': section,
-            'approved': True,
-            'enabled': True,
-            'deleted': False,
-            'available': True
-        }
-        # Hide items whose group is soft-deleted while keeping group-less items.
-        # section_group is nullable, so a dict-key `section_group__deleted=False`
-        # would inner-join and silently drop null-group rows; exclude() is the
-        # null-safe anti-join (a NULL FK never matches deleted=True).
-        items = MenuItem.objects.filter(**filters).exclude(
-            section_group__deleted=True
-        )
+        policy = self._menu_policy()
+        if policy is None:
+            # No policy context (operator management / unit tests): unchanged
+            # null-safe anti-join dropping only soft-deleted groups.
+            filters = {
+                'section': section,
+                'approved': True,
+                'enabled': True,
+                'deleted': False,
+                'available': True
+            }
+            items = MenuItem.objects.filter(**filters).exclude(
+                section_group__deleted=True
+            )
+            return SerializerPublicGetMenuItem(items, many=True).data
+        # Public path: serialize the policy-filtered items; forward the context so
+        # the nested item serializer's get_group/get_extras stay strict and use the
+        # request-scoped safe extras map.
         return SerializerPublicGetMenuItem(
-            items, many=True
+            self._visible_items(section), many=True, context=self.context,
         ).data
 
     def get_item_count(self, section):
-        # Publication is unconditional (mirrors get_items); no bypass.
-        filters = {
-            'section': section,
-            'approved': True,
-            'enabled': True,
-            'deleted': False,
-            'available': True
-        }
-        # Null-safe anti-join (see get_items): drop items under a soft-deleted
-        # group without excluding group-less items via an inner join.
-        return MenuItem.objects.filter(**filters).exclude(
-            section_group__deleted=True
-        ).count()
+        policy = self._menu_policy()
+        if policy is None:
+            # No policy context (operator management / unit tests): unchanged.
+            filters = {
+                'section': section,
+                'approved': True,
+                'enabled': True,
+                'deleted': False,
+                'available': True
+            }
+            return MenuItem.objects.filter(**filters).exclude(
+                section_group__deleted=True
+            ).count()
+        # Public path: derive from the already-filtered collection (no re-query).
+        return len(self._visible_items(section))
 
 
 class SerializerPutDiningArea(ModelSerializer):
@@ -885,15 +983,41 @@ class UpsellConfigSerializer(ModelSerializer):
 
     def get_items(self, config):
         # Manager order (listing_position) is preserved by using the related
-        # manager directly. Publication (approved/enabled/deleted) is filtered
-        # for the public payload; availability/stock stay passthrough data.
+        # manager directly. availability/stock stay passthrough data (the diner
+        # UI applies hide_out_of_stock).
         upsell_items = config.upsell_items.all()
         if self.context.get('public_only'):
-            upsell_items = upsell_items.filter(
-                menu_item__approved=True,
-                menu_item__enabled=True,
-                menu_item__deleted=False,
-            )
+            policy = self.context.get('menu_policy')
+            if policy is not None:
+                # Public menu path: an upsell inherits the SAME publication policy
+                # as a top-level diner item — same restaurant, structurally
+                # published, under a currently-visible section AND group (schedule
+                # + availability) at the captured time. So an item hidden from the
+                # main menu by its section/group/schedule cannot re-enter via
+                # upsell. The item's OWN available/in_stock are intentionally NOT
+                # gated here (they remain passthrough for hide_out_of_stock),
+                # mirroring item_orderable.
+                from restaurants_app.controllers.menu_publication import (
+                    item_orderable,
+                )
+                now = policy['now']
+                restaurant_id = str(policy['restaurant_id'])
+                upsell_items = [
+                    ui for ui in upsell_items.select_related(
+                        'menu_item__section', 'menu_item__section_group',
+                    )
+                    if ui.menu_item is not None
+                    and str(ui.menu_item.section.restaurant_id) == restaurant_id
+                    and item_orderable(ui.menu_item, now)
+                ]
+            else:
+                # public_only without a menu_policy (e.g. a direct-serializer unit
+                # test): keep the item-level publication filter (unchanged).
+                upsell_items = upsell_items.filter(
+                    menu_item__approved=True,
+                    menu_item__enabled=True,
+                    menu_item__deleted=False,
+                )
         return UpsellItemSerializer(
             upsell_items, many=True, context=self.context
         ).data
