@@ -193,6 +193,17 @@ class TenantRelationMetaTest(SimpleTestCase):
         problems = validate_inventory()
         self.assertEqual(problems, [], "\n" + "\n".join(problems))
 
+    def test_production_write_surface_is_explicit_and_classified(self):
+        # (F) Every manifest production write serializer imports, uses an explicit
+        # field list (no __all__/exclude), is absent from the (empty) __all__ debt
+        # set, and has every writable relation classified with — for SameTenant —
+        # a resolvable verified_by two-tenant test.
+        from dinify_backend.tenancy.write_surface_policy import (
+            write_surface_violations,
+        )
+        violations = write_surface_violations()
+        self.assertEqual(violations, [], "\n" + "\n".join(violations))
+
 
 class GuardrailNegativeTests(SimpleTestCase):
     """Prove the guardrail catches what it claims (each case must be caught)."""

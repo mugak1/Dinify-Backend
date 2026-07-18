@@ -55,19 +55,26 @@ def create_restaurant(data: dict, auth_info: dict) -> dict:
     record = SerializerPutRestaurant(data=record_data)
     if record.is_valid():
         with transaction.atomic():
-            record.save()
+            # owner + created_by are server-derived (read_only) — set them via the
+            # trusted save() channel from the resolved actor, never client input.
+            record.save(
+                owner_id=data['owner'],
+                created_by_id=auth_info['user_id'],
+            )
 
             # save the restaurant-employee mapping
             employee = {
                 'user': record.data['owner'],
-                'restaurant': record.data['id'],
                 'roles': [ROLES.get('RESTAURANT_OWNER')],
-                'created_by': auth_info['user_id']
             }
 
             employee_record = SerializerPutRestaurantEmployee(data=employee)
             if employee_record.is_valid():
-                employee_record.save()
+                # restaurant + created_by are server-derived (read_only).
+                employee_record.save(
+                    restaurant_id=record.data['id'],
+                    created_by_id=auth_info['user_id'],
+                )
 
                 # seed the default role-permission grid for the new restaurant
                 ensure_role_permissions(record.data['id'])
@@ -191,19 +198,25 @@ def admin_register_restaurant(data: dict, auth_info: dict) -> dict:
 
     if record.is_valid():
         with transaction.atomic():
-            record.save()
+            # owner + created_by are server-derived (read_only) — set via save().
+            record.save(
+                owner_id=user_creation_result['user_id'],
+                created_by_id=auth_info['user_id'],
+            )
 
             # save the restaurant-employee mapping
             employee = {
                 'user': user_creation_result['user_id'],
-                'restaurant': record.data['id'],
                 'roles': [ROLES.get('RESTAURANT_OWNER')],
-                'created_by': auth_info['user_id']
             }
 
             employee_record = SerializerPutRestaurantEmployee(data=employee)
             if employee_record.is_valid():
-                employee_record.save()
+                # restaurant + created_by are server-derived (read_only).
+                employee_record.save(
+                    restaurant_id=record.data['id'],
+                    created_by_id=auth_info['user_id'],
+                )
 
                 # seed the default role-permission grid for the new restaurant
                 ensure_role_permissions(record.data['id'])

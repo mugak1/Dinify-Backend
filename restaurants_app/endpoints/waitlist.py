@@ -77,12 +77,11 @@ class WaitlistEndpoint(APIView):
                 {'status': 404, 'message': 'Restaurant not found'}, status=404
             )
 
-        serializer = SerializerPutWaitlistEntry(data={
-            **post_data,
-            'created_by': str(request.user.id),
-        })
+        serializer = SerializerPutWaitlistEntry(data=post_data)
         if serializer.is_valid():
-            entry = serializer.save()
+            # created_by is server-derived (read_only) — set via the trusted
+            # save() channel from the resolved actor, never client input.
+            entry = serializer.save(created_by=request.user)
             data = SerializerGetWaitlistEntry(entry).data
             return Response({
                 'status': 201,

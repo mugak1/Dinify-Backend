@@ -65,7 +65,6 @@ def create_employee(
 
         employee_data = {
             'user': create_user['user_id'],
-            'restaurant': str(restaurant.id),
             'roles': roles
         }
         secretary_args = {
@@ -77,7 +76,11 @@ def create_employee(
             'user': creator,
             'msg_type': 'new-restaurant-employee',
             'success_message': 'The employee has been created successfully. Access credentials have been sent to the user email.',  # noqa
-            'error_message': 'The employee could not be created. Please try again later.'
+            'error_message': 'The employee could not be created. Please try again later.',
+            # restaurant is server-derived (read_only): pass the resolved,
+            # already-gated Restaurant object via the trusted server_values channel
+            # so an employee can never be created against a spoofed restaurant.
+            'server_values': {'restaurant': restaurant},
         }
         response = Secretary(secretary_args).create()
         if response['status'] != 200:

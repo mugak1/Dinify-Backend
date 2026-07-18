@@ -61,6 +61,11 @@ class ReviewWriteSerializer(serializers.ModelSerializer):
             'service_rating', 'value_rating', 'cleanliness_rating', 'comment',
             'tags',
         ]
+        # `order` is SERVER-DERIVED: submit_review resolves the order scoped to
+        # the diner's table SESSION (knowing the order UUID is not authority) and
+        # passes it via save(order=...). read_only here so it can never be spoofed
+        # from the request body; the controller enforces one-review-per-order.
+        read_only_fields = ['order']
 
     def validate_tags(self, value):
         """

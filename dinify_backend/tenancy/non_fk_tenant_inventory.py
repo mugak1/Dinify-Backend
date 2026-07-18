@@ -100,13 +100,19 @@ INVENTORY = [
     },
     {
         "identifier": "MenuItem tag_ids (write payload) -> MenuItemTag",
-        "location": "restaurants_app/models.py:405 (sync_tag_links); edit_information.py:69",
+        "location": "restaurants_app/serializers.py:419-458 (SerializerPutMenuItem.validate); models.py:405 (sync_tag_links)",
         "kind": "uuid-array",
         "owner": "menu",
         "follow_up_domain": "menu-config",
-        "status": "pending-audit",
-        "note": "tag_ids is a write-only payload key, not a model field; tenant scoping "
-                "is enforced in SerializerPutMenuItem.validate(), NOT by sync_tag_links.",
+        "status": "remediated",
+        "note": "tag_ids is a typed write-only UUID-list field on the now-explicit "
+                "SerializerPutMenuItem (no longer fields='__all__'). validate() "
+                "resolves the restaurant from the item's section and rejects any id "
+                "that is not a non-deleted RestaurantTag of THAT restaurant; "
+                "sync_tag_links only ever runs on the validated set. Cross-tenant "
+                "denial is proven by the two-tenant tests in "
+                "restaurants_app.tests.MenuFkTenantBoundaryTests "
+                "(test_foreign_tag_ids_still_rejected / test_same_tenant_tag_ids_still_succeeds).",
     },
     # --- denormalised restaurant ids / snapshots -------------------------------
     {
@@ -120,14 +126,22 @@ INVENTORY = [
                 "on the source item belonging to the order's restaurant.",
     },
     {
-        "identifier": "restaurant_id injected into menu-create payloads",
-        "location": "restaurants_app/endpoints/restaurant_setup.py:597",
+        "identifier": "restaurant bound on menu-create via server_values",
+        "location": "restaurants_app/endpoints/restaurant_setup.py:606-627",
         "kind": "denormalised-id",
         "owner": "restaurants",
         "follow_up_domain": "restaurant-setup",
-        "status": "pending-audit",
-        "note": "Server-derived from the section, then written into the payload; safe "
-                "only because it is re-derived, not taken from the client.",
+        "status": "remediated",
+        "note": "The create path no longer injects a `restaurant` key into the "
+                "request-shaped payload. MenuSection.restaurant is read_only on "
+                "SerializerPutMenuSection and is bound server-side through the "
+                "Secretary server_values channel (restaurant_id) from the "
+                "already-gated resource; for sectiongroups/menuitems the restaurant "
+                "is re-derived from the (SameTenant-classified) section, never taken "
+                "from the client. A client `restaurant` key can no longer widen "
+                "scope. Create-gate denial is proven by "
+                "MenuFkTenantBoundaryTests.test_create_menuitem_with_foreign_section_denied "
+                "and test_create_sectiongroup_with_foreign_section_denied.",
     },
     {
         "identifier": "DinifyTransaction restaurant_id from request body",
@@ -180,14 +194,20 @@ INVENTORY = [
     # --- dynamic model dispatch ------------------------------------------------
     {
         "identifier": "Secretary self.serializer.Meta.model.objects.<op>",
-        "location": "misc_app/controllers/secretary.py:104,277,343,505",
+        "location": "misc_app/controllers/secretary.py:299 (read() list path); update()/delete() now scope-bound",
         "kind": "dynamic-dispatch",
         "owner": "platform",
         "follow_up_domain": "crud-engine",
-        "status": "pending-audit",
-        "note": "The central CRUD engine resolves the model from whatever serializer it "
-                "is handed and applies NO tenant scoping — callers (e.g. restaurant_setup "
-                "check_permission / scope_list_filter) must gate.",
+        "status": "remediated",
+        "note": "update()/delete() resolve the row ONLY through a caller-supplied, "
+                "server-built instance_queryset under select_for_update — the "
+                "unrestricted Model.objects.get fallback was REMOVED and a missing "
+                "scope fails closed (500), a foreign/unknown id is a non-enumerating "
+                "404. create() writes created_by and any parent FK through the trusted "
+                "server_values channel (all read_only on the migrated write "
+                "serializers), never from request data. The only remaining dynamic "
+                ".objects use is read() (a LIST path the endpoint scopes via "
+                "scope_list_filter). Proven by misc_app.tests.SecretaryScopeBoundTests.",
     },
     {
         "identifier": "get_detail serializer.Meta.model.objects.get(id=...)",

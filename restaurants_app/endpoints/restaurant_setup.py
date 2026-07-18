@@ -353,6 +353,29 @@ def scope_list_filter(user, config_detail, orm_filter):
     return orm_filter, True
 
 
+def build_scoped_instance_queryset(user, config_detail, model):
+    """
+    Build the authoritative, server-scoped queryset that Secretary.update /
+    Secretary.delete resolve the target row through (locked). Reuses the same
+    module gate + ownership path as the GET list scoping: a dinify admin is
+    unrestricted (all rows — an explicit decision); otherwise only rows whose
+    owning restaurant grants the caller the resource's module. A resource with no
+    module or no known ownership path yields ``none()`` (fail closed). This — not
+    the request body — is the object universe the mutation may touch, so a spoofed
+    ``restaurant`` / foreign id can neither widen scope nor move a row.
+    """
+    module = _RECORD_MODULE.get(config_detail)
+    if module is None:
+        return model.objects.none()
+    allowed = get_module_restaurant_ids(user, module)
+    if allowed is None:  # dinify admin — unrestricted (explicit)
+        return model.objects.all()
+    path = LIST_RESTAURANT_PATH.get(config_detail)
+    if path is None:
+        return model.objects.none()
+    return model.objects.filter(**{f'{path}__in': list(allowed)})
+
+
 class RestaurantSetupEndpoint(APIView):
     """
     the endpoint for restaurant setups
@@ -580,7 +603,11 @@ class RestaurantSetupEndpoint(APIView):
         except Exception as error:
             logger.debug("Error converting data to dict: %s", error)
 
-        # attempt to auto approve menu items if a first time approval has already been done
+        # Server-owned create values travel the TRUSTED Secretary server_values
+        # channel (never the request payload): the auto-publication defaults
+        # (approval UI removed) and the parent restaurant resolved from the
+        # authorized resource — all read_only on the write serializers.
+        server_values = {}
         if config_detail in ['menusections', 'sectiongroups', 'menuitems']:
             restaurant_id = None
             if config_detail == 'menusections':
@@ -592,10 +619,12 @@ class RestaurantSetupEndpoint(APIView):
                 restaurant_id = str(restaurant_id)
 
             if restaurant_id is not None:
-                restaurant = Restaurant.objects.get(id=restaurant_id)
-                post_data['approved'] = True   # Always approve — approval UI removed in redesign
-                post_data['enabled'] = True    # Always enable — approval UI removed in redesign
-            post_data['restaurant_id'] = restaurant_id
+                server_values['approved'] = True   # Always approve — approval UI removed
+                server_values['enabled'] = True    # Always enable — approval UI removed
+                # MenuSection.restaurant is server-derived — bind it from the
+                # authorized resource, never the client payload (inventory #8).
+                if config_detail == 'menusections':
+                    server_values['restaurant_id'] = restaurant_id
 
             # Default new sections to the end of the rail so they don't
             # collide with existing sections at listing_position=0.
@@ -664,6 +693,7 @@ class RestaurantSetupEndpoint(APIView):
             'user': request.user,
             'msg_type': msg_types.get(config_detail),
             'non_unique_handling': RECORDS_NON_UNIQUE_COMBINATIONS.get(config_detail),
+            'server_values': server_values,
         }
         response = Secretary(secretary_args).create()
 
@@ -1105,7 +1135,14 @@ class RestaurantSetupEndpoint(APIView):
             'user_id': auth['id'],
             'username': auth['username'],
             'success_message': success_message,
-            'error_message': error_message
+            'error_message': error_message,
+            'user': request.user,
+            # Authoritative server-built scope: Secretary resolves + locks the row
+            # ONLY within the restaurants where this actor may access the resource's
+            # module. A spoofed restaurant / foreign id cannot widen or move it.
+            'instance_queryset': build_scoped_instance_queryset(
+                request.user, config_detail, serializer.Meta.model,
+            ),
         }
 
         response = Secretary(secretary_args).update()
@@ -1203,6 +1240,12 @@ class RestaurantSetupEndpoint(APIView):
             'data': data,
             'user_id': auth['id'],
             'username': auth['username'],
+            'user': request.user,
+            # Authoritative server-built scope (see the update path): Secretary
+            # resolves + locks the row only within the actor's permitted universe.
+            'instance_queryset': build_scoped_instance_queryset(
+                request.user, config_detail, serializer[config_detail].Meta.model,
+            ),
         }
         # The menu-item soft-delete runs the referenced-extra lifecycle guard inside
         # SerializerPutMenuItem.validate(), which takes a select_for_update row lock —

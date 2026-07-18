@@ -278,9 +278,6 @@ class ConOrder:
             actual_cost = discounted_cost
 
             extra = {
-                'order': order_id,
-                'parent_item': order_item_id,
-                'item': str(extra_item.id),
                 'item_name': extra_item.name,
                 'quantity': quantity,
 
@@ -326,7 +323,14 @@ class ConOrder:
             extra_record = SerializerPutOrderItem(data=extra)
             if not extra_record.is_valid():
                 raise Exception(extra_record.errors)
-            extra_record.save()
+            # order / parent_item / item are server-resolved, tenant-scoped
+            # objects passed through the trusted save() channel — never client
+            # input (the fields are read_only on the serializer).
+            extra_record.save(
+                order_id=order_id,
+                parent_item_id=order_item_id,
+                item=extra_item,
+            )
 
         return {'status': 200}
 
@@ -420,8 +424,6 @@ class ConOrder:
         cost_of_options = unit_cost_of_options * item['quantity']
 
         item_data = {
-            'order': order_id,
-            'item': str(menu_item.id),
             'item_name': menu_item.name,
             'quantity': item['quantity'],
 
@@ -473,7 +475,10 @@ class ConOrder:
         item_record = SerializerPutOrderItem(data=item_data)
         if not item_record.is_valid():
             raise Exception(item_record.errors)
-        item_record.save()
+        # order + item are server-resolved, tenant-scoped objects passed through
+        # the trusted save() channel — never accepted as client input (the fields
+        # are read_only on the serializer).
+        item_record.save(order=order, item=menu_item)
 
         # process the item extras — capture and propagate: a rejected extra
         # rejects the whole item so the service chokepoint (_create_order)

@@ -25,7 +25,16 @@ isolation is proven." It is not. Read this before trusting the ratchet.
    `all_fields_policy.py`. A **new write** serializer on `__all__` fails — it must use
    an explicit field list (else future model fields, including tenant FKs, become
    client-writable with no review). Read/archival `__all__` is allowed (serialize-out
-   only) and enumerated there.
+   only) and enumerated there. As of TENANT-ISO-PR5 the write-`__all__` debt set
+   (`WRITE_ALL_FIELDS_DEBT`) is **empty and frozen** — no production write serializer
+   uses `__all__`/`exclude`.
+6. **The named production write surfaces are explicit and fully classified.** A
+   manifest (`write_surface_policy.py`) names every load-bearing input serializer
+   that is validated + `.save()`d; its meta-test asserts each imports, avoids
+   `__all__`/`exclude`, is absent from every debt set, and has **no writable relation
+   left in `baseline.txt`** — every writable relation is classified in
+   `Meta.tenant_relations` and each `SameTenant` carries a resolvable `verified_by`.
+   This complements (does not replace) global AST discovery.
 4. **The baseline may only shrink — on PRs and on pushes.** `check_ratchet` compares
    the committed baseline against the base and fails on any addition. The base is
    event-aware (`resolve_base_ref`): a PR compares against its target branch; a
@@ -48,11 +57,16 @@ isolation is proven." It is not. Read this before trusting the ratchet.
 
 ## What remains BASELINED (legacy debt)
 
-- `baseline.txt` currently holds **117** writable relations that are *not yet
-  classified*. This is **not a count of confirmed vulnerabilities** — most are
-  read-only `SerArc*` archival serializers or write serializers already runtime-scoped
-  in `validate()`. The count only measures classification progress. Entries are
-  removed as domains migrate; the file may only shrink.
+- `baseline.txt` currently holds **61** writable relations that are *not yet
+  classified*. After TENANT-ISO-PR5 these are **read/archival-only**: every
+  PRODUCTION WRITE serializer has been drained from the baseline — its writable
+  relations are now either classified in `Meta.tenant_relations` (with a resolvable
+  `verified_by`) or made `read_only` (server-derived, written through the trusted
+  channel). What remains is the read (`SerializerGet*`) and archival (`SerArc*`,
+  serialize-out to Mongo via `archive_record`) legacy debt, which never `.save()`s
+  client input. This is **not a count of confirmed vulnerabilities** — it only
+  measures classification progress. Entries are removed as domains migrate; the
+  file may only shrink.
 
 ## What remains OUTSIDE discovery
 

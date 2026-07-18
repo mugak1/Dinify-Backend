@@ -87,7 +87,9 @@ EDIT_INFORMATION = {
         {'key': 'tags', 'label': 'tags', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'has_qr', 'label': 'has QR', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'qr_mode', 'label': 'QR mode', 'type': 'char', 'min_length': 5, 'text_presentation': str.lower},  # noqa
-        {'key': 'qr_regenerated_at', 'label': 'QR regenerated at', 'type': 'char', 'min_length': 5, 'text_presentation': None},  # noqa
+        # qr_regenerated_at is server-owned (regenerate-qr endpoint) — deliberately
+        # NOT editable via the generic table PUT, so an ordinary edit cannot forge a
+        # rotation timestamp. It is also read_only on SerializerPutTable.
         {'key': 'floor_x', 'label': 'floor X', 'type': 'float', 'min_length': 1, 'text_presentation': None},  # noqa
         {'key': 'floor_y', 'label': 'floor Y', 'type': 'float', 'min_length': 1, 'text_presentation': None},  # noqa
         {'key': 'floor_width', 'label': 'floor width', 'type': 'float', 'min_length': 1, 'text_presentation': None},  # noqa
