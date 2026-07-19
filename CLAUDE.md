@@ -586,6 +586,19 @@ the catch-all `<str:config_detail>/` route.
   `block_review`, `block_review_reason`, `review_blocked_by`) were REMOVED
   (orders_app migration `0034`). `reviews_app.Review` is now the system of
   record for order reviews — do not reintroduce inline review columns
+- `OrderItem.selected_modifiers` is CANONICALIZED before it is compared, priced,
+  snapshotted or persisted. `ConOrder.normalize_selected_modifiers` (via
+  `normalize_order_items`, called in-transaction inside `_create_order` after the
+  table lock and before the daily counter) validates a diner's
+  `{group_id: [choice_id]}` against the ordered item's OWN `options`, de-dupes
+  choices, orders groups/choices by menu-definition order, omits empty groups, and
+  enforces group min/max on the unique set. That ONE canonical value drives
+  `find_existing_order_item` line-merge (which keys on an order-/duplicate-independent
+  signature, so it also tolerates legacy pre-canonical rows),
+  `determine_effective_unit_price`, `construct_option_items`/`modifiers_snapshot` and
+  persistence — so `{"g":["c","c"]}` and `{"g":["c"]}` are the same order line and never
+  persist duplicates. No data migration was needed (new writes are canonical; comparison
+  tolerates legacy duplicates). Do NOT persist or compare raw client `selected_modifiers`
 
 ## Key Serializer Notes
 - `SerializerPublicGetMenuItem` includes `section` and `in_stock` —

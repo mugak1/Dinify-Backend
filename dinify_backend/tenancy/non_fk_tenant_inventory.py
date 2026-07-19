@@ -59,17 +59,23 @@ INVENTORY = [
         "owner": "menu",
         "follow_up_domain": "menu-config",
         "status": "remediated",
-        "note": "Grouped-modifier group/choice UUIDs live in a JSONField; no FK. A "
-                "diner selection is validated ENTIRELY against the ordered item's OWN "
-                "options at build time: ConOrder.determine_effective_unit_price "
-                "(orders_app/controllers/con_orders.py) rejects any group/choice id "
-                "not in menu_item.options and recomputes additional cost server-side, "
-                "and TENANT-ISO-PR6A added the in-transaction min/max completeness "
-                "re-check + duplicate-choice de-dup in _create_order / "
-                "check_options_requirements. Because the parent item is itself "
-                "tenant-scoped (validate_order_selections restaurant-scopes it), a "
-                "modifier id can only ever reference the parent's own tenant-local "
-                "options — never another tenant's. Proven by "
+        "note": "Grouped-modifier group/choice ids live in a JSONField; no FK. A diner "
+                "selection is canonicalized ENTIRELY against the ordered item's OWN "
+                "options in ONE place — ConOrder.normalize_selected_modifiers "
+                "(orders_app/controllers/con_orders.py), run in-transaction via "
+                "ConOrder.normalize_order_items inside _create_order after the table "
+                "lock and before any row is written. It rejects any group/choice id not "
+                "in menu_item.options, de-dupes choices, orders by menu definition, and "
+                "enforces group min/max on the unique set; that single canonical value "
+                "then drives validity, min/max, existing-line comparison, server-side "
+                "pricing (ConOrder.determine_effective_unit_price stays fail-closed as "
+                "defence in depth), snapshots and persistence. Because the parent item "
+                "is itself tenant-scoped (validate_order_selections restaurant-scopes "
+                "it), a modifier id can only ever reference the parent's own "
+                "tenant-local options — never another tenant's. This does NOT assert "
+                "operator-authored options JSON is write-time schema-governed — only "
+                "that a diner selection is fully validated against it at order time. "
+                "Proven by "
                 "tests_tenant_isolation_closure.ModifierIntegrityClosureTests.",
     },
     {
@@ -108,14 +114,20 @@ INVENTORY = [
         "owner": "orders",
         "follow_up_domain": "ordering",
         "status": "remediated",
-        "note": "Persisted diner selections keyed {group_id: [choice_id]}. They are "
-                "written only after being validated against the ordered item's own "
-                "tenant-scoped options (see MenuItem.options entry above) and the "
-                "stored value / modifiers_snapshot derive solely from that validated "
-                "parent in ConOrder.add_order_item — never from unvalidated client "
-                "input. Proven by "
+        "note": "Persisted diner selections keyed {group_id: [choice_id]}. The stored "
+                "value is the CANONICAL normalized form produced by "
+                "ConOrder.normalize_selected_modifiers (run in-transaction via "
+                "normalize_order_items inside _create_order): validated against the "
+                "ordered item's own tenant-scoped options, choices de-duped, "
+                "groups/choices ordered by menu definition, empty groups omitted. That "
+                "same canonical value drives min/max counting, existing-line comparison "
+                "(ConOrder.find_existing_order_item keys on an order-/duplicate-"
+                "independent signature, tolerating any legacy pre-canonical row), "
+                "server-side pricing, the modifiers_snapshot and persistence — never "
+                "raw client JSON. Proven by "
                 "tests_tenant_isolation_closure.ModifierIntegrityClosureTests "
-                "(valid/priced, foreign group/choice rejected, snapshot derivation).",
+                "(persisted-once, charged-once, ordering-determinism, merge/regression, "
+                "legacy-tolerance, staff parity, idempotent replay).",
     },
     # --- raw UUID arrays -------------------------------------------------------
     {
@@ -163,12 +175,17 @@ INVENTORY = [
                 "the tenant-scoped parent fetched by "
                 "ConOrder.add_order_item as "
                 "MenuItem.objects.get(pk=item['item'], section__restaurant=order.restaurant) "
-                "— a foreign/unknown id is a 400, never a snapshot. The snapshot is "
-                "denormalised tenant-LOCAL data (names/tags/modifier strings), not a "
-                "selector that can bind another tenant. Snapshot-from-validated-parent "
-                "is exercised by "
-                "tests_tenant_isolation_closure.ModifierIntegrityClosureTests."
-                "test_modifier_snapshot_derives_from_validated_parent.",
+                "— a foreign/unknown id is a 400, never a snapshot. The modifier "
+                "strings in modifiers_snapshot are built from the CANONICAL normalized "
+                "selection (choices de-duped, menu-definition order) in "
+                "ConOrder.construct_option_items, so a duplicate choice appears once. "
+                "The snapshot is denormalised tenant-LOCAL data (names/tags/modifier "
+                "strings), not a selector that can bind another tenant. "
+                "Snapshot-from-validated-parent and canonical modifier snapshot are "
+                "exercised by "
+                "tests_tenant_isolation_closure.ModifierIntegrityClosureTests "
+                "(test_modifier_snapshot_derives_from_validated_parent, "
+                "test_duplicate_choice_name_once_in_snapshot).",
     },
     {
         "identifier": "restaurant bound on menu-create via server_values",
