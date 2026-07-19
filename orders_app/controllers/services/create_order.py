@@ -159,25 +159,28 @@ def _create_order(*, restaurant, table, items,
             if selection.get('status') != 200:
                 raise OrderItemRejected(selection)
 
-            # 2c. AUTHORITATIVE modifier (option) selection limits, re-checked in
+            # 2c. AUTHORITATIVE modifier (option) normalization + limit recheck, in
             #     the SAME transaction as the publication/extras validation above.
             #     validate_order_selections covers tenant + publication + extra
-            #     applicability + extras min/max, but modifier group min/max lived
-            #     only in the endpoint preflight (ConOrder.check_options_requirements)
-            #     and was NOT re-run here — a menu-options change while a request
-            #     waited on the table lock could slip a stale selection through, and
-            #     any future caller that skipped the endpoint bypassed it entirely.
-            #     Re-running it here (new submissions only — a replay returns at
-            #     step 1 before this point, exactly like publication) closes that
-            #     window. Modifier group/choice VALIDITY and additional cost are
-            #     already re-derived server-side per line in
-            #     ConOrder.determine_effective_unit_price; this adds the min/max
-            #     completeness leg so all three modifier invariants are enforced
-            #     in-transaction. Applies to every caller (staff included), matching
-            #     the preflight, which does not gate this on created_by.
-            options_check = ConOrder.check_options_requirements(items)
-            if options_check.get('status') != 200:
-                raise OrderItemRejected(options_check)
+            #     applicability + extras min/max; this canonicalizes each line's
+            #     selected_modifiers against the ordered item's OWN server-side options
+            #     (group/choice validity, duplicate-choice de-dup, deterministic
+            #     menu-definition ordering, and group min/max on the unique set) and
+            #     REPLACES the local `items` with the normalized copy. That one
+            #     canonical value then drives existing-line comparison, pricing,
+            #     snapshots and persistence downstream — closing the gap where the
+            #     original client selected_modifiers was still used verbatim for
+            #     find_existing_order_item comparison and OrderItem.selected_modifiers
+            #     persistence. Group/choice VALIDITY and additional cost are also
+            #     re-derived server-side per line in
+            #     ConOrder.determine_effective_unit_price (defense in depth). Runs for
+            #     new submissions only — a replay returns at step 1 before this point,
+            #     exactly like publication — and applies to every caller (staff
+            #     included; it is NOT gated on created_by).
+            normalization = ConOrder.normalize_order_items(restaurant, items)
+            if normalization.get('status') != 200:
+                raise OrderItemRejected(normalization)
+            items = normalization['items']
 
             # 3. daily numbering (local business date)
             order_date = timezone.localdate()

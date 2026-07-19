@@ -49,6 +49,7 @@ from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
 from finance_app.models import DinifyTransaction
 from reviews_app.models import Review
 from orders_app.controllers.services.create_order import _create_order
+from orders_app.controllers.con_orders import ConOrder
 from restaurants_app.controllers.diner_capability import (
     issue_qr_credential, issue_table_session,
     resolve_qr_credential, resolve_table_session,
@@ -675,6 +676,47 @@ class MenuPublicationCheckoutClosureTests(ClosureFixtureBase):
 @tag('tenant_closure')
 class ModifierIntegrityClosureTests(ClosureFixtureBase):
 
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # A group requiring TWO distinct choices — proves a duplicate id cannot
+        # satisfy a higher minimum (task canonicalization proof 4).
+        cls.item_min2 = MenuItem.objects.create(
+            name='A Min2 Modifier Item', section=cls.section_a,
+            primary_price=Decimal('1000'), approved=True, enabled=True,
+            available=True, in_stock=True,
+            options={
+                'hasModifiers': True,
+                'groups': [
+                    {'id': 'g2', 'name': 'Pick two',
+                     'minSelections': 2, 'maxSelections': 3,
+                     'choices': [
+                         {'id': 'x1', 'name': 'Alpha', 'additionalCost': 0},
+                         {'id': 'x2', 'name': 'Bravo', 'additionalCost': 0},
+                         {'id': 'x3', 'name': 'Delta', 'additionalCost': 0},
+                     ]},
+                ],
+            },
+        )
+        # A sold-out item that ALSO has a modifier group — proves the zero-and-flag
+        # reconciliation is unchanged when canonical modifiers are present (proof 24).
+        cls.item_soldout_mod = MenuItem.objects.create(
+            name='A Sold Out Modifier Item', section=cls.section_a,
+            primary_price=Decimal('1000'), approved=True, enabled=True,
+            available=True, in_stock=False,
+            options={
+                'hasModifiers': True,
+                'groups': [
+                    {'id': 'g-req', 'name': 'Base',
+                     'minSelections': 1, 'maxSelections': 1,
+                     'choices': [
+                         {'id': 'c1', 'name': 'Plain', 'additionalCost': 0},
+                         {'id': 'c2', 'name': 'Deluxe', 'additionalCost': 200},
+                     ]},
+                ],
+            },
+        )
+
     def _service_create(self, selected_modifiers):
         """Call the internal service DIRECTLY (bypassing the endpoint preflight)
         to prove the in-transaction modifier re-check is load-bearing."""
@@ -683,6 +725,23 @@ class ModifierIntegrityClosureTests(ClosureFixtureBase):
             items=[{'item': str(self.item_mod.id), 'quantity': 1,
                     'selected_modifiers': selected_modifiers}],
             customer=None, created_by=None,
+        )
+
+    def _line(self, item, quantity=1, **extra):
+        """Build one request line for a given MenuItem."""
+        line = {'item': str(item.id), 'quantity': quantity}
+        line.update(extra)
+        return line
+
+    def _create(self, items, created_by=None, client_order_id=None,
+                restaurant=None, table=None):
+        """Direct internal-service order create with an explicit items list — the
+        load-bearing path with the endpoint preflight bypassed."""
+        return _create_order(
+            restaurant=restaurant or self.restaurant_a,
+            table=table or self.table_a,
+            items=items, customer=None, created_by=created_by,
+            client_order_id=client_order_id,
         )
 
     def test_in_tx_min_violation_creates_no_order(self):
@@ -737,6 +796,240 @@ class ModifierIntegrityClosureTests(ClosureFixtureBase):
         line = OrderItem.objects.get(order=order, item=self.item_mod)
         self.assertEqual(line.item_name_snapshot, self.item_mod.name)
         self.assertTrue(any('Deluxe' in s for s in (line.modifiers_snapshot or [])))
+
+    # -- canonical persistence (proofs 1-3) --------------------------------
+    def test_duplicate_choice_persisted_once(self):
+        result = self._create([self._line(
+            self.item_mod,
+            selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1', 'm1', 'm1']})])
+        self.assertEqual(result.get('status'), 200, result)
+        line = OrderItem.objects.get(order=result['order'], item=self.item_mod)
+        self.assertEqual(line.selected_modifiers, {'g-req': ['c1'], 'g-multi': ['m1']})
+
+    def test_duplicate_choice_charged_once(self):
+        result = self._create([self._line(
+            self.item_mod,
+            selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1', 'm1', 'm1']})])
+        self.assertEqual(result.get('status'), 200, result)
+        line = OrderItem.objects.get(order=result['order'], item=self.item_mod)
+        self.assertEqual(line.discounted_price, Decimal('1500'))   # 1000 + m1 500 once
+        self.assertEqual(line.cost_of_options, Decimal('500'))
+
+    def test_duplicate_choice_name_once_in_snapshot(self):
+        result = self._create([self._line(
+            self.item_mod,
+            selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1', 'm1']})])
+        self.assertEqual(result.get('status'), 200, result)
+        line = OrderItem.objects.get(order=result['order'], item=self.item_mod)
+        addon = [s for s in line.modifiers_snapshot if s.startswith('Add-ons')]
+        self.assertEqual(addon, ['Add-ons: Cheese'])   # not 'Cheese, Cheese'
+
+    # -- duplicates cannot game min/max (proofs 4-5) -----------------------
+    def test_duplicate_cannot_satisfy_higher_min(self):
+        before = Order.objects.count()
+        result = self._create([self._line(
+            self.item_min2, selected_modifiers={'g2': ['x1', 'x1']})])  # dedupes to 1 < 2
+        self.assertNotEqual(result.get('status'), 200)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_duplicate_cannot_breach_max(self):
+        # g-multi max 2: three raw ids but two DISTINCT stays within max, stored deduped.
+        result = self._create([self._line(
+            self.item_mod,
+            selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1', 'm1', 'm2']})])
+        self.assertEqual(result.get('status'), 200, result)
+        line = OrderItem.objects.get(order=result['order'], item=self.item_mod)
+        self.assertEqual(line.selected_modifiers, {'g-req': ['c1'], 'g-multi': ['m1', 'm2']})
+
+    # -- controlled 400s (proofs 6-10) -------------------------------------
+    def test_unknown_group_endpoint_400(self):
+        before = Order.objects.count()
+        resp = self._initiate(
+            {'items': [self._line(self.item_mod,
+                                  selected_modifiers={'g-x': ['c1'], 'g-req': ['c1']})]},
+            session=self._sess(self.table_a),
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_unknown_choice_endpoint_400(self):
+        before = Order.objects.count()
+        resp = self._initiate(
+            {'items': [self._line(self.item_mod, selected_modifiers={'g-req': ['nope']})]},
+            session=self._sess(self.table_a),
+        )
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_non_dict_selected_modifiers_400(self):
+        before = Order.objects.count()
+        result = self._create([self._line(self.item_mod, selected_modifiers='not-a-dict')])
+        self.assertNotEqual(result.get('status'), 200)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_non_list_group_selection_400(self):
+        before = Order.objects.count()
+        result = self._create([self._line(self.item_mod, selected_modifiers={'g-req': 'c1'})])
+        self.assertNotEqual(result.get('status'), 200)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_modifiers_on_non_modifier_item_rejected(self):
+        before = Order.objects.count()
+        result = self._create([self._line(self.item_a, selected_modifiers={'g-x': ['y']})])
+        self.assertNotEqual(result.get('status'), 200)
+        self.assertEqual(Order.objects.count(), before)
+
+    # -- empty / omitted (proof 11) ----------------------------------------
+    def test_omitted_modifiers_on_plain_item_ok(self):
+        result = self._create([self._line(self.item_a)])
+        self.assertEqual(result.get('status'), 200, result)
+        line = OrderItem.objects.get(order=result['order'], item=self.item_a)
+        self.assertEqual(line.selected_modifiers, {})
+
+    # -- ordering determinism (proofs 12-13) -------------------------------
+    def test_group_key_ordering_does_not_change_persisted_state(self):
+        result = self._create([self._line(
+            self.item_mod, selected_modifiers={'g-multi': ['m1'], 'g-req': ['c1']})])
+        self.assertEqual(result.get('status'), 200, result)
+        line = OrderItem.objects.get(order=result['order'], item=self.item_mod)
+        self.assertEqual(line.selected_modifiers, {'g-req': ['c1'], 'g-multi': ['m1']})
+
+    def test_choice_ordering_normalized_to_menu_definition(self):
+        # Deterministic ordering = MenuItem.options definition order (m1 before m2),
+        # regardless of the order the client submitted them in.
+        result = self._create([self._line(
+            self.item_mod, selected_modifiers={'g-req': ['c1'], 'g-multi': ['m2', 'm1']})])
+        self.assertEqual(result.get('status'), 200, result)
+        line = OrderItem.objects.get(order=result['order'], item=self.item_mod)
+        self.assertEqual(line.selected_modifiers['g-multi'], ['m1', 'm2'])
+
+    # -- line identity (proofs 14-16) --------------------------------------
+    def test_duplicate_and_canonical_merge_to_one_line(self):
+        # Explicit end-to-end regression: same item submitted twice — once with
+        # duplicate ids, once canonical with reordered keys — merges into ONE line.
+        result = self._create([
+            self._line(self.item_mod,
+                       selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1', 'm1', 'm1']}),
+            self._line(self.item_mod,
+                       selected_modifiers={'g-multi': ['m1'], 'g-req': ['c1']}),
+        ])
+        self.assertEqual(result.get('status'), 200, result)
+        lines = OrderItem.objects.filter(order=result['order'], parent_item__isnull=True)
+        self.assertEqual(lines.count(), 1)
+        line = lines.first()
+        self.assertEqual(line.quantity, 2)
+        self.assertEqual(line.selected_modifiers, {'g-req': ['c1'], 'g-multi': ['m1']})
+        self.assertEqual(line.discounted_price, Decimal('1500'))   # 1000 + m1 500
+        self.assertEqual(line.modifiers_snapshot.count('Add-ons: Cheese'), 1)
+
+    def test_different_selections_stay_separate_lines(self):
+        result = self._create([
+            self._line(self.item_mod, selected_modifiers={'g-req': ['c1']}),
+            self._line(self.item_mod, selected_modifiers={'g-req': ['c2']}),
+        ])
+        self.assertEqual(result.get('status'), 200, result)
+        lines = OrderItem.objects.filter(order=result['order'], parent_item__isnull=True)
+        self.assertEqual(lines.count(), 2)
+
+    def test_legacy_duplicate_representation_tolerated(self):
+        # A pre-canonical row (duplicate ids) still MERGES with a canonical incoming
+        # selection — the tolerance that lets us ship WITHOUT a data migration.
+        order = self._make_order(self.restaurant_a, self.table_a,
+                                 status=OrderStatus_Initiated)
+        legacy = OrderItem.objects.create(
+            order=order, item=self.item_mod, quantity=1,
+            unit_price=Decimal('1000'), discounted_price=Decimal('1500'),
+            cost_of_options=Decimal('500'), unit_cost_of_options=Decimal('500'),
+            total_cost=Decimal('1000'), discounted_cost=Decimal('1500'),
+            savings=Decimal('0'), actual_cost=Decimal('1500'),
+            selected_modifiers={'g-req': ['c1', 'c1'], 'g-multi': ['m1', 'm1']},
+        )
+        merged = ConOrder.add_order_item(
+            item=self._line(self.item_mod,
+                            selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1']}),
+            order_id=str(order.id),
+        )
+        self.assertEqual(merged.get('status'), 200, merged)
+        self.assertEqual(
+            OrderItem.objects.filter(order=order, item=self.item_mod).count(), 1)
+        legacy.refresh_from_db()
+        self.assertEqual(legacy.quantity, 2)
+
+    # -- service-level enforcement + rejection unwinds (proofs 17-20) ------
+    def test_direct_service_call_normalizes(self):
+        result = self._service_create({'g-req': ['c1'], 'g-multi': ['m1', 'm1', 'm1']})
+        self.assertEqual(result.get('status'), 200, result)
+        line = OrderItem.objects.get(order=result['order'], item=self.item_mod)
+        self.assertEqual(line.selected_modifiers, {'g-req': ['c1'], 'g-multi': ['m1']})
+
+    def test_rejected_selection_leaves_no_order_item_or_counter(self):
+        orders_before = Order.objects.count()
+        items_before = OrderItem.objects.count()
+        counters_before = RestaurantDailyOrderCounter.objects.count()
+        result = self._create([self._line(
+            self.item_mod, selected_modifiers={'g-req': ['c1', 'c2']})])  # 2 > max 1
+        self.assertNotEqual(result.get('status'), 200)
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), items_before)
+        self.assertEqual(RestaurantDailyOrderCounter.objects.count(), counters_before)
+
+    # -- staff parity (proof 21) -------------------------------------------
+    def test_staff_order_normalized_and_validated(self):
+        ok = self._create(
+            [self._line(self.item_mod,
+                        selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1', 'm1']})],
+            created_by=self.owner_a,
+        )
+        self.assertEqual(ok.get('status'), 200, ok)
+        line = OrderItem.objects.get(order=ok['order'], item=self.item_mod)
+        self.assertEqual(line.selected_modifiers, {'g-req': ['c1'], 'g-multi': ['m1']})
+        before = Order.objects.count()
+        bad = self._create(
+            [self._line(self.item_mod, selected_modifiers={'g-req': ['nope']})],
+            created_by=self.owner_a, table=self.table_a2,
+        )
+        self.assertNotEqual(bad.get('status'), 200)
+        self.assertEqual(Order.objects.count(), before)
+
+    # -- idempotency first (proof 22) --------------------------------------
+    def test_idempotent_replay_skips_modifier_revalidation(self):
+        coid = str(uuid4())
+        first = self._create(
+            [self._line(self.item_mod, selected_modifiers={'g-req': ['c1']})],
+            client_order_id=coid,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        self.assertFalse(first.get('idempotent'))
+        # Replay with a now-INVALID selection: must still return the original order
+        # WITHOUT re-validating current modifier config.
+        replay = self._create(
+            [self._line(self.item_mod, selected_modifiers={'g-bogus': ['x']})],
+            client_order_id=coid,
+        )
+        self.assertEqual(replay.get('status'), 200, replay)
+        self.assertTrue(replay.get('idempotent'))
+        self.assertEqual(replay['order'].id, first['order'].id)
+
+    # -- sold-out + extras unchanged (proofs 24-25) ------------------------
+    def test_soldout_reconciliation_unchanged_with_modifiers(self):
+        result = self._create([self._line(
+            self.item_soldout_mod, selected_modifiers={'g-req': ['c1']})])
+        self.assertEqual(result.get('status'), 200, result)
+        line = OrderItem.objects.get(order=result['order'], item=self.item_soldout_mod)
+        self.assertEqual(line.quantity, 0)
+        self.assertEqual(line.status, 'unavailable')
+        self.assertFalse(line.available)
+        self.assertEqual(line.selected_modifiers, {'g-req': ['c1']})
+
+    def test_extras_unchanged_alongside_modifiers(self):
+        result = self._create([self._line(self.parent_a, extras=[str(self.extra_a.id)])])
+        self.assertEqual(result.get('status'), 200, result)
+        parent = OrderItem.objects.get(
+            order=result['order'], item=self.parent_a, parent_item__isnull=True)
+        children = OrderItem.objects.filter(order=result['order'], parent_item=parent)
+        self.assertEqual(children.count(), 1)
+        self.assertEqual(children.first().item_id, self.extra_a.id)
+        self.assertEqual(parent.selected_modifiers, {})
 
 
 # =============================================================================

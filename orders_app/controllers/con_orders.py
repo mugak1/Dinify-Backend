@@ -33,33 +33,181 @@ logger = logging.getLogger(__name__)
 
 class ConOrder:
     @staticmethod
-    def check_options_requirements(order_items: list) -> dict:
+    def normalize_selected_modifiers(menu_item: MenuItem, selected_modifiers) -> dict:
+        """
+        Validate + canonicalize a diner's grouped modifier selection against the
+        ordered MenuItem's OWN server-side ``options`` definition.
+
+        Returns ``{'status': 200, 'selected_modifiers': <canonical dict>}`` or a
+        controlled ``{'status': 400, 'message': ...}`` envelope. It NEVER raises —
+        malformed client input OR malformed operator ``options`` fail closed with a
+        400 rather than a 500.
+
+        Canonical representation: ``{group_id: [choice_id, ...]}`` where the groups
+        and the choices within each group follow the item's OWN ``options`` definition
+        order, duplicate choices are collapsed, and empty optional groups are omitted.
+        This single representation is the sole input to min/max counting, existing-line
+        comparison, server-side pricing, snapshot construction and persistence — so a
+        selection compares/prices/persists identically regardless of the order or
+        duplication the client happened to send. Costs are NEVER read from client
+        input (only ids are handled here; pricing stays in
+        ``determine_effective_unit_price``). Because the parsed selection is already a
+        dict, duplicate group identifiers cannot exist (JSON parsing collapses them).
+        """
+        if selected_modifiers is None:
+            selected_modifiers = {}
+        if not isinstance(selected_modifiers, dict):
+            return {
+                'status': 400,
+                'message': f'Invalid modifier selections for item, {menu_item.name}'
+            }
+
+        modifier_data = menu_item.options if isinstance(menu_item.options, dict) else {}
+        has_modifiers = bool(modifier_data.get('hasModifiers'))
+        raw_groups = modifier_data.get('groups') if has_modifiers else []
+        if not isinstance(raw_groups, list):
+            raw_groups = []
+        groups = [g for g in raw_groups if isinstance(g, dict) and g.get('id') is not None]
+        groups_by_id = {}
+        for group in groups:
+            groups_by_id.setdefault(group.get('id'), group)
+
+        # Item with no active modifiers: an absent/null/empty selection normalizes to
+        # {}, but a non-empty modifier object is rejected rather than silently
+        # persisted as unrelated client data.
+        if not has_modifiers or not groups_by_id:
+            if not selected_modifiers:
+                return {'status': 200, 'selected_modifiers': {}}
+            return {
+                'status': 400,
+                'message': f'Item {menu_item.name} does not accept modifier selections.'
+            }
+
+        # Reject any submitted group that is not defined on THIS item's options.
+        for submitted_group_id in selected_modifiers.keys():
+            if submitted_group_id not in groups_by_id:
+                return {
+                    'status': 400,
+                    'message': f'Invalid modifier group for item, {menu_item.name}'
+                }
+
+        canonical = {}
+        # Iterate the item's OWN group order so (a) a minimum is enforced even for an
+        # omitted required group and (b) the canonical dict is deterministically
+        # ordered by menu definition.
+        for group in groups:
+            group_id = group.get('id')
+            submitted = selected_modifiers.get(group_id, [])
+            if group_id in selected_modifiers and not isinstance(submitted, list):
+                return {
+                    'status': 400,
+                    'message': f'Invalid modifier selection for item, {menu_item.name}'
+                }
+            choice_ids = submitted if isinstance(submitted, list) else []
+
+            raw_choices = group.get('choices')
+            if not isinstance(raw_choices, list):
+                raw_choices = []
+            defined_choice_ids = [
+                choice.get('id') for choice in raw_choices
+                if isinstance(choice, dict) and choice.get('id') is not None
+            ]
+            defined_choice_set = set(defined_choice_ids)
+
+            # De-dupe submitted choices (dict.fromkeys preserves first-seen order only
+            # to detect unknowns; the persisted order below is menu-definition order).
+            unique_submitted = list(dict.fromkeys(choice_ids))
+            for choice_id in unique_submitted:
+                if choice_id not in defined_choice_set:
+                    return {
+                        'status': 400,
+                        'message': f'Invalid modifier choice for item, {menu_item.name}'
+                    }
+            submitted_set = set(unique_submitted)
+            canonical_choice_ids = [
+                choice_id for choice_id in defined_choice_ids
+                if choice_id in submitted_set
+            ]
+
+            # min/max enforced on the UNIQUE selected count (0 for an omitted group).
+            min_selections = group.get('minSelections') or 0
+            max_selections = group.get('maxSelections') or 0
+            selected_count = len(canonical_choice_ids)
+            if selected_count < min_selections:
+                return {
+                    'status': 400,
+                    'message': f"Item {menu_item.name} requires at least {min_selections} option selections."
+                }
+            if max_selections and selected_count > max_selections:
+                return {
+                    'status': 400,
+                    'message': f"Item {menu_item.name} allows a maximum of {max_selections} option selections."
+                }
+
+            # Omit empty optional groups from the canonical form.
+            if canonical_choice_ids:
+                canonical[group_id] = canonical_choice_ids
+
+        return {'status': 200, 'selected_modifiers': canonical}
+
+    @staticmethod
+    def normalize_order_items(restaurant, order_items: list) -> dict:
+        """
+        Batch counterpart of ``normalize_selected_modifiers`` for the authoritative
+        order-creation transaction. For each line it resolves the MenuItem
+        tenant-scoped, canonicalizes its ``selected_modifiers``, and returns a NEW list
+        of shallow-copied items whose ``selected_modifiers`` is the canonical form —
+        the caller's original items are never mutated in place.
+
+        Returns ``{'status': 200, 'items': [<normalized copies>]}`` or the first
+        controlled ``{'status': 400, 'message': ...}`` rejection.
+        """
+        normalized = []
         for item in order_items:
-            menu_item = MenuItem.objects.get(pk=item['item'])
-            modifier_data = menu_item.options or {}
-            if not modifier_data.get('hasModifiers'):
-                continue
+            if not isinstance(item, dict) or item.get('item') is None:
+                return {
+                    'status': 400,
+                    'message': 'Each order item must include an item and a quantity.'
+                }
+            try:
+                menu_item = MenuItem.objects.get(
+                    pk=item['item'], section__restaurant=restaurant
+                )
+            except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+                return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}
 
-            selected_modifiers = item.get('selected_modifiers') or {}
-            for group in modifier_data.get('groups', []):
-                group_id = group.get('id')
-                min_selections = group.get('minSelections', 0)
-                max_selections = group.get('maxSelections', 0)
-                # Count DISTINCT choices only: a duplicate choice id in a group's
-                # list must not inflate the count (padding a min or tripping a max).
-                # dict.fromkeys de-dupes while preserving order.
-                selected_count = len(dict.fromkeys(selected_modifiers.get(group_id, []) or []))
+            result = ConOrder.normalize_selected_modifiers(
+                menu_item, item.get('selected_modifiers')
+            )
+            if result.get('status') != 200:
+                return result
 
-                if selected_count < min_selections:
-                    return {
-                        'status': 400,
-                        'message': f"Item {menu_item.name} requires at least {min_selections} option selections."
-                    }
-                if max_selections and selected_count > max_selections:
-                    return {
-                        'status': 400,
-                        'message': f"Item {menu_item.name} allows a maximum of {max_selections} option selections."
-                    }
+            new_item = dict(item)
+            new_item['selected_modifiers'] = result['selected_modifiers']
+            normalized.append(new_item)
+        return {'status': 200, 'items': normalized}
+
+    @staticmethod
+    def check_options_requirements(order_items: list) -> dict:
+        """
+        Non-authoritative endpoint preflight gate: validate every line's modifier
+        selection against its item's options. Delegates to the single canonical
+        normalizer (``normalize_selected_modifiers``) so group/choice validity, de-dup
+        and min/max have exactly ONE implementation. The authoritative in-transaction
+        transform is ``normalize_order_items`` (which additionally captures the
+        canonical value); this wrapper only surfaces an early rejection before the
+        atomic block and persists nothing.
+        """
+        for item in order_items:
+            try:
+                menu_item = MenuItem.objects.get(pk=item['item'])
+            except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+                return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}
+            result = ConOrder.normalize_selected_modifiers(
+                menu_item, item.get('selected_modifiers')
+            )
+            if result.get('status') != 200:
+                return result
         return {'status': 200}
 
     @staticmethod
@@ -166,7 +314,15 @@ class ConOrder:
             existing_item_extras = OrderItem.objects.filter(parent_item=existing_item)
             incoming_modifiers = item.get('selected_modifiers') or {}
             existing_modifiers = existing_item.selected_modifiers or {}
-            has_modifiers = bool(incoming_modifiers)
+            # Compare on the order- and duplicate-independent SEMANTIC key, not raw
+            # client JSON. The incoming selection is already canonical (normalized in
+            # the order-creation transaction); keying the existing row the same way
+            # keeps line-merge tolerant of any harmless legacy pre-canonical row
+            # (duplicate/reordered choice ids) while genuinely different selections
+            # stay distinct.
+            incoming_key = ConOrder._modifier_compare_key(incoming_modifiers)
+            existing_key = ConOrder._modifier_compare_key(existing_modifiers)
+            has_modifiers = bool(incoming_key)
 
             # no extras and no options
             if existing_item_extras.count() == 0 and not has_modifiers:
@@ -183,7 +339,7 @@ class ConOrder:
 
             # only options but no extras
             if existing_item_extras.count() == 0 and has_modifiers:
-                if existing_modifiers == incoming_modifiers:
+                if existing_key == incoming_key:
                     return existing_item
                 return None
 
@@ -193,10 +349,27 @@ class ConOrder:
                     for extra in existing_item_extras:
                         if str(extra.item.pk) not in extras:
                             return None
-                    if existing_modifiers == incoming_modifiers:
+                    if existing_key == incoming_key:
                         return existing_item
 
         return None
+
+    @staticmethod
+    def _modifier_compare_key(selected_modifiers) -> dict:
+        """
+        Build an order- and duplicate-independent semantic key for comparing two
+        modifier selections when merging order lines. Incoming selections are already
+        canonical (normalized in the order-creation transaction); keying the EXISTING
+        row the same way keeps line-merge tolerant of any harmless legacy
+        pre-canonical row (duplicate/reordered choice ids) so it still merges with the
+        canonical incoming selection, while genuinely different selections stay
+        distinct. Empty groups are dropped so ``{"g": []}`` compares as no selection.
+        """
+        return {
+            str(group_id): frozenset(str(choice_id) for choice_id in (choice_ids or []))
+            for group_id, choice_ids in (selected_modifiers or {}).items()
+            if choice_ids
+        }
 
     @staticmethod
     def determine_effective_unit_price(menu_item: MenuItem, selected_modifiers: dict = None) -> dict:
