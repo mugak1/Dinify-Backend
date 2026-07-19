@@ -159,6 +159,26 @@ def _create_order(*, restaurant, table, items,
             if selection.get('status') != 200:
                 raise OrderItemRejected(selection)
 
+            # 2c. AUTHORITATIVE modifier (option) selection limits, re-checked in
+            #     the SAME transaction as the publication/extras validation above.
+            #     validate_order_selections covers tenant + publication + extra
+            #     applicability + extras min/max, but modifier group min/max lived
+            #     only in the endpoint preflight (ConOrder.check_options_requirements)
+            #     and was NOT re-run here — a menu-options change while a request
+            #     waited on the table lock could slip a stale selection through, and
+            #     any future caller that skipped the endpoint bypassed it entirely.
+            #     Re-running it here (new submissions only — a replay returns at
+            #     step 1 before this point, exactly like publication) closes that
+            #     window. Modifier group/choice VALIDITY and additional cost are
+            #     already re-derived server-side per line in
+            #     ConOrder.determine_effective_unit_price; this adds the min/max
+            #     completeness leg so all three modifier invariants are enforced
+            #     in-transaction. Applies to every caller (staff included), matching
+            #     the preflight, which does not gate this on created_by.
+            options_check = ConOrder.check_options_requirements(items)
+            if options_check.get('status') != 200:
+                raise OrderItemRejected(options_check)
+
             # 3. daily numbering (local business date)
             order_date = timezone.localdate()
             order_number = allocate_daily_order_number(restaurant, order_date)

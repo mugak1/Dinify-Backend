@@ -45,7 +45,10 @@ class ConOrder:
                 group_id = group.get('id')
                 min_selections = group.get('minSelections', 0)
                 max_selections = group.get('maxSelections', 0)
-                selected_count = len(selected_modifiers.get(group_id, []) or [])
+                # Count DISTINCT choices only: a duplicate choice id in a group's
+                # list must not inflate the count (padding a min or tripping a max).
+                # dict.fromkeys de-dupes while preserving order.
+                selected_count = len(dict.fromkeys(selected_modifiers.get(group_id, []) or []))
 
                 if selected_count < min_selections:
                     return {
@@ -95,7 +98,11 @@ class ConOrder:
             if group is None or not choice_ids:
                 continue
             choices_by_id = {c.get('id'): c for c in group.get('choices', [])}
-            resolved_choices = [choices_by_id[cid] for cid in choice_ids if cid in choices_by_id]
+            # De-dupe so the displayed option cost matches the charged cost
+            # (determine_effective_unit_price also charges each choice once).
+            resolved_choices = [
+                choices_by_id[cid] for cid in dict.fromkeys(choice_ids) if cid in choices_by_id
+            ]
             names_of_choices = ', '.join(c.get('name', '') for c in resolved_choices)
             cost_total = float(sum(
                 Decimal(str(c.get('additionalCost', 0))) for c in resolved_choices
@@ -215,7 +222,11 @@ class ConOrder:
                         'message': f'Invalid modifier group for item, {menu_item.name}'
                     }
                 choices_by_id = {c.get('id'): c for c in group.get('choices', [])}
-                for choice_id in choice_ids or []:
+                # De-dupe choice ids per group (dict.fromkeys preserves order):
+                # a repeated choice must be validated and charged exactly ONCE, so
+                # a duplicate cannot inflate the per-unit cost. A foreign/unknown id
+                # is still caught because it survives de-duping into the set below.
+                for choice_id in dict.fromkeys(choice_ids or []):
                     choice = choices_by_id.get(choice_id)
                     if choice is None:
                         return {

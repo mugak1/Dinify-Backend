@@ -11,11 +11,16 @@
 #   2. makemigrations --check --dry-run  (fails if a model changed w/o a migration)
 #   3. money-field guard                 (fails if a monetary model field is a FloatField)
 #   4. tenant-relation ratchet           (fails if the tenant-relation baseline grew)
-#   5. test                              (full Django test suite)
+#   5. tenant-isolation closure gate     (focused adversarial boundary suite, fail-fast)
+#   6. test                              (full Django test suite)
 #
-# test_settings falls back to SQLite in-memory, so no local Postgres is
-# needed. Export DATABASE_ENGINE/NAME/USER/... to run against another database,
-# or VERIFY_SETTINGS=<module> to use a different settings module.
+# test_settings falls back to SQLite in-memory for the fast checks, but the
+# tenant-isolation closure gate and the full suite include relationship-integrity
+# tests that use JSONField `__contains` (Table/MenuItem deletion_blockers), which
+# SQLite does NOT support — run those against Postgres (as CI does). Export
+# DATABASE_ENGINE=django.db.backends.postgresql plus DATABASE_NAME/USER/PASSWORD/
+# HOST/PORT to point at a local Postgres, or VERIFY_SETTINGS=<module> for another
+# settings module. CI (Postgres 15) is the authoritative full-suite gate.
 #
 # This is a manual, post-change pre-PR gate — run it after making changes and
 # paste the output into the PR. It is intentionally NOT wired as a hook.
@@ -61,6 +66,17 @@ run_step "django check"         "${PYTHON}" -m django check --settings="${SETTIN
 run_step "makemigrations check" "${PYTHON}" -m django makemigrations --check --dry-run --settings="${SETTINGS}"
 run_step "money-field guard"    "${PYTHON}" scripts/check_money_fields.py
 run_step "tenant-relation ratchet" "${PYTHON}" scripts/check_tenant_relation_ratchet.py
+# Fail-fast adversarial tenant-isolation closure gate (TENANT-ISO-PR6A): the
+# focused boundary matrix + the deep capability / relationship / concurrency /
+# write-surface suites it builds on. Runs BEFORE the full suite so a broken
+# tenant boundary fails early. This does NOT replace the full suite below.
+run_step "tenant-isolation closure gate" "${PYTHON}" -m django test \
+  dinify_backend.tenancy.tests_tenant_isolation_closure \
+  restaurants_app.tests_diner_capability \
+  restaurants_app.tests_menu_relationship_integrity \
+  restaurants_app.tests_menu_relationships_concurrency \
+  restaurants_app.tests_write_surface_tenancy \
+  --settings="${SETTINGS}" --verbosity=2
 run_step "tests"                "${PYTHON}" -m django test --settings="${SETTINGS}" --verbosity=2
 
 echo

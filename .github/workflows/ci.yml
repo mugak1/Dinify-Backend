@@ -71,6 +71,28 @@ jobs:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: python scripts/check_tenant_relation_ratchet.py
 
+      - name: Tenant-isolation closure gate
+        # Fail-fast adversarial boundary suite (TENANT-ISO-PR6A): the focused
+        # closure matrix + the deep capability / relationship / concurrency /
+        # write-surface suites it builds on. Runs BEFORE the full suite so a
+        # broken restaurant/diner tenant boundary fails early with a clear
+        # signal. Mirrors scripts/verify.sh; does NOT replace "Run tests" below.
+        env:
+          DATABASE_ENGINE: django.db.backends.postgresql
+          DATABASE_NAME: test_dinify
+          DATABASE_USER: test_user
+          DATABASE_PASSWORD: test_password
+          DATABASE_HOST: localhost
+          DATABASE_PORT: 5432
+        run: |
+          python -m django test \
+            dinify_backend.tenancy.tests_tenant_isolation_closure \
+            restaurants_app.tests_diner_capability \
+            restaurants_app.tests_menu_relationship_integrity \
+            restaurants_app.tests_menu_relationships_concurrency \
+            restaurants_app.tests_write_surface_tenancy \
+            --settings=dinify_backend.test_settings --verbosity=2
+
       - name: Run tests
         env:
           DATABASE_ENGINE: django.db.backends.postgresql
