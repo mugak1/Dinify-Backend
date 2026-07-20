@@ -69,6 +69,11 @@ mongo_mock.COL_YO_RESPONSES = 'yo_responses'
 
 from dinify_backend.settings import *  # noqa: F401,F403,E402
 
+# The suite must NEVER touch SMTP: locmem stores sends in django.core.mail.outbox.
+# (Before this, tests nominally ran the real smtp backend and were saved only by
+# fail_silently=True — which send_email no longer uses.)
+EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
+
 # Use whatever DATABASE_* env vars are active.  In CI this is PostgreSQL
 # (set by the workflow); locally it falls back to the SQLite defaults above.
 DATABASES = {

@@ -263,6 +263,9 @@ EMAIL_HOST_USER = config('EMAIL_ACCOUNT')
 EMAIL_PORT = config('EMAIL_PORT')  # 587 for TLS or 465 for SSL
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 EMAIL_USE_TLS = True
+# Cap SMTP connection/send time so a hung mail server can never hang a
+# synchronous caller (Django's SMTP backend passes this to smtplib).
+EMAIL_TIMEOUT = config('EMAIL_TIMEOUT', default=10, cast=int)
 
 
 LOGGING = {

@@ -1,0 +1,104 @@
+"""
+The ONE Yo Uganda SMS sender.
+
+Consolidates the two byte-similar implementations that used to live in
+``Messenger.send_sms`` and ``payment_integrations_app.YoIntegration.send_sms``
+(the latter is deleted). Everything SMS goes through here so the gateway
+contract is enforced in exactly one place:
+
+- The gateway reports outcomes INSIDE HTTP 200 bodies, urlencoded.
+  ``ybs_autocreate_status=OK`` is the ONLY success signal — HTTP 200 is NOT
+  success. Per-destination states arrive in ``ybs_autocreate_message`` as
+  ``<msisdn>:<STATE>`` (verified live 2026-07-20).
+- Parameters travel via ``requests`` ``params`` (never f-string interpolation),
+  so an ``&`` or ``#`` inside a message cannot corrupt the request.
+- One retry on ``requests.RequestException`` only — a transport blip may
+  deserve a second attempt; a non-2xx or a parsed gateway failure is a
+  definitive answer and is never retried.
+- Failure logs include the HTTP status and the body truncated to 300 chars.
+  Failure paths only: bodies contain msisdns, and the pre-existing error log
+  already named the destination, so this adds no new exposure class.
+"""
+import logging
+import time
+from urllib.parse import parse_qs
+
+import requests
+from decouple import config
+
+logger = logging.getLogger(__name__)
+
+YO_SMS_URL = 'http://smgw1.yo.co.ug:9100/sendsms'
+DEFAULT_TIMEOUT = 10  # seconds
+RETRY_BACKOFF_SECONDS = 0.5
+
+
+def send_sms(
+    message: str,
+    msisdn: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    bypass_env_gate: bool = False,
+    capture: dict = None,
+) -> bool:
+    """Send one SMS through the Yo gateway. Returns the TRUTH.
+
+    True  = the gateway accepted the message (``ybs_autocreate_status=OK``),
+            or sending is not applicable in this environment (ENV gate below).
+    False = transport failure after one retry, non-2xx, or a parsed gateway
+            failure.
+
+    ``bypass_env_gate`` exists ONLY for the ``send_test_sms`` management
+    command, which verifies gateway credentials BEFORE an ENV change and so
+    cannot be gated by the flag it exists to test. ``capture``, when a dict,
+    receives the raw exchange (``status_code``/``body``) for that command's
+    human-readable report — production callers never pass it.
+    """
+    env = config('ENV', default='dev')
+    if not bypass_env_gate and env not in ['prod', 'test']:
+        # "True" here means "not applicable in this environment" — dev logins
+        # depend on this short-circuit staying a success.
+        logger.info("SMS skipped: ENV=%s", env)
+        return True
+
+    params = {
+        'ybsacctno': config('YO_SMS_ACCOUNT_NO'),
+        'password': config('YO_SMS_PASSWORD'),
+        'origin': 'Dinify',
+        'sms_content': message,
+        'destinations': msisdn,
+        'nostore': 0,
+    }
+
+    response = None
+    for attempt in (1, 2):  # exactly one retry, transport errors only
+        try:
+            response = requests.get(YO_SMS_URL, params=params, timeout=timeout)
+            break
+        except requests.RequestException as exc:
+            logger.error("SMS send failed to %s (attempt %d): %s", msisdn, attempt, exc)
+            if attempt == 1:
+                time.sleep(RETRY_BACKOFF_SECONDS)
+    if response is None:
+        return False
+
+    body = response.text or ''
+    if capture is not None:
+        capture['status_code'] = response.status_code
+        capture['body'] = body
+    parsed = parse_qs(body)
+    destination_states = parsed.get('ybs_autocreate_message', [])
+
+    if 200 <= response.status_code < 300 and parsed.get('ybs_autocreate_status') == ['OK']:
+        for state in destination_states:
+            logger.info("SMS accepted by gateway: %s", state)
+        return True
+
+    logger.error(
+        "SMS gateway rejected send to %s: HTTP %s ybs_autocreate_status=%s body=%.300s",
+        msisdn,
+        response.status_code,
+        (parsed.get('ybs_autocreate_status') or ['<missing>'])[0],
+        body,
+    )
+    return False

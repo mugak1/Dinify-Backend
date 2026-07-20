@@ -172,6 +172,15 @@ def login(
                 'data': data
             }
 
+        # Fail CLOSED. Without this explicit return, a make_otp failure would
+        # fall through to the token branch below and hand a privileged user a
+        # session with NO OTP — the exact opposite of the gate above.
+        logger.error("login [%s]: OTP delivery failed — refusing token", username)
+        return {
+            'status': 500,
+            'message': "We couldn't send your verification code. Please try again."
+        }
+
     logger.info("login [%s]: complete (no otp), total %.3fs", username, time.monotonic() - t_start)
     return {
         'status': 200,

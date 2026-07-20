@@ -48,7 +48,7 @@ def initiate_password_reset(username):
 
     return {
         'status': 500,
-        'message': 'Failed to send OTP. Please try again.'
+        'message': "We couldn't send your verification code. Please try again."
     }
 
 
