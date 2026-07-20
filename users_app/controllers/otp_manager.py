@@ -12,8 +12,8 @@ from django.utils import timezone
 from users_app.models import User, UserOtp
 from misc_app.controllers.notifications.notification import Notification
 from rest_framework_simplejwt.tokens import RefreshToken
-from payment_integrations_app.controllers.yo_integrations import YoIntegration
 from notifications_app.controllers.messenger import Messenger
+from notifications_app.controllers.sms import send_sms
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ class OtpManager:
         user: Optional[User] = None,
         msisdn: Optional[str] = None,
         purpose: Optional[str] = None,
-    ) -> True:
+    ) -> bool:
         # Canonicalise the msisdn at OTP creation so the stored UserOtp.msisdn,
         # the dedup filter and the SMS target are all canonical, and verify
         # (which also canonicalises) compares canonical-to-canonical. Defensive:
@@ -56,9 +56,10 @@ class OtpManager:
                 msisdn = normalise_msisdn(msisdn)
             except MsisdnError:
                 logger.warning("make_otp: could not canonicalise msisdn; using raw value")
+        env = config('ENV')
         otp = secrets.randbelow(9000) + 1000
         otp_str = str(otp)
-        if config('ENV') in ['dev']:
+        if env in ['dev']:
             otp_str = '1234'
 
         # Salted HMAC-SHA256 (keyed by the server pepper): the stored hash can
@@ -96,25 +97,62 @@ class OtpManager:
         if msisdn is None:
             msisdn = user.phone_number
 
-        def _send_otp_notifications():
+        def _send_email() -> bool:
+            recipients = [user.email] if user and user.email else []
+            if not recipients:
+                return False
+            otp_email_message = f"{otp_message} OTP is valid for 5 minutes."
+            return bool(Messenger().send_email(
+                to=recipients, cc=[], subject='Dinify OTP',
+                message=otp_email_message
+            ))
+
+        if env == 'dev':
+            # dev: UNCHANGED contract — fire-and-forget thread, immediate True,
+            # zero added latency. The hardcoded '1234' flow (above) plus this
+            # short-circuit are a deliberate pre-launch state; the SMS sender's
+            # own ENV gate makes the threaded send a no-op here anyway.
+            def _send_otp_notifications():
+                try:
+                    send_sms(message=otp_message, msisdn=msisdn)
+                except Exception as error:
+                    logger.error("OTP SMS send error: %s", error)
+                try:
+                    _send_email()
+                except Exception as error:
+                    logger.error("OTP email send error: %s", error)
+
+            threading.Thread(target=_send_otp_notifications, daemon=True).start()
+            return True
+
+        # test/prod: the caller needs the TRUTH, so the SMS goes out
+        # synchronously with a tight cap (3s — never the default 10s) and the
+        # return value reflects what the gateway actually said. This is the
+        # sanctioned "return value needed" exception to the threaded-SMS rule.
+        sms_ok = send_sms(message=otp_message, msisdn=msisdn, timeout=3)
+
+        if env == 'test':
+            if sms_ok:
+                # Email stays a secondary, fire-and-forget channel in test.
+                def _send_email_async():
+                    try:
+                        _send_email()
+                    except Exception as error:
+                        logger.error("OTP email send error: %s", error)
+
+                threading.Thread(target=_send_email_async, daemon=True).start()
+                return True
+            # SMS failed: email is a REAL delivery channel in test — send it
+            # synchronously and report ITS truth, so a user who received the
+            # email can still log in.
             try:
-                YoIntegration().send_sms(to=msisdn, message=otp_message)
-            except Exception as error:
-                logger.error("OTP SMS send error: %s", error)
-            try:
-                if config('ENV') in ['dev', 'test']:
-                    recipients = [user.email] if user and user.email else []
-                    if recipients:
-                        otp_email_message = f"{otp_message} OTP is valid for 5 minutes."
-                        Messenger().send_email(
-                            to=recipients, cc=[], subject='Dinify OTP',
-                            message=otp_email_message
-                        )
+                return _send_email()
             except Exception as error:
                 logger.error("OTP email send error: %s", error)
+                return False
 
-        threading.Thread(target=_send_otp_notifications, daemon=True).start()
-        return True
+        # prod is SMS-only by design — no email channel here.
+        return sms_ok
 
     def verify_otp(
         self,
@@ -305,5 +343,5 @@ class OtpManager:
 
         return {
             'status': 500,
-            'message': 'Failed to send OTP'
+            'message': "We couldn't send your verification code. Please try again."
         }

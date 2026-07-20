@@ -82,8 +82,15 @@ with PostgreSQL on AWS RDS.
   (`consumed_at`), and compares with `hmac.compare_digest`. A per-identifier
   `OtpIdentifierThrottle` (`users_app/throttles.py`) sits alongside the per-IP
   throttle on `verify-otp`/`resend-otp` so brute force can't be spread across
-  IPs. The dev `ENV=dev` `1234` override, threaded SMS dispatch, and MSISDN
-  canonicalisation are all preserved
+  IPs. The dev `ENV=dev` `1234` override and MSISDN canonicalisation are
+  preserved. `make_otp` now returns the delivery TRUTH per environment
+  (failure-visibility PR): dev is unchanged (threaded fire-and-forget,
+  immediate True); test sends SMS synchronously (3s) and falls back to a
+  SYNCHRONOUS email on SMS failure; prod is SMS-only (3s, synchronous). All
+  three callers (`login`, `initiate_password_reset`, `resend_otp`) fail CLOSED
+  on False with a 500 "We couldn't send your verification code" envelope —
+  login previously FELL THROUGH to the token branch on a falsy make_otp, which
+  would have bypassed OTP for privileged users
 - MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
   `+`) is the canonical stored/compared form for `User.phone_number` /
   `User.username`, enforced at every write site (registration, profile update,
@@ -553,9 +560,28 @@ the catch-all `<str:config_detail>/` route.
   because the endpoint needs its return value
 
 ## SMS / Yo Uganda
-- Yo Uganda SMS gateway has DNS resolution issues on the production server
-- All SMS dispatch must use `threading.Thread(daemon=True)` — never
-  called synchronously (30-second timeout will block requests)
+- VERIFIED 2026-07-20 from the EC2 box: `smgw1.yo.co.ug` resolves and connects —
+  the earlier "DNS resolution issues on the production server" note was stale
+  and is retired
+- The gateway reports outcomes INSIDE HTTP 200 bodies (urlencoded):
+  `ybs_autocreate_status=OK` is the ONLY success signal, and per-destination
+  states arrive as `<msisdn>:<STATE>` in `ybs_autocreate_message`. **HTTP 200 is
+  NOT success.** The ONE consolidated sender —
+  `notifications_app/controllers/sms.py::send_sms` (params-dict request, 10s
+  default timeout, one retry on transport errors only, body parsed via
+  `parse_qs`, real bool on every path) — owns this contract; do not hand-roll
+  gateway calls elsewhere. `Messenger.send_sms` is a thin delegate; the old
+  duplicate `payment_integrations_app.YoIntegration` was DELETED
+- SMS dispatch is threaded (`threading.Thread(daemon=True)`) EXCEPT where the
+  return value is needed: `make_otp` in ENV test/prod sends SYNCHRONOUSLY with a
+  tight 3s timeout BY DESIGN so callers can fail closed (the verification
+  checklist's "except where return value needed" carve-out). Never add a
+  synchronous send with the default 10s timeout to a request path
+- ENV='dev' on the server is a DELIBERATE pre-launch state (hardcoded OTP
+  `1234`, no SMS egress), revisited at launch. To verify gateway credentials
+  WITHOUT changing ENV, run `manage.py send_test_sms --to <msisdn>` (or set
+  `TEST_SMS_RECIPIENT`) — it bypasses the ENV gate on purpose and prints the
+  raw gateway response
 
 ## Phone Numbers / MSISDN — CRITICAL
 - The canonical STORED/COMPARED form of `User.phone_number` and `User.username`

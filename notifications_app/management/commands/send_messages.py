@@ -36,19 +36,34 @@ class Command(BaseCommand):
                         print('Restaurant is not yet active')
                         continue
 
-            Messenger().send_email(
+            # Log the truth of each send. Control flow is deliberately
+            # unchanged — the record is still marked sent below regardless
+            # (the sent-flag-on-failure bug is a separate, out-of-scope fix).
+            email_ok = Messenger().send_email(
                 to=x['tos'],
                 cc=x['ccs'],
                 subject=x['subject'],
                 message=x['email']
             )
+            if not email_ok:
+                logger.error(
+                    "Drain: email send FAILED (subject=%r, notification=%s)",
+                    x['subject'], x.get('_id')
+                )
+                self.stderr.write(f"Email send failed: {x['subject']} ({x.get('_id')})")
 
             if x['sms'] is not None:
                 if x['subject'] == 'Dinify Credentials!':
-                    Messenger().send_sms(
+                    sms_ok = Messenger().send_sms(
                         msisdn=x['msisdn'],
                         message=x['sms']
                     )
+                    if not sms_ok:
+                        logger.error(
+                            "Drain: credentials SMS send FAILED (notification=%s)",
+                            x.get('_id')
+                        )
+                        self.stderr.write(f"SMS send failed: {x.get('_id')}")
 
             # update the sent attribute to True
             try:

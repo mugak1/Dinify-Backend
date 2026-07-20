@@ -28,7 +28,7 @@ TEST_MSISDN = '256700000000'
 # Patch targets for external I/O — mirrors the pattern in users_app/tests.py
 # and payment_integrations_app/tests.py. The payment aggregators (Yo momo / DPO)
 # were retired in 8a; only the SMS gateway and OTP mocks remain.
-_PATCH_YO_SMS = 'payment_integrations_app.controllers.yo_integrations.YoIntegration.send_sms'
+_PATCH_YO_SMS = 'users_app.controllers.otp_manager.send_sms'
 _PATCH_MESSENGER_EMAIL = 'notifications_app.controllers.messenger.Messenger.send_email'
 _PATCH_MESSENGER_SMS = 'notifications_app.controllers.messenger.Messenger.send_sms'
 # OTP mocks — resend_otp is mocked to avoid the user=None crash where

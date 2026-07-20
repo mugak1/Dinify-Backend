@@ -7,7 +7,6 @@ from misc_app.controllers.notifications.determine_recipients import determine_re
 from misc_app.controllers.save_to_mongo import save_to_mongodb
 from dinify_backend.mongo_db import COL_NOTIFICATIONS
 from notifications_app.controllers.messenger import Messenger
-# from payment_integrations_app.controllers.yo_integrations import YoIntegration
 
 
 class Notification:
@@ -32,19 +31,28 @@ class Notification:
             'msisdn': recipients['msisdn'],
         }
 
-        save_to_mongodb(collection=COL_NOTIFICATIONS, data=message_data)
+        # Log the truth; control flow unchanged (callers stay fire-and-forget).
+        # A False here means the notification was NEVER queued — without the
+        # drain re-reading it from Mongo, it will not be delivered.
+        stored = save_to_mongodb(collection=COL_NOTIFICATIONS, data=message_data)
+        if not stored:
+            logger.error(
+                "Notification enqueue FAILED (Mongo unavailable): subject=%r was not queued",
+                message_data['subject']
+            )
 
         try:
             # if the sms is not None, send it inline
             if message_data['sms'] is not None:
                 if message_data['subject'] != 'Dinify Credentials!':
-                    Messenger().send_sms(
+                    sent = Messenger().send_sms(
                         msisdn=message_data['msisdn'],
                         message=message_data['sms']
                     )
-                    # YoIntegration().send_sms(
-                    #     to=message_data['msisdn'],
-                    #     message=message_data['sms']
-                    # )
+                    if not sent:
+                        logger.error(
+                            "Inline notification SMS FAILED: subject=%r",
+                            message_data['subject']
+                        )
         except Exception as error:
             logger.error("Error sending sms: %s", error)

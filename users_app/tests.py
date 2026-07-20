@@ -20,7 +20,7 @@ TEST_PHONE = '1234567890'
 TEST_EMAIL = 'test@user.com'
 
 # Patch targets for external I/O used across many tests
-_PATCH_YO_SMS = 'payment_integrations_app.controllers.yo_integrations.YoIntegration.send_sms'
+_PATCH_YO_SMS = 'users_app.controllers.otp_manager.send_sms'
 _PATCH_MESSENGER_EMAIL = 'notifications_app.controllers.messenger.Messenger.send_email'
 _PATCH_NOTIFICATION = 'misc_app.controllers.notifications.notification.Notification.create_notification'
 
@@ -606,3 +606,83 @@ class UserProfileMassAssignmentTests(TestCase):
             'prompt_password_change', 'groups', 'user_permissions',
         ):
             self.assertNotIn(forbidden, ser.validated_data)
+
+
+def _env_config(env):
+    """config() stub for otp_manager: fixes ENV, defaults everything else
+    (OTP_HMAC_PEPPER falls back to its SECRET_KEY derivation)."""
+    def _cfg(key, **kwargs):
+        if key == 'ENV':
+            return env
+        return kwargs.get('default')
+    return _cfg
+
+
+class OtpDeliveryTruthTests(TestCase):
+    """make_otp's per-ENV truth contract, plus the fail-CLOSED caller envelopes.
+
+    dev is UNCHANGED (immediate True, threaded fire-and-forget — the '1234'
+    flow); test falls back to a SYNCHRONOUS email when the SMS fails; prod is
+    SMS-only. The caller tests pin that a delivery failure can never fall
+    through to the token branch.
+    """
+
+    def setUp(self):
+        seed_user()
+        self.user = User.objects.get(phone_number=TEST_PHONE)
+
+    def test_dev_returns_true_immediately_even_when_sender_would_fail(self):
+        with patch('users_app.controllers.otp_manager.config', side_effect=_env_config('dev')), \
+                patch(_PATCH_YO_SMS, return_value=False), \
+                patch(_PATCH_MESSENGER_EMAIL, return_value=False):
+            self.assertTrue(OtpManager().make_otp(user=self.user, purpose='login'))
+
+    def test_prod_gateway_ok_returns_true_with_tight_timeout(self):
+        with patch('users_app.controllers.otp_manager.config', side_effect=_env_config('prod')), \
+                patch(_PATCH_YO_SMS, return_value=True) as mock_sms, \
+                patch(_PATCH_MESSENGER_EMAIL) as mock_email:
+            self.assertTrue(OtpManager().make_otp(user=self.user, purpose='login'))
+        self.assertEqual(mock_sms.call_args.kwargs.get('timeout'), 3)
+        mock_email.assert_not_called()
+
+    def test_prod_gateway_failure_returns_false_and_never_emails(self):
+        with patch('users_app.controllers.otp_manager.config', side_effect=_env_config('prod')), \
+                patch(_PATCH_YO_SMS, return_value=False), \
+                patch(_PATCH_MESSENGER_EMAIL) as mock_email:
+            self.assertFalse(OtpManager().make_otp(user=self.user, purpose='login'))
+        mock_email.assert_not_called()
+
+    def test_test_env_sms_ok_returns_true(self):
+        with patch('users_app.controllers.otp_manager.config', side_effect=_env_config('test')), \
+                patch(_PATCH_YO_SMS, return_value=True):
+            self.assertTrue(OtpManager().make_otp(user=self.user, purpose='login'))
+
+    def test_test_env_sms_fail_falls_back_to_synchronous_email(self):
+        with patch('users_app.controllers.otp_manager.config', side_effect=_env_config('test')), \
+                patch(_PATCH_YO_SMS, return_value=False), \
+                patch(_PATCH_MESSENGER_EMAIL, return_value=True) as mock_email:
+            self.assertTrue(OtpManager().make_otp(user=self.user, purpose='login'))
+        mock_email.assert_called_once()
+
+    def test_test_env_both_channels_fail_returns_false(self):
+        with patch('users_app.controllers.otp_manager.config', side_effect=_env_config('test')), \
+                patch(_PATCH_YO_SMS, return_value=False), \
+                patch(_PATCH_MESSENGER_EMAIL, return_value=False):
+            self.assertFalse(OtpManager().make_otp(user=self.user, purpose='login'))
+
+    def test_login_fails_closed_when_otp_delivery_fails(self):
+        """A make_otp failure must NEVER fall through to the token branch."""
+        with patch('users_app.controllers.login.OtpManager') as mock_manager:
+            mock_manager.return_value.make_otp.return_value = False
+            response = login(TEST_PHONE, 'password', source='restaurant')
+        self.assertEqual(response['status'], 500)
+        self.assertIn("couldn't send your verification code", response['message'])
+        self.assertNotIn('token', response.get('data') or {})
+        self.assertNotIn('refresh', response.get('data') or {})
+
+    def test_initiate_password_reset_fails_closed_when_otp_delivery_fails(self):
+        with patch('users_app.controllers.reset_password.OtpManager') as mock_manager:
+            mock_manager.return_value.make_otp.return_value = False
+            response = initiate_password_reset(TEST_PHONE)
+        self.assertEqual(response['status'], 500)
+        self.assertIn("couldn't send your verification code", response['message'])
