@@ -135,10 +135,31 @@ with PostgreSQL on AWS RDS.
   `NOT_ON_MENU_MESSAGE` moved to the policy module (re-exported from
   `con_orders`). Extras integrity applies to STAFF too (they bypass publication,
   never tenant/relationship integrity). `MenuItem.extras_applicable` write-time
-  integrity remains a LATER PR — it stays `pending-audit` in
-  `dinify_backend/tenancy/non_fk_tenant_inventory.py`; the runtime read/order
-  paths just fail closed against existing bad data. Do NOT re-scatter these
-  predicates or gate public filtering on a caller-supplied HTTP flag
+  integrity has since LANDED (PR #234, migration `0055_sanitize_menu_item_extras`)
+  — see the "Write-time menu relationship integrity" bullet below; its
+  `non_fk_tenant_inventory.py` entry is now `remediated` (was `pending-audit`) and
+  the runtime read/order paths still fail closed as defence-in-depth. Do NOT
+  re-scatter these predicates or gate public filtering on a caller-supplied HTTP flag
+- Write-time menu relationship integrity: ✅ (PRs #226, #234) —
+  `restaurants_app/controllers/menu_relationships.py` is the WRITE-TIME companion
+  to `menu_publication.py` (runtime read/order): the authority behind
+  `SerializerPutMenuItem` and the `deletion_blockers()` on
+  `MenuItem`/`MenuSection`/`SectionGroup`. It enforces that `extras_applicable` is
+  a canonical ordered list of unique lowercase-UUID strings, each an existing,
+  non-deleted, same-restaurant `is_extra` MenuItem and never the item itself
+  (fresh caller input is REJECTED on any invalid member, never silently dropped —
+  unlike the tolerant parse of an already-persisted allowlist); that
+  `has_extras=False` cannot retain an allowlist or non-zero selection limits; that
+  the extras selection limits validate against the COMPLETE effective state
+  (persisted merged with the partial update); that a non-null `section_group`
+  always belongs to the item's EXACT section — a partial update that moves the
+  section but OMITS `section_group` re-validates against the new section rather
+  than silently keeping it (the section-group cohesion rule, PR #226); and that a
+  referenced extra cannot be demoted (`is_extra` True→False) or soft-deleted while
+  an active same-restaurant parent still depends on it. Migration
+  `0055_sanitize_menu_item_extras` deterministically repaired the persisted corpus
+  (data-only, idempotent, LOSSY → irreversible). Do NOT re-scatter these
+  write-time predicates
 - Anonymous diner capability — capability-only, header-only entry + fail-closed
   key: ✅ The QR scan → table-session flow
   (`restaurants_app/controllers/diner_capability.py`; `django.core.signing`,
@@ -146,7 +167,11 @@ with PostgreSQL on AWS RDS.
   A signed QR credential in the `X-Diner-Credential` header is the ONLY input that
   mints a session (`handle_table_scan`); the raw `?table=<uuid>` legacy scan, the
   `DINER_ALLOW_LEGACY_TABLE_SCAN` flag, and `_resolve_legacy_table` were REMOVED —
-  a raw table UUID never grants authority (no setting re-enables it). Both tokens
+  a raw table UUID never grants authority (no setting re-enables it). The QR
+  credential is bound to the table's `qr_version` (migration `0054_table_qr_version`)
+  and verified WITHOUT expiry — bumping `qr_version` (QR regeneration in
+  `controllers/tables.py`) REVOKES every credential previously issued for that
+  table; the short-lived table SESSION is the separate expiring token. Both tokens
   travel HEADER-ONLY (`credential_from_request` → `X-Diner-Credential`,
   `session_token_from_request` → `X-Diner-Session`); the `?credential=` /
   `?session=` / body-`session` fallbacks were removed. `DINER_CAP_KEY` is
@@ -492,6 +517,11 @@ the catch-all `<str:config_detail>/` route.
     fulfilment-based occupancy helper `any_present_ongoing_order`
 - The `vacuum_deleted_records` dining-area→table soft-cascade was removed (dead
   code now that empty-area deletion is enforced) — do not reintroduce it
+- Menu-domain deletion rules now also live on the models via `deletion_blockers()`
+  (enforced by `restaurants_app/controllers/menu_relationships.py`): a `MenuItem`
+  referenced as an extra cannot be soft-deleted or demoted (`is_extra` True→False)
+  while an active same-restaurant parent still lists it in `extras_applicable`;
+  `MenuSection` / `SectionGroup` expose `deletion_blockers()` too
 
 ## Monetary Fields — CRITICAL
 - ALL monetary/financial fields must use `DecimalField`, never `FloatField`
@@ -632,7 +662,9 @@ the catch-all `<str:config_detail>/` route.
 ## Database
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove
 - All migrations must be generated and included in PRs when models change
-- Latest migration: `restaurants_app/migrations/0053_backfill_role_permissions.py`,
+- Latest migration: `restaurants_app/migrations/0055_sanitize_menu_item_extras.py`
+  (0054 adds `Table.qr_version`; 0055 data-repairs MenuItem extras — see the
+  "Write-time menu relationship integrity" bullet),
   `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
