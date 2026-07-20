@@ -29,9 +29,9 @@ class ReviewSubmissionEndpoint(NoStoreResponseMixin, APIView):
 
     def post(self, request):
         # A review is authorised by a diner table SESSION bound to the order's
-        # table — not by order-UUID knowledge alone. The completed-service
-        # (SALE_STATUSES) gate and one-per-order uniqueness are preserved in
-        # submit_review.
+        # table — not by order-UUID knowledge alone. The submitted-order
+        # eligibility gate (REVIEWABLE_ORDER_STATUSES) and one-per-order
+        # uniqueness are preserved in submit_review.
         try:
             table = require_table_session(request)
         except DinerCapabilityError as exc:
