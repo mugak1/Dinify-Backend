@@ -31,6 +31,10 @@ Coverage (the 20 required scenarios + two extras), grouped by surface:
 * ``DinerPaymentDetailsCapabilityTests`` — payment-details session rule + null
   order (16).
 * ``RegenerateQrEndpointTests``     — the JWT-gated regenerate-qr action.
+* ``ManagementTablesListCredentialTests`` — the flat management tables list
+  (the portal Setup View's page-load read) emits each table's CURRENT,
+  resolvable ``qr_credential``; a reload after rotation returns the new
+  generation while the old sticker is revoked.
 """
 import json
 import logging
@@ -1067,3 +1071,70 @@ class DinerCapabilityLoggingTests(DinerCapabilityTestBase):
         blob = '\n'.join(captured)
         self.assertNotIn(valid_session, blob)
         self.assertNotIn(marker, blob)
+
+
+class ManagementTablesListCredentialTests(DinerCapabilityTestBase):
+    """
+    The flat management tables list must emit each table's CURRENT credential.
+
+    ``GET restaurant-setup/tables/`` (SerializerPublicGetTable) is the read the
+    portal Tables Setup View loads on page render. PR 7A minted the credential
+    on the grouped read and the regenerate-qr response but not here, so every
+    reload dropped the portal back to "QR credential unavailable"; these tests
+    pin the closed gap.
+    """
+
+    TABLES_LIST_URL = '/api/v1/restaurant-setup/tables/'
+
+    def _list_tables(self, jwt, restaurant):
+        return self.client.get(
+            self.TABLES_LIST_URL, {'restaurant': str(restaurant.id)}, **jwt,
+        )
+
+    def _credentials_by_id(self, resp):
+        return {
+            record['id']: record.get('qr_credential')
+            for record in resp.json()['data']['records']
+        }
+
+    def test_flat_list_emits_resolvable_current_credential_per_row(self):
+        resp = self._list_tables(self._jwt(self.owner_a), self.restaurant_a)
+        self.assertEqual(resp.status_code, 200, resp.content)
+        credentials = self._credentials_by_id(resp)
+        self.assertEqual(
+            set(credentials),
+            {str(self.table_a.id), str(self.table_a2.id)},
+        )
+        for table_id, credential in credentials.items():
+            self.assertTrue(credential)
+            # Not merely present — it must be the CURRENT-generation authority
+            # for exactly that table.
+            self.assertEqual(
+                str(resolve_qr_credential(credential).id), table_id,
+            )
+
+    def test_reload_after_rotation_returns_new_generation_only(self):
+        # The reported bug loop: list -> rotate -> re-list (a "page reload").
+        # The re-listed credential must resolve to the bumped generation while
+        # the pre-rotation sticker is revoked; other tables are untouched.
+        first = self._list_tables(self._jwt(self.owner_a), self.restaurant_a)
+        old_credential = self._credentials_by_id(first)[str(self.table_a.id)]
+
+        rotate = self.client.post(
+            REGENERATE_QR_URL,
+            data=json.dumps({'table_id': str(self.table_a.id)}),
+            content_type='application/json', **self._jwt(self.owner_a),
+        )
+        self.assertEqual(rotate.status_code, 200, rotate.content)
+
+        second = self._list_tables(self._jwt(self.owner_a), self.restaurant_a)
+        refreshed = self._credentials_by_id(second)
+        resolved = resolve_qr_credential(refreshed[str(self.table_a.id)])
+        self.assertEqual(resolved.id, self.table_a.id)
+        self.assertEqual(resolved.qr_version, 2)
+        with self.assertRaises(DinerCapabilityDenied):
+            resolve_qr_credential(old_credential)
+        self.assertEqual(
+            resolve_qr_credential(refreshed[str(self.table_a2.id)]).id,
+            self.table_a2.id,
+        )
