@@ -17,6 +17,7 @@ from restaurants_app.models import (
     Reservation, WaitlistEntry, RestaurantTag
 )
 from misc_app.serializers.fields import JSONStringCompatField, JSONStringCompatListField
+from restaurants_app.controllers.diner_capability import issue_qr_credential
 from restaurants_app.controllers.tables import get_table_availability
 from restaurants_app.controllers.tenant_scope import assert_fks_belong_to_restaurant
 from restaurants_app.controllers.menu_relationships import (
@@ -721,11 +722,22 @@ class SerializerPublicGetTable(ModelSerializer):
     serializer for getting tables
     """
     dining_area = SerializerMethodField()
+    qr_credential = SerializerMethodField()
 
     class Meta:
         model = Table
         fields = '__all__'
-    
+
+    def get_qr_credential(self, table):
+        # The current opaque QR credential (bound to restaurant+table+
+        # generation) so the owner UI can render/print the QR directly —
+        # mirrors get_tables_by_area and the regenerate-qr response (PR 7A;
+        # this flat list is the read the portal Setup View actually loads).
+        # Derived per read, never stored; a qr_version bump revokes it.
+        return issue_qr_credential(
+            table.restaurant_id, table.id, table.qr_version,
+        )
+
     def get_dining_area(self, table):
         if table.dining_area is None:
             return None

@@ -171,7 +171,14 @@ with PostgreSQL on AWS RDS.
   credential is bound to the table's `qr_version` (migration `0054_table_qr_version`)
   and verified WITHOUT expiry — bumping `qr_version` (QR regeneration in
   `controllers/tables.py`) REVOKES every credential previously issued for that
-  table; the short-lived table SESSION is the separate expiring token. Both tokens
+  table; the short-lived table SESSION is the separate expiring token. The
+  authenticated management reads hand the owner each table's CURRENT credential,
+  minted per read via `issue_qr_credential` (never stored; token bytes vary per
+  read, the authority doesn't): the flat `restaurant-setup/tables/` list
+  (`SerializerPublicGetTable.qr_credential` — the portal Setup View's page-load
+  read, added later because PR 7A only covered the other two and the portal lost
+  every credential on reload), the grouped `?grouping` read, and the
+  regenerate-qr response. Both tokens
   travel HEADER-ONLY (`credential_from_request` → `X-Diner-Credential`,
   `session_token_from_request` → `X-Diner-Session`); the `?credential=` /
   `?session=` / body-`session` fallbacks were removed. `DINER_CAP_KEY` is
