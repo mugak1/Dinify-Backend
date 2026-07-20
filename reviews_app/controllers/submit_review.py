@@ -2,7 +2,7 @@
 Diner review submission controller (the AllowAny path).
 
 Returns the standard ``{'status', 'message', 'data'}`` dict. The order is
-pre-checked (existence / cancelled / already-reviewed) BEFORE serializer
+pre-checked (existence / eligibility / already-reviewed) BEFORE serializer
 validation, so the diner gets a precise, friendly message and the right status
 code instead of a raw DRF error.
 """
@@ -11,14 +11,32 @@ import logging
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 
+from dinify_backend.configss.string_definitions import (
+    OrderStatus_Pending, OrderStatus_Preparing,
+    OrderStatus_Served, OrderStatus_Paid,
+)
 from orders_app.models import Order
-from reports_app.controllers.common.sale_filters import SALE_STATUSES
 from reviews_app.serializers import (
     ReviewWriteSerializer,
     ReviewRestaurantReadSerializer,
 )
 
 logger = logging.getLogger(__name__)
+
+# Review-specific eligibility: any SUBMITTED order may be reviewed. The diner
+# app offers the review from the post-order screen, while the order is still
+# 'pending' — kitchen staff tapping Served on the KDS must never be a
+# precondition for a diner to leave feedback. Excluded: 'initiated' (an
+# unconfirmed draft that never reached the kitchen) and the reversed states
+# 'cancelled'/'refunded'. An explicit allow-list so any future status defaults
+# to not-reviewable. Deliberately NOT reports' SALE_STATUSES ({served, paid} —
+# the revenue definition): reviewability and revenue are different questions;
+# the served/paid review gate was interim containment (87504b9) for the
+# anonymous review-squat chain, superseded by the table-session capability.
+REVIEWABLE_ORDER_STATUSES = (
+    OrderStatus_Pending, OrderStatus_Preparing,
+    OrderStatus_Served, OrderStatus_Paid,
+)
 
 # The rating fields a diner may supply: overall_rating is mandatory, the rest are
 # optional dimensions. Defined here so the endpoint and controller agree on the
@@ -74,14 +92,15 @@ def submit_review(order_id, rating_fields, comment=None, tags=None,
     except (Order.DoesNotExist, ValidationError, ValueError):
         return {'status': 404, 'message': 'We could not find that order.'}
 
-    # 2. Only a completed service may be reviewed (400). SALE_STATUSES
-    #    ({served, paid}) is the canonical "completed service" predicate
-    #    (reports_app.controllers.common.sale_filters). Every other state —
-    #    initiated / pending / preparing (in-flight and reversible) and
-    #    cancelled / refunded (reversed) — is rejected with ONE restrained
-    #    message that deliberately does not disclose which lifecycle state the
-    #    order is in to an unauthorised caller.
-    if order.order_status not in SALE_STATUSES:
+    # 2. Only a SUBMITTED order may be reviewed (400): pending / preparing /
+    #    served / paid (REVIEWABLE_ORDER_STATUSES). Drafts ('initiated') and
+    #    reversed orders ('cancelled'/'refunded') are rejected with ONE
+    #    restrained message that deliberately does not disclose which lifecycle
+    #    state the order is in. Abuse protection does not live here — it is the
+    #    table-session capability (the endpoint resolves the session and the
+    #    lookup above is scoped to its restaurant+table) plus the one-per-order
+    #    constraint below.
+    if order.order_status not in REVIEWABLE_ORDER_STATUSES:
         return {
             'status': 400,
             'message': 'This order is not eligible for review.',

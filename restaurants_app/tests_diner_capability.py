@@ -647,7 +647,7 @@ class DinerOrderDetailsCapabilityTests(DinerCapabilityTestBase):
 
 
 class DinerReviewCapabilityTests(DinerCapabilityTestBase):
-    """(15) a review needs an eligible (served/paid) order AND a bound session."""
+    """(15) a review needs a SUBMITTED (non-draft) order AND a bound session."""
 
     def _submit_review(self, order_id, session=None, rating=5):
         extra = {}
@@ -670,11 +670,21 @@ class DinerReviewCapabilityTests(DinerCapabilityTestBase):
         resp = self._submit_review(str(order.id), session=self._session(self.table_a))
         self.assertEqual(resp.status_code, 201, resp.content)
 
-    def test_review_ineligible_order_rejected_even_with_session(self):
-        # A pending (not served/paid) order is not reviewable — the SALE_STATUSES
-        # gate is preserved under the capability model.
+    def test_review_with_session_on_pending_order_succeeds(self):
+        # The live diner flow: the review is offered right after the order is
+        # submitted (pending), before the kitchen serves it — reviewable.
         order = self._make_order(
             self.restaurant_a, self.table_a, status=OrderStatus_Pending,
+        )
+        resp = self._submit_review(str(order.id), session=self._session(self.table_a))
+        self.assertEqual(resp.status_code, 201, resp.content)
+
+    def test_review_ineligible_order_rejected_even_with_session(self):
+        # An 'initiated' order is an unconfirmed DRAFT that never reached the
+        # kitchen — not reviewable. The REVIEWABLE_ORDER_STATUSES gate is
+        # preserved under the capability model.
+        order = self._make_order(
+            self.restaurant_a, self.table_a, status=OrderStatus_Initiated,
         )
         resp = self._submit_review(str(order.id), session=self._session(self.table_a))
         self.assertEqual(resp.status_code, 400, resp.content)

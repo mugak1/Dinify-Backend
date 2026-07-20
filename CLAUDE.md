@@ -226,7 +226,12 @@ with PostgreSQL on AWS RDS.
   `summary/` + `analytics/` (owner/manager analytics),
   `<int:review_id>/resolution/` (owner/manager mark-handled write, optional
   `resolution_note` that persists across reopen/re-resolve), and `` root
-  (owner/manager retrieval). `overall_rating` mandatory (1–5) + five optional
+  (owner/manager retrieval). Diner `submit/` needs a table session and accepts
+  any SUBMITTED order — `REVIEWABLE_ORDER_STATUSES` ({pending, preparing,
+  served, paid} in `submit_review.py`, deliberately NOT the Reports
+  `SALE_STATUSES`: kitchen tapping Served is never a review precondition) —
+  rejecting drafts (`initiated`) and cancelled/refunded orders with one
+  restrained 400. `overall_rating` mandatory (1–5) + five optional
   dimension ratings; `is_public` seeded from `PUBLIC_RATING_THRESHOLD` (≥4 →
   public-eligible) but stays owner-overridable. List/analytics gate on the
   `reviews` module (`get_module_restaurant_ids` / `can_user_access_module`);

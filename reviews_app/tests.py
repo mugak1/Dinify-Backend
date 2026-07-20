@@ -143,9 +143,9 @@ class ReviewApiTestBase(TestCase):
     # --- fixtures -------------------------------------------------------
     def make_order(self, restaurant, table, **kwargs):
         # A fresh order per review — Review.order is one-per-order. Default to a
-        # SERVED (completed-service) order because a review is only accepted for
-        # a completed order (order_status in SALE_STATUSES = {served, paid});
-        # tests that need a non-reviewable state pass order_status= explicitly.
+        # SERVED order (any SUBMITTED state — REVIEWABLE_ORDER_STATUSES — would
+        # do); tests pinning a specific eligibility state pass order_status=
+        # explicitly.
         defaults = dict(
             total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
             order_status=OrderStatus_Served,
@@ -227,11 +227,13 @@ class ReviewSubmissionTests(ReviewApiTestBase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(resp.json()['status'], 404)
 
-    # --- review eligibility: only a completed service (served/paid) ------
-    # A review is accepted iff order_status is in SALE_STATUSES ({served, paid}).
-    # Every in-flight state (initiated/pending/preparing) and every reversed
-    # state (cancelled/refunded) is rejected 400 with ONE restrained message
-    # that does not disclose the specific lifecycle state.
+    # --- review eligibility: any SUBMITTED order --------------------------
+    # A review is accepted iff order_status is in REVIEWABLE_ORDER_STATUSES
+    # ({pending, preparing, served, paid}) — the diner app offers the review
+    # right after the order is sent to the kitchen, so kitchen staff tapping
+    # Served must never be a precondition. Drafts ('initiated') and reversed
+    # states ('cancelled'/'refunded') are rejected 400 with ONE restrained
+    # message that does not disclose the specific lifecycle state.
     def test_cancelled_order_returns_400(self):
         order = self.make_order(
             self.restaurant_a, self.table_a,
@@ -250,23 +252,25 @@ class ReviewSubmissionTests(ReviewApiTestBase):
         self.assertEqual(resp.status_code, 400)
         self.assertFalse(Review.objects.filter(order=order).exists())
 
-    def test_active_pending_order_cannot_be_reviewed(self):
+    def test_active_pending_order_can_be_reviewed(self):
+        # The diner-app flow: order submitted (pending), review offered from
+        # the post-order screen before the kitchen serves it.
         order = self.make_order(
             self.restaurant_a, self.table_a,
             order_status=OrderStatus_Pending,
         )
         resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
-        self.assertEqual(resp.status_code, 400)
-        self.assertFalse(Review.objects.filter(order=order).exists())
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertTrue(Review.objects.filter(order=order).exists())
 
-    def test_preparing_order_cannot_be_reviewed(self):
+    def test_preparing_order_can_be_reviewed(self):
         order = self.make_order(
             self.restaurant_a, self.table_a,
             order_status=OrderStatus_Preparing,
         )
         resp = self.post_submit({'order': str(order.id), 'overall_rating': 5})
-        self.assertEqual(resp.status_code, 400)
-        self.assertFalse(Review.objects.filter(order=order).exists())
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertTrue(Review.objects.filter(order=order).exists())
 
     def test_refunded_order_cannot_be_reviewed(self):
         order = self.make_order(
@@ -287,7 +291,7 @@ class ReviewSubmissionTests(ReviewApiTestBase):
         self.assertTrue(Review.objects.filter(order=order).exists())
 
     def test_paid_order_can_be_reviewed(self):
-        # 'paid' is also a completed sale (SALE_STATUSES) -> reviewable.
+        # 'paid' is also a submitted order (REVIEWABLE_ORDER_STATUSES).
         order = self.make_order(
             self.restaurant_a, self.table_a,
             order_status=OrderStatus_Paid,
