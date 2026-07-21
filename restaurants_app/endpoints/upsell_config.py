@@ -190,6 +190,15 @@ class UpsellItemsEndpoint(APIView):
         return Response(response, status=200)
 
     def delete(self, request, **kwargs):
+        # The reorder URL (upsell-config/items/reorder/) injects action='reorder'
+        # via urls.py. DELETE is not valid there — only the plain items route
+        # deletes — so reject the reorder URL instead of silently treating it as
+        # a plain item delete.
+        if kwargs.get('action') is not None:
+            return Response(
+                {'status': 405, 'message': 'Method not allowed.'},
+                status=405,
+            )
         try:
             decode_jwt_token(request)
         except Exception:

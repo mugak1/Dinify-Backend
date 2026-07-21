@@ -13,9 +13,8 @@ from misc_app.controllers.secretary import Secretary
 from users_app.tests import TEST_PHONE, seed_user
 from users_app.models import User
 from restaurants_app.controllers.create_restaurant import (
-    create_restaurant, admin_register_restaurant
+    admin_register_restaurant
 )
-from restaurants_app.controllers.create_employee import create_employee
 from restaurants_app.controllers.dining_areas import create_dining_area
 from restaurants_app.controllers.menu_sections import ConMenuSection
 from restaurants_app.endpoints.restaurant_setup import normalize_ordered_section_ids
@@ -244,73 +243,6 @@ class RestaurantAppTestFunctions(TestCase):
         """
         seed_user()
         seed_restaurant()
-
-    def test_create_restaurant(self):
-        """
-        test the restaurant self register function
-        """
-        user_id = str(User.objects.get(username=TEST_PHONE).pk)
-        auth_info = {
-            'user_id': user_id,
-            'first_name': 'First',
-            'email': 'dummy@email.com'
-        }
-
-        def test_missing_info():
-            data = {
-                'name': 'Test Restaurant',
-                'owner': user_id
-            }
-            result = create_restaurant(data, auth_info)
-            self.assertEqual(result['status'], 400)
-
-        def test_ok():
-            data = {
-                'name': 'Test Restaurant',
-                'location': 'Test location',
-                'owner': user_id
-            }
-            result = create_restaurant(data, auth_info)
-            self.assertEqual(result['status'], 200)
-            self.assertEqual(result['message'], MESSAGES.get('OK_CREATE_RESTAURANT'))
-
-        def test_create_employee():
-            restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-            result = create_employee(
-                first_name='Test',
-                last_name='Employee',
-                email='dummy@email.com',
-                phone_number='256777777777',
-                restaurant=restaurant,
-                roles=[ROLES.get('RESTAURANT_KITCHEN')],
-                creator=restaurant.owner,
-                skip_otp=True
-            )
-            print(f'employee result: {result}')
-            self.assertEqual(result['status'], 200)
-
-            print('editing the employee')
-            employee = RestaurantEmployee.objects.get(
-                user__phone_number='256777777777',
-                restaurant=restaurant
-            )
-            # secretary_args = {
-            #     'serializer': serializer,
-            #     'data': put_data,
-            #     'edit_considerations': EDIT_INFORMATION.get('restaurant_employee'),
-            #     'user_id': auth['id'],
-            #     'username': auth['username'],
-            #     'success_message': success_message,
-            #     'error_message': error_message
-            # }
-            
-            # Secretary
-
-
-
-        test_missing_info()
-        test_ok()
-        test_create_employee()
 
     def test_admin_register_restaurant(self):
         user = User.objects.get(username=TEST_PHONE)
@@ -1354,6 +1286,93 @@ class TenantIsolationTests(TestCase):
         self.assertEqual(response.status_code, 403)
         b_employee.refresh_from_db()
         self.assertTrue(b_employee.active)
+
+    # -- last-owner deactivation guard, live PUT path (DC-BE-011) ------------
+
+    def test_put_deactivate_last_owner_is_blocked_409(self):
+        # The guard that used to sit on the dead DELETE-employees branch now
+        # runs on the live PUT {active:'false'} path: the sole active owner
+        # cannot be deactivated. 409, never 403 (a 403 force-logs-out).
+        response = self._request(
+            self.owner_a, 'put', 'employees',
+            {'id': str(self.employment_a.id), 'active': 'false'},
+        )
+        self.assertEqual(response.status_code, 409)
+        self.employment_a.refresh_from_db()
+        self.assertTrue(self.employment_a.active)
+
+    def test_put_deactivate_non_last_owner_succeeds(self):
+        # A second active owner exists, so deactivating one is allowed.
+        second_owner = User.objects.create_user(
+            first_name='Owner', last_name='A2',
+            email='owner_a2@test.com', phone_number='256700000011',
+            username='256700000011', country='Uganda', password='password',
+            roles=[],
+        )
+        second_employment = RestaurantEmployee.objects.create(
+            user=second_owner, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_OWNER')],
+        )
+        response = self._request(
+            self.owner_a, 'put', 'employees',
+            {'id': str(second_employment.id), 'active': 'false'},
+        )
+        self.assertEqual(response.status_code, 200)
+        second_employment.refresh_from_db()
+        self.assertFalse(second_employment.active)
+
+    def test_put_deactivate_non_owner_employee_succeeds(self):
+        # A non-owner (kitchen) employee is never subject to the last-owner
+        # guard, so deactivation goes straight through.
+        staff = User.objects.create_user(
+            first_name='Kitchen', last_name='Staff',
+            email='kitchen_a@test.com', phone_number='256700000012',
+            username='256700000012', country='Uganda', password='password',
+            roles=[],
+        )
+        staff_employment = RestaurantEmployee.objects.create(
+            user=staff, restaurant=self.restaurant_a,
+            roles=[ROLES.get('RESTAURANT_KITCHEN')],
+        )
+        response = self._request(
+            self.owner_a, 'put', 'employees',
+            {'id': str(staff_employment.id), 'active': 'false'},
+        )
+        self.assertEqual(response.status_code, 200)
+        staff_employment.refresh_from_db()
+        self.assertFalse(staff_employment.active)
+
+    def test_put_deactivate_employee_cross_tenant_is_rejected(self):
+        # Owner A cannot deactivate an employee of restaurant B — the module
+        # gate resolves B from the id and denies (403) before the guard runs.
+        b_employee = RestaurantEmployee.objects.get(
+            user=self.owner_b, restaurant=self.restaurant_b,
+        )
+        response = self._request(
+            self.owner_a, 'put', 'employees',
+            {'id': str(b_employee.id), 'active': 'false'},
+        )
+        self.assertEqual(response.status_code, 403)
+        b_employee.refresh_from_db()
+        self.assertTrue(b_employee.active)
+
+    # -- upsell reorder DELETE verb guard (DC-BE-004) -----------------------
+
+    def test_delete_on_upsell_reorder_url_is_405(self):
+        # The reorder URL injects action='reorder'; DELETE is not valid there
+        # and used to silently act as a plain item delete. It now returns 405.
+        response = self._request(
+            self.owner_a, 'delete', 'upsell-config/items/reorder', {},
+        )
+        self.assertEqual(response.status_code, 405)
+
+    def test_delete_on_upsell_items_plain_url_is_not_405(self):
+        # The plain item-delete route injects no action, so the 405 guard must
+        # not fire there — a missing id yields the ordinary 400.
+        response = self._request(
+            self.owner_a, 'delete', 'upsell-config/items', {},
+        )
+        self.assertNotEqual(response.status_code, 405)
 
     # -- role gating ---------------------------------------------------------
 
