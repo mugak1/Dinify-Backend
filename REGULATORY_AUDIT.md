@@ -1,8 +1,20 @@
 # Dinify — Custodial Payments Regulatory Audit (READ-ONLY INVENTORY)
 
-> **Status: AUDIT / RECON ONLY.** No code was changed. This document is the deliverable.
-> Per the task's HARD STOP, this is the report and nothing else — no remediation,
-> no migrations, no refactors. Remediation planning awaits separate human review.
+> **⚠️ STATUS — RETIRED ARCHITECTURE.** This is a point-in-time audit of the
+> PRE-REMEDIATION codebase. The custodial payment design it inventories has since
+> been REMOVED: the aggregator integration layer was retired in commit `7e15e3f`,
+> and the balance-ledger models, disbursement, refund-payout, OVA fee-netting and
+> tip wallets were removed across the finance teardown. **As of the current
+> codebase the backend implements no payment execution of any kind** — the only
+> surviving payment code is the record-only `DinifyTransaction` model and a
+> subscription writer that records a Pending row and stops. Every present-tense
+> claim below describes the OLD design and is retained (past-tensed where
+> practical) purely as the historical remediation record — NOT as current
+> behaviour.
+
+> **Original audit note (superseded by the status banner above).** This began as
+> read-only reconnaissance; the audit itself changed no code and prescribed the
+> remediation that has since landed. Retained for provenance.
 
 ## Context — why this audit exists
 
@@ -11,10 +23,10 @@ institution, aggregator, gateway/operator, or e-money issuer under Uganda's
 National Payment Systems Act 2020. The previous developer ("Falcon") built the
 finance layer on the **opposite** model:
 
-- diner payments are collected into a **Dinify-controlled account** (an OVA /
+- diner payments were collected into a **Dinify-controlled account** (an OVA /
   `dinify_revenue` account),
-- Dinify holds **per-restaurant balances**, and
-- Dinify **disburses** funds out to restaurants.
+- Dinify held **per-restaurant balances**, and
+- Dinify **disbursed** funds out to restaurants.
 
 **Target (TO-BE), non-custodial:** funds settle DIRECTLY into each restaurant's
 own account via a separately-licensed aggregator; Dinify NEVER receives, holds,
@@ -22,8 +34,8 @@ controls, settles, or disburses funds. Dinify ONLY (a) transmits a
 payment-initiation instruction naming the RESTAURANT as payee, (b) receives
 status callbacks, (c) records transactions for reporting/receipts.
 
-This document inventories every structure that assumes or implements the OLD
-custodial model and maps dependencies so remediation can be sequenced safely.
+This document inventories every structure that assumed or implemented the OLD
+custodial model and maps the dependencies along which remediation was sequenced.
 
 ### Red-flag rubric (classification key)
 - **A** Fund custody (Dinify-controlled bank/momo/OVA/escrow/suspense/settlement/trust)
@@ -48,8 +60,9 @@ frontend UI) plus first-hand reads of the highest-severity files
 
 ## Verdict
 
-The backend currently implements a **fully custodial** payment model end-to-end.
-The custodial money-flow loop is:
+At the time of this audit the backend implemented a **fully custodial** payment
+model end-to-end (since removed — see the status banner above). The custodial
+money-flow loop was:
 
 ```
 diner pays
@@ -60,15 +73,15 @@ Subscriptions via OVA: DEBIT restaurant DinifyAccount, CREDIT dinify_revenue acc
 Refunds: Dinify initiates payout to customer from its Flutterwave float                   [A,G]
 ```
 
-The non-custodial target requires retiring or re-scoping the balance ledger
+The non-custodial target required retiring or re-scoping the balance ledger
 (`DinifyAccount`), the disbursement path, the OVA fee-netting, and Dinify-initiated
 refunds; relabelling the merchant-of-record framing in the aggregator integrations;
 and hiding/removing the Dinify-held-balance UI. A `DinifyTransaction` row, **stripped
-of balance mutation and re-scoped to a pure record**, can be KEPT for reporting/receipts.
+of balance mutation and re-scoped to a pure record**, was KEPT for reporting/receipts.
 
-Severity tally: **HIGH ≈ 12 structures**, MEDIUM ≈ 14, LOW/KEEP ≈ several. The two
-most-entangled structures (`DinifyTransaction` ~29 consumers, `DinifyAccount` ~19
-consumers) must be remediated LAST.
+Severity tally (as-audited): **HIGH ≈ 12 structures**, MEDIUM ≈ 14, LOW/KEEP ≈
+several. The two most-entangled structures (`DinifyTransaction` ~29 consumers,
+`DinifyAccount` ~19 consumers) were remediated LAST.
 
 ---
 
@@ -76,7 +89,7 @@ consumers) must be remediated LAST.
 
 ### 1) finance_app/models.py — the custodial data model (HIGH)
 
-| # | Path / symbol | What it is/does | Flags | Sev | Revision |
+| # | Path / symbol | What it did | Flags | Sev | Revision |
 |---|---|---|---|---|---|
 | M1 | `finance_app/models.py:60` `DinifyAccount` | "the accounts held at Dinify" — one per restaurant + one `dinify_revenue` + waiter (`user`) accounts. **Core custodial ledger.** | A,B,E | HIGH | RE-SCOPE or REMOVE balance ledger; keep at most a non-monetary settlement-config record |
 | M2 | `models.py:81-111` balance fields | Per payment-mode (`momo_/card_/cash_`): `*_actual_balance`, `*_available_balance`, `*_cumulative_in/out/in_charges/out_charges/refunds/disbursements` (~30 DecimalFields). These are funds Dinify holds + restaurant claim. | A,B,E,F | HIGH | REMOVE all balance/cumulative fields (Dinify holds no funds) |
@@ -92,7 +105,7 @@ don't run on `.create()`), so tip rows exist unvalidated. Minor data-integrity n
 
 ### 2) finance_app/controllers — custodial logic (HIGH)
 
-| # | Path / symbol | What it does | Flags | Sev | Revision |
+| # | Path / symbol | What it did | Flags | Sev | Revision |
 |---|---|---|---|---|---|
 | C1 | `controllers/update_wallet_balance.py` `update_wallet_balance()` | Central balance-mutation hub: mutates `*_actual_balance`/`*_available_balance`/cumulatives per mode; returns before/after JSON. Hub for all money movement. | A,B,C,F | HIGH | REMOVE (no held balances to mutate). Blocking dependency for M1/M2. |
 | C2 | `controllers/tx_disbursement.py` `DisbursementTransaction.initiate()` | Gates payout on `momo_available_balance`/`card_available_balance` (`:51`), then `YoIntegration().momo_disburse()` (`:76`) pushes funds OUT to restaurant owner's / waiter's MSISDN. Bank path is a `TODO/pass` (`:97-99`). | A,B,C | HIGH | REMOVE (Dinify does not hold or pay out funds) |
@@ -108,7 +121,7 @@ don't run on `.create()`), so tip rows exist unvalidated. Minor data-integrity n
 
 ### 3) finance_app endpoints / serializers / urls (HIGH)
 
-| # | Path / symbol | What it does | Flags | Sev | Revision |
+| # | Path / symbol | What it did | Flags | Sev | Revision |
 |---|---|---|---|---|---|
 | E1 | root `dinify_backend/urls.py:29` → `finance_app/urls.py` | Mounts at `api/v1/finances/`: `initiate-order-payment/` (`OrderPaymentsEndpoint`), `transactions/` (`TransactionsEndpoint` — routes subscription/disbursement/refund), `bank-accounts/` (`BankAccountRecordsEndpoint`). | A,C,D,G | HIGH | RE-SCOPE: keep payment-initiation (restaurant-direct) + records; REMOVE disbursement/refund routes |
 | E2 | `endpoints/transactions.py` `TransactionsEndpoint` | Single endpoint dispatching subscription / **disbursement** / **refund** to the custodial controllers (C2/C3/C5). | A,C,G | HIGH | REMOVE disbursement+refund dispatch; re-scope subscription |
@@ -132,7 +145,7 @@ don't run on `.create()`), so tip rows exist unvalidated. Minor data-integrity n
 
 ### 4) finance_app management commands (scheduled jobs — HIGH/MED)
 
-| # | Path / symbol | What it does | Flags | Sev | Revision |
+| # | Path / symbol | What it did | Flags | Sev | Revision |
 |---|---|---|---|---|---|
 | K1 | `management/commands/seed_dinify_account.py` | Creates the singleton `DinifyAccount(account_type='dinify_revenue')` — **Dinify's revenue vault**. | A,B | HIGH | REMOVE (no Dinify-held revenue account) |
 | K2 | `management/commands/createaccountswithyo.py` | For `BankAccountRecord` with null `yo_reference`, calls `YoIntegration().bank_create_verified_account()` and stores Yo id — registers restaurant bank accounts **under Dinify's Yo credentials** for disbursement. | C,H | HIGH | REMOVE (restaurant registers own settlement destination) |
@@ -140,16 +153,16 @@ don't run on `.create()`), so tip rows exist unvalidated. Minor data-integrity n
 | K4 | `check_yo_transactions.py`, `check_dpo_transactions.py`, `check_transaction_statuses.py` | Poll aggregators for pending transaction status; confirm transactions → balance updates. | A,B | MED | RE-SCOPE-TO-RECORD-ONLY (status reconciliation without balance mutation) |
 | K5 | `verify-dpo-tokens.py` | Verifies DPO token/credential health (Dinify's DPO merchant token). | H | LOW | RE-SCOPE/relabel once merchant-of-record removed |
 
-Scheduling: documented in `BACKGROUND_TASKS.md`; these run as cron/scheduled jobs.
+Scheduling: these ran as cron/scheduled jobs (the commands have since been removed).
 
 ### 5) payment_integrations_app — aggregator wiring (HIGH)
 
-Settlement destination across **all** integrations is **Dinify's** aggregator
-account/credentials, not the restaurant's. Credentials are **Dinify-global** env
+Settlement destination across **all** integrations was **Dinify's** aggregator
+account/credentials, not the restaurant's. Credentials were **Dinify-global** env
 vars (`FLUTTERWAVE_SECRET`, `DPO_COMPANY_TOKEN`, Yo username/password,
 `PESAPAL_CONSUMER_KEY/SECRET`), scoped to collect AND to move funds out.
 
-| # | Path / symbol | What it does | Flags | Sev | Revision |
+| # | Path / symbol | What it did | Flags | Sev | Revision |
 |---|---|---|---|---|---|
 | P1 | `controllers/yo_integrations.py` `momo_collect()` | Yo `acdepositfunds`; narrative `'Dinify Order Payment'`. Collects into Dinify's Yo account. | A,D,H | HIGH | REPLACE-WITH-RESTAURANT-DIRECT (settle to restaurant merchant code) |
 | P2 | `yo_integrations.py` `momo_disburse()` | Yo `acwithdrawfunds`; narrative `'Dinify Disbursement'`. Pays OUT from Dinify's Yo float. | A,C | HIGH | REMOVE |
@@ -157,7 +170,7 @@ vars (`FLUTTERWAVE_SECRET`, `DPO_COMPANY_TOKEN`, Yo username/password,
 | P4 | `yo_integrations.py` `bank_create_verified_account()` | Registers a restaurant bank account under Dinify's Yo credentials; stores `ApiBankIdentifier`→`yo_reference`. | C,H | HIGH | REPLACE-WITH-RESTAURANT-DIRECT |
 | P5 | `yo_integrations.py` `process_yo_response()` + `momo_check_transaction()` / `bank_check_disbursement_status()` | Process callbacks; confirm DinifyTransactions; own disbursement status. | A,B,C | MED | RE-SCOPE-TO-RECORD-ONLY |
 | P6 | `controllers/dpo.py` `create_token()`/`verify_token()`/`process_response()` | Card payment via **Dinify's** DPO company token; `ServiceDescription='Dinify Order Payment'`; redirect to `dinify-web`. | A,D,H | HIGH | REPLACE-WITH-RESTAURANT-DIRECT |
-| P7 | `controllers/flutterwave.py` `collect_mobile_money()` | Momo collect into **Dinify's** Flutterwave account (currently commented out at the order-payment call site, but live for other flows). | A,D,H | MED | REMOVE or REPLACE-WITH-RESTAURANT-DIRECT |
+| P7 | `controllers/flutterwave.py` `collect_mobile_money()` | Momo collect into **Dinify's** Flutterwave account (was commented out at the order-payment call site). | A,D,H | MED | REMOVE or REPLACE-WITH-RESTAURANT-DIRECT |
 | P8 | `flutterwave.py` `send_mobile_money()` | Momo payout/refund (`'Dinify Refund'`) from Dinify's Flutterwave float — backs `initiate_refund` (C5). | A,C,G | HIGH | REMOVE |
 | P9 | `controllers/pesapal.py` `authenticate()` (+ scaffolding) | Holds Pesapal consumer credentials (Dinify-level); no active flow yet. | H | LOW-MED | REPLACE-WITH-RESTAURANT-DIRECT or REMOVE |
 | P10 | `management/commands/process_aggregator_responses.py` | Batch-processes aggregator callbacks from Mongo collections → confirm + balance update. | A,B | MED | RE-SCOPE-TO-RECORD-ONLY |
@@ -172,7 +185,7 @@ Account types (`:10-13`):
 Payment modes (`:16-20`):
 - `PaymentMode_Ova='ova'` — **smoking gun**: Dinify internal wallet/stored value. A,B,E. HIGH. REMOVE.
 - `PaymentMode_Bank='bank'` — used only by Dinify-controlled bank disbursement. C. MED. REMOVE with disbursement.
-- `PaymentMode_MobileMoney='momo'`, `PaymentMode_Card='card'` — neutral channels; currently collect into Dinify (custodial **because of how used**, not the label). LOW. KEEP (re-scope usage).
+- `PaymentMode_MobileMoney='momo'`, `PaymentMode_Card='card'` — neutral channels; collected into Dinify (custodial **because of how used**, not the label). LOW. KEEP (re-scope usage).
 - `PaymentMode_Cash='cash'` — neutral. KEEP.
 
 Transaction types (`:31-36`):
@@ -192,7 +205,7 @@ roles, EOD sys-config: neutral. KEEP.
 
 ### 7) reports_app / dashboard
 
-| # | Path / symbol | What it does | Flags | Sev | Revision |
+| # | Path / symbol | What it did | Flags | Sev | Revision |
 |---|---|---|---|---|---|
 | R1 | `reports_app/controllers/dinify/dashboard.py` `summarize_dinify_earnings()` / `generate_dinify_dashboard()` | Aggregates `DinifyTransaction` (subscription + order_charge) into "Dinify earnings" + outstanding-subscription gating. Frames Dinify as revenue holder/collector. | A,B,F,I | MED-HIGH | RENAME-RELABEL → "subscription billings"; remove held-revenue framing |
 | R2 | `reports_app/controllers/restaurant/transactions.py` (+ `dinify/transactions.py`) | Lists `DinifyTransaction` incl. `account_balances` for the transaction-listing endpoint (`reports/restaurant/transactions-listing/`) — feeds the frontend balance cards. | B,I | MED | RE-SCOPE-TO-RECORD-ONLY; drop balance snapshot |
@@ -207,7 +220,7 @@ roles, EOD sys-config: neutral. KEEP.
   cost / netted from settlement.** Infra is **dormant**. Flags F *if activated*.
   MED. → **AMBIGUOUS** (see below). KEEP-as-dormant; if activated must be a
   separate bill/aggregator split, never netted from held funds.
-- **The only live fee-netting today** is the OVA subscription debit→`dinify_revenue`
+- **The only fee-netting that existed** was the OVA subscription debit→`dinify_revenue`
   credit (C3) + the `revenue_collected`/`*_cumulative_*_charges` infra (M2/M4).
 - **Receipts**: No PDF/HTML receipt generator exists in the backend.
   `Restaurant.receipt_footer` is a stored string only; `notifications_app/.../messenger.py`
@@ -256,7 +269,7 @@ Sequence remediation from the top (safe) down. Counts = distinct consuming files
 
 Key blocker chain: integrations + controllers → `update_wallet_balance()` →
 `DinifyAccount` balance fields. Reports_app (≥8 files) read `DinifyTransaction`,
-so a record-only `DinifyTransaction` must survive the cut.
+so a record-only `DinifyTransaction` had to survive the cut.
 
 Cross-app consumers to watch: `restaurants_app/controllers/create_restaurant.py`
 (creates a `DinifyAccount` per restaurant), `reports_app/*`,
@@ -302,7 +315,7 @@ written by finance controllers (these Order fields are business mirrors, likely 
 - **Separate subscription-billing mechanism** (invoice/charge decoupled from the
   OVA debit and the held-balance ledger).
 - **Callback-only recording path** that writes a transaction record without mutating
-  any Dinify balance (today every confirm routes through `update_wallet_balance`).
+  any Dinify balance (every confirm routed through `update_wallet_balance`).
 
 ---
 
@@ -321,7 +334,8 @@ written by finance controllers (these Order fields are business mirrors, likely 
 
 ## HARD STOP
 
-This is the end of the read-only audit. No production code was modified. No
-remediation, migrations, or refactors were performed, and no legal judgment is
-made here — findings are mapped to the rubric only. Awaiting human review before
-any plan or change.
+This was the end of the read-only audit. At the time it was written, no
+production code had been modified and no remediation, migrations, or refactors
+had been performed; no legal judgment was made — findings were mapped to the
+rubric only. The remediation the audit recommended has since landed (see the
+status banner at the top); this file is retained as the historical record.

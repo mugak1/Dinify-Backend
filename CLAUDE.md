@@ -292,6 +292,13 @@ with PostgreSQL on AWS RDS.
   its serializers, the subscription writer (`tx_subscription.py` via the
   surviving `TransactionsEndpoint`), and BOTH Transactions reports are UNCHANGED
   — do NOT delete or migrate the model
+- Payments posture (current): the codebase holds NO PSP credentials and NO
+  payment-execution code of any kind — the empty `payment_integrations_app`
+  aggregator shell was deleted and its dead test-only env-var stubs removed from
+  `test_settings.py`. The subscription flow is record-only —
+  `tx_subscription.initiate()` writes a Pending `DinifyTransaction` and stops (no
+  provider call). The PSP adapter will be designed FRESH per the non-custodial
+  Pattern A when the counsel and PSP integration gates clear
 - Reports module — rebuilt on the clean contract: ✅ Complete. All four
   restaurant reports (`api/v1/reports/restaurant/<name>/` →
   `RestaurantReportsEndpoint`, `{status, message, data}` envelope) are rebuilt on

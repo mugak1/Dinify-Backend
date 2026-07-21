@@ -1,10 +1,8 @@
 """
 The ONE Yo Uganda SMS sender.
 
-Consolidates the two byte-similar implementations that used to live in
-``Messenger.send_sms`` and ``payment_integrations_app.YoIntegration.send_sms``
-(the latter is deleted). Everything SMS goes through here so the gateway
-contract is enforced in exactly one place:
+Everything SMS goes through here so the gateway contract is enforced in exactly
+one place:
 
 - The gateway reports outcomes INSIDE HTTP 200 bodies, urlencoded.
   ``ybs_autocreate_status=OK`` is the ONLY success signal — HTTP 200 is NOT
