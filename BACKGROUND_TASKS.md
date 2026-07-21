@@ -1,6 +1,6 @@
 # Background Tasks & Management Commands — Operations Runbook
 
-**Last verified:** 2026-03-26
+**Last verified:** 2026-07-20
 
 This document describes every custom Django management command in the Dinify backend, what it does, what it touches, and where the operational gaps are. It is written for someone who needs to maintain or debug these tasks.
 
@@ -17,89 +17,6 @@ One exception: `vacuum_deleted_records` is also called inline (not scheduled) fr
 ---
 
 ## Commands by App
-
-### finance_app
-
-#### `check_dpo_transactions`
-
-| | |
-|---|---|
-| **Run** | `python manage.py check_dpo_transactions` |
-| **Arguments** | None |
-| **What it does** | Queries `DinifyTransaction` rows for DPO-aggregated order payments that are still pending (both `processing_status=Pending` and `transaction_status` in Pending/Initiated). Extracts the DPO token from `aggregator_misc_details` and calls `DpoIntegration.verify_token()` for each. |
-| **External services** | DPO payment gateway API, PostgreSQL |
-| **Idempotency** | Partial. Filters by pending status, so processed transactions are excluded on subsequent runs. No explicit deduplication lock — running twice in quick succession could call the DPO API twice for the same token. Skips transactions where `dpo_token` is None. |
-| **Error handling** | **None.** No try/except in the loop. A single DPO API failure crashes the command and skips all remaining transactions. Also has a likely runtime bug: `datetime.datetime.now()` will raise `AttributeError` because `datetime` is imported as the class, not the module. |
-
-#### `verify-dpo-tokens`
-
-| | |
-|---|---|
-| **Run** | `python manage.py verify-dpo-tokens` |
-| **Arguments** | None |
-| **What it does** | Nearly identical to `check_dpo_transactions`. Queries DPO order-payment transactions with Pending/Initiated status and calls `DpoIntegration.verify_token()` for each. |
-| **External services** | DPO payment gateway API, PostgreSQL |
-| **Idempotency** | Weaker than `check_dpo_transactions` — does **not** filter on `processing_status=Pending`, so it may pick up transactions whose processing status has already been updated. |
-| **Error handling** | **None.** Uses hard dictionary key lookup (`['transaction_token']`) instead of `.get()`, so a missing key raises `KeyError` and crashes the loop. |
-| **Note** | This is functionally a duplicate of `check_dpo_transactions` with slightly different filtering and slightly less safety. The hyphenated filename is non-standard for Django management commands. |
-
-#### `check_transaction_statuses`
-
-| | |
-|---|---|
-| **Run** | `python manage.py check_transaction_statuses <aggregator>` |
-| **Arguments** | `aggregator` (positional, required): `"yo"` or `"dpo"`. Raises `CommandError` if invalid. |
-| **What it does** | A more general version of the DPO/Yo checking commands. Queries pending transactions for the specified aggregator (filtering by `processing_status=Pending`, `transaction_status` in Pending/Initiated, non-null `aggregator_reference`) and calls `DpoIntegration.verify_token()` or `YoIntegration.momo_check_transaction()` as appropriate. |
-| **External services** | DPO or Yo Payments API (depending on argument), PostgreSQL |
-| **Idempotency** | Best of the status-checking commands. Filters on both `processing_status=Pending` and `transaction_status` in Pending/Initiated, and excludes null `aggregator_reference`. |
-| **Error handling** | Validates input with `CommandError`. No try/except around per-transaction API calls — a single failure still crashes the loop. |
-
-#### `check_yo_transactions`
-
-| | |
-|---|---|
-| **Run** | `python manage.py check_yo_transactions` |
-| **Arguments** | None |
-| **What it does** | Queries Yo-aggregated transactions (order payments and subscriptions) that are pending, and calls `YoIntegration.momo_check_transaction()` for each. |
-| **External services** | Yo Payments API, PostgreSQL |
-| **Idempotency** | Filters by pending status and non-null `aggregator_reference`. |
-| **Error handling** | **None.** Has a likely bug: uses `transaction_type=[...]` (exact match with a list) instead of `transaction_type__in=[...]`, and `processing_status__in=ProcessingStatus_Pending` where the value is a string, not a list. This command may be non-functional. |
-
-#### `process_transactions`
-
-| | |
-|---|---|
-| **Run** | `python manage.py process_transactions` |
-| **Arguments** | None |
-| **What it does** | The "second stage" processor. Finds transactions where `transaction_status` is still Pending/Initiated but `processing_status` has already been set to Confirmed or Failed by a payment aggregator. Dispatches to `OrderPaymentTransaction.process()` or `SubscriptionPaymentTransaction.process()` depending on transaction type. This converts aggregator results into business-logic side effects (crediting orders, activating subscriptions, etc.). |
-| **External services** | PostgreSQL. No direct external API calls in this file, but the `.process()` methods may touch external services. |
-| **Idempotency** | Natural guard: selects rows where `processing_status` is Confirmed/Failed but `transaction_status` is still Pending/Initiated. If `.process()` updates `transaction_status` to a terminal value, those rows won't be picked up again. If `.process()` fails partway without updating status, the transaction will be reprocessed. No explicit deduplication lock. |
-| **Error handling** | **None.** No try/except. If `.process()` throws on any transaction, remaining transactions are skipped. Unrecognised `transaction_type` values are silently skipped. |
-
-#### `createaccountswithyo`
-
-| | |
-|---|---|
-| **Run** | `python manage.py createaccountswithyo` |
-| **Arguments** | None |
-| **What it does** | Finds `BankAccountRecord` rows where `yo_reference` is NULL and calls `YoIntegration.bank_create_verified_account()` for each to register them with Yo Payments. |
-| **External services** | Yo Payments API, PostgreSQL |
-| **Idempotency** | Natural guard via `yo_reference__isnull=True` — once a reference is saved, the record won't be selected again. Risk: if the Yo API call succeeds but the reference isn't persisted (crash between API call and DB save), the account will be re-created on the next run. No external idempotency key. |
-| **Error handling** | **None.** No try/except. A single Yo API failure crashes the loop. |
-
-#### `seed_dinify_account`
-
-| | |
-|---|---|
-| **Run** | `python manage.py seed_dinify_account` |
-| **Arguments** | None |
-| **What it does** | One-time setup command. Creates the singleton `DinifyAccount` record of type `AccountType_DinifyRevenue` if it doesn't already exist. |
-| **External services** | PostgreSQL only |
-| **Idempotency** | **Fully idempotent.** Checks for existence before creating. Safe to run multiple times. |
-| **Error handling** | Catches `DinifyAccount.DoesNotExist`. Does not catch `MultipleObjectsReturned` (would indicate a data integrity issue). |
-| **Note** | Help text is copy-pasted from a DPO command and does not describe what this command actually does. |
-
----
 
 ### orders_app
 
@@ -131,21 +48,6 @@ One exception: `vacuum_deleted_records` is also called inline (not scheduled) fr
 
 ---
 
-### payment_integrations_app
-
-#### `process_aggregator_responses`
-
-| | |
-|---|---|
-| **Run** | `python manage.py process_aggregator_responses <aggregator>` |
-| **Arguments** | `aggregator` (positional, required): `"yo"` or `"dpo"` |
-| **What it does** | Reads unprocessed payment callback responses from MongoDB (`yo_responses` or `dpo_responses` collection, filtered by `dinify_processed` not existing). Delegates each to `YoIntegration.process_yo_response()` or `DpoIntegration.process_response()`. |
-| **External services** | MongoDB, PostgreSQL (via integration controllers). May call external payment APIs — depends on integration controller internals. |
-| **Idempotency** | Partial. Filters by `{'dinify_processed': {'$exists': False}}`. Whether the flag gets set atomically after processing depends entirely on the integration controller code — the command itself does not set it. |
-| **Error handling** | **None.** No try/except in the loop. A single processing failure crashes the command. |
-
----
-
 ### misc_app
 
 #### `vacuum_deleted_records`
@@ -169,16 +71,8 @@ This is **not a runnable command**. It is a configuration module that defines `V
 
 | Command | App | External Services | Idempotent | Error Handling | Likely Bugs |
 |---|---|---|---|---|---|
-| `check_dpo_transactions` | finance | DPO API, PG | Partial | None | `datetime` import bug |
-| `verify-dpo-tokens` | finance | DPO API, PG | Weak | None | KeyError risk, duplicate of above |
-| `check_transaction_statuses` | finance | DPO or Yo API, PG | Good | Input validation only | — |
-| `check_yo_transactions` | finance | Yo API, PG | Partial | None | ORM filter bug (likely non-functional) |
-| `process_transactions` | finance | PG (+ delegated) | Partial | None | — |
-| `createaccountswithyo` | finance | Yo API, PG | Partial | None | — |
-| `seed_dinify_account` | finance | PG | Full | Good | Misleading help text |
 | `determine-customers` | orders | PG | Good | Partial | Atomic rollback risk |
 | `send_messages` | notifications | MongoDB, SMTP, Yo SMS | Partial | None | Re-send risk on crash |
-| `process_aggregator_responses` | payments | MongoDB, PG, APIs | Partial | None | — |
 | `vacuum_deleted_records` | misc | PG | Good | Minimal | — |
 
 ---
@@ -191,7 +85,7 @@ There is no Celery, Celery Beat, crontab, Procfile, or any other scheduler in th
 
 ### No retry behaviour
 
-No command implements retry logic. If an external API call fails (DPO, Yo, SMTP), the command crashes immediately and all remaining items in the batch are skipped. There are no dead-letter queues, no exponential backoff, no retry counters. Recovery depends entirely on re-running the command on the next scheduled invocation and hoping the failed item's status hasn't changed.
+No command implements retry logic. If an external call fails (SMTP or the SMS gateway), the command crashes immediately and all remaining items in the batch are skipped. There are no dead-letter queues, no exponential backoff, no retry counters. Recovery depends entirely on re-running the command on the next scheduled invocation.
 
 ### No per-item error isolation
 
@@ -199,7 +93,7 @@ With the exception of `vacuum_deleted_records` (partial), every command that loo
 
 ### No monitoring or alerting
 
-No command emits metrics, health checks, or alert signals. There are no Prometheus counters, no Datadog tags, no Sentry breadcrumbs. If a command fails silently (e.g. the ORM filter bug in `check_yo_transactions` causes it to process zero records), there is no mechanism to detect this.
+No command emits metrics, health checks, or alert signals. There are no Prometheus counters, no Datadog tags, no Sentry breadcrumbs. If a command fails silently (e.g. processes zero records because a filter matches nothing), there is no mechanism to detect this.
 
 ### No failure notifications
 
@@ -215,16 +109,3 @@ All commands use `print()` instead of Python's `logging` module or Django's `sel
 ### Idempotency gaps
 
 - `send_messages` can re-send emails if the command crashes after sending but before marking as sent in MongoDB
-- `createaccountswithyo` can create duplicate Yo accounts if the command crashes after the API call but before persisting the reference
-- `check_dpo_transactions` and `verify-dpo-tokens` can call the DPO API multiple times for the same token across concurrent runs
-
-### Duplicate commands
-
-`check_dpo_transactions`, `verify-dpo-tokens`, and `check_transaction_statuses dpo` all perform essentially the same function (check DPO transaction status) with slightly different filtering logic. This creates confusion about which one to use and maintenance burden when behaviour needs to change.
-
-### Likely bugs
-
-- `check_dpo_transactions`: `datetime.datetime.now()` will raise `AttributeError` (imports `datetime` class, not module)
-- `check_yo_transactions`: ORM filter uses `=` with a list instead of `__in`, and passes a string to `__in` — likely returns zero results or errors
-- `seed_dinify_account`: Help text is copy-pasted from a DPO command and does not describe the actual functionality
-- `verify-dpo-tokens`: Hard dictionary key access (`['transaction_token']`) instead of `.get()` will crash on missing keys
