@@ -38,6 +38,9 @@ from dinify_backend.tenancy.relations import (
 # Dotted paths to every production input serializer that is validated + saved.
 # SerializerPutOrder was DELETED (dead); order rows are written by the service
 # via Order.objects.create + the internal SerializerPutOrderItem.
+# SerPutUserProfile was DELETED with the manager-OTP V2 user-profile endpoint
+# (dead); the live self-service profile path uses a plain User.save(), not a
+# write serializer.
 PRODUCTION_WRITE_SERIALIZERS = (
     "restaurants_app.serializers.SerializerPutRestaurant",
     "restaurants_app.serializers.SerializerPutRestaurantEmployee",
@@ -51,7 +54,6 @@ PRODUCTION_WRITE_SERIALIZERS = (
     "restaurants_app.serializers.SerializerRestaurantTag",
     "restaurants_app.serializers.UpsellConfigUpdateSerializer",
     "orders_app.serializers.SerializerPutOrderItem",
-    "users_app.serializers.SerPutUserProfile",
     "reviews_app.serializers.ReviewWriteSerializer",
     "support_app.serializers.SupportIssueWriteSerializer",
 )

@@ -28,7 +28,6 @@ from restaurants_app.serializers import (
 
     SerializerPutDiningArea, SerializerGetDiningArea
 )
-from orders_app.serializers import SerializerListGetOrder
 from restaurants_app.models import Restaurant, MenuSection, SectionGroup, MenuItem
 from restaurants_app.controllers.tables import (
     get_tables_by_area
@@ -53,20 +52,11 @@ from dinify_backend.configss.messages import (
 )
 from restaurants_app.controllers.create_employee import create_employee
 from dinify_backend.configss.string_definitions import (
-    OrderStatus_Pending,
-    OrderStatus_Preparing,
-    OrderStatus_Served,
-    OrderStatus_Paid,
-    OrderStatus_Cancelled,
-    OrderStatus_Refunded,
-    PaymentStatus_Paid,
-    PaymentStatus_Pending,
     RESTAURANT_OWNER,
     MODULE_SETTINGS,
     MODULE_TEAM,
     MODULE_MENU,
     MODULE_TABLES,
-    MODULE_REPORTS,
 )
 
 from users_app.controllers.permissions_check import (
@@ -235,9 +225,8 @@ def _resolve_target_restaurant_id(record, action, data):
 # record / config_detail (URL segment) -> the permission MODULE that gates it.
 # ONE mapping drives the catch-all write gate (check_permission), the GET list
 # scoping (scope_list_filter) and the single-record detail read (get_detail).
-# Per Decision 1, employees -> team (owner-only). `orders` is read-only via this
-# endpoint (no write resolver/serializer); it is mapped for the list path. A
-# record absent here fails closed.
+# Per Decision 1, employees -> team (owner-only). A record absent here fails
+# closed.
 _RECORD_MODULE = {
     'restaurants':   MODULE_SETTINGS,
     'employee':      MODULE_TEAM,   # alias used by handle_create_employee
@@ -247,7 +236,6 @@ _RECORD_MODULE = {
     'menuitems':     MODULE_MENU,
     'tables':        MODULE_TABLES,
     'diningareas':   MODULE_TABLES,
-    'orders':        MODULE_REPORTS,
 }
 
 
@@ -315,7 +303,6 @@ LIST_RESTAURANT_PATH = {
     'sectiongroups':    'section__restaurant_id',
     'menuitems':        'section__restaurant_id',
     'tables':           'restaurant_id',
-    'orders':           'restaurant_id',
     'diningareas':      'restaurant_id',
 }
 
@@ -752,49 +739,7 @@ class RestaurantSetupEndpoint(APIView):
             return Response(response, status=response['status'])
 
         filter_params = request.GET.copy()
-        if config_detail == 'orders':
-            if 'status' in request.GET:
-                filter_params.pop('status')
         orm_filter = define_filter_params(filter_params, config_detail)
-
-        if config_detail == 'orders':
-            if 'status' in request.GET:
-                try:
-                    orm_filter.pop('order_status')
-                except KeyError:
-                    pass
-                try:
-                    orm_filter.pop('payment_status')
-                except KeyError:
-                    pass
-
-                if request.GET.get('status') == 'active':
-                    orm_filter['order_status__in'] = [
-                        # OrderStatus_Initiated,
-                        OrderStatus_Pending,
-                        OrderStatus_Preparing,
-                        OrderStatus_Served
-                    ]
-                    orm_filter['payment_status'] = PaymentStatus_Pending
-
-                if request.GET.get('status') == 'closed':
-                    orm_filter['order_status__in'] = [OrderStatus_Served, OrderStatus_Paid]
-                    orm_filter['payment_status'] = PaymentStatus_Paid
-
-                if request.GET.get('status') == 'all':
-                    orm_filter['order_status__in'] = [
-                        # OrderStatus_Pending,
-                        # OrderStatus_Initiated,
-                        # OrderStatus_Preparing,
-                        # OrderStatus_Served,
-                        # OrderStatus_Cancelled,
-                        # OrderStatus_Refunded,
-
-                        OrderStatus_Paid,
-                        OrderStatus_Cancelled,
-                        OrderStatus_Refunded
-                    ]
-                    # orm_filter['payment_status'] = PaymentStatus_Pending
 
         if config_detail == 'restaurants':
             if 'status' not in request.GET:
@@ -853,7 +798,6 @@ class RestaurantSetupEndpoint(APIView):
             'sectiongroups': SerializerPublicGetSectionGroup,
             'menuitems': SerializerPublicGetMenuItem,
             'tables': SerializerPublicGetTable,
-            'orders': SerializerListGetOrder,
             'diningareas': SerializerGetDiningArea
         }
 
@@ -864,7 +808,6 @@ class RestaurantSetupEndpoint(APIView):
             'sectiongroups': OK_RETRIEVED_SECTION_GROUP,
             'menuitems': 'Successfully retrieved the menu items',
             'tables': 'Successfully retrieved the tables',
-            'orders': 'Successfully retrieved the orders',
             'diningareas': 'Successfully retrieved the dining areas'
         }
 
@@ -875,7 +818,6 @@ class RestaurantSetupEndpoint(APIView):
             'sectiongroups': ERR_RETRIEVED_SECTION_GROUP,
             'menuitems': 'Error while retrieving menu items',
             'tables': 'Error while retrieving the tables',
-            'orders': 'Error while retrieving the orders',
             'diningareas': 'Error while retrieving the dining areas'
         }
 

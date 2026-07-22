@@ -11,8 +11,8 @@ from orders_app.models import Order, OrderItem
 from restaurants_app.models import Table
 from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
-    OrderStatus_Served, PaymentStatus_Paid, OrderStatus_Cancelled,
-    OrderStatus_Refunded, OrderStatus_Preparing, OrderStatus_Pending,
+    PaymentStatus_Paid, OrderStatus_Cancelled,
+    OrderStatus_Refunded,
     OrderStatus_Initiated,
     PaymentStatus_Pending,
     TransactionType_OrderPayment, TransactionStatus_Success,
@@ -139,106 +139,6 @@ def summarize_revenue(restaurant_id: str):
         'this_month': this_month_revenue if this_month_revenue is not None else 0,
         # 'last_month': last_month_revenue,
         'month_growth': 'up'  # if this_month_revenue > last_month_revenue else 'down'
-    }
-
-
-def summarize_orders(restaurant_id: str):
-    orders = Order.objects.filter(
-        restaurant=restaurant_id
-    )
-    num_orders = orders.count()
-    # Resolve "this month" in EAT (see summarize_revenue).
-    local_now = timezone.localtime(timezone.now())
-    this_month_orders = orders.filter(
-        time_created__month=local_now.month,
-        time_created__year=local_now.year
-    ).count()
-    # last_month_orders = orders.filter(
-    #     time_created__month=datetime.now().month - 1
-    # ).count()
-
-    closed_orders = orders.filter(
-        order_status=OrderStatus_Served,
-        payment_status=PaymentStatus_Paid
-    )
-    cancelled_orders = orders.filter(
-        order_status__in=[OrderStatus_Cancelled, OrderStatus_Refunded]
-    ).count()
-
-    active_orders = orders.filter(
-        order_status__in=[OrderStatus_Served, OrderStatus_Preparing, OrderStatus_Pending],
-        payment_status=PaymentStatus_Pending
-    )
-    occupied_tables = active_orders.values('table').distinct().count()
-    total_tables = Table.objects.filter(restaurant=restaurant_id).count()
-    distinct_ordered_items = OrderItem.objects.filter(
-        order__in=[order.id for order in active_orders]
-    ).distinct().count()
-
-    # orders | closed_orders
-    order_items = OrderItem.objects.filter(
-        order__in=[order.id for order in orders]
-    )
-    most_popular_items = order_items.values('item__name').annotate(
-        total_quantity=Sum('quantity')
-    ).order_by('-total_quantity')[:3]
-    top_customers_by_revenue = orders.values('customer').annotate(
-        total_spent=Sum('actual_cost')
-    ).order_by('-total_spent')[:3]
-    top_customers_by_orders = orders.values(
-        'customer__first_name',
-        'customer__last_name',
-        'customer__username'
-    ).exclude(
-        customer__isnull=True
-    ).annotate(
-        total_orders=Count('id')
-    ).order_by('-total_orders')[:3]
-    # === end dummy content
-
-    diners = closed_orders.values('customer').distinct().count()
-    monthly_diners = closed_orders.filter(
-        time_created__month=local_now.month,
-        time_created__year=local_now.year
-    ).values('customer').distinct().count()
-
-    return {
-        'num_orders': num_orders,
-        'this_month_orders': this_month_orders,
-        # 'last_month_orders': last_month_orders,
-        'month_growth': 'up',  # if this_month_orders > last_month_orders else 'down'
-        'order_count_overview': {
-            'total': num_orders,
-            'closed': closed_orders.count(),
-            'cancelled': cancelled_orders,
-        },
-        'real_time': {
-            'active': active_orders.count(),
-            'occupied_tables': occupied_tables,
-            'total_tables': total_tables,
-            'distinct_order_items': distinct_ordered_items
-        },
-        'top_items': most_popular_items,
-        'top_customers': {
-            'by_revenue': top_customers_by_revenue,
-            'by_orders': top_customers_by_orders
-        },
-        'diners': {
-            'total': diners,
-            'monthly': monthly_diners,
-            'monthly_growth': 'up'
-        }
-    }
-
-
-def get_restaurant_dashboard_1(restaurant_id: str):
-    return {
-        'status': 200,
-        'message': 'Successfully retrieved the restaurant dashboard',
-        'data': {
-            'revenue': summarize_revenue(restaurant_id),
-            'orders': summarize_orders(restaurant_id)
-        }
     }
 
 

@@ -8,11 +8,9 @@ from users_app.controllers.permissions_check import can_user_access_module
 from dinify_backend.configss.string_definitions import MODULE_REPORTS
 from reports_app.controllers.restaurant.dashboard import (
     generate_restaurant_dashboard_details,
-    get_restaurant_dashboard_1,
     generate_restaurant_dashboard_v2
 )
 from reports_app.controllers.restaurant.sales import (
-    generate_restaurant_sales_summary,
     generate_restaurant_sales_listing,
     generate_restaurant_sales_trends,
     generate_restaurant_sales_hourly
@@ -51,16 +49,6 @@ class RestaurantReportsEndpoint(APIView):
         date_today = timezone.localdate()
         if report_name == 'dashboard':
             response = generate_restaurant_dashboard_details(
-                restaurant_id=request.GET.get('restaurant', None),
-                date_from=request.GET.get('from', str(date_today)),
-                date_to=request.GET.get('to', str(date_today))
-            )
-        elif report_name == 'dashboard1':
-            response = get_restaurant_dashboard_1(
-                restaurant_id=request.GET.get('restaurant', None),
-            )
-        elif report_name == 'sales-summary':
-            response = generate_restaurant_sales_summary(
                 restaurant_id=request.GET.get('restaurant', None),
                 date_from=request.GET.get('from', str(date_today)),
                 date_to=request.GET.get('to', str(date_today))

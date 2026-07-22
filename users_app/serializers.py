@@ -31,24 +31,3 @@ class SerGetUserProfile(ModelSerializer):
         # avoids any module-load coupling.
         from users_app.controllers.permissions_check import get_any_restaurant_roles
         return get_any_restaurant_roles(user)
-
-
-class SerPutUserProfile(ModelSerializer):
-    """
-    Write serializer for the manager/admin profile-update path (via Secretary).
-
-    Explicit, tightly-scoped contract (TENANT-ISO-PR5): ONLY the profile fields
-    legitimately updated by update_user_profile are writable. The privilege and
-    security fields on the platform-global User model — password, is_staff,
-    is_superuser, is_active, groups, user_permissions, roles,
-    prompt_password_change, last_login, date_joined — are NOT exposed and can
-    never be set through a profile update. Phone canonicalisation / OTP stay in
-    the controller, which normalises before this serializer runs.
-    """
-    class Meta:
-        model = User
-        fields = (
-            'id', 'country', 'first_name', 'last_name', 'other_names',
-            'email', 'phone_number', 'username',
-        )
-        read_only_fields = ('id',)

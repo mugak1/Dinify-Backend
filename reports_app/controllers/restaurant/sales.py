@@ -1,22 +1,19 @@
 """
-Restaurant Sales reports — summary, listing, and trends.
+Restaurant Sales reports — listing and trends.
 
-Built on the PR3 reporting foundations so the three panes agree:
+Built on the PR3 reporting foundations so the two panes agree:
   * the "sale" set is ``SALE_STATUSES`` ({served, paid}) via ``sale_orders``,
-  * revenue is ``Sum('actual_cost')`` and discount is ``Sum('savings')`` via
-    ``revenue_sum`` / ``discount_sum`` — never ``total_cost`` (gross) or
-    ``discounted_cost`` (post-discount total),
+  * revenue is ``Sum('actual_cost')`` and discount is ``Sum('savings')`` — never
+    ``total_cost`` (gross) or ``discounted_cost`` (post-discount total),
   * trends are ONE grouped query via ``bucket_sales`` (no per-period loop).
 
-The ``{status, message, data}`` envelope and the three public entrypoints
-(``generate_restaurant_sales_summary`` / ``_listing`` / ``_trends``) are kept so
-the endpoint dispatch (``reports_app/endpoints/restaurant_reports.py``) is
-unchanged.
+The public entrypoints are ``generate_restaurant_sales_listing`` / ``_trends``
+(plus the hour-of-day ``generate_restaurant_sales_hourly``), each returning the
+``{status, message, data}`` envelope dispatched from
+``reports_app/endpoints/restaurant_reports.py``.
 """
-from decimal import Decimal, ROUND_HALF_UP
-
 from django.db.models import (
-    Count, Sum, Avg, Max, Min, Subquery, OuterRef, IntegerField,
+    Count, Sum, Subquery, OuterRef, IntegerField,
 )
 from django.db.models.functions import Coalesce
 
@@ -29,7 +26,7 @@ from dinify_backend.configss.string_definitions import (
 from misc_app.controllers.clean_dates import clean_dates
 from misc_app.controllers.report_support_functions import make_graph_series_data
 from reports_app.controllers.common.sale_filters import (
-    sale_orders, revenue_sum, discount_sum, SALE_STATUSES,
+    sale_orders, SALE_STATUSES,
 )
 from reports_app.controllers.common.bucketing import (
     bucket_sales, bucket_sales_by_hour, LOCAL_TZ,
@@ -59,82 +56,6 @@ TREND_AXIS_TITLES = {
     'quarter': 'Quarters',
     'year': 'Years',
 }
-
-
-def generate_restaurant_sales_summary(
-    restaurant_id: str,
-    date_from: str,
-    date_to: str,
-) -> dict:
-    dates = clean_dates(date_from=date_from, date_to=date_to)
-    if dates.get('status') != 200:
-        return dates
-    date_from = dates['date_from']
-    date_to = dates['date_to']
-
-    orders = sale_orders(restaurant_id, date_from, date_to)
-
-    # ONE aggregate row. revenue/discount use the canonical bases; avg/max/min
-    # are over actual_cost (net order value), NOT total_cost.
-    agg = orders.aggregate(
-        number_of_sales=Count('id'),
-        revenue=revenue_sum(),
-        gross_sales=Sum('total_cost'),
-        total_discounts=discount_sum(),
-        average_order_value=Avg('actual_cost'),
-        max_order_value=Max('actual_cost'),
-        min_order_value=Min('actual_cost'),
-    )
-
-    average_order_value = agg['average_order_value']
-    if average_order_value is not None:
-        # Avg over a numeric column can carry extra places; money is 2dp.
-        average_order_value = average_order_value.quantize(
-            Decimal('0.01'), rounding=ROUND_HALF_UP,
-        )
-
-    # Payment channels: successful order-payment transactions over the SAME sale
-    # set, grouped by the real payment_mode. Genuinely sparse until 8b — not
-    # fabricated, and (different lens) it need not reconcile with the order
-    # count/revenue above (a served order may have no on-system transaction).
-    channel_rows = (
-        DinifyTransaction.objects
-        .filter(
-            transaction_type=TransactionType_OrderPayment,
-            transaction_status=TransactionStatus_Success,
-            order__restaurant=restaurant_id,
-            order__order_status__in=SALE_STATUSES,
-            order__time_created__date__gte=date_from,
-            order__time_created__date__lte=date_to,
-        )
-        .values('payment_mode')
-        .annotate(count=Count('id'), amount=Sum('transaction_amount'))
-        .order_by('payment_mode')
-    )
-    payment_channels = [
-        {
-            'channel': row['payment_mode'],
-            'count': row['count'],
-            'amount': row['amount'] if row['amount'] is not None else 0,
-        }
-        for row in channel_rows
-    ]
-
-    data = {
-        'number_of_sales': agg['number_of_sales'] or 0,
-        'revenue': agg['revenue'] if agg['revenue'] is not None else 0,
-        'gross_sales': agg['gross_sales'] if agg['gross_sales'] is not None else 0,
-        'total_discounts': agg['total_discounts'] if agg['total_discounts'] is not None else 0,
-        'average_order_value': average_order_value if average_order_value is not None else 0,
-        'max_order_value': agg['max_order_value'] if agg['max_order_value'] is not None else 0,
-        'min_order_value': agg['min_order_value'] if agg['min_order_value'] is not None else 0,
-        'payment_channels': payment_channels,
-    }
-    return {
-        'status': 200,
-        'message': 'Successfully retrieved the sales summary',
-        'data': data,
-    }
 
 
 def generate_restaurant_sales_listing(

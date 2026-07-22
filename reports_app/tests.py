@@ -7,7 +7,7 @@ Every restaurant report is single-target (scoped by the client ``?restaurant=``)
 (not 403) on a cross-tenant / non-member / missing-id read so a restaurant's
 existence is never confirmed to an outsider. A dinify admin is unrestricted;
 unauthenticated callers are stopped by the global IsAuthenticated default (401).
-The guard is report-name agnostic, so a single report name (``sales-summary``)
+The guard is report-name agnostic, so a single report name (``sales-listing``)
 exercises it. Owner/manager hold the ``reports`` module by default (these tests);
 roles without it are covered in users_app/tests_permission_enforcement.py.
 """
@@ -20,8 +20,8 @@ from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Active, RESTAURANT_OWNER, RESTAURANT_MANAGER, DINIFY_ADMIN,
 )
 
-# A valid date range — sales-summary has no day cap, and an empty result set
-# still returns 200, so the authorized path needs no order fixtures.
+# A 30-day range — deliberately inside sales-listing's 31-day cap — and an empty
+# result set still returns 200, so the authorized path needs no order fixtures.
 DATE_QS = 'from=2024-01-01&to=2024-01-31'
 
 
@@ -73,7 +73,7 @@ class ReportsTenantScopeTests(TestCase):
         token = str(RefreshToken.for_user(user).access_token)
         return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
 
-    def get_report(self, user=None, restaurant=None, name='sales-summary'):
+    def get_report(self, user=None, restaurant=None, name='sales-listing'):
         url = f'/api/v1/reports/restaurant/{name}/'
         qs = f'restaurant={restaurant}&{DATE_QS}' if restaurant is not None else DATE_QS
         headers = self.auth(user) if user is not None else {}

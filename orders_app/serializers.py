@@ -1,10 +1,5 @@
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from orders_app.models import Order, OrderItem
-from dinify_backend.configss.string_definitions import (
-    OrderItemStatus_Unavailable,
-    OrderItemStatus_Served,
-    OrderStatus_Cancelled
-)
 
 
 class SerializerPutOrderItem(ModelSerializer):
@@ -81,48 +76,6 @@ class SerializerListOrderItem(ModelSerializer):
                 'time_last_updated': extra.time_last_updated
             })
         return extras
-
-
-class SerializerListGetOrder(ModelSerializer):
-    items = SerializerMethodField()
-    table_details = SerializerMethodField()
-    count_items_served = SerializerMethodField()
-    count_items_considered = SerializerMethodField()
-
-    class Meta:
-        model = Order
-        fields = (
-            'id', 'table', 'customer',
-            'total_cost', 'discounted_cost', 'savings',
-            'actual_cost', 'prepayment_required',
-            'payment_status', 'order_status',
-            'items', 'order_number', 'time_created', 'table_details',
-            'count_items_served', 'count_items_considered',
-            'total_paid', 'balance_payable', 'payment_status',
-            'time_last_updated'
-        )
-
-    def get_items(self, order):
-        items = OrderItem.objects.filter(order=order)
-        return SerializerListOrderItem(items, many=True).data
-
-    def get_table_details(self, order):
-        return {
-            'table_number': order.table.number,
-            'table_room_name': order.table.room_name
-        }
-
-    def get_count_items_served(self, order):
-        return OrderItem.objects.values('id').filter(
-            order=order,
-            status=OrderItemStatus_Served
-        ).count()
-
-    def get_count_items_considered(self, order):
-        return OrderItem.objects.values('id').filter(
-            order=order,
-            deleted=False,
-        ).exclude(status__in=[OrderItemStatus_Unavailable, OrderStatus_Cancelled]).count()
 
 
 class SerializerPublicOrderDetails(ModelSerializer):

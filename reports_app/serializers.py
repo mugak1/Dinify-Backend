@@ -13,9 +13,9 @@ class SerializerOrderListingReport(serializers.ModelSerializer):
     ``generate_restaurant_sales_listing`` — so the whole listing serialises in a
     single query with no per-row N+1.
 
-    Money fields are emitted as JSON numbers (``coerce_to_string=False``) to
-    stay consistent with the sales-summary dict, which renders raw Decimals as
-    numbers via DRF's JSON encoder.
+    Money fields are emitted as JSON numbers (``coerce_to_string=False``) so the
+    frontend receives raw numeric Decimals (via DRF's JSON encoder) and owns all
+    currency formatting — the standing Reports money convention.
     """
     # order_number is an IntegerField(null=True) on the model; the contract
     # wants it as a string. CharField coerces int -> str on output and passes

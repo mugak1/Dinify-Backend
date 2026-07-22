@@ -1199,26 +1199,24 @@ class MassAssignmentClosureTests(ClosureFixtureBase):
 @tag('tenant_closure')
 class PublicDirectoryPiiClosureTests(ClosureFixtureBase):
 
-    def test_soft_deleted_restaurant_hidden_regardless_of_deleted_param(self):
-        deleted_restaurant = Restaurant.objects.create(
-            name='Deleted Dir R', location='del-dir', status=RestaurantStatus_Active,
-            owner=self.owner_a, deleted=True,
-        )
+    def test_anonymous_restaurant_directory_is_retired(self):
+        # The anonymous misc-public restaurants directory was fully RETIRED (the
+        # endpoint is gone). Full retirement SUBSUMES the old narrowing guarantee
+        # that a soft-deleted restaurant could never surface: with no route, no
+        # restaurant data (deleted or live) is anonymously reachable at all.
         resp = self.client.get(f'{MISC_PUBLIC_RESTAURANTS_URL}?deleted=true')
-        self.assertEqual(resp.status_code, 200, resp.content)
-        body = resp.content.decode()
-        self.assertNotIn(str(deleted_restaurant.id), body)
+        self.assertEqual(resp.status_code, 404, resp.content)
 
     def test_anonymous_table_directory_is_retired(self):
         resp = self.client.get(MISC_PUBLIC_TABLES_URL)
         self.assertEqual(resp.status_code, 404, resp.content)
 
-    def test_public_directory_exposes_no_owner_pii(self):
+    def test_public_directory_owner_pii_route_is_retired(self):
+        # The old anonymous restaurants directory's no-owner-PII guarantee is
+        # SUBSUMED by full retirement: the route no longer exists, so there is no
+        # anonymous payload that could carry owner PII in the first place.
         resp = self.client.get(MISC_PUBLIC_RESTAURANTS_URL)
-        self.assertEqual(resp.status_code, 200, resp.content)
-        body = resp.content.decode()
-        self.assertNotIn(self.owner_a.email, body)
-        self.assertNotIn(self.owner_a.phone_number, body)
+        self.assertEqual(resp.status_code, 404, resp.content)
 
     def test_scan_payload_carries_only_safe_fields(self):
         resp = self.client.get(
