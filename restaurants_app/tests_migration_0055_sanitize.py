@@ -167,14 +167,18 @@ class Migration0055ExecutorTests(TransactionTestCase):
 
     # Pin users_app to its latest migration in BOTH targets so the historical User
     # model state matches the applied DB schema (the country_of_origin->country
-    # rename otherwise drifts between project_state and the DB).
+    # rename otherwise drifts between project_state and the DB). BUMP this to the
+    # new head whenever a users_app migration is added: each test migrates
+    # users_app to this pin and tearDown only restores restaurants_app, so a stale
+    # (older) pin leaves users_app migrated BACKWARD — dropping newer columns like
+    # User.account_type — for every test that runs after this class.
     migrate_from = [
         ('restaurants_app', '0054_table_qr_version'),
-        ('users_app', '0009_otp_hardening'),
+        ('users_app', '0011_flip_admin_account_type'),
     ]
     migrate_to = [
         ('restaurants_app', '0055_sanitize_menu_item_extras'),
-        ('users_app', '0009_otp_hardening'),
+        ('users_app', '0011_flip_admin_account_type'),
     ]
 
     def _migrate(self, targets):

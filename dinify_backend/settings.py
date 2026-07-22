@@ -66,7 +66,8 @@ INSTALLED_APPS = [
     'reports_app',
     'notifications_app',
     'support_app',
-    'reviews_app'
+    'reviews_app',
+    'platform_admin_app',
 ]
 
 MIDDLEWARE = [
