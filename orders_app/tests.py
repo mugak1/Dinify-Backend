@@ -169,7 +169,6 @@ class TestOrderFunctions(TestCase):
         table = Table.objects.get(number=TEST_TABLE_NUMBER4)
 
         menu_item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
-        menu_item2 = MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME)
         discounted = MenuItem.objects.get(name=TEST_DISCOUNTED_MENU_ITEM_NAME)
         options_item = MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME)
 

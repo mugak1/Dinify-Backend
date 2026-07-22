@@ -13,7 +13,6 @@ an idempotent replay still returns the original order after the menu changes.
 available / in_stock remain the zero-and-flag reconciliation path — never a hard
 publication rejection — which these tests lock in.
 """
-from decimal import Decimal
 
 from django.test import TestCase
 
@@ -326,7 +325,7 @@ class CheckoutTransactionBoundaryTests(CheckoutPolicyBase):
     def test_idempotent_replay_returns_original_after_unpublish(self):
         import uuid as _uuid
         key = str(_uuid.uuid4())
-        first = self._order([{'item': str(self.published_item.pk), 'quantity': 1}])
+        self._order([{'item': str(self.published_item.pk), 'quantity': 1}])
         # Re-run with the SAME client_order_id after the item is unpublished.
         first_with_key = ConOrder.initiate_order(
             restaurant_id=str(self.restaurant.pk), table_id=str(self.table.pk),

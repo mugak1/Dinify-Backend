@@ -1,5 +1,5 @@
 import hashlib
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from django.test import TestCase
 from django.core.cache import cache
 from django.contrib.auth.models import AnonymousUser

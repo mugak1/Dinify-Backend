@@ -11,8 +11,6 @@ RestaurantStatus_Rejected = 'rejected'
 PaymentMode_Cash = 'cash'
 PaymentMode_MobileMoney = 'momo'
 PaymentMode_Card = 'card'
-PaymentMode_Ova = 'ova'
-PaymentMode_Bank = 'bank'
 
 PaymentForm_Split = 'split'
 PaymentForm_Full = 'full'
@@ -23,7 +21,6 @@ TransactionType_OrderRefund = 'order_refund'
 TransactionType_OrderCharge = 'order_charge'
 TransactionType_Disbursement = 'disbursement'
 TransactionType_Subscription = 'subscription'
-TransactionType_Tip = 'tip'
 
 # transaction statuses
 TransactionStatus_Success = 'success'

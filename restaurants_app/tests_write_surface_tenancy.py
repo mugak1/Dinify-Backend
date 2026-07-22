@@ -13,8 +13,7 @@ from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from restaurants_app.models import (
-    Restaurant, RestaurantEmployee, MenuSection, SectionGroup, MenuItem,
-    DiningArea, Table, Reservation, WaitlistEntry,
+    Restaurant, RestaurantEmployee, MenuSection, SectionGroup, DiningArea, Table, Reservation, WaitlistEntry,
 )
 from restaurants_app.serializers import (
     SerializerPutSectionGroup, SerializerPutRestaurant, SerializerPutMenuItem,

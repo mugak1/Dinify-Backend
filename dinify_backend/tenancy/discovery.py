@@ -36,14 +36,7 @@ logger = logging.getLogger(__name__)
 # The meta-test asserts the discovered-un-introspectable set EQUALS this, so a
 # NEW un-introspectable serializer fails loudly (it can't silently hide its
 # relations) and fixing a listed one reminds you to shrink this set.
-#
-# restaurants_app.serializers.SerializerEmployeeGetRestaurant: already broken —
-#   Meta.fields names a 'name' field that RestaurantEmployee does not have, so
-#   `.fields` raises ImproperlyConfigured unconditionally (dead code; it would
-#   500 on any request). Fixing it is a separate change, not this PR.
-KNOWN_UNINTROSPECTABLE = frozenset({
-    "restaurants_app.serializers.SerializerEmployeeGetRestaurant",
-})
+KNOWN_UNINTROSPECTABLE = frozenset()
 
 # Project modules that DEFINE a serializer (by AST) but cannot be imported in the
 # tooling/test context. The meta-test asserts the discovered import-failure set

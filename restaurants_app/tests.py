@@ -1,15 +1,12 @@
 import json
-from cgi import test
 from django.db import transaction
 from django.test import TestCase
 from dinify_backend.configs import ROLES
-from dinify_backend.configss.messages import MESSAGES
 from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Active,
     RestaurantStatus_Pending,
     RestaurantStatus_Blocked,
 )
-from misc_app.controllers.secretary import Secretary
 from users_app.tests import TEST_PHONE, seed_user
 from users_app.models import User
 from restaurants_app.controllers.create_restaurant import (
@@ -22,7 +19,6 @@ from restaurants_app.models import (
     Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table,
     SectionGroup, DiningArea, Reservation, WaitlistEntry,
 )
-from users_app.controllers.otp_manager import OtpManager
 
 
 TEST_RESTAURANT_NAME = 'Seed Test Restaurant'

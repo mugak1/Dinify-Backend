@@ -41,11 +41,6 @@ MESSAGES = {
 
 ERR_GENERAL = 'Sorry, an error occurred'
 
-# finance messages
-OK_ORDER_PAYMENT_INITIATED = 'Order payment has been initiated. Please confirm once prompted.'
-ERR_ORDER_PAYMENT_INITIATION = 'Failed to initiate order payment. Please try again.'
-OK_ORDER_PAYMENT_PROCESSED = 'Order payment has been processed successfully.'
-
 
 OK_GET_RECORD_DETAIL = 'The details of the record have been retrieved successfully.'
 ERR_UNSPECIFIED_RECORD_DETAILS = 'Please specify the record type and the record id'
@@ -57,10 +52,6 @@ ERR_ORDER_UPDATED = 'Sorry, an error occurred while updating the order.'
 
 OK_SCANNED_TABLE = 'The table details have been retrieved successfully.'
 ERR_TABLE_REFERENCE_REQUIRED = 'A table reference is required to view the menu.'
-ERR_TABLE_REFERENCE_INVALID = "That table reference isn't valid."
-ERR_TABLE_UNAVAILABLE = (
-    "This table isn't available right now — please ask a member of staff."
-)
 
 OK_ADDED_SECTION_GROUP = 'The section group has been added successfully.'
 ERR_ADDED_SECTION_GROUP = 'An error occurred while adding the section group.'
@@ -74,9 +65,5 @@ ERR_RESTAURANT_REFERENCE_REQUIRED = (
     'A restaurant reference is required to view the menu.'
 )
 
-
-ERR_UPDATING_ITEM_STATUS_UNSUPPORTED_STATUS = 'The provided status is not supported.'
-ERR_ORDER_ITEM_NOT_AVAILABLE = 'This order item is unavailable.'
-OK_UPDATED_ITEM_STATUS = 'The item status has been updated successfully.'
 
 EOD_IN_PROGRESS = 'The restaurant is currently processing the End of Day tasks. Please wait for 5 minutes.'  # noqa

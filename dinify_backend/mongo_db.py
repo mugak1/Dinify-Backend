@@ -12,15 +12,8 @@ logger = logging.getLogger(__name__)
 
 # the collection strings for mongodb
 ACTION_LOGS = 'action_logs'
-NOTIFICATIONS = 'notifications'
-COL_DPO_TOKENS = 'dpo_tokens'
-COL_DPO_TOKEN_VERIFICATION = 'dpo_token_verification'
 
 COL_NOTIFICATIONS = 'notifications'
-
-# aggregator responses
-COL_DPO_RESPONSES = 'dpo_responses'
-COL_YO_RESPONSES = 'yo_responses'
 
 
 class _LazyMongoClient:

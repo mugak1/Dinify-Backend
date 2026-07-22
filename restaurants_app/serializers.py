@@ -126,15 +126,6 @@ class SerializerMiscPublicRestaurant(ModelSerializer):
         )
 
 
-class SerializerEmployeeGetRestaurant(ModelSerializer):
-    """
-    serializer for getting restaurant details for the employee
-    """
-    class Meta:
-        model = RestaurantEmployee
-        fields = ("id", "name", "location")
-
-
 class SerializerPutRestaurantEmployee(ModelSerializer):
     """
     serializer for adding and editing restaurant employees

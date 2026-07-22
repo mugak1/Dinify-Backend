@@ -343,8 +343,8 @@ with PostgreSQL on AWS RDS.
   3.17.1 / SimpleJWT 5.5.1 / psycopg 3.1.18 already supported 5.2). The
   deprecation surface was clean — no removed-in-5.x APIs in use, no new
   migrations generated, `USE_TZ` already explicit. App timezone code now uses
-  stdlib `zoneinfo`; `pytz` was removed from app code (it remains only as a
-  transitive dependency of pandas — do not reintroduce `import pytz`)
+  stdlib `zoneinfo`; `pytz`/`numpy`/`pandas`/`tzdata` were removed from
+  requirements entirely (no app imports remain — do not reintroduce `import pytz`)
 
 ## Deployment Rules — CRITICAL
 - Merging a PR to main automatically triggers GitHub Actions to pull code,

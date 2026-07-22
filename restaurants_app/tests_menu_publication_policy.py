@@ -16,7 +16,6 @@ These close the gaps the pre-PR2 suites left open:
 
 Read behaviour only; the order/checkout parity lives in orders_app/tests.py.
 """
-from unittest.mock import patch
 
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext

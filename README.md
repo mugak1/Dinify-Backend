@@ -107,10 +107,7 @@ Configured via `.env` file using `python-decouple`. See [`.env.example`](.env.ex
 | Group | Variables | Purpose |
 |---|---|---|
 | MongoDB | `MONGO_HOST`, `MONGO_DATABASE` | MongoDB connection for notifications, callbacks, and logs |
-| Flutterwave | `FLUTTERWAVE_SECRET`, `DEFAULT_PAYMENT_EMAIL` | Flutterwave payment integration |
-| DPO | `DPO_COMPANY_TOKEN`, `DPO_SERVICE_TYPE` | DPO payment gateway |
-| Yo Uganda | `YO_API_USERNAME`, `YO_API_PASSWORD`, `YO_SMS_ACCOUNT_NO`, `YO_SMS_PASSWORD` | Yo mobile money and SMS |
-| Pesapal | `PESAPAL_CONSUMER_KEY`, `PESAPAL_CONSUMER_SECRET` | Pesapal payment integration |
+| Yo Uganda | `YO_SMS_ACCOUNT_NO`, `YO_SMS_PASSWORD` | Yo SMS gateway (OTP + notifications) |
 | Rate limiting | `THROTTLE_AUTH_LOGIN`, `THROTTLE_AUTH_OTP`, `THROTTLE_AUTH_RESET` | Auth endpoint throttle rates (defaults: 10/min, 5/min, 5/min) |
 
 ## Migration Workflow

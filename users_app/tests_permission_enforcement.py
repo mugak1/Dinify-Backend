@@ -28,7 +28,7 @@ from users_app.controllers.permissions_check import (
 )
 from restaurants_app.models import (
     Restaurant, RestaurantEmployee, RestaurantRolePermission,
-    MenuSection, MenuItem, DiningArea, Table,
+    MenuSection, MenuItem, Table,
 )
 from orders_app.models import Order
 from reviews_app.models import Review

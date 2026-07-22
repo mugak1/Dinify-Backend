@@ -8,16 +8,11 @@ from django.db import transaction
 from users_app.models import User
 from orders_app.models import Order, OrderItem
 from dinify_backend.configss.messages import (
-    OK_ORDER_UPDATED, ERR_ORDER_UPDATED,
-    ERR_UPDATING_ITEM_STATUS_UNSUPPORTED_STATUS,
-    OK_UPDATED_ITEM_STATUS, ERR_ORDER_ITEM_NOT_AVAILABLE
+    OK_ORDER_UPDATED, ERR_ORDER_UPDATED
 )
 from dinify_backend.configss.string_definitions import (
-    OrderItemStatus_Initiated, OrderItemStatus_Unavailable,
-    OrderStatus_Pending,
-    OrderItemStatus_Preparing, OrderItemStatus_Served,
-    OrderStatus_Cancelled, OrderStatus_Preparing,
-    OrderStatus_Served
+    OrderItemStatus_Initiated, OrderStatus_Pending,
+    OrderItemStatus_Preparing, OrderStatus_Preparing
 )
 
 logger = logging.getLogger(__name__)
@@ -140,52 +135,3 @@ def _submit_order(order: Order, user: Union[User, None]) -> dict:
         'status': 200,
         'message': OK_ORDER_UPDATED
     }
-
-
-def update_item_status(
-    item_id: str,
-    new_status: str,
-    user: User
-) -> dict:
-    """
-    update the status of an order item
-    """
-    if new_status not in [OrderItemStatus_Preparing, OrderItemStatus_Served]:
-        return {
-            'status': 400,
-            'message': ERR_UPDATING_ITEM_STATUS_UNSUPPORTED_STATUS
-        }
-
-    with transaction.atomic():
-        item = OrderItem.objects.select_for_update().get(id=item_id)
-
-        if not item.available:
-            return {
-                'status': 200,
-                'message': ERR_ORDER_ITEM_NOT_AVAILABLE
-            }
-
-        # time_last_updated is auto_now on BaseModel — each save stamps it.
-        item.status = new_status
-        item.last_updated_by = user
-        item.save()
-
-        # check if to set the order status to served
-        if new_status in [OrderItemStatus_Preparing, OrderItemStatus_Served]:
-            order = Order.objects.select_for_update().get(id=item.order.pk)
-            available_order_items = OrderItem.objects.filter(
-                order=order,
-                available=True
-            ).exclude(status=OrderItemStatus_Unavailable)
-
-            updated_items = available_order_items.filter(status=new_status)
-
-            if available_order_items.count() == updated_items.count():
-                order.order_status = new_status  # OrderStatus_Served
-                order.last_updated_by = user
-                order.save()
-
-        return {
-            'status': 200,
-            'message': OK_UPDATED_ITEM_STATUS
-        }

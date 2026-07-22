@@ -907,24 +907,3 @@ def handle_add_order_items(order_id: str, items: list) -> dict:
             'unavailable_extras': order_details.get('unavailable_extras')
         }
     }
-
-
-def handle_delete_items(
-    order_item: str, reason: str, user: Union[User, None]
-) -> dict:
-    # an unauthenticated diner arrives as AnonymousUser (not None); never assign
-    # it to the deleted_by User FK — normalise to None.
-    if user is not None and user.is_anonymous:
-        user = None
-    with transaction.atomic():
-        item = OrderItem.objects.select_for_update().get(pk=order_item)
-        item.deleted = True
-        item.deletion_reason = reason
-        item.deleted_by = user
-        item.save()
-        ConOrder.update_order_amounts(order=item.order)
-
-    return {
-        'status': 200,
-        'message': 'The order item has been updated successfully.'
-    }

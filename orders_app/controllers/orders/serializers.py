@@ -1,5 +1,4 @@
 from orders_app.models import Order, OrderItem
-from rest_framework.serializers import ModelSerializer, SerializerMethodField
 
 
 def serialize_order_details(order: Order) -> dict:
