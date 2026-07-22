@@ -13,7 +13,6 @@ an idempotent replay still returns the original order after the menu changes.
 available / in_stock remain the zero-and-flag reconciliation path — never a hard
 publication rejection — which these tests lock in.
 """
-from decimal import Decimal
 
 from django.test import TestCase
 

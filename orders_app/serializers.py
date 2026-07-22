@@ -1,8 +1,6 @@
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from orders_app.models import Order, OrderItem
 from dinify_backend.configss.string_definitions import (
-    OrderItemStatus_Initiated,
-    OrderItemStatus_Preparing,
     OrderItemStatus_Unavailable,
     OrderItemStatus_Served,
     OrderStatus_Cancelled
