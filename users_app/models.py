@@ -118,11 +118,6 @@ class UserOtp(models.Model):
         ordering = ['time_created']
 
 
-@receiver(pre_save, sender=BaseModel)
-def add_time_last_updated(sender, instance, **kwargs):
-    instance.time_last_updated = timezone.now()
-
-
 @receiver(pre_save, sender=UserOtp)
 def set_expiry_time(sender, instance, **kwargs):
     instance.expiry_time = timezone.now() + datetime.timedelta(minutes=5)
