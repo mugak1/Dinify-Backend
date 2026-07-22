@@ -1470,8 +1470,8 @@ class TenantReadIsolationTests(TestCase):
     The analogue of TenantIsolationTests (which covers writes): owner of
     restaurant A must NOT be able to READ resources belonging to restaurant B
     by changing the ?restaurant= query param — covering tables, dining areas,
-    menu items, employees (staff PII), menu sections, orders, and order
-    reviews — while its own reads keep working and a dinify admin retains its
+    menu items, employees (staff PII), and menu sections — while its own reads
+    keep working and a dinify admin retains its
     legitimate cross-restaurant access.
 
     Headline property: the returned queryset is authoritatively bound to the
@@ -1480,8 +1480,6 @@ class TenantReadIsolationTests(TestCase):
     """
 
     def setUp(self):
-        from orders_app.models import Order
-
         self.owner_a = User.objects.create_user(
             first_name='Owner', last_name='A',
             email='read_owner_a@test.com', phone_number='256700000110',
@@ -1541,11 +1539,6 @@ class TenantReadIsolationTests(TestCase):
         self.table_b = Table.objects.create(
             number=1, str_number='1', restaurant=self.restaurant_b,
         )
-        # An order at B — exercises the orders read-isolation test.
-        self.order_b = Order.objects.create(
-            restaurant=self.restaurant_b, table=self.table_b,
-            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
-        )
 
         # Independent dinify admin with no employment at either restaurant.
         self.dinify_admin = User.objects.create_user(
@@ -1600,10 +1593,14 @@ class TenantReadIsolationTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertNotIn(str(self.employment_b.id), self._record_ids(r))
 
-    def test_owner_of_a_cannot_read_b_orders(self):
+    def test_orders_vocab_is_retired(self):
+        # The `orders` record type was retired from the setup catch-all, so the
+        # endpoint no longer lists orders at all — a GET falls through to the
+        # generic unmapped-resource rejection (403). Full retirement SUBSUMES the
+        # old cross-tenant read-isolation guarantee this test used to assert
+        # (owner_a could not see B's orders): with no orders listing, none leak.
         r = self._get(self.owner_a, f'{self.BASE}/orders/?restaurant={self.restaurant_b.id}')
-        self.assertEqual(r.status_code, 200)
-        self.assertNotIn(str(self.order_b.id), self._record_ids(r))
+        self.assertEqual(r.status_code, 403)
 
     def test_no_restaurant_param_does_not_leak_other_tenants(self):
         # Omitting ?restaurant= previously returned every tenant's records.
