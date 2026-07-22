@@ -82,7 +82,7 @@ class RestaurantTagsEndpoint(APIView):
 
     def post(self, request):
         try:
-            auth = decode_jwt_token(request)
+            decode_jwt_token(request)
         except Exception:
             return Response({'status': 401, 'message': 'Unauthorized'}, status=401)
 

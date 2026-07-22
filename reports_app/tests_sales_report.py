@@ -15,7 +15,7 @@ the assertions distinguish which column each figure comes from. ``time_created``
 is ``auto_now_add``, so it is set via ``.update()`` after create; UTC instants
 are used (EAT is UTC+3, so 09:00 UTC == 12:00 EAT, same calendar day).
 """
-from datetime import datetime, date, timezone as dt_timezone
+from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 
 from django.test import TestCase
@@ -264,7 +264,7 @@ class SalesListingTests(SalesReportBase):
 
     def test_payment_mode_is_real_or_null_never_hardcoded(self):
         with_txn = self.make_order(status=OrderStatus_Served, when=utc(2024, 2, 1, 8))
-        without_txn = self.make_order(status=OrderStatus_Paid, when=utc(2024, 2, 1, 9))
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 2, 1, 9))
         failed_only = self.make_order(status=OrderStatus_Served, when=utc(2024, 2, 1, 10))
         self.add_txn(with_txn, payment_mode=PaymentMode_MobileMoney)
         # A failed txn must NOT surface as the payment_mode.

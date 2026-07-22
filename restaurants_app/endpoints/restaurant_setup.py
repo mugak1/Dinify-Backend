@@ -62,7 +62,6 @@ from dinify_backend.configss.string_definitions import (
     PaymentStatus_Paid,
     PaymentStatus_Pending,
     RESTAURANT_OWNER,
-    OrderStatus_Initiated,
     MODULE_SETTINGS,
     MODULE_TEAM,
     MODULE_MENU,
@@ -77,7 +76,6 @@ from users_app.controllers.permissions_check import (
 )
 
 from restaurants_app.models import RestaurantEmployee, DiningArea, Table
-from users_app.models import User
 from restaurants_app.controllers.subscriptions import RestaurantSubscription
 from restaurants_app.configs.non_unique_combination import RECORDS_NON_UNIQUE_COMBINATIONS
 from restaurants_app.controllers.con_cla_employees import ConRestaurantEmployee
@@ -445,7 +443,6 @@ class RestaurantSetupEndpoint(APIView):
         response = {'status': 500, 'message': "Invalid request"}
         # decode the token
         auth = decode_jwt_token(request)
-        non_unique_combination = None
 
         if config_detail == 'admin-register-restaurant':
             # Admin-only trust boundary: this branch mints User accounts and

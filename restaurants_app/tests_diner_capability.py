@@ -63,9 +63,8 @@ from dinify_backend.configss.string_definitions import (
 )
 from restaurants_app.controllers.diner_capability import (
     issue_qr_credential, issue_table_session,
-    resolve_qr_credential, resolve_table_session, require_table_session,
-    DinerCapabilityError, DinerCapabilityDenied,
-    QR_SALT, SESSION_SALT, CAPABILITY_VERSION,
+    resolve_qr_credential, resolve_table_session, DinerCapabilityError, DinerCapabilityDenied,
+    QR_SALT, CAPABILITY_VERSION,
     CREDENTIAL_HEADER, SESSION_HEADER,
 )
 
