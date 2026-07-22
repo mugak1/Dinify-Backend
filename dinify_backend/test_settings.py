@@ -54,12 +54,7 @@ mongo_mock = MagicMock()
 sys.modules['dinify_backend.mongo_db'] = mongo_mock
 mongo_mock.MONGO_DB = MagicMock()
 mongo_mock.ACTION_LOGS = 'action_logs'
-mongo_mock.NOTIFICATIONS = 'notifications'
-mongo_mock.COL_DPO_TOKENS = 'dpo_tokens'
-mongo_mock.COL_DPO_TOKEN_VERIFICATION = 'dpo_token_verification'
 mongo_mock.COL_NOTIFICATIONS = 'notifications'
-mongo_mock.COL_DPO_RESPONSES = 'dpo_responses'
-mongo_mock.COL_YO_RESPONSES = 'yo_responses'
 
 from dinify_backend.settings import *  # noqa: F401,F403,E402
 
