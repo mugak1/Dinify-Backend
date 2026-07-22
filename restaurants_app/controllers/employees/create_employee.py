@@ -17,6 +17,11 @@ def create_employee_from_existing_user(
     if present_employee_record.exists():
         employee = present_employee_record.first()
         if employee.deleted:
+            # Invariant guard: refuse reactivating a soft-deleted membership for a
+            # platform-staff account. Lazy import avoids an import cycle. A no-op
+            # for ordinary restaurant_user accounts.
+            from platform_admin_app.services import guard_membership_creation
+            guard_membership_creation(employee.user)
             employee.active = True
             employee.deleted = False
             employee.roles = roles

@@ -91,6 +91,15 @@ RESTAURANT_FINANCE = 'finance'
 DINER = 'diner'
 
 
+# account_type discriminator on User (platform-admin identity layer)
+ACCOUNT_TYPE_RESTAURANT_USER = 'restaurant_user'
+ACCOUNT_TYPE_PLATFORM_STAFF = 'platform_staff'
+ACCOUNT_TYPE_CHOICES = [
+    (ACCOUNT_TYPE_RESTAURANT_USER, ACCOUNT_TYPE_RESTAURANT_USER),
+    (ACCOUNT_TYPE_PLATFORM_STAFF, ACCOUNT_TYPE_PLATFORM_STAFF),
+]
+
+
 # portal module registry (role-based access grid)
 MODULE_DASHBOARD = 'dashboard'
 MODULE_KITCHEN = 'kitchen'

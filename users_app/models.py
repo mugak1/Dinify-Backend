@@ -8,6 +8,10 @@ from django.contrib.auth.models import AbstractUser
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
 from django.utils import timezone
+from dinify_backend.configss.string_definitions import (
+    ACCOUNT_TYPE_CHOICES,
+    ACCOUNT_TYPE_RESTAURANT_USER,
+)
 
 
 # Create your models here.
@@ -35,6 +39,16 @@ class User(AbstractUser):
 
     roles = models.JSONField(default=list)
     prompt_password_change = models.BooleanField(default=True)
+
+    # platform-admin identity discriminator (restaurant_user | platform_staff).
+    # Inert until the admin control-plane PRs consume it; never Secretary-editable
+    # and never exposed writable on a serializer.
+    account_type = models.CharField(
+        max_length=32,
+        choices=ACCOUNT_TYPE_CHOICES,
+        default=ACCOUNT_TYPE_RESTAURANT_USER,
+        db_index=True,
+    )
 
     # track if profile is
 

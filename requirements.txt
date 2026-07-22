@@ -2,6 +2,7 @@ asgiref==3.11.1
 # backports.zoneinfo==0.2.1
 certifi==2026.5.20
 charset-normalizer==3.3.2
+cryptography==43.0.3
 Django==5.2.15
 django-cors-headers==4.9.0
 djangorestframework==3.17.1

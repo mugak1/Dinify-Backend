@@ -138,6 +138,36 @@ class SerializerPutRestaurantEmployee(ModelSerializer):
             ),
         }
 
+    def validate(self, attrs):
+        """
+        Enforce the platform-staff invariant at the single serializer choke point
+        for employee CREATE and REACTIVATE (active False->True): a platform-staff
+        account may not be given, or have reactivated, a restaurant membership.
+        Editing or deactivating an already-active membership is NOT the invariant's
+        concern — pre-existing dual-role rows are tolerated until the founder
+        account split (PR-2b). A no-op for ordinary restaurant_user accounts, so
+        normal employee create/reactivate flows are unaffected.
+        """
+        attrs = super().validate(attrs)
+        # Lazy import keeps app-load order safe and avoids an import cycle.
+        from platform_admin_app.services import guard_membership_creation
+
+        if self.instance is None:
+            # Creation: a new membership is active-by-intent unless explicitly not.
+            activating = attrs.get('active', True)
+            target_user = attrs.get('user')
+        else:
+            # Update (partial): only a False->True transition is a reactivation.
+            activating = (
+                attrs.get('active', self.instance.active)
+                and not self.instance.active
+            )
+            target_user = self.instance.user
+
+        if activating and target_user is not None:
+            guard_membership_creation(target_user)
+        return attrs
+
 
 class SerializerGetRestaurantEmployee(ModelSerializer):
     """
