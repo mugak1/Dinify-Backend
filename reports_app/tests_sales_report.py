@@ -1,5 +1,5 @@
 """
-Tests for the rebuilt Sales reports (PR4): summary / listing / trends.
+Tests for the rebuilt Sales reports (PR4): listing / trends / hourly.
 
 These lock in the corrected semantics over the legacy bugs:
   * revenue is ``Sum('actual_cost')`` and discount is ``Sum('savings')`` — NOT
@@ -34,7 +34,6 @@ from dinify_backend.configss.string_definitions import (
     PaymentMode_MobileMoney, PaymentMode_Cash,
 )
 from reports_app.controllers.restaurant.sales import (
-    generate_restaurant_sales_summary,
     generate_restaurant_sales_listing,
     generate_restaurant_sales_trends,
     generate_restaurant_sales_hourly,
@@ -118,107 +117,6 @@ class SalesReportBase(TestCase):
             transaction_amount=Decimal(amount),
             payment_mode=payment_mode,
         )
-
-
-class SalesSummaryTests(SalesReportBase):
-
-    def test_revenue_is_actual_cost_not_total_or_discounted(self):
-        # Two sale orders (one served, one paid) on the same day.
-        self.make_order(status=OrderStatus_Served, when=utc(2024, 1, 10))
-        self.make_order(status=OrderStatus_Paid, when=utc(2024, 1, 10))
-        # Non-sale orders that must be excluded.
-        self.make_order(status=OrderStatus_Cancelled, when=utc(2024, 1, 10))
-        self.make_order(status=OrderStatus_Pending, when=utc(2024, 1, 10))
-
-        data = generate_restaurant_sales_summary(
-            restaurant_id=self.restaurant.id,
-            date_from='2024-01-10', date_to='2024-01-10',
-        )['data']
-
-        self.assertEqual(data['number_of_sales'], 2)
-        # revenue == Sum(actual_cost) == 2 x 750 — NOT total_cost / discounted_cost.
-        self.assertEqual(data['revenue'], Decimal('1500.00'))
-        self.assertNotEqual(data['revenue'], Decimal('2000.00'))   # not 2 x total 1000
-        self.assertNotEqual(data['revenue'], Decimal('1600.00'))   # not 2 x discounted 800
-        # gross_sales is the pre-discount list total, correctly labelled.
-        self.assertEqual(data['gross_sales'], Decimal('2000.00'))
-        # total_discounts == Sum(savings) == 2 x 200 — NOT discounted_cost.
-        self.assertEqual(data['total_discounts'], Decimal('400.00'))
-        self.assertNotEqual(data['total_discounts'], Decimal('1600.00'))
-
-    def test_avg_max_min_over_actual_cost(self):
-        self.make_order(status=OrderStatus_Served, when=utc(2024, 1, 10),
-                        actual='600.00')
-        self.make_order(status=OrderStatus_Paid, when=utc(2024, 1, 10),
-                        actual='900.00')
-
-        data = generate_restaurant_sales_summary(
-            restaurant_id=self.restaurant.id,
-            date_from='2024-01-10', date_to='2024-01-10',
-        )['data']
-
-        self.assertEqual(data['average_order_value'], Decimal('750.00'))
-        self.assertEqual(data['max_order_value'], Decimal('900.00'))
-        self.assertEqual(data['min_order_value'], Decimal('600.00'))
-
-    def test_paid_not_served_order_is_counted(self):
-        # A single paid (never served) order proves the {served, paid} set.
-        self.make_order(status=OrderStatus_Paid, when=utc(2024, 1, 10))
-
-        data = generate_restaurant_sales_summary(
-            restaurant_id=self.restaurant.id,
-            date_from='2024-01-10', date_to='2024-01-10',
-        )['data']
-
-        self.assertEqual(data['number_of_sales'], 1)
-        self.assertEqual(data['revenue'], Decimal('750.00'))
-
-    def test_empty_range_returns_zero_not_null(self):
-        data = generate_restaurant_sales_summary(
-            restaurant_id=self.restaurant.id,
-            date_from='2024-01-10', date_to='2024-01-10',
-        )['data']
-
-        self.assertEqual(data['number_of_sales'], 0)
-        self.assertEqual(data['revenue'], 0)
-        self.assertEqual(data['gross_sales'], 0)
-        self.assertEqual(data['total_discounts'], 0)
-        self.assertEqual(data['average_order_value'], 0)
-        self.assertEqual(data['payment_channels'], [])
-
-    def test_payment_channels_read_real_payment_mode(self):
-        momo_order = self.make_order(status=OrderStatus_Served, when=utc(2024, 1, 10))
-        cash_order = self.make_order(status=OrderStatus_Paid, when=utc(2024, 1, 10))
-        self.add_txn(momo_order, payment_mode=PaymentMode_MobileMoney, amount='750.00')
-        self.add_txn(cash_order, payment_mode=PaymentMode_Cash, amount='750.00')
-
-        # A successful txn on a CANCELLED (non-sale) order must be excluded.
-        cancelled = self.make_order(status=OrderStatus_Cancelled, when=utc(2024, 1, 10))
-        self.add_txn(cancelled, payment_mode=PaymentMode_MobileMoney, amount='999.00')
-
-        data = generate_restaurant_sales_summary(
-            restaurant_id=self.restaurant.id,
-            date_from='2024-01-10', date_to='2024-01-10',
-        )['data']
-
-        # Ordered by payment_mode: 'cash' then 'momo'.
-        self.assertEqual(data['payment_channels'], [
-            {'channel': PaymentMode_Cash, 'count': 1, 'amount': Decimal('750.00')},
-            {'channel': PaymentMode_MobileMoney, 'count': 1, 'amount': Decimal('750.00')},
-        ])
-
-    def test_restaurant_scoped(self):
-        self.make_order(status=OrderStatus_Served, when=utc(2024, 1, 10))
-        self.make_order(status=OrderStatus_Served, when=utc(2024, 1, 10),
-                        restaurant=self.restaurant_b, table=self.table_b)
-
-        data = generate_restaurant_sales_summary(
-            restaurant_id=self.restaurant.id,
-            date_from='2024-01-10', date_to='2024-01-10',
-        )['data']
-
-        self.assertEqual(data['number_of_sales'], 1)
-        self.assertEqual(data['revenue'], Decimal('750.00'))
 
 
 class SalesListingTests(SalesReportBase):
@@ -319,6 +217,32 @@ class SalesListingTests(SalesReportBase):
             date_from='2024-01-01', date_to='2024-03-01',
         )
         self.assertEqual(result['status'], 400)
+
+    def test_empty_range_returns_200_empty_list(self):
+        # No orders -> the listing is an empty list, still HTTP 200 with no
+        # fixtures. This is the empty-authorized-read invariant the reports
+        # canaries lean on (migrated here from the retired sales-summary).
+        result = generate_restaurant_sales_listing(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-02-01', date_to='2024-02-01',
+        )
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['data'], [])
+
+    def test_restaurant_scoped(self):
+        # An order in another tenant must never appear in this restaurant's
+        # listing (migrated from the retired sales-summary).
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 2, 1))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 2, 1),
+                        restaurant=self.restaurant_b, table=self.table_b)
+
+        data = generate_restaurant_sales_listing(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-02-01', date_to='2024-02-01',
+        )['data']
+
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['revenue'], Decimal('750.00'))
 
 
 class SalesTrendsTests(SalesReportBase):

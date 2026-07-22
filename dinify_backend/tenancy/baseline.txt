@@ -15,8 +15,6 @@
 #
 # Regenerate (only to REMOVE migrated entries): python scripts/gen_tenant_baseline.py
 
-orders_app.serializers.SerializerListGetOrder::customer
-orders_app.serializers.SerializerListGetOrder::table
 orders_app.serializers.SerializerPublicOrderDetails::table
 restaurants_app.models.SerArcDiningArea::created_by
 restaurants_app.models.SerArcDiningArea::deleted_by

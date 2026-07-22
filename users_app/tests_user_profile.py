@@ -7,9 +7,10 @@ self-editable (only a no-op echo of the stored value is accepted; a real change
 is rejected), and an email already held by another user is rejected (email is not
 unique on the model but is a password-reset lookup key).
 
-The abandoned profile-update approval queue was deleted, so GET
-``users/user-profile/pending-approvals/`` no longer exists (405). The manager path
-``PUT users/user-profile/update-profile/`` (V2UserProfileEndpoint) is unchanged.
+The abandoned profile-update approval queue was deleted, and the manager-OTP path
+``PUT users/user-profile/update-profile/`` (V2UserProfileEndpoint) has now been
+RETIRED: the whole ``user-profile/<action>/`` route is gone, so any request to it
+(update-profile, pending-approvals, ...) 404s.
 
 Mirrors the conventions in tests_user_lookup.py (plain TestCase + JWT bearer).
 """
@@ -172,21 +173,28 @@ class SelfServiceProfileUpdateTests(TestCase):
         self.assertEqual(user.email, '256750000032@test.com')
 
 
-class V2UserProfileEndpointTests(TestCase):
+class V2UserProfileEndpointRetiredTests(TestCase):
+    """The manager-OTP ``user-profile/<action>/`` route (V2UserProfileEndpoint)
+    is RETIRED: the endpoint, its route, the update_user_profile controller and
+    the SerPutUserProfile write serializer were all deleted. Any sub-action now
+    404s (the route no longer resolves). The live self-service ``user-profile/``
+    path is unaffected."""
+
     def setUp(self):
         self.user = make_user('256750000040')
 
-    def test_pending_approvals_get_is_gone_returns_405(self):
-        # The approval-queue GET was removed; V2UserProfileEndpoint has no GET.
+    def test_pending_approvals_get_is_gone_returns_404(self):
+        # The approval-queue GET was long gone; with the whole <action> route now
+        # retired it 404s (previously 405 against the still-mounted V2 endpoint).
         resp = self.client.get(
             '/api/v1/users/user-profile/pending-approvals/', **auth(self.user))
-        self.assertEqual(resp.status_code, 405, resp.content)
+        self.assertEqual(resp.status_code, 404, resp.content)
 
-    def test_manager_update_profile_still_works(self):
-        # The manager path is unchanged. A Dinify admin acting on their own
-        # profile is authorized without an OTP (no phone change).
+    def test_manager_update_profile_is_retired(self):
+        # The manager-OTP path is retired: PUT user-profile/update-profile/ no
+        # longer resolves to any view -> 404, and performs no write.
         admin = make_user('256750000041', roles=[DINIFY_ADMIN])
         resp = put_json(self.client, MANAGER_URL, admin, {'first_name': 'ViaManager'})
-        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.status_code, 404, resp.content)
         admin.refresh_from_db()
-        self.assertEqual(admin.first_name, 'ViaManager')
+        self.assertNotEqual(admin.first_name, 'ViaManager')

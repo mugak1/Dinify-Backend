@@ -201,9 +201,6 @@ class CatchAllModuleEnforcementTests(TestCase):
             name='Item', section=self.section, primary_price=1000, listing_position=0)
         self.table = Table.objects.create(
             number=1, str_number='1', restaurant=self.restaurant)
-        self.order = Order.objects.create(
-            restaurant=self.restaurant, table=self.table,
-            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000)
 
         # Second restaurant for the cross-tenant spoof.
         self.owner_b = make_user('256731000006')
@@ -231,20 +228,29 @@ class CatchAllModuleEnforcementTests(TestCase):
 
     # -- list scoping: the module split ---------------------------------
 
-    def test_staff_sees_tables_not_menu_or_orders(self):
+    def test_staff_sees_tables_not_menu(self):
         self.assertIn(str(self.table.id), record_ids(self._get(self.staff, 'tables')))
         self.assertNotIn(str(self.item.id), record_ids(self._get(self.staff, 'menuitems')))
-        self.assertNotIn(str(self.order.id), record_ids(self._get(self.staff, 'orders')))
 
     def test_chef_sees_neither_tables_nor_menu(self):
         self.assertNotIn(str(self.table.id), record_ids(self._get(self.chef, 'tables')))
         self.assertNotIn(str(self.item.id), record_ids(self._get(self.chef, 'menuitems')))
 
-    def test_owner_sees_menu_orders_and_employees(self):
+    def test_owner_sees_menu_and_employees(self):
         self.assertIn(str(self.item.id), record_ids(self._get(self.owner, 'menuitems')))
-        self.assertIn(str(self.order.id), record_ids(self._get(self.owner, 'orders')))
         # owner holds `team` -> employees list is populated
         self.assertTrue(len(records(self._get(self.owner, 'employees'))) >= 1)
+
+    def test_orders_vocab_is_retired(self):
+        # The `orders` record type was retired from the setup catch-all (its
+        # serializer, filters, list-path and _RECORD_MODULE mapping are gone), so
+        # a GET falls through to the generic unmapped-resource rejection (403) for
+        # owner AND staff — the endpoint no longer lists orders. Reports-module
+        # enforcement over order data lives on the reports endpoint and is covered
+        # by the REPORTS_URL probes in ReportsReviewsSupportEnforcementTests.
+        for user in (self.owner, self.staff):
+            resp = self._get(user, 'orders')
+            self.assertEqual(resp.status_code, 403, resp.content)
 
     def test_manager_sees_menu_but_not_employees(self):
         # manager holds every grid module (menu shows) ...
@@ -433,25 +439,25 @@ class ReportsReviewsSupportEnforcementTests(TestCase):
     # reports -> reports module (404 fail-closed for non-members/roles)
     def test_owner_reads_reports(self):
         resp = self.client.get(
-            f'{REPORTS_URL}sales-summary/?restaurant={self.restaurant.id}&{DATE_QS}',
+            f'{REPORTS_URL}sales-listing/?restaurant={self.restaurant.id}&{DATE_QS}',
             **auth(self.owner))
         self.assertEqual(resp.status_code, 200, resp.content)
 
     def test_staff_denied_reports(self):
         resp = self.client.get(
-            f'{REPORTS_URL}sales-summary/?restaurant={self.restaurant.id}&{DATE_QS}',
+            f'{REPORTS_URL}sales-listing/?restaurant={self.restaurant.id}&{DATE_QS}',
             **auth(self.staff))
         self.assertEqual(resp.status_code, 404)
 
     def test_chef_denied_reports(self):
         resp = self.client.get(
-            f'{REPORTS_URL}sales-summary/?restaurant={self.restaurant.id}&{DATE_QS}',
+            f'{REPORTS_URL}sales-listing/?restaurant={self.restaurant.id}&{DATE_QS}',
             **auth(self.chef))
         self.assertEqual(resp.status_code, 404)
 
     def test_admin_reads_reports_any_tenant(self):
         resp = self.client.get(
-            f'{REPORTS_URL}sales-summary/?restaurant={self.restaurant_b.id}&{DATE_QS}',
+            f'{REPORTS_URL}sales-listing/?restaurant={self.restaurant_b.id}&{DATE_QS}',
             **auth(self.admin))
         self.assertEqual(resp.status_code, 200, resp.content)
 

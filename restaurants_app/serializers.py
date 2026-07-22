@@ -110,22 +110,6 @@ class SerializerPublicGetRestaurant(ModelSerializer):
         }
 
 
-class SerializerMiscPublicRestaurant(ModelSerializer):
-    """
-    public restaurant listing for the AllowAny misc-public endpoint.
-
-    Deliberately excludes the owner block: a public listing exposes the
-    restaurant, never the owner's personal PII (name/email/phone).
-    """
-    class Meta:
-        model = Restaurant
-        fields = (
-            "id", "name", "location",
-            "logo", "cover_photo", "status",
-            "preset_tags",
-        )
-
-
 class SerializerPutRestaurantEmployee(ModelSerializer):
     """
     serializer for adding and editing restaurant employees
