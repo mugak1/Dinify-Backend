@@ -40,10 +40,9 @@ os.environ.setdefault('EMAIL_PORT', '587')
 os.environ.setdefault('MONGO_HOST', 'mongodb://localhost:27017')
 os.environ.setdefault('MONGO_DATABASE', 'dinify_test')
 
-# SMS gateway + test-MSISDN stubs (settings-import defaults; SMS is mocked in tests)
+# SMS gateway stubs (settings-import defaults; SMS is mocked in tests)
 os.environ.setdefault('YO_SMS_ACCOUNT_NO', 'test-yo-sms-account')
 os.environ.setdefault('YO_SMS_PASSWORD', 'test-yo-sms-password')
-os.environ.setdefault('TEST_MSISDN', '256700000000')
 
 from unittest.mock import MagicMock  # noqa: E402
 import sys  # noqa: E402
