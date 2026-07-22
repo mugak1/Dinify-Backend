@@ -11,7 +11,6 @@ from rest_framework.response import Response
 logger = logging.getLogger(__name__)
 from rest_framework.views import APIView
 from restaurants_app.controllers.create_restaurant import (
-    create_restaurant,
     admin_register_restaurant
 )
 from misc_app.controllers.decode_auth_token import decode_jwt_token
@@ -353,6 +352,20 @@ def scope_list_filter(user, config_detail, orm_filter):
     return orm_filter, True
 
 
+def _is_false_flag(value):
+    """
+    Interpret a PUT boolean-ish flag as False.
+
+    ``bool('false')`` is ``True`` in Python and the frontend sends the STRING
+    ``'false'`` for a deactivation, so an explicit check is required. Recognises
+    real ``False``, the strings ``'false'``/``'False'``/``'0'`` and integer ``0``;
+    an absent value (or any other value) is treated as 'not false'.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() in ('false', '0')
+    return value is False or value == 0
+
+
 def build_scoped_instance_queryset(user, config_detail, model):
     """
     Build the authoritative, server-scoped queryset that Secretary.update /
@@ -434,32 +447,6 @@ class RestaurantSetupEndpoint(APIView):
         auth = decode_jwt_token(request)
         non_unique_combination = None
 
-        if config_detail == 'restaurants':
-            # TODO if the user is not a Dinify admin,.
-            # then set the owner value from the auth details
-            post_data = request.data
-            try:
-                post_data = post_data.dict()
-            except Exception as error:
-                logger.debug("Error converting data to dict: %s", error)
-
-            data = post_data.copy()
-            data['owner'] = auth['user_id']
-            response = create_restaurant(
-                data,
-                # auth,
-                {
-                    'id': str(request.user.id),
-                    'user_id': str(request.user.id),
-                    'username': request.user.username,
-                    'first_name': request.user.first_name,
-                    'email': request.user.email
-                }
-            )
-            return Response(
-                response,
-                status=response['status']
-            )
         if config_detail == 'admin-register-restaurant':
             # Admin-only trust boundary: this branch mints User accounts and
             # dispatches credential SMS/email (self_register, skip_otp=True), so
@@ -1027,6 +1014,34 @@ class RestaurantSetupEndpoint(APIView):
             }
             return Response(response, status=403)
 
+        # A restaurant must always keep at least one ACTIVE owner. The live
+        # deactivation path is PUT {active:'false'} (the old DELETE-employees
+        # branch was dead), so the last-owner guard lives here. Resolve the
+        # target through the SAME server-scoped queryset Secretary uses — an
+        # out-of-scope id then gets the ordinary not-found posture instead of a
+        # raw lookup that leaks existence. Returns 409 (never 403 — a 403
+        # force-logs-out the client), matching the deletion-integrity guards.
+        if config_detail == 'employees' and _is_false_flag(put_data.get('active')):
+            target = build_scoped_instance_queryset(
+                request.user, config_detail, SerializerPutRestaurantEmployee.Meta.model,
+            ).filter(id=put_data.get('id')).values('roles', 'restaurant').first()
+            if (
+                target
+                and RESTAURANT_OWNER in target['roles']
+                and not RestaurantEmployee.objects.filter(
+                    restaurant_id=target['restaurant'],
+                    roles__contains=[RESTAURANT_OWNER],
+                    active=True,
+                    deleted=False,
+                ).exclude(id=put_data.get('id')).exists()
+            ):
+                return Response(
+                    {'status': 409,
+                     'message': 'You need to assign another restaurant owner '
+                                'before you can deactivate this one.'},
+                    status=409,
+                )
+
         # `status` and `flat_fee` are platform-owned state a tenant must never
         # write; a non-admin's values for them are silently stripped here (Dinify
         # admins keep full write access):
@@ -1174,27 +1189,8 @@ class RestaurantSetupEndpoint(APIView):
             return Response(response, status=403)
 
         data = request.data
-        if config_detail == 'employees':
-            data['active'] = False
-
-            # check if the employee is an owner
-            roles = RestaurantEmployee.objects.values('roles', 'restaurant').get(id=data['id'])
-            if RESTAURANT_OWNER in roles['roles']:
-                more_owners = RestaurantEmployee.objects.filter(
-                    restaurant_id=roles['restaurant'],
-                    roles__contains=[RESTAURANT_OWNER],
-                    active=True,
-                    deleted=False
-                ).exclude(id=data['id']).count() > 0
-                if not more_owners:
-                    response = {
-                        'status': 400,
-                        'message': 'You need to assign another restaurant owner before you can delete this one.'
-                    }
-                    return Response(response, status=403)
 
         serializer = {
-            'restaurant': SerializerPutRestaurant,
             'employees': SerializerPutRestaurantEmployee,
             'menusections': SerializerPutMenuSection,
             'sectiongroups': SerializerPutSectionGroup,
