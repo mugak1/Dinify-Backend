@@ -58,7 +58,10 @@ with PostgreSQL on AWS RDS.
   and race-safe. Preserve these invariants in any future order-create work
 - Restaurant tag catalog: ✅ Per-restaurant tag catalog (migrations 0044–0045) +
   `restaurant_tags.py` endpoint + `EI_RESTAURANT_TAG`; menu items reference
-  catalog tags via `tag_ids`
+  catalog tags via `tag_ids`. The endpoint also serves tag reorder
+  (`RestaurantTagReorderEndpoint`) and per-tag `usage-count`
+  (`RestaurantTagUsageCountEndpoint`) — added additively to match the shipped
+  frontend (FEU-02/03, PR #245; no model change / no migration). See URL Structure
 - Menu item extensions: ✅ Per-restaurant `menu_item_sort_mode`, `age_restricted`
   flag, and extras `extras_min_selections`/`extras_max_selections`
 - Restaurant profile & settings fields: ✅ Identity/contact (`contact_email`,
@@ -399,12 +402,22 @@ with PostgreSQL on AWS RDS.
 
 ## URL Structure
 - `api/v1/restaurant-setup/` → RestaurantSetupEndpoint (catch-all) +
-  dedicated endpoints for: preset-tags, restaurant-tags, upsell-config,
-  upsell-config/items, reservations, waitlist, table-actions/<action>/,
-  role-permissions. The dead `section-tables` write verb was removed (PR #213,
-  BUG-P3-10) — a retired/unknown verb falls through to the generic unmapped
-  handling; dining-area creation with tables goes through
-  `create_dining_area(create_tables=True)`
+  dedicated endpoints for: preset-tags, restaurant-tags (+ dedicated
+  `restaurant-tags/reorder/` and `restaurant-tags/<tag_id>/usage-count/`, PR #245),
+  upsell-config, upsell-config/items, reservations, waitlist,
+  table-actions/<action>/, role-permissions. The dead `section-tables` write verb
+  was removed (PR #213, BUG-P3-10) — a retired/unknown verb falls through to the
+  generic unmapped handling; dining-area creation with tables goes through
+  `create_dining_area(create_tables=True)`. Authz closures (PR #244): the ungated
+  POST `restaurants` self-service create branch was REMOVED (DC-BE-014 — it made
+  the caller owner after only a JWT decode); restaurant creation now flows ONLY
+  through the admin-gated `admin-register-restaurant` branch (the `create_restaurant`
+  controller function was removed; its `admin_register_restaurant` sibling in
+  `create_restaurant.py` remains). The last-active-owner guard moved onto the LIVE
+  employee-deactivation path (PUT `employees` `{active:'false'}`), resolving the
+  target through the server-scoped queryset and returning 409 — never 403, which
+  force-logs-out the client (DC-BE-011). DELETE on `upsell-config/items/reorder/`
+  now returns 405 instead of silently deleting an item (DC-BE-004)
 - `api/v1/reports/restaurant/<report_name>/` → RestaurantReportsEndpoint
 - `api/v1/orders/` → v1 orders (urls.py) — only `submit` (PUT) is live; the
   orphaned, unscoped `prepare`/`cancel`/`update-item` write actions were
