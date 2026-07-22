@@ -3036,6 +3036,148 @@ class RestaurantTagsEndpointTests(TestCase):
         )
         self.assertEqual(response.status_code, 401)
 
+    # -- reorder (POST restaurant-tags/reorder/) ----------------------------
+
+    def test_reorder_persists_display_order(self):
+        from restaurants_app.models import RestaurantTag
+        vegan = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Vegan')
+        spicy = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Spicy')
+        response = self.client.post(
+            '/api/v1/restaurant-setup/restaurant-tags/reorder/',
+            data={'order': [
+                {'id': str(vegan.id), 'display_order': 7},
+                {'id': str(spicy.id), 'display_order': 3},
+            ]},
+            content_type='application/json',
+            **self._auth(self.owner_a),
+        )
+        self.assertEqual(response.status_code, 200)
+        vegan.refresh_from_db()
+        spicy.refresh_from_db()
+        self.assertEqual(vegan.display_order, 7)
+        self.assertEqual(spicy.display_order, 3)
+
+    def test_reorder_rejects_mixed_restaurant_payload(self):
+        # A foreign-restaurant tag anywhere in the payload rejects the WHOLE
+        # request and writes nothing (not even the caller's own rows).
+        from restaurants_app.models import RestaurantTag
+        a_tag = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Vegan')
+        b_tag = RestaurantTag.objects.get(restaurant=self.restaurant_b, name='Vegan')
+        a_before, b_before = a_tag.display_order, b_tag.display_order
+        response = self.client.post(
+            '/api/v1/restaurant-setup/restaurant-tags/reorder/',
+            data={'order': [
+                {'id': str(a_tag.id), 'display_order': 40},
+                {'id': str(b_tag.id), 'display_order': 41},
+            ]},
+            content_type='application/json',
+            **self._auth(self.owner_a),
+        )
+        self.assertEqual(response.status_code, 400)
+        a_tag.refresh_from_db()
+        b_tag.refresh_from_db()
+        self.assertEqual(a_tag.display_order, a_before)
+        self.assertEqual(b_tag.display_order, b_before)
+
+    def test_reorder_foreign_only_denied(self):
+        # Only foreign tags → single (foreign) restaurant → module gate 403.
+        from restaurants_app.models import RestaurantTag
+        b_tag = RestaurantTag.objects.get(restaurant=self.restaurant_b, name='Spicy')
+        b_before = b_tag.display_order
+        response = self.client.post(
+            '/api/v1/restaurant-setup/restaurant-tags/reorder/',
+            data={'order': [{'id': str(b_tag.id), 'display_order': 42}]},
+            content_type='application/json',
+            **self._auth(self.owner_a),
+        )
+        self.assertEqual(response.status_code, 403)
+        b_tag.refresh_from_db()
+        self.assertEqual(b_tag.display_order, b_before)
+
+    def test_reorder_rejects_unknown_id(self):
+        from restaurants_app.models import RestaurantTag
+        a_tag = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Vegan')
+        a_before = a_tag.display_order
+        response = self.client.post(
+            '/api/v1/restaurant-setup/restaurant-tags/reorder/',
+            data={'order': [
+                {'id': str(a_tag.id), 'display_order': 3},
+                {'id': '00000000-0000-0000-0000-000000000000', 'display_order': 4},
+            ]},
+            content_type='application/json',
+            **self._auth(self.owner_a),
+        )
+        self.assertEqual(response.status_code, 400)
+        a_tag.refresh_from_db()
+        self.assertEqual(a_tag.display_order, a_before)
+
+    def test_reorder_unauthenticated_rejected(self):
+        from restaurants_app.models import RestaurantTag
+        a_tag = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Vegan')
+        response = self.client.post(
+            '/api/v1/restaurant-setup/restaurant-tags/reorder/',
+            data={'order': [{'id': str(a_tag.id), 'display_order': 0}]},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 401)
+
+    # -- usage-count (GET restaurant-tags/<id>/usage-count/) ----------------
+
+    def _link_items(self, tag, count):
+        from restaurants_app.models import MenuItemTag
+        section = MenuSection.objects.create(
+            name='Mains', restaurant=tag.restaurant,
+        )
+        items = []
+        for i in range(count):
+            item = MenuItem.objects.create(
+                name=f'Dish {i}', section=section, primary_price=1000,
+            )
+            MenuItemTag.objects.create(menu_item=item, tag=tag)
+            items.append(item)
+        return items
+
+    def test_usage_count_returns_number(self):
+        from restaurants_app.models import RestaurantTag
+        tag = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Spicy')
+        self._link_items(tag, 2)
+        response = self.client.get(
+            f'/api/v1/restaurant-setup/restaurant-tags/{tag.id}/usage-count/',
+            **self._auth(self.owner_a),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['data']['count'], 2)
+
+    def test_usage_count_excludes_soft_deleted_items(self):
+        from restaurants_app.models import RestaurantTag
+        tag = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Spicy')
+        items = self._link_items(tag, 2)
+        items[0].deleted = True
+        items[0].save(update_fields=['deleted'])
+        response = self.client.get(
+            f'/api/v1/restaurant-setup/restaurant-tags/{tag.id}/usage-count/',
+            **self._auth(self.owner_a),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['data']['count'], 1)
+
+    def test_usage_count_rejects_cross_restaurant(self):
+        from restaurants_app.models import RestaurantTag
+        b_tag = RestaurantTag.objects.get(restaurant=self.restaurant_b, name='Spicy')
+        response = self.client.get(
+            f'/api/v1/restaurant-setup/restaurant-tags/{b_tag.id}/usage-count/',
+            **self._auth(self.owner_a),
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_usage_count_unauthenticated_rejected(self):
+        from restaurants_app.models import RestaurantTag
+        tag = RestaurantTag.objects.get(restaurant=self.restaurant_a, name='Spicy')
+        response = self.client.get(
+            f'/api/v1/restaurant-setup/restaurant-tags/{tag.id}/usage-count/'
+        )
+        self.assertEqual(response.status_code, 401)
+
 
 class MenuItemTagIdsTests(TestCase):
     """Tests for the tag_ids payload on menu item create / update.
