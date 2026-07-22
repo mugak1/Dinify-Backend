@@ -72,5 +72,3 @@ support_app.serializers.SupportIssueAdminReadSerializer::assigned_to
 support_app.serializers.SupportIssueAdminReadSerializer::created_by
 support_app.serializers.SupportIssueAdminReadSerializer::restaurant
 support_app.serializers.SupportIssueRestaurantReadSerializer::restaurant
-users_app.models.SerArcUser::groups
-users_app.models.SerArcUser::user_permissions

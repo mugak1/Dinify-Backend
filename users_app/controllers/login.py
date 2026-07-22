@@ -108,7 +108,7 @@ def login(
         }
 
     # when the login is successful
-    # Use update() to avoid triggering the post_save archive_user signal.
+    # Set last_login via update() to write a single column without a full model save.
     # Reuse the auth_user object from authenticate() — no need to re-fetch.
     login_time = timezone.now()
     User.objects.filter(username=username).update(last_login=login_time)

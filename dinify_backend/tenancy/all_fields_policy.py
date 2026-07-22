@@ -47,7 +47,6 @@ READ_ARCHIVAL_ALL_FIELDS_ALLOWED = frozenset({
     "restaurants_app.models.SerArcUpsellItem",
     "restaurants_app.models.SerArcReservation",
     "restaurants_app.models.SerArcWaitlistEntry",
-    "users_app.models.SerArcUser",
 })
 
 # The union: every serializer allowed to use ``__all__`` today. Anything else that
