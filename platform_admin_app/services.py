@@ -33,6 +33,22 @@ class PlatformStaffInvariantError(ValidationError):
     """
 
 
+def has_active_membership(user):
+    """
+    True if ``user`` holds any active, non-deleted restaurant membership.
+
+    The single source of truth for the "zero active memberships" half of the
+    platform-staff invariant. Reused by ``promote_to_platform_staff`` (write-time
+    refusal) and by the admin session authenticator (fail-closed login rejection),
+    so the predicate is defined exactly once.
+    """
+    from restaurants_app.models import RestaurantEmployee  # lazy: avoid import cycle
+
+    return RestaurantEmployee.objects.filter(
+        user=user, active=True, deleted=False
+    ).exists()
+
+
 def promote_to_platform_staff(user):
     """
     Promote ``user`` to platform staff and provision its auth adjunct.
@@ -42,11 +58,7 @@ def promote_to_platform_staff(user):
     ``platform_staff`` account with active memberships. On success sets
     ``account_type`` and returns the created-or-existing ``PlatformStaffAuth``.
     """
-    from restaurants_app.models import RestaurantEmployee  # lazy: avoid import cycle
-
-    if RestaurantEmployee.objects.filter(
-        user=user, active=True, deleted=False
-    ).exists():
+    if has_active_membership(user):
         raise PlatformStaffInvariantError(
             'Cannot promote to platform staff: the user still holds an active '
             'restaurant membership. Remove the membership(s) first.'
