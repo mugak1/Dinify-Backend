@@ -10,6 +10,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class PlatformStaffAuth(models.Model):
@@ -53,3 +54,53 @@ class PlatformStaffAuth(models.Model):
 
     def __str__(self):
         return f'PlatformStaffAuth<{self.user_id}>'
+
+
+class AdminSession(models.Model):
+    """
+    An opaque, server-side admin session — the admin plane exits SimpleJWT entirely.
+
+    The browser holds only a high-entropy random token in the ``__Host-`` session
+    cookie; this row stores only its SHA-256 hash, never the raw value. Expiry is
+    enforced server-side on every request (an 8h absolute lifetime plus a 30-min
+    idle timeout), and a session can be revoked instantly — there is no
+    stateless-token gap. Rows are minted / resolved / expired / revoked by
+    ``platform_admin_app.sessions`` and consumed by ``AdminSessionAuthentication``;
+    the login/logout endpoints that call ``create_session`` land in PR-2b.
+    """
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='admin_sessions',
+    )
+    # SHA-256 hex of the raw token (64 chars). The raw token is NEVER stored.
+    # unique=True also provides the index used by the hash lookup in resolve_session.
+    token_hash = models.CharField(max_length=64, unique=True)
+
+    issued_at = models.DateTimeField(default=timezone.now)
+    absolute_expiry = models.DateTimeField()
+    last_seen = models.DateTimeField(default=timezone.now)
+
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=255, blank=True, default='')
+
+    issued_ip = models.GenericIPAddressField(null=True, blank=True)
+    issued_user_agent = models.TextField(blank=True, default='')
+
+    # Set when the session most recently cleared a TOTP re-auth (PR-2b consumes it).
+    elevated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'admin_session'
+        indexes = [
+            # Powers revoke_all_for_user and any per-user session listing.
+            models.Index(fields=['user', 'revoked_at']),
+        ]
+
+    def __str__(self):
+        return f'AdminSession<{self.user_id}>'

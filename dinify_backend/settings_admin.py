@@ -1,0 +1,83 @@
+"""
+Admin control-plane settings.
+
+Inherits everything from the base ``settings`` module, then overrides only what the
+admin plane needs: its own root urlconf + WSGI entry point, a locked-down host list,
+the two admin middlewares, the session-cookie authenticator as the sole DRF
+authenticator (deny-by-default permission inherited), CSRF for cookie auth, a locked
+same-origin CORS posture, and the admin session / cookie constants.
+
+Served by ``dinify_backend.wsgi_admin`` on ``admin.dinifyapp.com`` behind a dedicated
+Apache ``WSGIDaemonProcess`` (Topology A, same-origin — no CORS needed). Base
+``settings.py`` is unchanged.
+"""
+from datetime import timedelta
+
+from dinify_backend.settings import *  # noqa: F401,F403
+
+# --- Routing / entry point --------------------------------------------------------
+ROOT_URLCONF = 'dinify_backend.urls_admin'
+WSGI_APPLICATION = 'dinify_backend.wsgi_admin.application'
+
+# The admin plane answers only on its own host (env-overridable for local / dev).
+ALLOWED_HOSTS = config(
+    'ADMIN_ALLOWED_HOSTS',
+    default='admin.dinifyapp.com',
+    cast=lambda v: [s.strip() for s in v.split(',') if s.strip()],
+)
+
+# --- Middleware -------------------------------------------------------------------
+# Prepend the admin request-id / client-ip middleware to the FULL inherited base
+# stack. Prepend-only: keeping Session/Auth/Message middleware satisfies the
+# admin.E408/E409/E410 system checks (django.contrib.admin is installed) and lets
+# CsrfViewMiddleware manage the CSRF cookie.
+MIDDLEWARE = [
+    'platform_admin_app.middleware.RequestIDMiddleware',
+    'platform_admin_app.middleware.ClientIPMiddleware',
+    *MIDDLEWARE,
+]
+
+# --- DRF: admin authenticator only, deny-by-default -------------------------------
+REST_FRAMEWORK = {
+    **REST_FRAMEWORK,
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'platform_admin_app.authentication.AdminSessionAuthentication',
+    ),
+    # DEFAULT_PERMISSION_CLASSES=(IsAuthenticated,) is inherited = deny-by-default.
+    # Drop the Browsable API renderer — an admin plane serves JSON only.
+    'DEFAULT_RENDERER_CLASSES': (
+        'rest_framework.renderers.JSONRenderer',
+    ),
+}
+
+# --- Admin session / cookie constants ---------------------------------------------
+# Read in code via getattr(settings, NAME, <same default>) so the session / cookie
+# helpers also work under the base / test settings where these names are absent.
+ADMIN_SESSION_COOKIE_NAME = '__Host-dinify_admin_session'
+ADMIN_SESSION_ABSOLUTE_LIFETIME = timedelta(hours=8)
+ADMIN_SESSION_IDLE_TIMEOUT = timedelta(minutes=30)
+ADMIN_SESSION_TOUCH_THROTTLE = timedelta(minutes=5)
+# Apache is the only hop (no proxy in front), so raw X-Forwarded-For is not trusted.
+ADMIN_TRUSTED_PROXY_DEPTH = 0
+
+# --- CSRF (cookie auth is CSRF-susceptible; the SPA echoes X-CSRFToken) -----------
+CSRF_COOKIE_SAMESITE = 'Strict'
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_HTTPONLY = False  # the SPA must read it to echo the header
+CSRF_TRUSTED_ORIGINS = config(
+    'ADMIN_CSRF_TRUSTED_ORIGINS',
+    default='https://admin.dinifyapp.com',
+    cast=lambda v: [s.strip() for s in v.split(',') if s.strip()],
+)
+
+# --- CORS: locked for the same-origin admin plane (Topology A needs none) ---------
+# Hardcoded (not env-driven) so a shared dev / prod env cannot loosen the admin plane.
+CORS_ORIGIN_ALLOW_ALL = False
+CORS_ALLOWED_ORIGINS = []
+CORS_ALLOW_CREDENTIALS = False
+
+# NOTE: SECURE_PROXY_SSL_HEADER is deliberately OMITTED. Apache terminates TLS
+# directly on this box and mod_wsgi sets wsgi.url_scheme=https, so request.is_secure()
+# is already correct — there is no proxy whose X-Forwarded-Proto we could trust.
+# SESSION_COOKIE_* settings are irrelevant here: the admin plane does not rely on
+# django.contrib.sessions — its session is the AdminSession row, not a Django session.
