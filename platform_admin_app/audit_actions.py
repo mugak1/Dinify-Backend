@@ -38,3 +38,13 @@ ADMIN_AUTH_RECOVERY_CODES_GENERATED = 'admin.auth.recovery_codes_generated'
 
 # --- admin.session: session lifecycle beyond login/logout ------------------------
 ADMIN_SESSION_REVOKED = 'admin.session.revoked'
+
+# --- admin.delegation: scoped, time-boxed access into one restaurant --------------
+# A grant was minted and the one-time exchange code handed to the administrator.
+ADMIN_DELEGATION_MINTED = 'admin.delegation.minted'
+# A mint was refused — stale elevation, a bad target, or the live-grant cap.
+ADMIN_DELEGATION_MINT_DENIED = 'admin.delegation.mint_denied'
+ADMIN_DELEGATION_REVOKED = 'admin.delegation.revoked'
+# An earlier unredeemed grant for the same admin+restaurant was auto-revoked because
+# a fresh one replaced it — its own action so it is never mistaken for a manual revoke.
+ADMIN_DELEGATION_SUPERSEDED = 'admin.delegation.superseded'

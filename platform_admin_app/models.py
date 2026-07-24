@@ -11,6 +11,7 @@ append-only record of what the admin plane did. None of them inherit
 ``users_app.BaseModel`` — its soft-delete / archival semantics are wrong here.
 """
 import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import models
@@ -153,6 +154,132 @@ class AdminLoginChallenge(models.Model):
 
     def __str__(self):
         return f'AdminLoginChallenge<{self.user_id}>'
+
+
+# ``DelegationGrant.scope`` — how much authority a delegated session carries.
+# PR-4b enforces these on the customer plane; this module only records the choice.
+SCOPE_VIEW = 'view'
+SCOPE_SUPPORT = 'support'
+SCOPE_CHOICES = [
+    (SCOPE_VIEW, SCOPE_VIEW),
+    (SCOPE_SUPPORT, SCOPE_SUPPORT),
+]
+
+
+class DelegationGrant(models.Model):
+    """
+    A scoped, time-boxed, reasoned, revocable grant of access into one restaurant.
+
+    This replaces ambient authority. The Falcon-era admin portal drilled into a
+    tenant through an in-process embed carrying the administrator's full authority,
+    which in the data was indistinguishable from the owner acting. A grant is the
+    opposite: it names WHO, WHICH restaurant, HOW MUCH (``scope``), FOR HOW LONG,
+    and WHY — and can be killed at any moment.
+
+    Two independent clocks, deliberately: ``code_expires_at`` bounds only the
+    handoff window in which the one-time exchange code may be redeemed (minutes),
+    while ``session_ttl_seconds`` bounds the delegated session that redemption buys
+    (PR-4b mints it). A code that is never redeemed simply lapses.
+
+    Only the SHA-256 hash of the exchange code is stored — the raw value is returned
+    to the minting admin exactly once and never again, matching ``AdminSession`` and
+    ``AdminLoginChallenge``.
+
+    NOT append-only, unlike ``AdminAuditLog``: ``redeemed_at`` and ``revoked_at`` are
+    legitimate later writes, because this row tracks a lifecycle. Its immutable
+    history lives in the audit log, which records every mint, supersession and
+    revocation as its own entry.
+    """
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    # The platform-staff account that minted it. PROTECT: a grant is evidence of
+    # who reached into a tenant, so deleting the actor must never erase it.
+    administrator = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='delegation_grants',
+        db_index=True,
+    )
+    # Which admin session minted it. Nullable so the grant outlives session expiry.
+    admin_session = models.ForeignKey(
+        AdminSession,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='delegation_grants',
+    )
+    # A real FK, unlike AdminAuditLog.restaurant_id (a loose UUID so the log can
+    # outlive the row). The trade-off inverts here: restaurants are only ever
+    # SOFT-deleted, and a grant is meaningless without its target — so referential
+    # integrity is worth more than independence. String reference because this is
+    # the first model-level dependency platform_admin_app -> restaurants_app.
+    restaurant = models.ForeignKey(
+        'restaurants_app.Restaurant',
+        on_delete=models.PROTECT,
+        related_name='delegation_grants',
+        db_index=True,
+    )
+
+    # No default: the minting admin must choose how much authority to hand over.
+    scope = models.CharField(max_length=16, choices=SCOPE_CHOICES)
+    # Required and substantive (non-blank, >= 10 chars, enforced at mint). A
+    # delegation without a stated reason is precisely what this feature prevents.
+    reason = models.TextField()
+
+    # SHA-256 hex of the one-time code (64 chars). The raw code is NEVER stored,
+    # logged or audited. unique=True also provides the lookup index PR-4b needs.
+    exchange_code_hash = models.CharField(max_length=64, unique=True)
+
+    # The handoff window only — how long the code may be redeemed for, not how long
+    # the resulting session lives. Set at mint from ADMIN_DELEGATION_CODE_TTL.
+    code_expires_at = models.DateTimeField()
+    # How long the delegated session PR-4b mints will live. Bounded at mint.
+    session_ttl_seconds = models.PositiveIntegerField(default=900)
+
+    issued_at = models.DateTimeField(default=timezone.now)
+    redeemed_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=255, blank=True, default='')
+
+    issued_ip = models.GenericIPAddressField(null=True, blank=True)
+    issued_user_agent = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'delegation_grant'
+        ordering = ['-issued_at']
+        indexes = [
+            # "What has this administrator been doing?" — the per-actor history.
+            models.Index(fields=['administrator', 'issued_at']),
+            # "Who has been in this tenant?" — the per-restaurant history.
+            models.Index(fields=['restaurant', 'issued_at']),
+        ]
+
+    def __str__(self):
+        return f'DelegationGrant<{self.administrator_id}:{self.restaurant_id}>'
+
+    @property
+    def is_code_live(self):
+        """The exchange code may still be redeemed. Pure — no side effects."""
+        if self.redeemed_at is not None or self.revoked_at is not None:
+            return False
+        return timezone.now() < self.code_expires_at
+
+    @property
+    def is_session_live(self):
+        """
+        The delegated session bought by redemption is still within its TTL.
+
+        Revocation wins immediately — PR-4b treats a revoked grant as killing the
+        session outright, not merely preventing future redemption.
+        """
+        if self.redeemed_at is None or self.revoked_at is not None:
+            return False
+        expiry = self.redeemed_at + timedelta(seconds=self.session_ttl_seconds)
+        return timezone.now() < expiry
 
 
 class AppendOnlyViolation(Exception):
