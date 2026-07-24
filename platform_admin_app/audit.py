@@ -197,14 +197,16 @@ def record_from_request(request, action, *, result, **kwargs):
 
 def record_auth_event(
     request, action, *, result, actor=None, actor_label='', error_code='',
+    session=None,
 ):
     """
     Record an authentication event, where there may be no user and no session yet.
 
-    For PR-2b's login / logout / failure paths: a failed login has no resolved user,
-    so ``actor`` stays None and ``actor_label`` carries the submitted identifier
-    verbatim for forensics. The session is never inferred here — at login time it
-    does not exist yet, and on the failure path it must not be implied.
+    For the login / logout / failure paths: a failed login has no resolved user, so
+    ``actor`` stays None and ``actor_label`` carries the submitted identifier
+    verbatim for forensics. The session is never INFERRED here — at login time it
+    does not exist yet, and on a failure path it must not be implied — but the
+    completed-login event may pass the session it just minted explicitly.
     """
     return record(
         action=action,
@@ -212,5 +214,6 @@ def record_auth_event(
         actor=actor,
         actor_label=actor_label,
         error_code=error_code,
+        session=session,
         **_request_context(request),
     )

@@ -47,9 +47,15 @@ class PlatformStaffAuth(models.Model):
     recovery_code_hashes = models.JSONField(default=list)
     recovery_generated_at = models.DateTimeField(null=True, blank=True)
 
-    # Failed-verification / lockout state (consumed by PR-2b).
+    # Failed-verification / lockout state.
     failed_attempts = models.PositiveSmallIntegerField(default=0)
     locked_until = models.DateTimeField(null=True, blank=True)
+
+    # Highest TOTP time-step already accepted for this account. A TOTP code stays
+    # valid for its whole ±1-step window, so without this a code observed in
+    # transit could be replayed within ~90s; verification requires a STRICTLY
+    # greater counter, which makes every code single-use.
+    last_totp_counter = models.BigIntegerField(null=True, blank=True)
 
     class Meta:
         db_table = 'platform_staff_auth'
@@ -108,6 +114,45 @@ class AdminSession(models.Model):
 
     def __str__(self):
         return f'AdminSession<{self.user_id}>'
+
+
+class AdminLoginChallenge(models.Model):
+    """
+    The short-lived first-factor receipt in the two-step admin login.
+
+    Password verification alone must never produce something that can act. Rather
+    than adding an "unverified" state to ``AdminSession`` — which would make the
+    existence of a session stop meaning "fully authenticated" — the partial state
+    lives here, in its own row behind its own short-lived cookie. Only the second
+    factor converts a challenge into a session.
+
+    Like the session token, only the SHA-256 hash of the challenge token is stored.
+    The FK CASCADEs (unlike ``AdminSession``'s PROTECT): a challenge is ephemeral
+    scaffolding with no forensic value once consumed or expired, and a five-minute
+    row must never block deleting a user — the audit log is the durable record.
+    """
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='admin_login_challenges',
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+
+    created_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        db_table = 'admin_login_challenge'
+
+    def __str__(self):
+        return f'AdminLoginChallenge<{self.user_id}>'
 
 
 class AppendOnlyViolation(Exception):

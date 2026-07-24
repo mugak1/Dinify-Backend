@@ -35,7 +35,18 @@ class User(AbstractUser):
     # either of these will be used for login
     # but primarily the phone number shall be considered
     email = models.EmailField(max_length=255, db_index=True, null=True, blank=True)
-    phone_number = models.CharField(max_length=255, unique=True, db_index=True)
+    # Nullable ONLY so a platform-staff account can exist without one: the admin
+    # plane authenticates by password + TOTP and must never need a phone or SMS.
+    # It stays REQUIRED for restaurant users — enforced at the write sites
+    # (REQUIRED_INFORMATION['new_user'] via self_register / create_restaurant),
+    # not by the column. Postgres treats NULLs as distinct under a UNIQUE
+    # constraint, so uniqueness for real numbers is unaffected.
+    # NOTE: null=True WITHOUT blank=True is deliberate. `blank=True` would make
+    # every ModelSerializer treat the field as required=False, silently loosening
+    # customer registration; leaving blank=False keeps DRF's required=True.
+    phone_number = models.CharField(
+        max_length=255, unique=True, db_index=True, null=True,
+    )
 
     roles = models.JSONField(default=list)
     prompt_password_change = models.BooleanField(default=True)

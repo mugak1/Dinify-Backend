@@ -19,6 +19,7 @@ from users_app.controllers.permissions_check import (
     get_any_restaurant_roles
 )
 from dinify_backend.configss.string_definitions import (
+    ACCOUNT_TYPE_PLATFORM_STAFF,
     RESTAURANT_OWNER,
     RESTAURANT_FINANCE,
     RESTAURANT_MANAGER
@@ -102,6 +103,18 @@ def login(
             }
 
         logger.info("login [%s]: failed (wrong password) total %.3fs", username, time.monotonic() - t_start)
+        return {
+            'status': 401,
+            'message': MESSAGES.get('WRONG_PASSWORD')
+        }
+
+    # Platform staff authenticate on the admin origin only. Refused HERE — after
+    # authenticate() so this is not an account-type oracle for an anonymous prober,
+    # and before the unconditional RefreshToken.for_user() below, so no customer
+    # token is ever minted for an admin account. Placing it above the `source`
+    # branch also means the client-supplied source='diner' cannot route around it.
+    if auth_user.account_type == ACCOUNT_TYPE_PLATFORM_STAFF:
+        logger.info("login [%s]: refused (platform staff on customer origin)", username)
         return {
             'status': 401,
             'message': MESSAGES.get('WRONG_PASSWORD')

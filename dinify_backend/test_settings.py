@@ -20,6 +20,13 @@ os.environ.setdefault('ENV', 'dev')
 os.environ.setdefault(
     'DINER_CAP_KEY', 'diner-cap-test-key-0123456789abcdef0123456789abcdef'
 )
+# Platform-admin Fernet key — a valid, obviously test-only urlsafe-base64 key so the
+# admin TOTP enrolment/verification tests can actually encrypt and decrypt. It must
+# be set in the ENVIRONMENT (not django settings): platform_admin_app/crypto.py reads
+# it via decouple.config, so override_settings cannot supply it.
+os.environ.setdefault(
+    'ADMIN_SECRET_ENCRYPTION_KEY', 'ZGluaWZ5LXRlc3QtYWRtaW4tZmVybmV0LWtleS0zMmI='
+)
 
 # Database — CI sets these to point at the PostgreSQL service container;
 # locally they fall back to SQLite in-memory.
