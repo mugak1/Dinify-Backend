@@ -72,6 +72,17 @@ ADMIN_LOCKOUT_DURATION = timedelta(minutes=15)
 # action. Consumed by platform_admin_app.permissions (attached to nothing yet).
 ADMIN_ELEVATION_MAX_AGE = timedelta(minutes=5)
 
+# --- Admin delegation constants -----------------------------------------------------
+# Two independent clocks: the exchange code is a HANDOFF window (the admin has minutes
+# to pass it to the restaurant portal), while the delegated session it buys is a WORK
+# window. Conflating them would either make the code linger or cut the work short.
+ADMIN_DELEGATION_CODE_TTL = timedelta(minutes=3)
+ADMIN_DELEGATION_SESSION_TTL_DEFAULT = 900     # 15 minutes
+ADMIN_DELEGATION_SESSION_TTL_MAX = 3600        # 1 hour — a hard ceiling, not advice
+# How many live grants one administrator may hold at once, across all restaurants.
+# A runaway mint loop should hit a wall rather than fill a drawer with live codes.
+ADMIN_DELEGATION_MAX_LIVE_GRANTS = 5
+
 # --- CSRF (cookie auth is CSRF-susceptible; the SPA echoes X-CSRFToken) -----------
 CSRF_COOKIE_SAMESITE = 'Strict'
 CSRF_COOKIE_SECURE = True
