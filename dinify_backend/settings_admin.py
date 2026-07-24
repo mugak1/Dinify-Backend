@@ -60,6 +60,18 @@ ADMIN_SESSION_TOUCH_THROTTLE = timedelta(minutes=5)
 # Apache is the only hop (no proxy in front), so raw X-Forwarded-For is not trusted.
 ADMIN_TRUSTED_PROXY_DEPTH = 0
 
+# --- Admin authentication constants ------------------------------------------------
+# Same getattr-with-matching-default contract as above.
+# The first-factor challenge: minutes, not hours — it only bridges password → TOTP.
+ADMIN_CHALLENGE_COOKIE_NAME = '__Host-dinify_admin_challenge'
+ADMIN_CHALLENGE_TTL = timedelta(minutes=5)
+# Durable, DB-backed lockout (the throttles are per-process and cannot be relied on).
+ADMIN_LOCKOUT_THRESHOLD = 5
+ADMIN_LOCKOUT_DURATION = timedelta(minutes=15)
+# How recently a session must have cleared a second factor to perform a sensitive
+# action. Consumed by platform_admin_app.permissions (attached to nothing yet).
+ADMIN_ELEVATION_MAX_AGE = timedelta(minutes=5)
+
 # --- CSRF (cookie auth is CSRF-susceptible; the SPA echoes X-CSRFToken) -----------
 CSRF_COOKIE_SAMESITE = 'Strict'
 CSRF_COOKIE_SECURE = True

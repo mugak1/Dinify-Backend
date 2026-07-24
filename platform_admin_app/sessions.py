@@ -101,6 +101,20 @@ def touch(session):
         session.save(update_fields=['last_seen'])
 
 
+def elevate(session):
+    """
+    Stamp ``elevated_at`` after a fresh second-factor check on a live session.
+
+    Step-up authentication: holding a valid session is not enough for the actions
+    whose blast radius is largest (delegation minting, lifecycle transitions,
+    mark-paid). Those re-verify TOTP, and this records when that last happened;
+    ``platform_admin_app.permissions`` decides how recent is recent enough.
+    """
+    session.elevated_at = timezone.now()
+    session.save(update_fields=['elevated_at'])
+    return session
+
+
 def revoke(session, reason=''):
     """Revoke a single session (idempotent — a second call is a no-op)."""
     if session.revoked_at is None:

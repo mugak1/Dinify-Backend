@@ -16,6 +16,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from users_app.models import User
 from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
+from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
 from misc_app.controllers.save_action_log import save_action
 from users_app.controllers.otp_manager import OtpManager
 
@@ -127,11 +128,25 @@ def reset_password(username, otp):
 
 
 def _resolve_user(username):
-    """Resolve a user by email or phone number."""
+    """
+    Resolve a user by email or phone number.
+
+    Platform-staff accounts resolve to None — the same result as "no such user", so
+    nothing is disclosed. This flow ends in ``RefreshToken.for_user`` (a customer
+    token) and, before that, overwrites the account password; leaving it open would
+    let anyone who knows an admin's email mint a customer session as them and lock
+    them out of the admin plane. Guarding the single resolver closes both
+    ``initiate_password_reset`` and ``reset_password`` at once. Admin credential
+    recovery is the ``reset_platform_admin_totp`` management command, not this path.
+    """
     try:
         if '@' in username:
-            return User.objects.get(email=username)
+            user = User.objects.get(email=username)
         else:
-            return User.objects.get(phone_number=username)
+            user = User.objects.get(phone_number=username)
     except User.DoesNotExist:
         return None
+
+    if user.account_type == ACCOUNT_TYPE_PLATFORM_STAFF:
+        return None
+    return user

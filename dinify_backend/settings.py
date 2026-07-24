@@ -252,6 +252,12 @@ REST_FRAMEWORK = {
         'auth_otp': config('THROTTLE_AUTH_OTP', default='5/min'),
         'auth_otp_identifier': config('THROTTLE_AUTH_OTP_IDENTIFIER', default='10/min'),
         'auth_password_reset': config('THROTTLE_AUTH_RESET', default='5/min'),
+        # Admin control plane. Defence in depth only — the durable lockout lives on
+        # PlatformStaffAuth (these counters are per-process without a shared cache).
+        'admin_login': config('THROTTLE_ADMIN_LOGIN', default='10/min'),
+        'admin_login_identifier': config(
+            'THROTTLE_ADMIN_LOGIN_IDENTIFIER', default='10/min'
+        ),
     },
 }
 

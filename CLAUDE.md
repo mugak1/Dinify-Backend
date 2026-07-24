@@ -716,6 +716,14 @@ the catch-all `<str:config_detail>/` route.
   entries (`--clean-allergens`)
 - `reoptimise_menu_images` in `restaurants_app/management/commands/` —
   re-runs image optimisation across existing MenuItem images. Do not recreate it
+- `create_platform_admin` in `platform_admin_app/management/commands/` — creates a
+  platform-staff account for the admin control plane: prompts for the password
+  INTERACTIVELY (never argv), enrols TOTP, prints the `otpauth://` URI + ASCII QR +
+  ten one-time recovery codes. Refuses a duplicate username/email, a phone-number
+  username, or a missing `ADMIN_SECRET_ENCRYPTION_KEY`. Requires a TTY
+- `reset_platform_admin_totp` in `platform_admin_app/management/commands/` — the
+  documented break-glass path: re-provisions the TOTP secret + recovery codes for an
+  existing admin and revokes all of its sessions. Does NOT change the password
 
 ## Database
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove

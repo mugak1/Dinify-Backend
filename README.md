@@ -97,6 +97,7 @@ Configured via `.env` file using `python-decouple`. See [`.env.example`](.env.ex
 |---|---|---|
 | Django core | `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS`, `ENV` | App secret, debug mode, allowed hosts, environment identifier |
 | Diner capability | `DINER_CAP_KEY`, `DINER_SESSION_TTL_SECONDS` | Signing key for anonymous diner QR credentials + table sessions (**required in production**, ≥32 chars, must differ from `SECRET_KEY`) and the session TTL (default 6h) |
+| Platform admin | `ADMIN_SECRET_ENCRYPTION_KEY` | Fernet key encrypting platform-staff TOTP secrets at rest (**required wherever the admin control plane is used** — without it no admin can be created or log in; the customer API is unaffected) |
 | CORS | `CORS_ORIGIN_ALLOW_ALL`, `CORS_ALLOWED_ORIGINS` | Cross-origin request policy |
 | JWT | `JWT_ACCESS_LIFETIME_MINUTES`, `JWT_REFRESH_LIFETIME_DAYS` | Token expiry configuration |
 | Database | `DATABASE_ENGINE`, `DATABASE_NAME`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_HOST`, `DATABASE_PORT` | PostgreSQL connection |
@@ -108,7 +109,8 @@ Configured via `.env` file using `python-decouple`. See [`.env.example`](.env.ex
 |---|---|---|
 | MongoDB | `MONGO_HOST`, `MONGO_DATABASE` | MongoDB connection for notifications, callbacks, and logs |
 | Yo Uganda | `YO_SMS_ACCOUNT_NO`, `YO_SMS_PASSWORD` | Yo SMS gateway (OTP + notifications) |
-| Rate limiting | `THROTTLE_AUTH_LOGIN`, `THROTTLE_AUTH_OTP`, `THROTTLE_AUTH_RESET` | Auth endpoint throttle rates (defaults: 10/min, 5/min, 5/min) |
+| Rate limiting | `THROTTLE_AUTH_LOGIN`, `THROTTLE_AUTH_OTP`, `THROTTLE_AUTH_OTP_IDENTIFIER`, `THROTTLE_AUTH_RESET` | Customer auth endpoint throttle rates (defaults: 10/min, 5/min, 10/min, 5/min) |
+| Rate limiting (admin) | `THROTTLE_ADMIN_LOGIN`, `THROTTLE_ADMIN_LOGIN_IDENTIFIER` | Admin auth throttle rates (both default 10/min). Defence in depth only — the durable lockout is DB-backed on `PlatformStaffAuth` |
 
 ## Migration Workflow
 
