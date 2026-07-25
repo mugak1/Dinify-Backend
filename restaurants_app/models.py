@@ -11,7 +11,7 @@ from django.dispatch import receiver
 from django.utils import timezone
 from users_app.models import BaseModel, User
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Pending,
+    RESTAURANT_STATUS_CHOICES, RestaurantStatus_Onboarding,
     PaymentStatus_Paid, OrderStatus_Cancelled, OrderStatus_Refunded,
 )
 from rest_framework.serializers import ModelSerializer
@@ -65,7 +65,19 @@ class Restaurant(BaseModel):
     owner = models.ForeignKey(User, on_delete=models.CASCADE)
     logo = models.ImageField(null=True, upload_to='restaurant_logos/')
     cover_photo = models.ImageField(null=True, upload_to='restaurant_cover_photos/')
-    status = models.CharField(max_length=255, default=RestaurantStatus_Pending)
+    # Commercial lifecycle. Constrained, indexed, and written ONLY by
+    # restaurants_app.controllers.lifecycle — it is read_only on
+    # SerializerPutRestaurant and absent from EDIT_INFORMATION, so no generic edit
+    # path can reach it. What each state permits lives in
+    # restaurants_app.controllers.lifecycle_policy, never in a reader's string
+    # comparison. Distinct from BaseModel.deleted (the technical soft-delete),
+    # which this field never substitutes for.
+    status = models.CharField(
+        max_length=255,
+        choices=RESTAURANT_STATUS_CHOICES,
+        default=RestaurantStatus_Onboarding,
+        db_index=True,
+    )
 
     # dynamic configurations
     # if the orders should be prepaid before submission

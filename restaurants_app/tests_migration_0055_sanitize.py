@@ -207,10 +207,10 @@ class Migration0055ExecutorTests(TransactionTestCase):
             password='x',
         )
         rest = self._create(
-            Restaurant, name='Mig Rest', location='loc', status='active', owner=owner,
+            Restaurant, name='Mig Rest', location='loc', status='live', owner=owner,
         )
         rest_b = self._create(
-            Restaurant, name='Mig Rest B', location='loc-b', status='active', owner=owner,
+            Restaurant, name='Mig Rest B', location='loc-b', status='live', owner=owner,
         )
         sec1 = self._create(MenuSection, name='S1', restaurant=rest, approved=True, enabled=True)
         sec2 = self._create(MenuSection, name='S2', restaurant=rest, approved=True, enabled=True)

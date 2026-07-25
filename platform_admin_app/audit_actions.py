@@ -64,3 +64,13 @@ ADMIN_DELEGATION_ACTION_PERFORMED = 'admin.delegation.action_performed'
 # A delegated request refused — dead session, off-allowlist route, or a write the
 # scope does not carry.
 ADMIN_DELEGATION_ACTION_DENIED = 'admin.delegation.action_denied'
+
+# --- admin.restaurant: the commercial lifecycle -----------------------------
+# A restaurant moved between lifecycle states. before_state / after_state carry the
+# from- and to-states; the reason is mandatory at the service.
+ADMIN_RESTAURANT_LIFECYCLE_TRANSITION = 'admin.restaurant.lifecycle_transition'
+# A transition was refused — an unknown target, a missing or too-short reason, a
+# pair outside the matrix, or a failed precondition (go-live readiness, outstanding
+# receivables). Recorded rather than silently 400'd: an attempt to suspend or
+# offboard a tenant is worth knowing about even when it did not take effect.
+ADMIN_RESTAURANT_TRANSITION_DENIED = 'admin.restaurant.transition_denied'

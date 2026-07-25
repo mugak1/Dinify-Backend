@@ -89,6 +89,28 @@ class DelegationContext:
 
     @property
     def scope(self):
+        """
+        The scope this session may actually exercise RIGHT NOW.
+
+        Normally the grant's own scope, but the restaurant's lifecycle state can
+        cap it: an ``offboarded`` tenant admits ``view`` only, however the grant
+        was minted (``lifecycle_policy``'s delegated-access row). Applied here, on
+        the property every caller already reads — the middleware's route check, the
+        permission resolver's scope grid and the session payload — so there is no
+        path that sees the uncapped value and no extra query (the restaurant is
+        already select_related on every resolve).
+
+        Only ever narrows. ``effective_delegated_scope`` cannot upgrade a scope.
+        """
+        from restaurants_app.controllers.lifecycle_policy import (
+            effective_delegated_scope,
+        )
+
+        return effective_delegated_scope(self.grant.scope, self.restaurant.status)
+
+    @property
+    def granted_scope(self):
+        """The scope the grant was MINTED with, before any lifecycle ceiling."""
         return self.grant.scope
 
     @property
@@ -115,7 +137,11 @@ class DelegationContext:
         )
         return {
             'delegation_id': str(self.grant.id),
-            'scope': self.grant.scope,
+            # The EFFECTIVE scope, so the banner states what this session can
+            # actually do rather than what it was minted with — those differ at an
+            # offboarded restaurant, and the narrower answer is the honest one.
+            'scope': self.scope,
+            'granted_scope': self.granted_scope,
             'reason': self.grant.reason,
             'expires_at': self.session.expires_at.isoformat(),
             'restaurant': {

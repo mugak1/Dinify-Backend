@@ -24,7 +24,7 @@ from users_app.models import User
 from restaurants_app.models import Restaurant, Table, RestaurantEmployee
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active, RESTAURANT_OWNER,
+    RestaurantStatus_Live, RESTAURANT_OWNER,
     OrderStatus_Paid, PaymentStatus_Paid,
 )
 from reports_app.controllers.restaurant.dashboard import summarize_revenue
@@ -67,7 +67,7 @@ class RestaurantReportsDefaultWindowTests(TestCase):
         self.owner = make_user('256700000900')
         self.restaurant = Restaurant.objects.create(
             name='TZ Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant, roles=[RESTAURANT_OWNER],
@@ -103,7 +103,7 @@ class RestaurantDashboardMonthBoundaryTests(TestCase):
         self.owner = make_user('256700000901')
         self.restaurant = Restaurant.objects.create(
             name='TZ Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         self.table = Table.objects.create(number=1, restaurant=self.restaurant)
 
@@ -125,7 +125,7 @@ class DinifyDashboardMonthBoundaryTests(TestCase):
         self.owner = make_user('256700000902')
         self.restaurant = Restaurant.objects.create(
             name='TZ Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         self.table = Table.objects.create(number=1, restaurant=self.restaurant)
 

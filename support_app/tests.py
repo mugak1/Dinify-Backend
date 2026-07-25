@@ -10,7 +10,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from users_app.models import User
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     RESTAURANT_OWNER,
     RESTAURANT_MANAGER,
     DINIFY_ADMIN,
@@ -53,7 +53,7 @@ class SupportAppTestBase(TestCase):
         self.owner_a = make_user('256700000010', [], first='Owner', last='A')
         self.restaurant_a = Restaurant.objects.create(
             name='Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -64,7 +64,7 @@ class SupportAppTestBase(TestCase):
         self.owner_b = make_user('256700000020', [], first='Owner', last='B')
         self.restaurant_b = Restaurant.objects.create(
             name='Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,

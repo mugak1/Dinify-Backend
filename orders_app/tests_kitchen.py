@@ -45,7 +45,7 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated, OrderStatus_Cancelled,
     OrderStatus_Served, OrderStatus_Pending,
     PaymentStatus_Pending,
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     CancellationReason_CustomerChangedMind,
     MODULE_KITCHEN,
 )
@@ -82,7 +82,7 @@ class KitchenTestBase(TestCase):
 
         self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         # get_user_restaurant_roles only returns roles for active restaurants
-        self.restaurant.status = RestaurantStatus_Active
+        self.restaurant.status = RestaurantStatus_Live
         self.restaurant.save(update_fields=['status'])
 
         self.table1 = Table.objects.get(restaurant=self.restaurant, number=TEST_TABLE_NUMBER1)
@@ -1048,7 +1048,7 @@ class KitchenMenuItemStockTests(KitchenTestBase):
         other_restaurant = Restaurant.objects.create(
             name='Other Seed Restaurant', location='Elsewhere', owner=self.admin_user,
         )
-        other_restaurant.status = RestaurantStatus_Active
+        other_restaurant.status = RestaurantStatus_Live
         other_restaurant.save(update_fields=['status'])
         other_section = MenuSection.objects.create(
             name='Other Section', restaurant=other_restaurant,

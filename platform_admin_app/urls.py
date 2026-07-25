@@ -18,6 +18,9 @@ from platform_admin_app.endpoints.delegation import (
     AdminDelegationRevokeView,
     AdminDelegationsView,
 )
+from platform_admin_app.endpoints.restaurants import (
+    AdminRestaurantTransitionView,
+)
 from platform_admin_app.views import AdminHealthView
 
 urlpatterns = [
@@ -41,5 +44,13 @@ urlpatterns = [
         'delegations/<uuid:grant_id>/revoke/',
         AdminDelegationRevokeView.as_view(),
         name='admin-delegation-revoke',
+    ),
+
+    # Restaurant lifecycle. The ONLY route that writes Restaurant.status;
+    # elevation-gated, because it can stop a tenant trading.
+    path(
+        'restaurants/<uuid:restaurant_id>/transition/',
+        AdminRestaurantTransitionView.as_view(),
+        name='admin-restaurant-transition',
     ),
 ]

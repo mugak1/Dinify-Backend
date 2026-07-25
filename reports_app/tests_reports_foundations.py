@@ -25,7 +25,7 @@ from users_app.models import User
 from restaurants_app.models import Restaurant, Table
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     OrderStatus_Initiated, OrderStatus_Pending, OrderStatus_Preparing,
     OrderStatus_Served, OrderStatus_Paid, OrderStatus_Refunded,
     OrderStatus_Cancelled,
@@ -57,7 +57,7 @@ class ReportsFoundationsBase(TestCase):
         self.owner = make_user('256700000300')
         self.restaurant = Restaurant.objects.create(
             name='Test Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         self.table = Table.objects.create(number=1, restaurant=self.restaurant)
 
@@ -65,7 +65,7 @@ class ReportsFoundationsBase(TestCase):
         self.other_owner = make_user('256700000301')
         self.restaurant_b = Restaurant.objects.create(
             name='Other Restaurant', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.other_owner,
+            status=RestaurantStatus_Live, owner=self.other_owner,
         )
         self.table_b = Table.objects.create(
             number=1, restaurant=self.restaurant_b,

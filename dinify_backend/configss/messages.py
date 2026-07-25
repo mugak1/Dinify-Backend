@@ -65,5 +65,14 @@ ERR_RESTAURANT_REFERENCE_REQUIRED = (
     'A restaurant reference is required to view the menu.'
 )
 
+# The graceful "temporarily unavailable" a diner sees at a SUSPENDED restaurant —
+# the one lifecycle state the public surface answers with something other than the
+# generic not-found (see menu_publication.resolve_public_restaurant). Deliberately
+# says nothing about WHY: suspension is usually a billing matter between Dinify and
+# the restaurant, and that is not a diner's business.
+ERR_RESTAURANT_UNAVAILABLE = (
+    'This restaurant is temporarily unavailable. Please check back later.'
+)
+
 
 EOD_IN_PROGRESS = 'The restaurant is currently processing the End of Day tasks. Please wait for 5 minutes.'  # noqa

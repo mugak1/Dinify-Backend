@@ -31,7 +31,7 @@ from restaurants_app.serializers import (
 from restaurants_app.controllers import menu_relationships as mr
 from users_app.models import User
 from dinify_backend.configs import ROLES
-from dinify_backend.configss.string_definitions import RestaurantStatus_Active
+from dinify_backend.configss.string_definitions import RestaurantStatus_Live
 
 
 class MenuRelBase(TestCase):
@@ -45,7 +45,7 @@ class MenuRelBase(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Rel Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -58,7 +58,7 @@ class MenuRelBase(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Rel Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,

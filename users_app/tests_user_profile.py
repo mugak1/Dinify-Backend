@@ -22,7 +22,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from users_app.models import User
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     RESTAURANT_OWNER,
     RESTAURANT_MANAGER,
     RESTAURANT_STAFF,
@@ -66,7 +66,7 @@ class SelfServiceProfileUpdateTests(TestCase):
         self.rest_owner = make_user('256750000001')
         self.restaurant = Restaurant.objects.create(
             name='R', location='loc',
-            status=RestaurantStatus_Active, owner=self.rest_owner,
+            status=RestaurantStatus_Live, owner=self.rest_owner,
         )
 
     def _employee(self, phone, roles):

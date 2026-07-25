@@ -25,7 +25,7 @@ from users_app.models import User
 from restaurants_app.models import Restaurant, RestaurantEmployee, Table
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active, RESTAURANT_OWNER, RESTAURANT_MANAGER,
+    RestaurantStatus_Live, RESTAURANT_OWNER, RESTAURANT_MANAGER,
     OrderStatus_Cancelled, OrderStatus_Served, OrderStatus_Paid,
     OrderStatus_Pending, OrderStatus_Preparing, OrderStatus_Initiated,
     OrderStatus_Refunded,
@@ -49,7 +49,7 @@ class ReviewModelTests(TestCase):
         self.owner = make_user('256700000010')
         self.restaurant = Restaurant.objects.create(
             name='Test Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         self.table = Table.objects.create(number=1, restaurant=self.restaurant)
 
@@ -117,7 +117,7 @@ class ReviewApiTestBase(TestCase):
         self.owner_a = make_user('256700000110')
         self.restaurant_a = Restaurant.objects.create(
             name='Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -129,7 +129,7 @@ class ReviewApiTestBase(TestCase):
         self.owner_b = make_user('256700000120')
         self.restaurant_b = Restaurant.objects.create(
             name='Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,

@@ -15,7 +15,7 @@ from restaurants_app.serializers import (
 from restaurants_app.tests import seed_restaurant, TEST_RESTAURANT_NAME
 from restaurants_app.models import Restaurant, RestaurantEmployee, MenuSection
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Pending, RestaurantStatus_Active,
+    RestaurantStatus_Onboarding, RestaurantStatus_Live,
 )
 from dinify_backend.configs import ROLES
 from dinify_backend.configss.edit_information import EDIT_INFORMATION
@@ -251,7 +251,7 @@ class SecretaryAbsentVsNullSemanticTests(TestCase):
             Restaurant, MenuSection, MenuItem,
         )
         from dinify_backend.configss.string_definitions import (
-            RestaurantStatus_Active,
+            RestaurantStatus_Live,
         )
         self.owner = User.objects.create_user(
             first_name='Secretary', last_name='Tester',
@@ -261,7 +261,7 @@ class SecretaryAbsentVsNullSemanticTests(TestCase):
         )
         self.restaurant = Restaurant.objects.create(
             name='Secretary Test Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         self.section = MenuSection.objects.create(
             name='Mains', restaurant=self.restaurant, listing_position=0,
@@ -788,22 +788,22 @@ class SecretaryNotificationDispatchTests(TestCase):
         self.assertEqual(actor_warnings, [])
 
 
-class SecretaryUpdateNotificationTests(TestCase):
+class SecretaryCannotWriteRestaurantStatusTests(TestCase):
     """
-    Locks in Secretary.make_notification's null-safety contract for the
-    restaurant-activated / restaurant-rejected status transition path.
+    PR-5: the restaurant lifecycle is unreachable through the generic edit path.
 
-    Pre-fix, secretary.py's make_notification dereferenced
-    new_record.instance.owner.first_name unconditionally. Restaurant.owner
-    is a non-nullable FK (restaurants_app/models.py:Restaurant.owner) but
-    User.first_name is nullable (users_app/models.py:User.first_name has
-    null=True, blank=True), so production rows do exist with first_name=''
-    or None — and any such owner triggered an AttributeError on the
-    f-string in msg_builder_restaurant.py rendering "Hello {first_name},".
+    This class REPLACES SecretaryUpdateNotificationTests, which drove a
+    pending -> active status edit through Secretary and asserted the
+    restaurant-activated notification fired from ``make_notification``. That whole
+    path is gone: ``status`` left EDIT_INFORMATION, so Secretary — which builds its
+    update payload solely from EDIT_INFORMATION keys — never sees the field, and the
+    now-unreachable ``make_notification`` hook was removed with it.
 
-    The owner-None case is not directly reachable through the schema, so
-    we don't test it here; the guard added in secretary.py is
-    defence-in-depth for partial fixtures and any future schema change.
+    The go-live notification did NOT disappear; it moved to the one place that can
+    still fire it, ``restaurants_app.controllers.lifecycle``, and its null-safe
+    greeting contract is pinned by ``restaurants_app.tests_lifecycle``.
+
+    What is locked in here is the negative: no Secretary route writes ``status``.
     """
 
     def setUp(self):
@@ -811,20 +811,15 @@ class SecretaryUpdateNotificationTests(TestCase):
         seed_restaurant()
         self.actor = User.objects.get(username=TEST_PHONE)
         self.restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
-        # These tests exercise the pending -> active activation notification, so
-        # the restaurant must start pending (seed_restaurant now seeds active).
-        self.restaurant.status = RestaurantStatus_Pending
+        self.restaurant.status = RestaurantStatus_Onboarding
         self.restaurant.save(update_fields=['status'])
 
-    def _activate_restaurant(self):
-        # Drives the same code path RestaurantSetupEndpoint.put hits when
-        # an admin moves a restaurant from pending to active.
+    def _secretary_update(self, data):
+        payload = {'id': str(self.restaurant.id)}
+        payload.update(data)
         return Secretary({
             'serializer': SerializerPutRestaurant,
-            'data': {
-                'id': str(self.restaurant.id),
-                'status': 'active',
-            },
+            'data': payload,
             'edit_considerations': EDIT_INFORMATION.get('restaurants'),
             'user_id': str(self.actor.id),
             'username': TEST_PHONE,
@@ -833,50 +828,39 @@ class SecretaryUpdateNotificationTests(TestCase):
             'instance_queryset': Restaurant.objects.all(),
         }).update()
 
-    def test_update_notification_with_complete_owner(self):
-        """Regression: owner with a populated first_name dispatches normally."""
-        # The seed user already has first_name='Test' (users_app.tests.seed_user).
-        target = 'misc_app.controllers.secretary.Notification'
-        with patch(target) as MockNotification:
-            MockNotification.return_value.create_notification.return_value = None
-            result = self._activate_restaurant()
-        self.assertEqual(result.get('status'), 200)
-        MockNotification.assert_called_once()
-        msg_data = MockNotification.call_args.kwargs.get(
-            'msg_data', MockNotification.call_args.args[0]
-            if MockNotification.call_args.args else {}
-        )
-        self.assertEqual(msg_data['msg_type'], 'restaurant-activated')
-        self.assertEqual(msg_data['first_name'], 'Test')
-        self.assertEqual(msg_data['user_id'], str(self.actor.id))
-        self.assertEqual(msg_data['restaurant_id'], str(self.restaurant.id))
+    def test_status_absent_from_edit_information(self):
+        keys = {entry['key'] for entry in EDIT_INFORMATION.get('restaurants')}
+        self.assertNotIn('status', keys)
 
-    def test_update_notification_with_missing_first_name(self):
-        """Owner with first_name=None must dispatch the fallback greeting."""
-        # User.first_name is nullable, so this is the production-reachable case.
-        self.actor.first_name = None
-        self.actor.save(update_fields=['first_name'])
+    def test_status_only_update_is_a_no_op(self):
+        """Fully ignored, so Secretary finds no applicable field: 400, no write."""
+        result = self._secretary_update({'status': RestaurantStatus_Live})
+        self.assertEqual(result.get('status'), 400)
+        self.restaurant.refresh_from_db()
+        self.assertEqual(self.restaurant.status, RestaurantStatus_Onboarding)
 
-        target = 'misc_app.controllers.secretary.Notification'
-        with patch(target) as MockNotification:
-            MockNotification.return_value.create_notification.return_value = None
-            try:
-                result = self._activate_restaurant()
-            except AttributeError as exc:
-                self.fail(
-                    f"Secretary.make_notification raised AttributeError on "
-                    f"null first_name: {exc}"
-                )
-        self.assertEqual(result.get('status'), 200)
-        MockNotification.assert_called_once()
-        msg_data = MockNotification.call_args.kwargs.get(
-            'msg_data', MockNotification.call_args.args[0]
-            if MockNotification.call_args.args else {}
+    def test_status_alongside_a_real_edit_is_dropped(self):
+        """The legitimate field applies; the smuggled lifecycle write does not."""
+        result = self._secretary_update({
+            'name': 'Renamed Bistro', 'status': RestaurantStatus_Live,
+        })
+        self.assertEqual(result.get('status'), 200, result)
+        self.restaurant.refresh_from_db()
+        self.assertEqual(self.restaurant.name, 'Renamed Bistro')
+        self.assertEqual(self.restaurant.status, RestaurantStatus_Onboarding)
+
+    def test_serializer_treats_status_as_read_only(self):
+        """Belt-and-braces: DRF drops it even if a caller bypasses Secretary."""
+        record = SerializerPutRestaurant(
+            self.restaurant,
+            data={'name': 'Direct Write', 'status': RestaurantStatus_Live},
+            partial=True,
         )
-        self.assertEqual(msg_data['msg_type'], 'restaurant-activated')
-        # Fallback greeting target so the email reads "Hello there,".
-        self.assertEqual(msg_data['first_name'], 'there')
-        self.assertEqual(msg_data['user_id'], str(self.actor.id))
+        self.assertTrue(record.is_valid(), record.errors)
+        self.assertNotIn('status', record.validated_data)
+        record.save()
+        self.restaurant.refresh_from_db()
+        self.assertEqual(self.restaurant.status, RestaurantStatus_Onboarding)
 
 
 class SecretaryScopeBoundTests(TestCase):
@@ -915,11 +899,11 @@ class SecretaryScopeBoundTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Sec Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Sec Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         self.section_a = MenuSection.objects.create(
             name='A Section', restaurant=self.restaurant_a, listing_position=0,

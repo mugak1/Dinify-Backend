@@ -10,7 +10,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from dinify_backend.configs import ROLES
 from dinify_backend.configss.string_definitions import (
-    GRID_MODULES, RestaurantStatus_Active,
+    GRID_MODULES, RestaurantStatus_Live,
 )
 from restaurants_app.models import (
     Restaurant, RestaurantEmployee, RestaurantRolePermission,
@@ -42,7 +42,7 @@ class RolePermissionsEndpointTests(TestCase):
         self.owner_a = _make_user('256701000001', 'rp_owner_a@test.com')
         self.restaurant_a = Restaurant.objects.create(
             name='RP Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a, roles=[OWNER],
@@ -64,7 +64,7 @@ class RolePermissionsEndpointTests(TestCase):
         self.owner_b = _make_user('256701000005', 'rp_owner_b@test.com')
         self.restaurant_b = Restaurant.objects.create(
             name='RP Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b, roles=[OWNER],
@@ -290,7 +290,7 @@ class CreateEmployeeTempPasswordTests(TestCase):
         self.owner = _make_user('256701000020', 'ce_owner@test.com')
         self.restaurant = Restaurant.objects.create(
             name='CE Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant, roles=[OWNER],

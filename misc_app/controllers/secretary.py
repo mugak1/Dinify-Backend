@@ -23,7 +23,6 @@ from restaurants_app.models import Restaurant
 from users_app.models import User
 from misc_app.controllers.notifications.notification import Notification
 from misc_app.controllers.con_class_utils import ConMiscUtils
-from restaurants_app.serializers import SerializerPutRestaurant
 
 
 RECIPIENT_GREETED_MSG_TYPES = frozenset({'new-restaurant-employee'})
@@ -484,11 +483,6 @@ class Secretary:
                 except Exception as error:
                     logger.error("SecretaryError-Update: %s", error)
 
-                self.make_notification(
-                    old_record=old_record,
-                    new_record=record
-                )
-
                 return {
                     'status': 200,
                     'message': self.ok_message
@@ -621,42 +615,3 @@ class Secretary:
                 'status': 200,
                 'message': MESSAGES.get('OK_DELETION')
             }
-
-    def make_notification(self, old_record, new_record):
-        # Restaurant.owner is a non-nullable FK and User.first_name is
-        # nullable (users_app.models.User: null=True, blank=True). The
-        # owner guard is defence-in-depth for partial test fixtures and
-        # any future schema change; the first_name guard is required
-        # because production rows do exist with an empty/null first
-        # name. When first_name is missing we fall back to a generic
-        # "there" greeting rather than skip the notification — the
-        # status transition is the actionable signal, not the salutation.
-        if self.serializer is SerializerPutRestaurant:
-            if old_record.status != new_record.instance.status:
-                owner = getattr(new_record.instance, 'owner', None)
-                if owner is None:
-                    logger.warning(
-                        "Restaurant status notification skipped (restaurant_id=%s, "
-                        "status=%s): owner is missing.",
-                        old_record.id, new_record.instance.status,
-                    )
-                    return
-
-                first_name = owner.first_name or 'there'
-                if new_record.instance.status == 'active':
-                    Notification(msg_data={
-                        'msg_type': 'restaurant-activated',
-                        'first_name': first_name,
-                        'restaurant_id': str(old_record.id),
-                        'restaurant_name': old_record.name,
-                        'user_id': str(owner.id)
-                    }).create_notification()
-
-                elif new_record.instance.status == 'rejected':
-                    Notification(msg_data={
-                        'msg_type': 'restaurant-rejected',
-                        'first_name': first_name,
-                        'restaurant_id': str(old_record.id),
-                        'restaurant_name': old_record.name,
-                        'user_id': str(owner.id)
-                    }).create_notification()

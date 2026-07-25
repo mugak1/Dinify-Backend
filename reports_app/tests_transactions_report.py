@@ -23,7 +23,7 @@ from restaurants_app.models import Restaurant, Table
 from orders_app.models import Order
 from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     TransactionType_OrderPayment, TransactionType_Subscription,
     TransactionStatus_Success, TransactionStatus_Failed,
     TransactionStatus_Pending, TransactionStatus_Initiated,
@@ -57,7 +57,7 @@ class TransactionsReportBase(TestCase):
         self.owner = make_user('256700000500')
         self.restaurant = Restaurant.objects.create(
             name='Test Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         self.table = Table.objects.create(number=1, restaurant=self.restaurant)
 
@@ -65,7 +65,7 @@ class TransactionsReportBase(TestCase):
         self.other_owner = make_user('256700000501')
         self.restaurant_b = Restaurant.objects.create(
             name='Other Restaurant', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.other_owner,
+            status=RestaurantStatus_Live, owner=self.other_owner,
         )
 
     def make_order(self, when=None, order_number=None):
