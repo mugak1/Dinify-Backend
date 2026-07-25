@@ -282,6 +282,72 @@ class DelegationGrant(models.Model):
         return timezone.now() < expiry
 
 
+class DelegatedSession(models.Model):
+    """
+    The credential a redeemed ``DelegationGrant`` buys — the thing that actually
+    travels on the CUSTOMER plane.
+
+    ``OneToOneField`` on purpose: one grant yields at most one session, ever. The
+    grant's ``redeemed_at`` already makes redemption single-use, but stating it as a
+    database constraint means a bug in the exchange path cannot quietly mint a
+    second credential for authority that was handed over once.
+
+    Only the SHA-256 hash of the session token is stored (``hash_token``, imported
+    from ``sessions`` — never redefined). The raw token is returned by the exchange
+    exactly once and cannot be recovered from this row.
+
+    Deliberately NO ``last_seen_at``: a write on every delegated request would buy
+    nothing that ``AdminAuditLog`` does not already record, at the cost of a write
+    amplification on a read path.
+
+    Liveness is NEVER cached and is never read from this row alone — it is
+    recomputed per request across this row AND the grant (revocation must take
+    effect immediately), which is why there is no ``is_live`` property here to
+    tempt a caller into asking only half the question.
+
+    NOT append-only (``ended_at`` is a legitimate later write); its immutable
+    history lives in ``AdminAuditLog``.
+    """
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    # PROTECT: the grant is the authority this session rests on; deleting it must
+    # never orphan a live credential.
+    grant = models.OneToOneField(
+        DelegationGrant,
+        on_delete=models.PROTECT,
+        related_name='delegated_session',
+    )
+
+    # SHA-256 hex of the session token (64 chars). unique=True is also the lookup
+    # index every delegated request hits.
+    token_hash = models.CharField(max_length=64, unique=True)
+
+    issued_at = models.DateTimeField(default=timezone.now)
+    # Set at exchange to redeemed_at + grant.session_ttl_seconds — the SAME
+    # arithmetic as DelegationGrant.is_session_live, so the admin plane's listing
+    # and the customer plane can never disagree about when this expires.
+    expires_at = models.DateTimeField()
+
+    # Voluntary end (the administrator leaving the tenant), distinct from the
+    # grant's revocation, which is the admin-plane kill switch.
+    ended_at = models.DateTimeField(null=True, blank=True)
+    ended_reason = models.CharField(max_length=64, blank=True, default='')
+
+    issued_ip = models.GenericIPAddressField(null=True, blank=True)
+    issued_user_agent = models.TextField(blank=True, default='')
+
+    class Meta:
+        db_table = 'delegated_session'
+        ordering = ['-issued_at']
+
+    def __str__(self):
+        return f'DelegatedSession<{self.grant_id}>'
+
+
 class AppendOnlyViolation(Exception):
     """
     Raised on any attempt to mutate or delete an append-only audit row.
