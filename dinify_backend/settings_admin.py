@@ -27,14 +27,22 @@ ALLOWED_HOSTS = config(
 )
 
 # --- Middleware -------------------------------------------------------------------
-# Prepend the admin request-id / client-ip middleware to the FULL inherited base
-# stack. Prepend-only: keeping Session/Auth/Message middleware satisfies the
+# Prepend the admin request-id / client-ip middleware to the inherited base stack.
+# Prepend-only: keeping Session/Auth/Message middleware satisfies the
 # admin.E408/E409/E410 system checks (django.contrib.admin is installed) and lets
 # CsrfViewMiddleware manage the CSRF cookie.
+#
+# The delegated-access gate is REMOVED here rather than inherited. Delegation is a
+# customer-plane credential; it has no meaning on the control plane, and no admin
+# route is on its allowlist. Dropping it keeps the two planes provably separate
+# instead of relying on the allowlist to refuse.
+_DELEGATED_ACCESS_MIDDLEWARE = (
+    'platform_admin_app.delegated_middleware.DelegatedAccessMiddleware'
+)
 MIDDLEWARE = [
     'platform_admin_app.middleware.RequestIDMiddleware',
     'platform_admin_app.middleware.ClientIPMiddleware',
-    *MIDDLEWARE,
+    *(m for m in MIDDLEWARE if m != _DELEGATED_ACCESS_MIDDLEWARE),
 ]
 
 # --- DRF: admin authenticator only, deny-by-default -------------------------------

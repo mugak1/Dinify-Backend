@@ -48,3 +48,19 @@ ADMIN_DELEGATION_REVOKED = 'admin.delegation.revoked'
 # An earlier unredeemed grant for the same admin+restaurant was auto-revoked because
 # a fresh one replaced it — its own action so it is never mistaken for a manual revoke.
 ADMIN_DELEGATION_SUPERSEDED = 'admin.delegation.superseded'
+
+# --- admin.delegation: the delegated session on the CUSTOMER plane ----------------
+# A one-time exchange code was redeemed and a delegated session minted. This is the
+# moment an administrator entered someone else's tenant — the row that answers
+# "who reached in, when, under what authority", and the reason delegated READS are
+# not audited one row per GET.
+ADMIN_DELEGATION_SESSION_STARTED = 'admin.delegation.session_started'
+# A redemption was refused: unknown, malformed, expired, already-used or revoked code.
+ADMIN_DELEGATION_SESSION_START_DENIED = 'admin.delegation.session_start_denied'
+# The administrator voluntarily left the tenant (distinct from an admin-plane revoke).
+ADMIN_DELEGATION_SESSION_ENDED = 'admin.delegation.session_ended'
+# A state-changing request performed under a delegated session, with its outcome.
+ADMIN_DELEGATION_ACTION_PERFORMED = 'admin.delegation.action_performed'
+# A delegated request refused — dead session, off-allowlist route, or a write the
+# scope does not carry.
+ADMIN_DELEGATION_ACTION_DENIED = 'admin.delegation.action_denied'

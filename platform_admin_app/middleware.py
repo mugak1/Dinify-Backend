@@ -29,31 +29,37 @@ class RequestIDMiddleware:
         return response
 
 
-class ClientIPMiddleware:
+def client_ip_from_request(request):
     """
-    Set ``request.client_ip`` from the trusted network position.
+    The client IP from the trusted network position.
 
     Given the verified topology (Apache is the only hop — no load balancer or proxy
     in front), the trustworthy value is ``REMOTE_ADDR``. ``ADMIN_TRUSTED_PROXY_DEPTH``
     is 0, so raw ``X-Forwarded-For`` is NOT trusted; the depth>0 branch is only
     future-proofing for a deliberately-configured proxy chain.
+
+    A function rather than middleware-only logic because the delegated-access gate on
+    the CUSTOMER plane needs the same value, and that plane does not install
+    ``ClientIPMiddleware``. One definition, two callers.
     """
+    depth = getattr(settings, 'ADMIN_TRUSTED_PROXY_DEPTH', 0)
+    remote_addr = request.META.get('REMOTE_ADDR')
+    if depth <= 0:
+        return remote_addr
+    forwarded = [
+        part.strip()
+        for part in request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')
+        if part.strip()
+    ]
+    return forwarded[-depth] if len(forwarded) >= depth else remote_addr
+
+
+class ClientIPMiddleware:
+    """Set ``request.client_ip`` via :func:`client_ip_from_request`."""
 
     def __init__(self, get_response):
         self.get_response = get_response
 
     def __call__(self, request):
-        depth = getattr(settings, 'ADMIN_TRUSTED_PROXY_DEPTH', 0)
-        remote_addr = request.META.get('REMOTE_ADDR')
-        if depth <= 0:
-            request.client_ip = remote_addr
-        else:
-            forwarded = [
-                part.strip()
-                for part in request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')
-                if part.strip()
-            ]
-            request.client_ip = (
-                forwarded[-depth] if len(forwarded) >= depth else remote_addr
-            )
+        request.client_ip = client_ip_from_request(request)
         return self.get_response(request)

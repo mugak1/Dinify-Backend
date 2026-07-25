@@ -32,4 +32,8 @@ urlpatterns = [
     path('api/v1/kitchen/', include('orders_app.urls_kitchen')),
     path('api/v1/support/', include('support_app.urls')),
     path('api/v1/reviews/', include('reviews_app.urls')),
+    # Delegated administrator access — the customer-plane half of delegation:
+    # redeem a one-time code for a session, inspect it, end it. The admin control
+    # plane (minting, listing, revoking grants) is a separate urlconf entirely.
+    path('api/v1/delegation/', include('platform_admin_app.urls_delegation')),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

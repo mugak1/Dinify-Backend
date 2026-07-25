@@ -79,6 +79,12 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # The delegated-access gate. Runs last on the way in, so it sits inside the
+    # standard stack. It returns immediately unless the request carries the
+    # X-Delegation-Session header, so every existing caller — diner, JWT staff,
+    # anonymous — is unaffected. Deliberately NOT installed on the admin control
+    # plane (settings_admin.py overrides MIDDLEWARE).
+    'platform_admin_app.delegated_middleware.DelegatedAccessMiddleware',
 ]
 
 # cors headers origin
@@ -96,6 +102,13 @@ CORS_ALLOW_HEADERS = (
     *default_headers,
     'x-diner-session',      # the short-lived diner table-session token
     'x-diner-credential',   # the opaque QR credential presented at scan
+    # Delegated administrator access. Permitting a REQUEST HEADER is not a widening
+    # of CORS: CORS_ALLOWED_ORIGINS is untouched, so the same origins may call and
+    # no new one may. Without these the browser strips the headers and the feature
+    # fails only in-browser (never in tests or curl) — the same trap the diner
+    # entries above exist to avoid.
+    'x-delegation-session',   # the delegated session credential
+    'x-delegation-code',      # the one-time exchange code, presented once
 )
 
 # --- Diner table-session capability ----------------------------------------
@@ -245,6 +258,13 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # Binds the administrator named by a delegated session that
+        # DelegatedAccessMiddleware has ALREADY validated and allow-listed. It never
+        # reads a header itself, so on any request the middleware did not clear it
+        # returns None and this list behaves exactly as it did before. This is NOT
+        # AdminSessionAuthentication — the admin control plane's cookie
+        # authenticator is never added here.
+        'platform_admin_app.delegated_auth.DelegatedSessionAuthentication',
     ),
     'DEFAULT_THROTTLE_CLASSES': [],
     'DEFAULT_THROTTLE_RATES': {
@@ -257,6 +277,11 @@ REST_FRAMEWORK = {
         'admin_login': config('THROTTLE_ADMIN_LOGIN', default='10/min'),
         'admin_login_identifier': config(
             'THROTTLE_ADMIN_LOGIN_IDENTIFIER', default='10/min'
+        ),
+        # Delegated-session redemption. Guessing a 288-bit code is not a real
+        # threat; this just makes a flood of attempts cost something.
+        'delegation_exchange': config(
+            'THROTTLE_DELEGATION_EXCHANGE', default='10/min'
         ),
     },
 }

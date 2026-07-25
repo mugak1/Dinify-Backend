@@ -36,6 +36,7 @@ from uuid import uuid4
 
 from django.conf import settings
 from django.core import signing
+from django.core.cache import cache
 from django.test import TestCase, SimpleTestCase, override_settings, tag
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -57,7 +58,24 @@ from restaurants_app.controllers.diner_capability import (
     QR_SALT, SESSION_SALT, CAPABILITY_VERSION,
     CREDENTIAL_HEADER, SESSION_HEADER,
 )
+from platform_admin_app import delegated_sessions, delegation
+from platform_admin_app import sessions as admin_sessions
+from platform_admin_app.audit_actions import (
+    ADMIN_DELEGATION_ACTION_DENIED,
+    ADMIN_DELEGATION_ACTION_PERFORMED,
+)
+from platform_admin_app.cookies import cookie_name as admin_cookie_name
+from platform_admin_app.models import (
+    RESULT_DENIED, AdminAuditLog, SCOPE_SUPPORT, SCOPE_VIEW,
+)
+from restaurants_app.endpoints.restaurant_setup import build_scoped_instance_queryset
+from users_app.controllers.permissions_check import (
+    get_module_restaurant_ids,
+    is_dinify_admin,
+)
 from dinify_backend.configss.string_definitions import (
+    ACCOUNT_TYPE_PLATFORM_STAFF,
+    MODULE_MENU,
     RestaurantStatus_Active, RestaurantStatus_Pending, RestaurantStatus_Blocked,
     RESTAURANT_OWNER, RESTAURANT_STAFF, RESTAURANT_KITCHEN,
     DINIFY_ADMIN,
@@ -81,6 +99,7 @@ MISC_PUBLIC_RESTAURANTS_URL = '/api/v1/restaurant-setup/misc-public/restaurants/
 MISC_PUBLIC_TABLES_URL = '/api/v1/restaurant-setup/misc-public/tables/'
 TRANSACTIONS_URL = '/api/v1/finances/transactions/'
 PROFILE_URL = '/api/v1/users/user-profile/'
+SUPPORT_ISSUES_URL = '/api/v1/support/issues/'
 
 
 def _setup_url(config_detail):
@@ -1357,6 +1376,181 @@ class GetDetailDispatchClosureTests(ClosureFixtureBase):
         resp = self._detail(self.owner_a, 'orders', str(uuid4()))
         # 'orders' is not in the get_detail serializer allowlist -> 404, never a 500.
         self.assertEqual(resp.status_code, 404, resp.content)
+
+
+# =============================================================================
+# M. Delegated administrator access (PR-4b) — the SECOND authenticated principal
+#    on this plane, and the newest way a tenant boundary could be crossed.
+#
+#    A delegated session is a platform administrator acting inside ONE restaurant
+#    under a DelegationGrant. It is not an employee, not a Dinify admin, and not
+#    the owner. The threat modelled here is the one that matters: a delegation
+#    issued for A being used to read or write B.
+# =============================================================================
+@tag('tenant_closure')
+class DelegatedAdministratorClosureTests(ClosureFixtureBase):
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()  # the exchange throttle is process-global (LocMemCache)
+        self.administrator = User.objects.create_user(
+            first_name='Plat', last_name='Admin', email='closure-admin@test.com',
+            phone_number=None, username='closure-platform-admin',
+            country='Uganda', password='password', roles=[],
+            account_type=ACCOUNT_TYPE_PLATFORM_STAFF,
+        )
+
+    def _delegated(self, restaurant, scope=SCOPE_VIEW):
+        """A live delegated session token for ``restaurant``, via the real services."""
+        raw_code, _grant = delegation.mint_grant(
+            administrator=self.administrator, admin_session=None,
+            restaurant=restaurant, scope=scope,
+            reason='Closure-suite delegated access check.',
+        )
+        token, context = delegated_sessions.exchange_code(raw_code)
+        return {'HTTP_X_DELEGATION_SESSION': token}, context
+
+    # --- the boundary --------------------------------------------------------
+    def test_delegated_list_read_returns_only_the_granted_restaurant(self):
+        headers, _ = self._delegated(self.restaurant_a)
+        response = self.client.get(_setup_url('menuitems'), **headers)
+        self.assertEqual(response.status_code, 200, response.content)
+        names = json.dumps(response.json())
+        self.assertIn('A Item', names)
+        self.assertNotIn('B Item', names)
+
+    def test_naming_the_other_restaurant_narrows_to_nothing(self):
+        # The client parameter can only ever FAIL to match the grant; it can never
+        # widen, because the restaurant is resolved server-side from the grant.
+        headers, _ = self._delegated(self.restaurant_a)
+        response = self.client.get(
+            _setup_url('menuitems') + f'?restaurant={self.restaurant_b.id}', **headers,
+        )
+        self.assertNotIn('B Item', json.dumps(response.json()))
+
+    def test_detail_read_of_the_other_tenant_is_not_found(self):
+        headers, _ = self._delegated(self.restaurant_a)
+        response = self.client.get(
+            f'{DETAIL_URL}?record=menuitems&id={self.item_b.id}', **headers,
+        )
+        self.assertIn(response.status_code, (403, 404), response.content)
+        self.assertNotIn('B Item', response.content.decode())
+
+    def test_kitchen_board_of_the_other_tenant_is_refused(self):
+        headers, _ = self._delegated(self.restaurant_a)
+        response = self.client.get(
+            f'/api/v1/kitchen/menu-items/?restaurant={self.restaurant_b.id}', **headers,
+        )
+        self.assertIn(response.status_code, (403, 404), response.content)
+
+    def test_reports_are_readable_for_the_granted_tenant_only(self):
+        # The reports endpoint gates once on `?restaurant=` and then re-reads the
+        # same parameter ten more times to dispatch. The grant opens its own
+        # restaurant and closes the other through the SAME comparison.
+        headers, _ = self._delegated(self.restaurant_a)
+        own = self.client.get(
+            f'/api/v1/reports/restaurant/sales-listing/?restaurant={self.restaurant_a.id}',
+            **headers,
+        )
+        self.assertEqual(own.status_code, 200, own.content)
+        other = self.client.get(
+            f'/api/v1/reports/restaurant/sales-listing/?restaurant={self.restaurant_b.id}',
+            **headers,
+        )
+        self.assertIn(other.status_code, (403, 404), other.content)
+
+    def test_a_support_scope_write_cannot_reach_the_other_tenant(self):
+        headers, _ = self._delegated(self.restaurant_a, scope=SCOPE_SUPPORT)
+        response = self.client.put(
+            f'/api/v1/kitchen/menu-items/{self.item_b.id}/stock/',
+            data=json.dumps({'in_stock': False}),
+            content_type='application/json', **headers,
+        )
+        self.assertIn(response.status_code, (403, 404), response.content)
+        self.item_b.refresh_from_db()
+        self.assertTrue(self.item_b.in_stock)
+        # The gate allowed the ROUTE (stock toggle is a support-scope write); the
+        # tenant check refused the TARGET. It is recorded as a denial, so the log
+        # never reads as though the change landed.
+        self.assertTrue(
+            AdminAuditLog.objects.filter(
+                action=ADMIN_DELEGATION_ACTION_DENIED, result=RESULT_DENIED,
+            ).exists()
+        )
+
+    def test_a_support_scope_ticket_cannot_be_raised_for_the_other_tenant(self):
+        headers, _ = self._delegated(self.restaurant_a, scope=SCOPE_SUPPORT)
+        response = self.client.post(
+            SUPPORT_ISSUES_URL,
+            data=json.dumps({
+                'restaurant': str(self.restaurant_b.id),
+                'category': 'menu', 'impact': 'question',
+                'title': 'Cross-tenant attempt',
+                'description': 'Should never be created.',
+            }),
+            content_type='application/json', **headers,
+        )
+        self.assertEqual(response.status_code, 403, response.content)
+
+    # --- the principal -------------------------------------------------------
+    def test_a_delegated_principal_is_never_the_unrestricted_dinify_admin(self):
+        _headers, context = self._delegated(self.restaurant_a)
+        principal = context.administrator
+        setattr(principal, 'active_delegation', context)
+        # The three doors a dinify admin walks through, all shut at once.
+        self.assertFalse(is_dinify_admin(principal))
+        self.assertIsNotNone(get_module_restaurant_ids(principal, MODULE_MENU))
+        self.assertEqual(
+            get_module_restaurant_ids(principal, MODULE_MENU),
+            {str(self.restaurant_a.id)},
+        )
+        self.assertEqual(
+            build_scoped_instance_queryset(principal, 'menuitems', MenuItem).count(),
+            MenuItem.objects.filter(section__restaurant=self.restaurant_a).count(),
+        )
+
+    def test_a_delegated_write_is_attributed_to_the_administrator(self):
+        headers, context = self._delegated(self.restaurant_a, scope=SCOPE_SUPPORT)
+        self.client.put(
+            f'/api/v1/kitchen/menu-items/{self.item_a.id}/stock/',
+            data=json.dumps({'in_stock': False}),
+            content_type='application/json', **headers,
+        )
+        entry = AdminAuditLog.objects.filter(
+            action=ADMIN_DELEGATION_ACTION_PERFORMED,
+        ).first()
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.actor_id, self.administrator.id)
+        self.assertNotEqual(entry.actor_id, self.owner_a.id)
+        self.assertEqual(entry.restaurant_id, self.restaurant_a.id)
+        self.assertEqual(entry.delegation_id, context.grant.id)
+
+    # --- the plane is otherwise unchanged ------------------------------------
+    def test_the_diner_channel_is_untouched_by_delegation(self):
+        # Invariant: the anonymous capability path neither gains nor loses anything.
+        session = self._sess(self.table_a)
+        response = self.client.get(
+            f'{SHOW_MENU_URL}?restaurant={self.restaurant_a.id}',
+            **_header_kw(SESSION_HEADER, session),
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        item_ids = {i['id'] for s in response.json()['data'] for i in s['items']}
+        self.assertIn(str(self.item_a.id), item_ids)
+
+    def test_a_request_without_the_delegation_header_is_unchanged(self):
+        # Staff JWT still works exactly as before, and writes no admin audit row.
+        before = AdminAuditLog.objects.count()
+        response = self._setup_get(self.owner_a, 'menuitems')
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(AdminAuditLog.objects.count(), before)
+
+    def test_an_admin_session_cookie_authenticates_nothing_on_this_plane(self):
+        # The control plane's cookie is same-site with the customer API. It must be
+        # an unread cookie here — AdminSessionAuthentication is never in this
+        # plane's authenticator list.
+        raw_session, _ = admin_sessions.create_session(self.administrator)
+        self.client.cookies[admin_cookie_name()] = raw_session
+        self.assertEqual(self.client.get(_setup_url('menuitems')).status_code, 401)
 
 
 # =============================================================================

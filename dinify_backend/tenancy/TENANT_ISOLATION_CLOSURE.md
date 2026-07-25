@@ -40,7 +40,10 @@ staff of both A and B; staff with module access at A but not B; restaurant owner
 Dinify platform administrator; client submitting foreign nested IDs in an
 otherwise-authorized request; client submitting forbidden audit/lifecycle/
 privilege/QR fields; client replaying an idempotency key across restaurants;
-client attempting rapid duplicate QR rotations.
+client attempting rapid duplicate QR rotations; **delegated platform
+administrator** (holding a live `DelegationGrant` for restaurant A only, at
+`view` or `support` scope) — added by PR-4b, the second authenticated principal
+on this plane.
 
 Fixtures use **two** independent restaurants with independent tables, sections,
 groups, menu items, extras, employees, orders and transactions
@@ -60,6 +63,8 @@ groups, menu items, extras, employees, orders and transactions
 | QR rotation (`table-actions/regenerate-qr/`) | staff JWT | table's restaurant, `MODULE_TABLES` gate | 401 unauth / 403 cross-tenant·no-module / 404 unknown |
 | Subscription (`finances/transactions/`) | staff JWT | `restaurant_id` body authorized via `can_manage_restaurant` | 404 non-manager·cross-tenant |
 | Self profile (`users/user-profile/`) | staff JWT | acts only on `request.user`; whitelisted fields only | privilege fields ignored |
+| Delegation exchange (`api/v1/delegation/exchange/`) | one-time code, `X-Delegation-Code` header only, no authenticator | administrator + restaurant read from the STORED grant, never the caller | one generic 400 for missing·unknown·expired·used·revoked |
+| Delegated access (allowlisted customer routes) | `X-Delegation-Session` header only | grant's single restaurant, COMPARED against each app's own resolution (never injected) | 401 dead credential / 403 off-allowlist·scope·ambiguous credentials |
 
 ## 5. Security invariants (and the test that proves each)
 
@@ -83,6 +88,7 @@ alongside the deep suites it builds on.
 | I12 | `get_detail` dynamic dispatch is allowlisted, module-gated, server-resolves the record's restaurant, and returns an indistinguishable 404 for cross-tenant/unknown/unmapped | `GetDetailDispatchClosureTests` |
 | I13 | Cross-repo contract constants (header names, salts, routes) match the frontend's | `ContractParityClosureTests` |
 | I14 | Menu relationship integrity + deterministic concurrency (the authoritative race proof — invoked, not replaced) | `restaurants_app.tests_menu_relationship_integrity`, `restaurants_app.tests_menu_relationships_concurrency` |
+| I15 | A delegated session for A reaches only A: list reads are scoped, `?restaurant=B` narrows to nothing, B's detail/kitchen/reports are refused and a `support`-scope write aimed at B changes nothing. The principal is never a Dinify admin, never manage-level, and its id resolvers never return the unrestricted `None`. A request WITHOUT `X-Delegation-Session` is unchanged, and the admin session cookie authenticates nothing on this plane | `DelegatedAdministratorClosureTests`; depth in `platform_admin_app.tests_delegated_session` |
 
 ## 6. CI command (the closure gate)
 
@@ -96,6 +102,7 @@ python -m django test \
   restaurants_app.tests_menu_relationship_integrity \
   restaurants_app.tests_menu_relationships_concurrency \
   restaurants_app.tests_write_surface_tenancy \
+  platform_admin_app.tests_delegated_session \
   --settings=dinify_backend.test_settings --verbosity=2
 ```
 
@@ -175,6 +182,10 @@ Re-run this closure audit when any of these change:
 - order creation or idempotency (`create_order.py`, `con_orders.py`);
 - restaurant ownership resolution (`_RESTAURANT_RESOLVERS`, resolvers);
 - the permission modules / resolver primitives (`permissions_check.py`);
+- delegated administrator access — the scope→module map or route allowlist
+  (`platform_admin_app/configs/delegation_scopes.py`), the gate
+  (`delegated_middleware.py`), the binder (`delegated_auth.py`), or the session
+  lifecycle (`delegated_sessions.py`);
 - the Secretary or another generic CRUD layer;
 - production write serializers (any `SerializerPut*`/write surface);
 - JSON/array tenant references (the non-FK inventory);
