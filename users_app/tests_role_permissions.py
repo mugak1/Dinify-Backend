@@ -25,7 +25,7 @@ from restaurants_app.models import (
 from restaurants_app.controllers.role_permissions import ensure_role_permissions
 from restaurants_app.configs.role_defaults import DEFAULT_ROLE_MODULES
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN, RESTAURANT_STAFF,
     DINIFY_ADMIN,
     GRID_MODULES, MODULE_BILLING, MODULE_TEAM, MODULE_SUPPORT,
@@ -51,7 +51,7 @@ class RolePermissionResolverTests(TestCase):
         self.owner = make_user('256700000001')
         self.restaurant = Restaurant.objects.create(
             name='Test Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant, roles=[RESTAURANT_OWNER])
@@ -158,7 +158,7 @@ class RolePermissionPayloadTests(TestCase):
         self.owner = make_user('256700000100')
         self.restaurant = Restaurant.objects.create(
             name='Payload Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         self.chef = make_user('256700000101')
         RestaurantEmployee.objects.create(
@@ -206,7 +206,7 @@ class EnsureRolePermissionsTests(TestCase):
         self.owner = make_user('256700000200')
         self.restaurant = Restaurant.objects.create(
             name='Seed Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
 
     def test_seeds_four_rows(self):

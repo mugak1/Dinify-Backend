@@ -6,6 +6,7 @@ from dinify_backend.mongo_db import MONGO_DB, COL_NOTIFICATIONS
 logger = logging.getLogger(__name__)
 from notifications_app.controllers.messenger import Messenger
 from restaurants_app.models import Restaurant
+from restaurants_app.controllers.lifecycle_policy import grants_portal_access
 
 
 class Command(BaseCommand):
@@ -32,8 +33,13 @@ class Command(BaseCommand):
                 user_restaurants = Restaurant.objects.filter(owner__email=owner).order_by('time_created')  # noqa
                 if user_restaurants.count() > 0:
                     restaurant = user_restaurants.first()
-                    if restaurant.status != 'active':
-                        print('Restaurant is not yet active')
+                    # Hold credentials until the owner can actually sign in. That
+                    # is the portal-access set (onboarding + live), NOT "live" —
+                    # under the PR-5 lifecycle an onboarding owner is expected to
+                    # log in and build their menu before going live, so gating on
+                    # `live` alone would strand them without a password.
+                    if not grants_portal_access(restaurant.status):
+                        print('Restaurant cannot yet be signed in to')
                         continue
 
             # Log the truth of each send. Control flow is deliberately

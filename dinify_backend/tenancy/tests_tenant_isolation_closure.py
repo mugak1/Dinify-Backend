@@ -64,6 +64,9 @@ from platform_admin_app.audit_actions import (
     ADMIN_DELEGATION_ACTION_DENIED,
     ADMIN_DELEGATION_ACTION_PERFORMED,
 )
+from users_app.controllers.permissions_check import (
+    can_user_access_module as can_user_access_module_closure,
+)
 from platform_admin_app.cookies import cookie_name as admin_cookie_name
 from platform_admin_app.models import (
     RESULT_DENIED, AdminAuditLog, SCOPE_SUPPORT, SCOPE_VIEW,
@@ -76,7 +79,8 @@ from users_app.controllers.permissions_check import (
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     MODULE_MENU,
-    RestaurantStatus_Active, RestaurantStatus_Pending, RestaurantStatus_Blocked,
+    RestaurantStatus_Live, RestaurantStatus_Onboarding,
+    RestaurantStatus_Suspended, RestaurantStatus_Offboarded,
     RESTAURANT_OWNER, RESTAURANT_STAFF, RESTAURANT_KITCHEN,
     DINIFY_ADMIN,
     OrderStatus_Served, OrderStatus_Pending, OrderStatus_Initiated,
@@ -129,7 +133,7 @@ class ClosureFixtureBase(TestCase):
         # --- Restaurant A -----------------------------------------------------
         cls.owner_a = cls._user('256700010001')
         cls.restaurant_a = Restaurant.objects.create(
-            name='Closure A', location='loc-a', status=RestaurantStatus_Active,
+            name='Closure A', location='loc-a', status=RestaurantStatus_Live,
             owner=cls.owner_a, accepting_orders=True,
             preferred_subscription_method='monthly', flat_fee=Decimal('50000.00'),
         )
@@ -234,7 +238,7 @@ class ClosureFixtureBase(TestCase):
         # --- Restaurant B (cross-tenant target) -------------------------------
         cls.owner_b = cls._user('256700010010')
         cls.restaurant_b = Restaurant.objects.create(
-            name='Closure B', location='loc-b', status=RestaurantStatus_Active,
+            name='Closure B', location='loc-b', status=RestaurantStatus_Live,
             owner=cls.owner_b, accepting_orders=True,
         )
         RestaurantEmployee.objects.create(
@@ -614,11 +618,27 @@ class MenuPublicationCheckoutClosureTests(ClosureFixtureBase):
         item_ids = {i['id'] for s in resp.json()['data'] for i in s['items']}
         self.assertIn(str(self.item_a.id), item_ids)
 
-    def test_pending_restaurant_serves_no_anonymous_menu(self):
-        self.restaurant_a.status = RestaurantStatus_Pending
+    def test_offboarded_restaurant_serves_no_anonymous_menu(self):
+        self.restaurant_a.status = RestaurantStatus_Offboarded
         self.restaurant_a.save(update_fields=['status'])
         resp = self.client.get(f'{SHOW_MENU_URL}?restaurant={self.restaurant_a.id}')
         self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_suspended_restaurant_serves_no_anonymous_menu(self):
+        self.restaurant_a.status = RestaurantStatus_Suspended
+        self.restaurant_a.save(update_fields=['status'])
+        resp = self.client.get(f'{SHOW_MENU_URL}?restaurant={self.restaurant_a.id}')
+        # Graceful unavailable rather than the generic 404 — see
+        # menu_publication.resolve_public_restaurant for the disclosure trade-off.
+        self.assertEqual(resp.status_code, 503, resp.content)
+
+    def test_onboarding_restaurant_still_serves_anonymous_menu(self):
+        """The PR-5 widening: the diner surface is live during onboarding, because
+        the go-live checklist needs a real end-to-end test order."""
+        self.restaurant_a.status = RestaurantStatus_Onboarding
+        self.restaurant_a.save(update_fields=['status'])
+        resp = self.client.get(f'{SHOW_MENU_URL}?restaurant={self.restaurant_a.id}')
+        self.assertEqual(resp.status_code, 200, resp.content)
 
     def test_hidden_section_group_item_cannot_be_ordered(self):
         session = self._sess(self.table_a)
@@ -1204,12 +1224,40 @@ class MassAssignmentClosureTests(ClosureFixtureBase):
     def test_platform_status_and_flat_fee_stripped_for_non_admin(self):
         resp = self._setup_put(self.owner_a, 'restaurants', {
             'id': str(self.restaurant_a.id), 'name': 'Renamed Again',
-            'status': RestaurantStatus_Blocked, 'flat_fee': '0.00',
+            'status': RestaurantStatus_Suspended, 'flat_fee': '0.00',
         })
         self.assertEqual(resp.json().get('status'), 200)
         self.restaurant_a.refresh_from_db()
-        self.assertEqual(self.restaurant_a.status, RestaurantStatus_Active)   # not blocked
+        # `flat_fee` is stripped for non-admins; `status` cannot be written by
+        # ANYONE through this path since PR-5 (out of EDIT_INFORMATION, read_only
+        # on the serializer) — the lifecycle has exactly one writer.
+        self.assertEqual(self.restaurant_a.status, RestaurantStatus_Live)
         self.assertEqual(self.restaurant_a.flat_fee, Decimal('50000.00'))     # not zeroed
+
+    def test_dinify_admin_also_cannot_write_status_through_setup_put(self):
+        """
+        The lifecycle is closed to the generic edit path for EVERY principal.
+
+        Before PR-5 a Dinify admin legitimately drove approval through this PUT
+        (`changeApprovalStatus`). That route is retired: `status` left
+        EDIT_INFORMATION and is read_only on the serializer, so an admin's value is
+        ignored exactly like a tenant's. Transitions go through
+        POST admin/v1/restaurants/<id>/transition/, which enforces the matrix,
+        requires a reason and writes an audit row.
+        """
+        admin = User.objects.create_user(
+            first_name='Dinify', last_name='Admin', email='closure-status-admin@test.com',
+            phone_number='256700019999', username='256700019999', country='Uganda',
+            password='password', roles=[DINIFY_ADMIN],
+        )
+        resp = self._setup_put(admin, 'restaurants', {
+            'id': str(self.restaurant_a.id), 'name': 'Admin Renamed',
+            'status': RestaurantStatus_Suspended,
+        })
+        self.assertEqual(resp.json().get('status'), 200)
+        self.restaurant_a.refresh_from_db()
+        self.assertEqual(self.restaurant_a.name, 'Admin Renamed')      # applied
+        self.assertEqual(self.restaurant_a.status, RestaurantStatus_Live)  # ignored
 
 
 # =============================================================================
@@ -1552,6 +1600,180 @@ class DelegatedAdministratorClosureTests(ClosureFixtureBase):
         self.client.cookies[admin_cookie_name()] = raw_session
         self.assertEqual(self.client.get(_setup_url('menuitems')).status_code, 401)
 
+
+
+# =============================================================================
+# N. Restaurant lifecycle x principal (PR-5) — the boundary in the state axis.
+#
+#    The lifecycle decides WHETHER a tenant can be reached at all, so it sits
+#    underneath every gate the sections above test. Two threats are modelled:
+#    a principal reaching a tenant its state should have closed, and a DELEGATED
+#    administrator transitioning a restaurant that is not their grant's.
+#
+#    The matrix, reason validation and audit content belong to
+#    restaurants_app.tests_lifecycle; what is here is strictly cross-principal.
+# =============================================================================
+@tag('tenant_closure')
+class LifecycleClosureTests(ClosureFixtureBase):
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.administrator = User.objects.create_user(
+            first_name='Plat', last_name='Admin', email='closure-life-admin@test.com',
+            phone_number=None, username='closure-life-admin',
+            country='Uganda', password='password', roles=[],
+            account_type=ACCOUNT_TYPE_PLATFORM_STAFF,
+        )
+
+    def _delegated(self, restaurant, scope=SCOPE_SUPPORT):
+        raw_code, _grant = delegation.mint_grant(
+            administrator=self.administrator, admin_session=None,
+            restaurant=restaurant, scope=scope,
+            reason='Closure-suite lifecycle access check.',
+        )
+        token, context = delegated_sessions.exchange_code(raw_code)
+        return {'HTTP_X_DELEGATION_SESSION': token}, context
+
+    def _set_state(self, restaurant, state):
+        restaurant.status = state
+        restaurant.save(update_fields=['status'])
+
+    # --- the transition service is not reachable from the customer plane ------
+    def test_no_customer_plane_route_writes_restaurant_status(self):
+        """
+        The lifecycle has ONE writer and it is not on this plane. An owner cannot
+        promote their own restaurant, and a Dinify admin cannot either — the field
+        left EDIT_INFORMATION and is read_only on the serializer.
+        """
+        self._set_state(self.restaurant_a, RestaurantStatus_Onboarding)
+        resp = self._setup_put(self.owner_a, 'restaurants', {
+            'id': str(self.restaurant_a.id), 'name': 'Self Promoted',
+            'status': RestaurantStatus_Live,
+        })
+        self.assertEqual(resp.json().get('status'), 200)
+        self.restaurant_a.refresh_from_db()
+        self.assertEqual(self.restaurant_a.name, 'Self Promoted')          # applied
+        self.assertEqual(self.restaurant_a.status, RestaurantStatus_Onboarding)
+
+    # --- a delegated administrator cannot transition anything -----------------
+    def test_delegated_session_cannot_reach_the_transition_route(self):
+        """
+        The transition endpoint lives on the ADMIN plane and is absent from the
+        delegated ALLOWED_ROUTES allowlist, so a delegated credential cannot reach
+        it for its OWN restaurant, let alone another's. Deny-by-default, not an
+        explicit exclusion that could be forgotten.
+        """
+        from platform_admin_app.configs.delegation_scopes import ALLOWED_ROUTES
+
+        transition_routes = [
+            route for (route, _method) in ALLOWED_ROUTES
+            if 'transition' in route
+        ]
+        self.assertEqual(transition_routes, [])
+
+    def test_delegated_session_cannot_write_status_through_setup_put(self):
+        headers, _ = self._delegated(self.restaurant_a)
+        before = self.restaurant_a.status
+        response = self.client.put(
+            _setup_url('restaurants'),
+            data=json.dumps({
+                'id': str(self.restaurant_a.id),
+                'status': RestaurantStatus_Suspended,
+            }),
+            content_type='application/json', **headers,
+        )
+        # restaurant-setup WRITES are not on the delegated allowlist at all.
+        self.assertIn(response.status_code, (401, 403))
+        self.restaurant_a.refresh_from_db()
+        self.assertEqual(self.restaurant_a.status, before)
+
+    def test_view_scope_carries_no_write_authority_in_any_state(self):
+        for state in (RestaurantStatus_Onboarding, RestaurantStatus_Live):
+            with self.subTest(state):
+                self._set_state(self.restaurant_a, state)
+                headers, _ = self._delegated(self.restaurant_a, scope=SCOPE_VIEW)
+                response = self.client.put(
+                    f'/api/v1/kitchen/menu-items/{self.item_a.id}/stock/',
+                    data=json.dumps({'in_stock': False}),
+                    content_type='application/json', **headers,
+                )
+                self.assertEqual(response.status_code, 403, response.content)
+
+    def test_offboarded_restaurant_caps_a_support_delegation_to_view(self):
+        """
+        The delegated-access row of the policy: at an OFFBOARDED tenant the grant's
+        scope is capped at `view`, so the one write a support delegation normally
+        carries (86 / un-86 a menu item) is refused. The commercial relationship is
+        over; an administrator may still look, but may no longer act inside it.
+        """
+        self._set_state(self.restaurant_a, RestaurantStatus_Live)
+        headers, context = self._delegated(self.restaurant_a, scope=SCOPE_SUPPORT)
+        # Live: the support write is permitted.
+        ok = self.client.put(
+            f'/api/v1/kitchen/menu-items/{self.item_a.id}/stock/',
+            data=json.dumps({'in_stock': False}),
+            content_type='application/json', **headers,
+        )
+        self.assertEqual(ok.status_code, 200, ok.content)
+
+        # Offboarded: the SAME credential is capped to view and the write is refused.
+        self._set_state(self.restaurant_a, RestaurantStatus_Offboarded)
+        denied = self.client.put(
+            f'/api/v1/kitchen/menu-items/{self.item_a.id}/stock/',
+            data=json.dumps({'in_stock': True}),
+            content_type='application/json', **headers,
+        )
+        self.assertEqual(denied.status_code, 403, denied.content)
+        self.assertEqual(
+            AdminAuditLog.objects.filter(
+                action=ADMIN_DELEGATION_ACTION_DENIED).count(),
+            1,
+        )
+
+    def test_offboarded_ceiling_is_visible_on_the_session_payload(self):
+        headers, context = self._delegated(self.restaurant_a, scope=SCOPE_SUPPORT)
+        self.assertEqual(context.scope, SCOPE_SUPPORT)
+        self._set_state(self.restaurant_a, RestaurantStatus_Offboarded)
+        refreshed = delegated_sessions.resolve_session(
+            headers['HTTP_X_DELEGATION_SESSION'])
+        self.assertEqual(refreshed.scope, SCOPE_VIEW)          # effective
+        self.assertEqual(refreshed.granted_scope, SCOPE_SUPPORT)   # as minted
+        payload = refreshed.acting_as()
+        self.assertEqual(payload['scope'], SCOPE_VIEW)
+        self.assertEqual(payload['granted_scope'], SCOPE_SUPPORT)
+
+    # --- staff of one tenant are unaffected by another tenant's state ---------
+    def test_suspending_one_restaurant_does_not_touch_the_other(self):
+        self._set_state(self.restaurant_a, RestaurantStatus_Suspended)
+        # A denied at the gate ...
+        self.assertFalse(
+            can_user_access_module_closure(
+                self.owner_a, str(self.restaurant_a.id), MODULE_MENU),
+        )
+        # ... B untouched.
+        self.assertTrue(
+            can_user_access_module_closure(
+                self.owner_b, str(self.restaurant_b.id), MODULE_MENU),
+        )
+
+    def test_suspended_state_denies_the_kitchen_board_over_http(self):
+        self._set_state(self.restaurant_a, RestaurantStatus_Suspended)
+        response = self.client.get(
+            f'/api/v1/kitchen/orders/active/?restaurant={self.restaurant_a.id}',
+            **self._jwt(self.kitchen_a),
+        )
+        self.assertEqual(response.status_code, 403, response.content)
+
+    def test_onboarding_state_permits_the_kitchen_board_over_http(self):
+        """The widening reaches the kitchen too: an onboarding restaurant can cook
+        the go-live test order."""
+        self._set_state(self.restaurant_a, RestaurantStatus_Onboarding)
+        response = self.client.get(
+            f'/api/v1/kitchen/orders/active/?restaurant={self.restaurant_a.id}',
+            **self._jwt(self.kitchen_a),
+        )
+        self.assertEqual(response.status_code, 200, response.content)
 
 # =============================================================================
 # §14 cross-repository contract parity — the constants/routes this repo OWNS.

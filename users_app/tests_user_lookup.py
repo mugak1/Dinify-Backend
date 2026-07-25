@@ -19,7 +19,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from users_app.models import User
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_STAFF,
     DINIFY_ADMIN, DINER,
 )
@@ -49,7 +49,7 @@ class UserLookupEndpointTests(TestCase):
         # the resolver reads RestaurantEmployee, not the Restaurant.owner FK.
         self.owner = make_user('256750000001')
         self.restaurant = Restaurant.objects.create(
-            name='R', location='loc', status=RestaurantStatus_Active,
+            name='R', location='loc', status=RestaurantStatus_Live,
             owner=self.owner,
         )
         RestaurantEmployee.objects.create(

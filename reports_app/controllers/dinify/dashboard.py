@@ -8,9 +8,7 @@ from django.db.models import Sum
 from dinify_backend.configss.string_definitions import (
     TransactionType_Subscription,
 
-    RestaurantStatus_Pending, RestaurantStatus_Active,
-    RestaurantStatus_Inactive, RestaurantStatus_Blocked,
-    RestaurantStatus_Rejected,
+    RESTAURANT_LIFECYCLE_STATES, RestaurantStatus_Suspended,
 
     OrderStatus_Served, OrderStatus_Preparing,
     PaymentStatus_Paid, PaymentStatus_Pending,
@@ -19,11 +17,9 @@ from dinify_backend.configss.string_definitions import (
 
 def summarize_restaurants():
     restaurants = Restaurant.objects.all()
-    statuses = [
-        RestaurantStatus_Pending, RestaurantStatus_Active,
-        RestaurantStatus_Inactive, RestaurantStatus_Blocked,
-        RestaurantStatus_Rejected
-    ]
+    # The lifecycle vocabulary itself, so a state added later appears in the
+    # breakdown without this list being remembered separately.
+    statuses = list(RESTAURANT_LIFECYCLE_STATES)
     summary = {'total': restaurants.count()}
     # "This month" in EAT — the DB extracts time_created in EAT, so the
     # comparison values must be EAT too (naive datetime.now() is UTC wall clock).
@@ -100,8 +96,11 @@ def summarize_dinify_earnings():
     ).aggregate(Sum('transaction_amount'))['transaction_amount__sum']
     summary['subscriptions'] = cum_subscriptions if cum_subscriptions else 0.0
 
+    # `suspended` is the successor to `blocked` — suspension is typically FOR
+    # non-payment, which is what makes it the proxy for "owes us" until the
+    # Phase-1 SubscriptionInvoice models make outstanding amounts real.
     outstanding_subscriptions = Restaurant.objects.filter(
-        status=RestaurantStatus_Blocked,
+        status=RestaurantStatus_Suspended,
         preferred_subscription_method__in=['monthly', 'yearly']
     ).aggregate(Sum('flat_fee'))['flat_fee__sum']
     summary['outstanding'] = outstanding_subscriptions if outstanding_subscriptions else 0.0

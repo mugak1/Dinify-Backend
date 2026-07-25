@@ -23,7 +23,7 @@ from restaurants_app.models import (
 from restaurants_app.serializers import SerializerPutMenuItem
 from users_app.models import User
 from dinify_backend.configs import ROLES
-from dinify_backend.configss.string_definitions import RestaurantStatus_Active
+from dinify_backend.configss.string_definitions import RestaurantStatus_Live
 
 
 def _assign(parent_id, extra_id, results, barrier=None):
@@ -85,7 +85,7 @@ class ReferencedExtraConcurrencyTests(TransactionTestCase):
         )
         self.restaurant = Restaurant.objects.create(
             name='Conc Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant,

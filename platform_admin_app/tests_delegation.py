@@ -26,7 +26,7 @@ from django.utils import timezone
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     ACCOUNT_TYPE_RESTAURANT_USER,
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
 )
 from dinify_backend.tenancy.discovery import all_project_serializers
 from platform_admin_app import delegation, sessions
@@ -98,7 +98,7 @@ def _make_admin(email='deleg-admin@t.com', username='deleg-admin'):
 def _make_restaurant(name='Java House', owner=None, deleted=False):
     owner = owner or _make_user(f'owner-{name}@t.com'.replace(' ', '-'))
     return Restaurant.objects.create(
-        name=name, location=f'{name} loc', status=RestaurantStatus_Active,
+        name=name, location=f'{name} loc', status=RestaurantStatus_Live,
         owner=owner, deleted=deleted,
     )
 

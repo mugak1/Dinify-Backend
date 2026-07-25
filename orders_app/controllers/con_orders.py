@@ -22,6 +22,7 @@ from orders_app.controllers.services.create_order import _create_order
 from restaurants_app.controllers.menu_publication import (
     NOT_ON_MENU_MESSAGE, validate_order_selections,
 )
+from restaurants_app.controllers.lifecycle_policy import allows_order_creation
 
 logger = logging.getLogger(__name__)
 
@@ -718,10 +719,12 @@ class ConOrder:
         order_source: str = 'diner_self_service',
         client_order_id: Optional[str] = None
     ):
-        # check that the restaurant is not blocked
+        # Lifecycle gate: a restaurant only takes orders in a state that permits it
+        # (onboarding + live). `suspended` and `offboarded` are refused here — the
+        # policy owns which, so this never compares status to a literal.
         try:
             restaurant = Restaurant.objects.get(pk=restaurant_id)
-            if restaurant.status in ['blocked']:
+            if not allows_order_creation(restaurant.status):
                 return {
                     'status': 400,
                     'message': MESSAGES.get('BLOCKED_RESTAURANT')

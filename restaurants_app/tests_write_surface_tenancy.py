@@ -21,7 +21,7 @@ from restaurants_app.serializers import (
     SerializerPutRestaurantEmployee, SerializerRestaurantTag,
 )
 from users_app.models import User
-from dinify_backend.configss.string_definitions import RestaurantStatus_Active
+from dinify_backend.configss.string_definitions import RestaurantStatus_Live
 from dinify_backend.configs import ROLES
 
 
@@ -38,7 +38,7 @@ class _TwoTenantBase(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='WS Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -51,7 +51,7 @@ class _TwoTenantBase(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='WS Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,

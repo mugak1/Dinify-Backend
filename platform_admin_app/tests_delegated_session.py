@@ -40,7 +40,7 @@ from dinify_backend.configss.string_definitions import (
     MODULE_SUPPORT,
     MODULE_TEAM,
     RESTAURANT_OWNER,
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     DINIFY_ADMIN,
 )
 from dinify_backend.tenancy.discovery import all_project_serializers
@@ -131,7 +131,7 @@ def _make_admin(email='ds-admin@t.com', username='ds-admin'):
 def _make_restaurant(name='Java House', owner=None, deleted=False):
     owner = owner or _make_user(f'owner-{name}@t.com'.replace(' ', '-'))
     return Restaurant.objects.create(
-        name=name, location=f'{name} loc', status=RestaurantStatus_Active,
+        name=name, location=f'{name} loc', status=RestaurantStatus_Live,
         owner=owner, deleted=deleted,
     )
 

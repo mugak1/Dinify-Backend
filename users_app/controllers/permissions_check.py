@@ -4,6 +4,7 @@ from typing import Optional
 from users_app.models import User
 from restaurants_app.models import RestaurantEmployee, RestaurantRolePermission
 from restaurants_app.configs.role_defaults import DEFAULT_ROLE_MODULES
+from restaurants_app.controllers.lifecycle_policy import portal_access_states
 from dinify_backend.configss.string_definitions import (
     DINIFY_ACCOUNT_MANAGER,
     DINIFY_ADMIN,
@@ -77,7 +78,7 @@ def _delegation_grants(delegation, restaurant_id, module) -> bool:
 def get_user_restaurant_roles(user_id: str, restaurant_id: str) -> list:
     try:
         return RestaurantEmployee.objects.values('roles').get(
-            restaurant__status__in=['active'],
+            restaurant__status__in=portal_access_states(),
             user=user_id,
             restaurant=restaurant_id,
             deleted=False,
@@ -149,7 +150,7 @@ def _resolve_from_roles(roles, is_admin: bool, overrides_by_role: dict) -> dict:
 def get_any_restaurant_roles(user: User) -> list:
     employments = list(
         RestaurantEmployee.objects.select_related('restaurant').filter(
-            restaurant__status__in=['active'],
+            restaurant__status__in=portal_access_states(),
             user=user,
             active=True,
             deleted=False
@@ -264,7 +265,8 @@ def get_employed_restaurant_ids(user: User) -> Optional[set]:
     Role-agnostic on purpose: it powers the ungated ``support`` module's list
     scoping, where EVERY employee — not just owners/managers — may see their
     own restaurants' issues. Unlike the module path it does NOT filter on
-    restaurant status, so support stays reachable during onboarding.
+    lifecycle state at all, which is what makes support reachable in every state
+    (the ``Support access`` row of the ``lifecycle_policy`` matrix).
 
     Returns:
         ``None``      -> unrestricted (dinify admin); callers must NOT scope.
@@ -303,8 +305,9 @@ def get_module_restaurant_ids(user: User, module: str) -> Optional[set]:
     check): a GET list is authoritatively bound to exactly the restaurants where
     the caller's resolved module grid grants ``module``. ``support`` is ungated,
     so it maps to every restaurant the caller is employed at. Mirrors the
-    resolver's active-restaurant scope (employment at an ``active`` restaurant)
-    and batches the override rows in one query (no N+1).
+    resolver's lifecycle scope (employment at a restaurant whose state grants
+    portal access — ``onboarding`` or ``live``, per ``lifecycle_policy``) and
+    batches the override rows in one query (no N+1).
 
     Returns:
         ``None``      -> unrestricted (dinify admin); callers must NOT scope.
@@ -331,7 +334,7 @@ def get_module_restaurant_ids(user: User, module: str) -> Optional[set]:
         return get_employed_restaurant_ids(user)
     employments = list(
         RestaurantEmployee.objects.filter(
-            restaurant__status__in=['active'],
+            restaurant__status__in=portal_access_states(),
             user=user,
             active=True,
             deleted=False,

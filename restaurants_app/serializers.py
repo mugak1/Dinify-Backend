@@ -54,14 +54,21 @@ class SerializerPutRestaurant(ModelSerializer):
     fields in EDIT_INFORMATION['restaurants'] are client-writable. `owner` and
     every audit / lifecycle / approval / billing-lifecycle field are server-owned
     and read_only — `owner` is set at creation through the trusted save() channel
-    (create_restaurant), and the non-admin `status`/`flat_fee` post-gate strip
-    stays in restaurant_setup (PR#211).
+    (create_restaurant), and the non-admin `flat_fee` post-gate strip stays in
+    restaurant_setup (PR#211).
+
+    `status` is read_only (PR-5): the lifecycle is a constrained axis with exactly
+    one writer, ``restaurants_app.controllers.lifecycle``, which assigns the field
+    on the model directly. Together with its removal from EDIT_INFORMATION this is
+    belt-and-braces — Secretary only forwards EDIT_INFORMATION keys, and DRF drops
+    the field even if some future caller builds the serializer by hand. Creation
+    (admin_register_restaurant) relies on the model default, ``onboarding``.
     """
     class Meta:
         model = Restaurant
         fields = (
             # client-writable (mirrors EDIT_INFORMATION['restaurants'])
-            'name', 'location', 'logo', 'cover_photo', 'status',
+            'name', 'location', 'logo', 'cover_photo',
             'require_order_prepayments', 'expose_order_ratings',
             'allow_deliveries', 'allow_pickups', 'preferred_subscription_method',
             'order_surcharge_percentage', 'order_surcharge_min_amount',
@@ -71,14 +78,14 @@ class SerializerPutRestaurant(ModelSerializer):
             'accepting_orders', 'opening_hours', 'vat_registered', 'vat_rate',
             'tin', 'receipt_footer',
             # server-owned (output-only)
-            'id', 'owner', 'menu_item_sort_mode',
+            'id', 'owner', 'status', 'menu_item_sort_mode',
             'first_time_menu_approval', 'first_time_menu_approval_decision',
             'subscription_validity', 'subscription_expiry_date',
             'created_by', 'deleted', 'deleted_by', 'time_deleted',
             'deletion_reason', 'time_created', 'time_last_updated',
         )
         read_only_fields = (
-            'id', 'owner', 'menu_item_sort_mode',
+            'id', 'owner', 'status', 'menu_item_sort_mode',
             'first_time_menu_approval', 'first_time_menu_approval_decision',
             'subscription_validity', 'subscription_expiry_date',
             'created_by', 'deleted', 'deleted_by', 'time_deleted',

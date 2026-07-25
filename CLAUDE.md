@@ -439,6 +439,11 @@ with PostgreSQL on AWS RDS.
 - `api/v1/reviews/` → reviews_app endpoints (`reviews_app/urls.py`):
   `submit/`, `summary/`, `analytics/`, `<int:review_id>/resolution/`,
   `` (root) — separate app
+- `admin/v1/` → platform_admin_app control plane (`platform_admin_app/urls.py`,
+  mounted by `dinify_backend/urls_admin.py`; Apache strips the `/api` prefix).
+  Explicit deny-by-default routes only — health, `auth/*`, `delegations/*`, and
+  `restaurants/<uuid:id>/transition/` (the ONLY writer of `Restaurant.status`,
+  elevation-gated)
 
 ## Endpoint Pattern — CRITICAL
 New resource types get their own dedicated endpoint file in
@@ -470,15 +475,21 @@ the catch-all `<str:config_detail>/` route.
   only thing that can register a file edit — it keys on `key in self.data` (NOT
   "value is non-null"), so an explicit `null`-clear of a file field counts as a
   change and persists (HTTP 200), rather than collapsing to "no changes detected"
-- `status` (approval / payment-enforcement axis) and `flat_fee` (the Dinify
-  subscription price billed by `finance_app.tx_subscription`) are registered in
-  `EDIT_INFORMATION['restaurants']` but are PLATFORM-owned — the restaurant-setup
-  write path STRIPS both keys from a non-admin's `restaurants` PUT payload AFTER
-  `check_permission` and BEFORE the Secretary dispatch (PR #211), so an
-  owner/settings-manager of an active restaurant cannot zero `flat_fee` or
-  rewrite the approval `status`. Dinify admins keep full write access (the admin
-  `changeApprovalStatus` flow is unchanged). This is a post-gate payload strip,
-  NOT an EDIT_INFORMATION removal — do not delete them from EDIT_INFORMATION
+- `flat_fee` (the Dinify subscription price billed by
+  `finance_app.tx_subscription`) is registered in `EDIT_INFORMATION['restaurants']`
+  but is PLATFORM-owned — the restaurant-setup write path STRIPS the key from a
+  non-admin's `restaurants` PUT payload AFTER `check_permission` and BEFORE the
+  Secretary dispatch (PR #211), so an owner/settings-manager cannot zero their own
+  subscription price. Dinify admins keep write access. This is a post-gate payload
+  strip, NOT an EDIT_INFORMATION removal — do not delete it from EDIT_INFORMATION
+- `status` is DIFFERENT and stricter: PR-5 REMOVED it from
+  `EDIT_INFORMATION['restaurants']` entirely (and made it `read_only` on
+  `SerializerPutRestaurant`), so NO principal writes it through Secretary — see
+  the "Restaurant Lifecycle" section. `Table.status` was removed from
+  `EDIT_INFORMATION['table']` in the same PR for its own reason: the dedicated
+  `table-actions/update-status/` verb validates against `TABLE_STATUS_CHOICES` and
+  keeps `is_active` in step with `out_of_service`, which the generic path did not.
+  No `EDIT_INFORMATION` section exposes a `status` key any more
 - Check this file before adding any editable field — it may already be there
 
 ## Tenant Isolation / Role-Permission ENFORCEMENT — CRITICAL
@@ -531,11 +542,76 @@ the catch-all `<str:config_detail>/` route.
 - Writes resolve the target restaurant SERVER-SIDE from the resource FK (by PK)
   via `_RESTAURANT_RESOLVERS`, then module-gate that resolved id — the spoof
   `{id: <victim record>, restaurant: <attacker own>}` cannot smuggle access.
-- Portal module access requires an ACTIVE restaurant (the resolver filters
-  `restaurant__status='active'`, consistent with the login permission grid);
-  pending restaurants are admin-managed until activated.
+- Portal module access requires a lifecycle state that GRANTS PORTAL ACCESS — the
+  three resolvers filter `restaurant__status__in=portal_access_states()`
+  (`onboarding` + `live`), never a literal. PR-5 WIDENED this: the filter used to
+  be `['active']`, so an owner at a not-yet-approved restaurant was denied the
+  portal entirely; `onboarding` now grants FULL staff access so the owner can build
+  a menu and provision tables before going live. `suspended` / `offboarded` deny.
+  See the "Restaurant Lifecycle" section below.
 - Any NEW read/write branch must map its resource to a module and route through
   these primitives — an unmapped resource fails closed (403/404)
+
+## Restaurant Lifecycle — CRITICAL
+
+- `Restaurant.status` is a CONSTRAINED four-state commercial lifecycle (PR-5,
+  migration `restaurants_app/0056_restaurant_lifecycle_states`):
+  `onboarding` → `live` → `suspended` → `offboarded`. Constants +
+  `RESTAURANT_STATUS_CHOICES` + `RESTAURANT_LIFECYCLE_STATES` live in
+  `string_definitions.py`. The legacy free-text vocabulary
+  (`pending`/`active`/`inactive`/`blocked`/`rejected`) and its five
+  `RestaurantStatus_*` constants were REMOVED — do not reintroduce them
+- `offboarded` is deliberately NOT `archived`: `users_app.BaseModel` already owns
+  `deleted` (the technical soft-delete) plus a dormant `archived` boolean. This
+  axis is COMMERCIAL state; `deleted` stays the soft-delete mechanism and is
+  orthogonal (a soft-deleted `live` restaurant is still invisible to diners)
+- ONE WRITER: `restaurants_app/controllers/lifecycle.py`
+  (`transition_restaurant`). No other code path may assign `status`. Enforcement
+  is two-layer — the field is ABSENT from `EDIT_INFORMATION['restaurants']`
+  (Secretary builds its payload solely from those keys) and `read_only` on
+  `SerializerPutRestaurant`. The legacy admin `changeApprovalStatus` PUT is
+  RETIRED: a Dinify admin can no longer write `status` through restaurant-setup
+  either. The `flat_fee` non-admin strip in `restaurant_setup.py` REMAINS
+- The service enforces the matrix against the row read under `select_for_update`
+  (so concurrent transitions serialize), requires a reason (≥10 chars, mirroring
+  `platform_admin_app.delegation.MIN_REASON_LENGTH`), and writes an
+  `AdminAuditLog` row IN THE SAME TRANSACTION — a failed audit unwinds the
+  transition. A REFUSED transition is audited too
+  (`admin.restaurant.transition_denied`) and then raises
+  `LifecycleTransitionError`. Allowed: onboarding→live (readiness-gated),
+  onboarding→offboarded, live↔suspended, live/suspended→offboarded.
+  `offboarded → live` is NEVER allowed — restoration is re-onboarding. There is
+  no self-transition
+- ONE POLICY: `restaurants_app/controllers/lifecycle_policy.py` is the single
+  source for what each state PERMITS — `CAPABILITY_MATRIX` is the spec table as
+  data and every predicate reads from it. Readers call a named predicate
+  (`grants_portal_access`, `allows_order_creation`, `allows_kitchen`,
+  `allows_support`, `diner_menu_visibility`, `effective_delegated_scope`) or the
+  derived set (`portal_access_states()`), NEVER `status == '<literal>'`. It is
+  import-light on purpose (imported by `permissions_check`) — no models, no
+  querysets. An unknown/legacy value fails CLOSED (denies everything, menu gone)
+- Per-state behaviour: staff portal + kitchen + order-create are allowed for
+  onboarding/live and blocked for suspended/offboarded; the diner menu is served
+  for onboarding/live, answers a graceful **503** for `suspended` (the ONE state
+  that does not collapse to the generic 404 — a diner at a printed QR is told the
+  place is temporarily unavailable) and a flat 404 for `offboarded`; support is
+  reachable in every state; a delegated admin session is CAPPED to `view` scope at
+  an `offboarded` restaurant (`DelegationContext.scope` applies the ceiling;
+  `granted_scope` exposes the as-minted value)
+- TWO PHASE-1 SEAMS, both named single-call functions with real call sites —
+  `check_go_live_readiness` (returns ready today; the hard blockers need
+  Phase-1 models) and `has_outstanding_receivables` (returns False today;
+  `SubscriptionInvoice` does not exist yet, and `DinifyTransaction` is never the
+  receivable). Do NOT inline either at a call site
+- Admin transition endpoint: `POST admin/v1/restaurants/<uuid:id>/transition/`
+  (`platform_admin_app/endpoints/restaurants.py`), `AdminAPIView` +
+  `IsRecentlyElevated` — body `{to_state, reason}`. It is deliberately ABSENT from
+  the delegated `ALLOWED_ROUTES` allowlist, so a delegated session can never
+  transition anything
+- The go-live owner notification (`restaurant-activated`) moved from the deleted
+  `Secretary.make_notification` hook into the lifecycle service, fired
+  post-commit and best-effort. There is no `restaurant-rejected` counterpart —
+  `rejected` is not a state in the new vocabulary
 
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns
@@ -728,9 +804,11 @@ the catch-all `<str:config_detail>/` route.
 ## Database
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove
 - All migrations must be generated and included in PRs when models change
-- Latest migration: `restaurants_app/migrations/0055_sanitize_menu_item_extras.py`
+- Latest migration: `restaurants_app/migrations/0056_restaurant_lifecycle_states.py`
   (0054 adds `Table.qr_version`; 0055 data-repairs MenuItem extras — see the
-  "Write-time menu relationship integrity" bullet),
+  "Write-time menu relationship integrity" bullet; 0056 constrains
+  `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
+  "Restaurant Lifecycle"),
   `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,

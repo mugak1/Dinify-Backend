@@ -24,7 +24,7 @@ from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
 from orders_app.controllers.con_orders import ConOrder, NOT_ON_MENU_MESSAGE
 from orders_app.controllers.services.create_order import _create_order
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active, RESTAURANT_OWNER,
+    RestaurantStatus_Live, RESTAURANT_OWNER,
 )
 
 
@@ -41,7 +41,7 @@ class CheckoutPolicyBase(TestCase):
         self.owner = _owner('256700020001')
         self.restaurant = Restaurant.objects.create(
             name='Chk R', location='chk', owner=self.owner,
-            status=RestaurantStatus_Active, accepting_orders=True,
+            status=RestaurantStatus_Live, accepting_orders=True,
         )
         self.staff = self.owner  # owner authorises the staff/admin order path
         self.section = self._section('Section')
@@ -64,7 +64,7 @@ class CheckoutPolicyBase(TestCase):
         # Cross-tenant restaurant B for foreign controls.
         self.restaurant_b = Restaurant.objects.create(
             name='Chk R B', location='chk-b', owner=_owner('256700020002'),
-            status=RestaurantStatus_Active,
+            status=RestaurantStatus_Live,
         )
         self.section_b = MenuSection.objects.create(
             name='B Section', restaurant=self.restaurant_b,
