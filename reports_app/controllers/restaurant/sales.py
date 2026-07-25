@@ -37,6 +37,7 @@ from reports_app.serializers import SerializerOrderListingReport
 # trend_category (the public API param) -> bucketing period granularity.
 TREND_PERIODS = {
     'daily': 'day',
+    'weekly': 'week',
     'monthly': 'month',
     'quarterly': 'quarter',
     'annual': 'year',
@@ -45,6 +46,11 @@ TREND_PERIODS = {
 # cap also bounds the listing; the wider caps bound the number of buckets.
 TREND_CAPS = {
     'daily': (31, 'Date range should not be greater than 31 days.'),
+    # 371 days is 53 weeks exactly, so this bounds a weekly request to <=54
+    # buckets for every start-day alignment (the 54th is the partial edge week).
+    # It sits well above any span the timeframe ladder selects weekly for — it
+    # exists to bound payload size and query cost, as the other caps do.
+    'weekly': (371, 'Date range should not be greater than 1 year.'),
     'monthly': (731, 'Date range should not be greater than 2 years.'),
     'quarterly': (731, 'Date range should not be greater than 2 years.'),
     'annual': (1850, 'Date range should not be greater than 5 years.'),
@@ -52,6 +58,7 @@ TREND_CAPS = {
 # x-axis title for the graph series, keyed by bucketing period.
 TREND_AXIS_TITLES = {
     'day': 'Days',
+    'week': 'Weeks',
     'month': 'Months',
     'quarter': 'Quarters',
     'year': 'Years',
@@ -235,12 +242,26 @@ def _period_label(period_dt, period: str) -> str:
     bucket therefore emits a key that sorts correctly as a plain string.
 
     day      -> 'YYYY-MM-DD'   (2024-03-01)
+    week     -> 'YYYY-MM-DD'   (2024-03-04)  the MONDAY boundary of the bucket
     month    -> 'YYYY-MM'      (2024-03)
     quarter  -> 'YYYY-Qn'      (2024-Q1)   year-first so it sorts as text
     year     -> 'YYYY'         (2024)
+
+    A week deliberately emits its Monday DATE, not an ISO week string. An ISO
+    week (``2026-W30``) would sort correctly but breaks ``parseISO()`` on the
+    frontend; the Monday boundary date preserves the "raw sortable value the
+    frontend parses as an ISO date" contract above. ``TruncWeek`` is
+    Monday-anchored and ``bucket_sales`` truncates with ``tzinfo=LOCAL_TZ``, so
+    the boundary is the Monday in EAT.
+
+    NOTE the partial-edge week: a range whose first day is mid-week produces a
+    first bucket labelled with the PRECEDING Monday — a key that can fall before
+    the requested ``date_from`` — while containing only the in-range days. That
+    is correct and intended (the bucket is named by its week, not clipped to the
+    window), but it is an easy thing to misread as an off-by-one.
     """
     local_date = period_dt.astimezone(LOCAL_TZ).date()
-    if period == 'day':
+    if period in ('day', 'week'):
         return local_date.strftime('%Y-%m-%d')
     if period == 'month':
         return local_date.strftime('%Y-%m')

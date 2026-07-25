@@ -346,6 +346,127 @@ class SalesTrendsTests(SalesReportBase):
         self.assertEqual(result['status'], 400)
 
 
+class SalesTrendsWeeklyTests(SalesReportBase):
+    """The ``weekly`` trend category (TRENDS-WEEKLY-00).
+
+    ``TruncWeek`` is Monday-anchored, and ``bucket_sales`` truncates with
+    ``tzinfo=LOCAL_TZ``, so a bucket key is the MONDAY of its week in EAT,
+    emitted as 'YYYY-MM-DD' (deliberately not an ISO 'YYYY-Wnn' week string,
+    which the frontend's parseISO() could not read).
+
+    Calendar facts these cases rely on: 2024-03-04 and 2024-03-11 are Mondays;
+    2024-03-01 (Fri) and 2024-03-03 (Sun) both sit in the week of 2024-02-26;
+    2024-03-20 (Wed) sits in the week of 2024-03-18.
+    """
+
+    def test_weekly_table_buckets_by_week(self):
+        # Two orders in the week of 03-04 (Mon + Wed), one in 03-11, one in 03-18.
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 4))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 6))
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 3, 11))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 20))
+
+        table = generate_restaurant_sales_trends(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-03-01', date_to='2024-03-31',
+            trend_category='weekly', trend_result='table',
+        )['data']
+
+        # Ascending, and every key is the Monday of its week.
+        self.assertEqual([r['period'] for r in table],
+                         ['2024-03-04', '2024-03-11', '2024-03-18'])
+        self.assertEqual([r['count'] for r in table], [2, 1, 1])
+        self.assertEqual([r['revenue'] for r in table],
+                         [Decimal('1500.00'), Decimal('750.00'), Decimal('750.00')])
+
+    def test_weekly_buckets_are_monday_anchored(self):
+        # Sunday 03-03 belongs to the PREVIOUS week (Monday 02-26); Monday 03-04
+        # starts a new one. Saturday 03-09 is still the 03-04 week.
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 3))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 4))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 9))
+
+        table = generate_restaurant_sales_trends(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-02-26', date_to='2024-03-10',
+            trend_category='weekly', trend_result='table',
+        )['data']
+
+        # Sunday split off on its own; Monday + Saturday merged.
+        self.assertEqual([r['period'] for r in table],
+                         ['2024-02-26', '2024-03-04'])
+        self.assertEqual([r['count'] for r in table], [1, 2])
+
+    def test_weekly_bucket_boundary_is_eat_not_utc(self):
+        # 2024-03-03 23:30 UTC is 2024-03-04 02:30 EAT — Sunday in UTC, Monday in
+        # EAT. It must land in the LATER (Monday-starting) week.
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 3, 3, 23, 30))
+
+        table = generate_restaurant_sales_trends(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-03-03', date_to='2024-03-10',
+            trend_category='weekly', trend_result='table',
+        )['data']
+
+        self.assertEqual([r['period'] for r in table], ['2024-03-04'])
+        # Bucketed in UTC it would have fallen into the preceding week.
+        self.assertNotIn('2024-02-26', [r['period'] for r in table])
+
+    def test_weekly_first_bucket_is_the_preceding_monday_for_a_midweek_start(self):
+        # The documented partial-edge week: 2024-03-01 is a Friday, so its bucket
+        # is labelled with Monday 2024-02-26 — a key BEFORE date_from — while
+        # holding only the in-range days.
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 1))
+
+        table = generate_restaurant_sales_trends(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-03-01', date_to='2024-03-07',
+            trend_category='weekly', trend_result='table',
+        )['data']
+
+        self.assertEqual([r['period'] for r in table], ['2024-02-26'])
+        self.assertEqual(table[0]['count'], 1)
+
+    def test_weekly_371_day_cap(self):
+        # 2024-01-01 -> 2025-01-08 is 373 days: over the 53-week cap.
+        over = generate_restaurant_sales_trends(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-01-01', date_to='2025-01-08',
+            trend_category='weekly', trend_result='table',
+        )
+        self.assertEqual(over['status'], 400)
+        self.assertEqual(over['message'],
+                         'Date range should not be greater than 1 year.')
+
+        # 2024-01-01 -> 2025-01-06 is exactly 371 days: allowed.
+        at_cap = generate_restaurant_sales_trends(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-01-01', date_to='2025-01-06',
+            trend_category='weekly', trend_result='table',
+        )
+        self.assertEqual(at_cap['status'], 200)
+
+    def test_weekly_graph_result_has_a_weeks_axis_title(self):
+        # TREND_AXIS_TITLES is keyed on the PERIOD, not the category, so a
+        # missing 'week' entry would KeyError at runtime rather than 400.
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 4))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 6))
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 3, 11))
+
+        data = generate_restaurant_sales_trends(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-03-01', date_to='2024-03-31',
+            trend_category='weekly', trend_result='graph',
+        )['data']
+
+        self.assertEqual(data['xaxis']['title']['text'], 'Weeks')
+        self.assertEqual(data['xaxis']['categories'],
+                         ['2024-03-04', '2024-03-11'])
+        series_by_name = {s['name']: s['data'] for s in data['series']}
+        self.assertIn('Revenue', series_by_name)
+        self.assertEqual(series_by_name['Count'], [2, 1])
+
+
 class SalesHourlyTests(SalesReportBase):
     """The hour-of-day ("when orders land") sale distribution.
 
