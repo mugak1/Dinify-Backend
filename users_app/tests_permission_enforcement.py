@@ -23,6 +23,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from users_app.models import User
 from users_app.controllers.permissions_check import (
+    can_user_access_module,
     get_module_restaurant_ids,
     get_employed_restaurant_ids,
 )
@@ -34,7 +35,8 @@ from orders_app.models import Order
 from reviews_app.models import Review
 from support_app.models import SupportIssue
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active, RestaurantStatus_Pending,
+    RestaurantStatus_Live, RestaurantStatus_Onboarding,
+    RestaurantStatus_Suspended, RestaurantStatus_Offboarded,
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN, RESTAURANT_STAFF,
     DINIFY_ADMIN,
     MODULE_MENU, MODULE_TABLES, MODULE_REPORTS, MODULE_REVIEWS, MODULE_TEAM,
@@ -82,7 +84,7 @@ class ScopingPrimitiveTests(TestCase):
     def setUp(self):
         self.owner = make_user('256730000001')
         self.restaurant = Restaurant.objects.create(
-            name='R', location='loc', status=RestaurantStatus_Active,
+            name='R', location='loc', status=RestaurantStatus_Live,
             owner=self.owner,
         )
         RestaurantEmployee.objects.create(
@@ -152,19 +154,64 @@ class ScopingPrimitiveTests(TestCase):
         self.assertEqual(get_employed_restaurant_ids(self.staff), set())
         self.assertEqual(get_module_restaurant_ids(self.staff, MODULE_TABLES), set())
 
-    def test_non_active_restaurant_excluded_from_module_but_not_support(self):
-        pending_owner = make_user('256730000007')
-        pending = Restaurant.objects.create(
-            name='P', location='loc', status=RestaurantStatus_Pending,
-            owner=pending_owner,
+    def test_suspended_restaurant_excluded_from_module_but_not_support(self):
+        suspended_owner = make_user('256730000007')
+        suspended = Restaurant.objects.create(
+            name='S', location='loc', status=RestaurantStatus_Suspended,
+            owner=suspended_owner,
         )
         staff2 = make_user('256730000008')
         RestaurantEmployee.objects.create(
-            user=staff2, restaurant=pending, roles=[RESTAURANT_STAFF])
-        # a non-active restaurant is excluded from module access ...
+            user=staff2, restaurant=suspended, roles=[RESTAURANT_STAFF])
+        # a suspended restaurant is excluded from module access ...
         self.assertEqual(get_module_restaurant_ids(staff2, MODULE_TABLES), set())
         # ... but support (ungated, employment-based) still reaches it
-        self.assertEqual(get_employed_restaurant_ids(staff2), {str(pending.id)})
+        self.assertEqual(get_employed_restaurant_ids(staff2), {str(suspended.id)})
+
+    def test_offboarded_restaurant_excluded_from_module_but_not_support(self):
+        off_owner = make_user('256730000011')
+        offboarded = Restaurant.objects.create(
+            name='O', location='loc', status=RestaurantStatus_Offboarded,
+            owner=off_owner,
+        )
+        staff3 = make_user('256730000012')
+        RestaurantEmployee.objects.create(
+            user=staff3, restaurant=offboarded, roles=[RESTAURANT_STAFF])
+        self.assertEqual(get_module_restaurant_ids(staff3, MODULE_TABLES), set())
+        self.assertEqual(get_employed_restaurant_ids(staff3), {str(offboarded.id)})
+
+    def test_onboarding_restaurant_GRANTS_module_access(self):
+        """
+        THE DELIBERATE WIDENING (PR-5).
+
+        Before the lifecycle work the resolver filtered `status__in=['active']`, so
+        an owner at a not-yet-approved restaurant was denied the portal outright.
+        Under the lifecycle policy `onboarding` grants FULL staff access: the owner
+        has to build a menu and provision tables BEFORE going live, and the go-live
+        readiness checklist is a check on exactly that work having been done.
+        """
+        onboarding_owner = make_user('256730000009')
+        onboarding = Restaurant.objects.create(
+            name='N', location='loc', status=RestaurantStatus_Onboarding,
+            owner=onboarding_owner,
+        )
+        RestaurantEmployee.objects.create(
+            user=onboarding_owner, restaurant=onboarding, roles=[RESTAURANT_OWNER])
+        staff4 = make_user('256730000010')
+        RestaurantEmployee.objects.create(
+            user=staff4, restaurant=onboarding, roles=[RESTAURANT_STAFF])
+        self.assertEqual(
+            get_module_restaurant_ids(staff4, MODULE_TABLES), {str(onboarding.id)},
+        )
+        self.assertTrue(
+            can_user_access_module(staff4, str(onboarding.id), MODULE_TABLES),
+        )
+        # The owner reaches every module at their onboarding restaurant.
+        self.assertTrue(
+            can_user_access_module(
+                onboarding_owner, str(onboarding.id), MODULE_MENU,
+            ),
+        )
 
     def test_inactive_user_denied(self):
         self.staff.is_active = False
@@ -179,7 +226,7 @@ class CatchAllModuleEnforcementTests(TestCase):
     def setUp(self):
         self.owner = make_user('256731000001')
         self.restaurant = Restaurant.objects.create(
-            name='A', location='loc-a', status=RestaurantStatus_Active,
+            name='A', location='loc-a', status=RestaurantStatus_Live,
             owner=self.owner,
         )
         RestaurantEmployee.objects.create(
@@ -205,7 +252,7 @@ class CatchAllModuleEnforcementTests(TestCase):
         # Second restaurant for the cross-tenant spoof.
         self.owner_b = make_user('256731000006')
         self.restaurant_b = Restaurant.objects.create(
-            name='B', location='loc-b', status=RestaurantStatus_Active,
+            name='B', location='loc-b', status=RestaurantStatus_Live,
             owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
@@ -316,7 +363,7 @@ class DedicatedEndpointModuleEnforcementTests(TestCase):
     def setUp(self):
         self.owner = make_user('256732000001')
         self.restaurant = Restaurant.objects.create(
-            name='A', location='loc-a', status=RestaurantStatus_Active,
+            name='A', location='loc-a', status=RestaurantStatus_Live,
             owner=self.owner,
         )
         RestaurantEmployee.objects.create(
@@ -339,7 +386,7 @@ class DedicatedEndpointModuleEnforcementTests(TestCase):
         # Second restaurant + table for the cross-restaurant transfer.
         self.owner_b = make_user('256732000005')
         self.restaurant_b = Restaurant.objects.create(
-            name='B', location='loc-b', status=RestaurantStatus_Active,
+            name='B', location='loc-b', status=RestaurantStatus_Live,
             owner=self.owner_b,
         )
         self.table_b = Table.objects.create(
@@ -403,7 +450,7 @@ class ReportsReviewsSupportEnforcementTests(TestCase):
     def setUp(self):
         self.owner = make_user('256733000001')
         self.restaurant = Restaurant.objects.create(
-            name='A', location='loc-a', status=RestaurantStatus_Active,
+            name='A', location='loc-a', status=RestaurantStatus_Live,
             owner=self.owner,
         )
         RestaurantEmployee.objects.create(
@@ -429,7 +476,7 @@ class ReportsReviewsSupportEnforcementTests(TestCase):
         # cross-tenant target
         self.owner_b = make_user('256733000005')
         self.restaurant_b = Restaurant.objects.create(
-            name='B', location='loc-b', status=RestaurantStatus_Active,
+            name='B', location='loc-b', status=RestaurantStatus_Live,
             owner=self.owner_b,
         )
         self.issue_b = SupportIssue.objects.create(
@@ -505,7 +552,7 @@ class AdminElevatedActionsTests(TestCase):
     def setUp(self):
         self.owner = make_user('256734000001')
         self.restaurant = Restaurant.objects.create(
-            name='A', location='loc-a', status=RestaurantStatus_Active,
+            name='A', location='loc-a', status=RestaurantStatus_Live,
             owner=self.owner,
         )
         RestaurantEmployee.objects.create(

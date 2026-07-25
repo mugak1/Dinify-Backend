@@ -11,7 +11,7 @@ from restaurants_app.models import Restaurant, RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
     ProcessingStatus_Pending,
     PaymentMode_MobileMoney,
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     RESTAURANT_OWNER,
     DINIFY_ADMIN,
 )
@@ -165,7 +165,7 @@ class SubscriptionTransactionTenancyTests(TestCase):
         self.owner_a = make_user('256700000310')
         self.restaurant_a = Restaurant.objects.create(
             name='Tenancy Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
             preferred_subscription_method='monthly', flat_fee=Decimal('50000'),
         )
         RestaurantEmployee.objects.create(
@@ -176,7 +176,7 @@ class SubscriptionTransactionTenancyTests(TestCase):
         self.owner_b = make_user('256700000320')
         self.restaurant_b = Restaurant.objects.create(
             name='Tenancy Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
             preferred_subscription_method='monthly', flat_fee=Decimal('40000'),
         )
         RestaurantEmployee.objects.create(

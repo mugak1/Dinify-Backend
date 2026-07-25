@@ -11,7 +11,8 @@
 #   2. makemigrations --check --dry-run  (fails if a model changed w/o a migration)
 #   3. money-field guard                 (fails if a monetary model field is a FloatField)
 #   4. tenant-relation ratchet           (fails if the tenant-relation baseline grew)
-#   5. tenant-isolation closure gate     (focused adversarial boundary suite, fail-fast)
+#   5. tenant-isolation closure gate     (focused adversarial boundary suite, fail-fast;
+#                                         includes the delegated-session auth path)
 #   6. test                              (full Django test suite)
 #
 # test_settings falls back to SQLite in-memory for the fast checks, but the
@@ -76,6 +77,7 @@ run_step "tenant-isolation closure gate" "${PYTHON}" -m django test \
   restaurants_app.tests_menu_relationship_integrity \
   restaurants_app.tests_menu_relationships_concurrency \
   restaurants_app.tests_write_surface_tenancy \
+  platform_admin_app.tests_delegated_session \
   --settings="${SETTINGS}" --verbosity=2
 run_step "tests"                "${PYTHON}" -m django test --settings="${SETTINGS}" --verbosity=2
 

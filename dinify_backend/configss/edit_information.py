@@ -4,7 +4,14 @@ EDIT_INFORMATION = {
         {'key': 'location', 'label': 'location', 'type': 'char', 'min_length': 5, 'text_presentation': str.title},  # noqa
         {'key': 'logo', 'label': 'logo', 'type': 'file', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'cover_photo', 'label': 'cover photo', 'type': 'file', 'min_length': 5, 'text_presentation': None},  # noqa
-        {'key': 'status', 'label': 'status', 'type': 'char', 'min_length': 5, 'text_presentation': str.lower},  # noqa
+        # `status` (the commercial lifecycle) is DELIBERATELY ABSENT (PR-5). It is
+        # written only by restaurants_app.controllers.lifecycle, through the
+        # elevation-gated admin transition endpoint, and is read_only on
+        # SerializerPutRestaurant. Secretary builds its update payload solely from
+        # the keys listed here, so omitting it is the enforcement, not a comment.
+        # Re-adding it would restore a generic edit path around the matrix, the
+        # reason requirement and the audit entry — and would resurrect the
+        # `min_length: 5` trap that made the four-character state `live` unwritable.
         {'key': 'require_order_prepayments', 'label': 'require order prepayments', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'expose_order_ratings', 'label': 'expose order ratings', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'allow_deliveries', 'label': 'allow deliveries', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
@@ -83,7 +90,12 @@ EDIT_INFORMATION = {
         {'key': 'min_capacity', 'label': 'min capacity', 'type': 'int', 'min_length': 1, 'text_presentation': None},  # noqa
         {'key': 'max_capacity', 'label': 'max capacity', 'type': 'int', 'min_length': 1, 'text_presentation': None},  # noqa
         {'key': 'shape', 'label': 'shape', 'type': 'char', 'min_length': 3, 'text_presentation': str.lower},  # noqa
-        {'key': 'status', 'label': 'status', 'type': 'char', 'min_length': 5, 'text_presentation': str.lower},  # noqa
+        # Table.status (available/seated/dirty/out_of_service) is a DIFFERENT field
+        # from the restaurant lifecycle above — it is the floor-service axis. It is
+        # removed here for its own reason: `table-actions/update-status/` is the
+        # dedicated writer, and it validates against TABLE_STATUS_CHOICES and keeps
+        # `is_active` in step with `out_of_service`. This generic path did neither,
+        # so writing status through it silently desynchronised the two.
         {'key': 'tags', 'label': 'tags', 'type': 'list', 'min_length': 0, 'text_presentation': None},  # noqa
         {'key': 'has_qr', 'label': 'has QR', 'type': 'bool', 'min_length': 5, 'text_presentation': None},  # noqa
         {'key': 'qr_mode', 'label': 'QR mode', 'type': 'char', 'min_length': 5, 'text_presentation': str.lower},  # noqa

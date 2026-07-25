@@ -3,9 +3,9 @@ from django.db import transaction
 from django.test import TestCase
 from dinify_backend.configs import ROLES
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active,
-    RestaurantStatus_Pending,
-    RestaurantStatus_Blocked,
+    RestaurantStatus_Live,
+    RestaurantStatus_Onboarding,
+    RestaurantStatus_Suspended,
 )
 from users_app.tests import TEST_PHONE, seed_user
 from users_app.models import User
@@ -54,7 +54,7 @@ def seed_restaurant(seed_owner=True):
             name=TEST_RESTAURANT_NAME,
             location='Seed Test location',
             owner=owner,
-            status=RestaurantStatus_Active,
+            status=RestaurantStatus_Live,
         )
         if seed_owner:
             RestaurantEmployee.objects.create(
@@ -359,8 +359,8 @@ class MenuSectionReorderTests(TestCase):
 
     def test_reorder_allows_owner_role(self):
         # Activate the seeded restaurant so role-lookup matches the
-        # `restaurant__status__in=['active']` filter in get_user_restaurant_roles.
-        self.restaurant.status = RestaurantStatus_Active
+        # portal-access lifecycle filter in get_user_restaurant_roles.
+        self.restaurant.status = RestaurantStatus_Live
         self.restaurant.save(update_fields=['status'])
         owner = User.objects.create_user(
             first_name='Restaurant', last_name='Owner',
@@ -969,7 +969,7 @@ class TenantIsolationTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         self.employment_a = RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -984,7 +984,7 @@ class TenantIsolationTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -1488,7 +1488,7 @@ class TenantReadIsolationTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Read Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         self.employment_a = RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -1503,7 +1503,7 @@ class TenantReadIsolationTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Read Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         self.employment_b = RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -1917,7 +1917,7 @@ class NullableFieldClearingDirectNullTests(TestCase):
         )
         self.restaurant = Restaurant.objects.create(
             name='Null Clearing Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant,
@@ -2000,7 +2000,7 @@ class PresetTagsEndpointTests(TestCase):
         )
         self.restaurant = Restaurant.objects.create(
             name='Preset Tags Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant,
@@ -2093,7 +2093,7 @@ class DedicatedEndpointAuthorizationTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Dedicated A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         self.employment_a = RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -2108,7 +2108,7 @@ class DedicatedEndpointAuthorizationTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Dedicated B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -2863,7 +2863,7 @@ class RestaurantTagsEndpointTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Tag Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -2878,7 +2878,7 @@ class RestaurantTagsEndpointTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Tag Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -3194,7 +3194,7 @@ class MenuItemTagIdsTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Tag Items Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -3212,7 +3212,7 @@ class MenuItemTagIdsTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Tag Items Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -3561,7 +3561,7 @@ class PublicTableScanPresetTagsTests(TestCase):
         )
         self.restaurant = Restaurant.objects.create(
             name='Scan Tags Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         self.table = Table.objects.create(
             number=901, restaurant=self.restaurant,
@@ -3634,7 +3634,7 @@ class AreaDeletionBlockTests(TestCase):
         )
         self.restaurant = Restaurant.objects.create(
             name='Area Restaurant', location='loc-area',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant,
@@ -3737,7 +3737,7 @@ class TableDeletionBlockTests(TestCase):
         )
         self.restaurant = Restaurant.objects.create(
             name='Table Restaurant', location='loc-table',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant,
@@ -3885,7 +3885,7 @@ class EditInformationTableCleanupTests(TestCase):
         )
         self.restaurant = Restaurant.objects.create(
             name='EI Table Restaurant', location='loc-ei-table',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant,
@@ -4263,7 +4263,7 @@ class UpdateFloorPlanEndpointTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Floor A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -4280,7 +4280,7 @@ class UpdateFloorPlanEndpointTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Floor B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -4403,7 +4403,7 @@ class SubscriptionDetailsGateTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Sub Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -4429,7 +4429,7 @@ class SubscriptionDetailsGateTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Sub Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -4599,7 +4599,7 @@ class AdminRegisterRestaurantAuthorizationTests(TestCase):
         )
         self.restaurant = Restaurant.objects.create(
             name='AR Existing Restaurant', location='ar-loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant,
@@ -4827,18 +4827,26 @@ class TestDinerJourneyDetailHardening(TestCase):
 
 class RestaurantAdminOnlyFieldGuardTests(TestCase):
     """
-    BUG-P3-2: `status` and `flat_fee` are platform-owned restaurant fields only a
-    Dinify admin may write through the restaurant-setup PUT path. `status` is the
-    approval / payment-enforcement axis; `flat_fee` is the Dinify subscription
-    price billed by finance_app tx_subscription. A tenant (owner/manager) PUT that
-    carries either field must have it silently stripped (matching how Secretary
-    ignores non-applicable fields) while the rest of the edit still applies; the
-    admin keeps full write access (the changeApprovalStatus flow).
+    BUG-P3-2 + PR-5: platform-owned restaurant fields on the restaurant-setup PUT.
 
-    Reachability: module access (the write gate) requires an ACTIVE restaurant
-    (get_user_restaurant_roles filters restaurant__status='active'), so a tenant
-    at a pending/blocked restaurant is already denied 403 at the gate — the strip
-    only bites for an owner of an already-active restaurant. Both layers covered.
+    `flat_fee` (the Dinify subscription price billed by finance_app
+    tx_subscription) keeps the original contract: a tenant (owner/manager) PUT
+    carrying it has it silently stripped — matching how Secretary ignores
+    non-applicable fields — while the rest of the edit still applies, and a Dinify
+    admin retains write access.
+
+    `status` is now stricter than "admin-only". PR-5 made the lifecycle a
+    constrained axis with exactly ONE writer (restaurants_app.controllers.lifecycle,
+    behind the elevation-gated admin transition endpoint): the field left
+    EDIT_INFORMATION and is read_only on SerializerPutRestaurant, so NOBODY writes
+    it here — not a tenant, and not a Dinify admin. The legacy admin
+    changeApprovalStatus PUT is retired.
+
+    Reachability: module access (the write gate) requires a lifecycle state that
+    grants portal access (onboarding or live), so a tenant at a suspended
+    restaurant is denied 403 at the gate before any field handling. Note the PR-5
+    widening — an ONBOARDING restaurant now passes that gate, where `pending` used
+    to fail it — which is why the denied fixture below is suspended, not onboarding.
     """
 
     def setUp(self):
@@ -4853,7 +4861,7 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
         )
         self.active_restaurant = Restaurant.objects.create(
             name='Active Bistro', location='loc-active',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
             flat_fee=Decimal('2500.00'),
         )
         RestaurantEmployee.objects.create(
@@ -4861,35 +4869,36 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
             roles=[ROLES.get('RESTAURANT_OWNER')],
         )
 
-        # Pending restaurant + owner: tenant write is blocked at the gate.
-        self.pending_owner = User.objects.create_user(
-            first_name='Owner', last_name='Pending',
+        # Onboarding restaurant + owner: PR-5 GRANTS this owner portal access,
+        # so their PUT reaches the field handling rather than dying at the gate.
+        self.onboarding_owner = User.objects.create_user(
+            first_name='Owner', last_name='Onboarding',
             email='owner_pending_p3@test.com', phone_number='256700000211',
             username='256700000211', country='Uganda', password='password',
             roles=[],
         )
-        self.pending_restaurant = Restaurant.objects.create(
-            name='Pending Bistro', location='loc-pending',
-            status=RestaurantStatus_Pending, owner=self.pending_owner,
+        self.onboarding_restaurant = Restaurant.objects.create(
+            name='Onboarding Bistro', location='loc-onboarding',
+            status=RestaurantStatus_Onboarding, owner=self.onboarding_owner,
         )
         RestaurantEmployee.objects.create(
-            user=self.pending_owner, restaurant=self.pending_restaurant,
+            user=self.onboarding_owner, restaurant=self.onboarding_restaurant,
             roles=[ROLES.get('RESTAURANT_OWNER')],
         )
 
-        # Blocked restaurant + owner: the enforcement lever; write blocked at gate.
-        self.blocked_owner = User.objects.create_user(
-            first_name='Owner', last_name='Blocked',
+        # Suspended restaurant + owner: the enforcement lever; write blocked at gate.
+        self.suspended_owner = User.objects.create_user(
+            first_name='Owner', last_name='Suspended',
             email='owner_blocked_p3@test.com', phone_number='256700000212',
             username='256700000212', country='Uganda', password='password',
             roles=[],
         )
-        self.blocked_restaurant = Restaurant.objects.create(
-            name='Blocked Bistro', location='loc-blocked',
-            status=RestaurantStatus_Blocked, owner=self.blocked_owner,
+        self.suspended_restaurant = Restaurant.objects.create(
+            name='Suspended Bistro', location='loc-suspended',
+            status=RestaurantStatus_Suspended, owner=self.suspended_owner,
         )
         RestaurantEmployee.objects.create(
-            user=self.blocked_owner, restaurant=self.blocked_restaurant,
+            user=self.suspended_owner, restaurant=self.suspended_restaurant,
             roles=[ROLES.get('RESTAURANT_OWNER')],
         )
 
@@ -4928,7 +4937,7 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.active_restaurant.refresh_from_db()
         self.assertEqual(self.active_restaurant.name, 'Renamed Bistro')
-        self.assertEqual(self.active_restaurant.status, RestaurantStatus_Active)
+        self.assertEqual(self.active_restaurant.status, RestaurantStatus_Live)
         self.assertEqual(self.active_restaurant.flat_fee, Decimal('2500.00'))
 
     def test_tenant_status_only_write_is_stripped_noop(self):
@@ -4944,7 +4953,7 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
         })
         self.assertEqual(response.status_code, 400)
         self.active_restaurant.refresh_from_db()
-        self.assertEqual(self.active_restaurant.status, RestaurantStatus_Active)
+        self.assertEqual(self.active_restaurant.status, RestaurantStatus_Live)
 
     def test_tenant_flat_fee_only_write_is_stripped_noop(self):
         """flat_fee-only tenant PUT is stripped: 400 no-op, subscription price unchanged."""
@@ -4969,18 +4978,35 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
 
     # -- dinify admin retains full write (the legitimate path) ---------------
 
-    def test_admin_status_write_on_pending_restaurant_applies(self):
-        """changeApprovalStatus: admin PUT {id, status} approves a pending restaurant."""
-        from unittest.mock import patch
-        with patch('misc_app.controllers.secretary.Notification') as MockNotification:
-            MockNotification.return_value.create_notification.return_value = None
-            response = self._put_restaurant(self.dinify_admin, {
-                'id': str(self.pending_restaurant.id),
-                'status': 'active',
-            })
+    def test_admin_status_write_is_now_ignored_too(self):
+        """
+        The retired changeApprovalStatus flow: an admin PUT {id, status} no longer
+        moves the lifecycle. Status-only, so nothing applicable remains and
+        Secretary returns 400 — the point is that the state does not change.
+        """
+        response = self._put_restaurant(self.dinify_admin, {
+            'id': str(self.onboarding_restaurant.id),
+            'status': 'live',
+        })
+        self.assertEqual(response.status_code, 400)
+        self.onboarding_restaurant.refresh_from_db()
+        self.assertEqual(
+            self.onboarding_restaurant.status, RestaurantStatus_Onboarding,
+        )
+
+    def test_admin_status_write_alongside_real_edit_is_dropped(self):
+        """The companion case: the legitimate field applies, the lifecycle does not."""
+        response = self._put_restaurant(self.dinify_admin, {
+            'id': str(self.onboarding_restaurant.id),
+            'name': 'Admin Renamed Bistro',
+            'status': 'live',
+        })
         self.assertEqual(response.status_code, 200)
-        self.pending_restaurant.refresh_from_db()
-        self.assertEqual(self.pending_restaurant.status, RestaurantStatus_Active)
+        self.onboarding_restaurant.refresh_from_db()
+        self.assertEqual(self.onboarding_restaurant.name, 'Admin Renamed Bistro')
+        self.assertEqual(
+            self.onboarding_restaurant.status, RestaurantStatus_Onboarding,
+        )
 
     def test_admin_flat_fee_write_applies(self):
         """Admin retains flat_fee (subscription price) write access."""
@@ -4995,29 +5021,36 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
 
     # -- existing gate already blocks non-active restaurants (documentation) -
 
-    def test_tenant_put_on_pending_restaurant_forbidden_at_gate(self):
+    def test_tenant_put_on_onboarding_restaurant_reaches_the_gate(self):
         """
-        A tenant PUT on a pending restaurant is denied 403 at check_permission
-        (module access requires an active restaurant), so the self-approval write
-        never reaches the strip. Status is unchanged.
+        THE PR-5 WIDENING at the write gate: an ONBOARDING owner is no longer 403'd
+        (the resolver used to demand `active`), so a real edit applies — while the
+        self-promotion to `live` is still refused, now by the read_only field rather
+        than by the gate. Both halves matter: access widened, authority did not.
         """
-        response = self._put_restaurant(self.pending_owner, {
-            'id': str(self.pending_restaurant.id),
-            'status': 'active',
+        response = self._put_restaurant(self.onboarding_owner, {
+            'id': str(self.onboarding_restaurant.id),
+            'name': 'Owner Renamed Bistro',
+            'status': 'live',
         })
-        self.assertEqual(response.status_code, 403)
-        self.pending_restaurant.refresh_from_db()
-        self.assertEqual(self.pending_restaurant.status, RestaurantStatus_Pending)
+        self.assertEqual(response.status_code, 200)
+        self.onboarding_restaurant.refresh_from_db()
+        self.assertEqual(self.onboarding_restaurant.name, 'Owner Renamed Bistro')
+        self.assertEqual(
+            self.onboarding_restaurant.status, RestaurantStatus_Onboarding,
+        )
 
-    def test_tenant_put_on_blocked_restaurant_forbidden_at_gate(self):
-        """The enforcement lever holds: a blocked restaurant denies the tenant at the gate."""
-        response = self._put_restaurant(self.blocked_owner, {
-            'id': str(self.blocked_restaurant.id),
-            'status': 'active',
+    def test_tenant_put_on_suspended_restaurant_forbidden_at_gate(self):
+        """The enforcement lever holds: a suspended restaurant denies at the gate."""
+        response = self._put_restaurant(self.suspended_owner, {
+            'id': str(self.suspended_restaurant.id),
+            'status': 'live',
         })
         self.assertEqual(response.status_code, 403)
-        self.blocked_restaurant.refresh_from_db()
-        self.assertEqual(self.blocked_restaurant.status, RestaurantStatus_Blocked)
+        self.suspended_restaurant.refresh_from_db()
+        self.assertEqual(
+            self.suspended_restaurant.status, RestaurantStatus_Suspended,
+        )
 
 
 class MenuFkTenantBoundaryTests(TestCase):
@@ -5050,7 +5083,7 @@ class MenuFkTenantBoundaryTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='FK Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -5064,7 +5097,7 @@ class MenuFkTenantBoundaryTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='FK Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -5329,7 +5362,7 @@ class MenuItemSectionGroupCohesionTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Cohesion Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -5343,7 +5376,7 @@ class MenuItemSectionGroupCohesionTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='Cohesion Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -5583,7 +5616,7 @@ class TablesNestedFkTenantBoundaryTests(TestCase):
         )
         self.restaurant_a = Restaurant.objects.create(
             name='TFK Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_a, restaurant=self.restaurant_a,
@@ -5631,7 +5664,7 @@ class TablesNestedFkTenantBoundaryTests(TestCase):
         )
         self.restaurant_b = Restaurant.objects.create(
             name='TFK Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
         )
         RestaurantEmployee.objects.create(
             user=self.owner_b, restaurant=self.restaurant_b,
@@ -5984,18 +6017,18 @@ class AuthenticatedManagementDeletedAccessTests(TestCase):
         # A live restaurant the owner manages ...
         self.live_restaurant = Restaurant.objects.create(
             name='Mgmt Live Restaurant', location='loc-live',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.live_restaurant,
             roles=[ROLES.get('RESTAURANT_OWNER')],
         )
-        # ... and a soft-deleted (still status='active') restaurant they also
+        # ... and a soft-deleted (still status='live') restaurant they also
         # manage. Module scope binds on restaurant STATUS, not the deleted flag,
         # so it stays within the owner's tenancy and is reachable via ?deleted=true.
         self.deleted_restaurant = Restaurant.objects.create(
             name='Mgmt Deleted Restaurant', location='loc-del',
-            status=RestaurantStatus_Active, owner=self.owner, deleted=True,
+            status=RestaurantStatus_Live, owner=self.owner, deleted=True,
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.deleted_restaurant,

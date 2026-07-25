@@ -36,6 +36,7 @@ from restaurants_app.controllers.dining_areas import create_dining_area
 from restaurants_app.controllers.menu_sections import ConMenuSection
 from restaurants_app.controllers.menu_items import ConMenuItem
 from restaurants_app.controllers.menu_item_sort_mode import ConMenuItemSortMode
+from restaurants_app.controllers.lifecycle_policy import portal_access_states
 from dinify_backend.configss.required_information import (
     REQUIRED_INFORMATION,
     RI_RESTAURANT_EMPLOYEES,
@@ -743,7 +744,9 @@ class RestaurantSetupEndpoint(APIView):
 
         if config_detail == 'restaurants':
             if 'status' not in request.GET:
-                orm_filter['status__in'] = ['active', 'pending']
+                # Default the list to the states a portal user can actually work in
+                # (onboarding + live) — the successor to the old ['active','pending'].
+                orm_filter['status__in'] = portal_access_states()
 
         if 'deleted' not in request.GET:
             orm_filter['deleted'] = False
@@ -981,25 +984,23 @@ class RestaurantSetupEndpoint(APIView):
                     status=409,
                 )
 
-        # `status` and `flat_fee` are platform-owned state a tenant must never
-        # write; a non-admin's values for them are silently stripped here (Dinify
-        # admins keep full write access):
-        #   * `status` is the approval / payment-enforcement axis — pending->active
-        #     approval, plus inactive/blocked/rejected enforcement (e.g. blocking
-        #     for non-payment). Readers: orders_app con_orders ('blocked' blocks
-        #     ordering), notifications send_messages ('active' gate), and the
-        #     module resolver (restaurant__status='active' gates portal access).
-        #   * `flat_fee` is the Dinify subscription price charged to the restaurant
-        #     (finance_app tx_subscription bills restaurant.flat_fee) — a tenant
-        #     must not set their own subscription price.
-        # The Dinify admin portal legitimately writes these through THIS path
-        # (e.g. changeApprovalStatus sets status), so we strip per-field for
-        # non-admins rather than drop the fields from EDIT_INFORMATION. Stripping
-        # (not 403) matches how Secretary already ignores non-applicable fields;
-        # the tenant portal never sends either field, so nothing legitimate breaks.
+        # `flat_fee` is the Dinify subscription price charged to the restaurant
+        # (finance_app tx_subscription bills restaurant.flat_fee) — platform-owned
+        # state a tenant must never write, so a non-admin's value is silently
+        # stripped here while Dinify admins keep write access. Stripping (not 403)
+        # matches how Secretary already ignores non-applicable fields; the tenant
+        # portal never sends the field, so nothing legitimate breaks.
+        #
+        # `status` USED TO BE STRIPPED HERE TOO. It no longer needs to be, and the
+        # strip would now be misleading: PR-5 made the lifecycle a constrained axis
+        # owned by ONE writer (restaurants_app.controllers.lifecycle). `status` left
+        # EDIT_INFORMATION and is read_only on SerializerPutRestaurant, so NO caller
+        # reaches it through this path — not a tenant, and not a Dinify admin. The
+        # legacy admin changeApprovalStatus PUT is therefore retired; lifecycle
+        # changes happen only through POST admin/v1/restaurants/<id>/transition/.
         if config_detail == 'restaurants' and not is_dinify_admin(request.user):
             admin_only_fields = [
-                key for key in ('status', 'flat_fee') if key in put_data
+                key for key in ('flat_fee',) if key in put_data
             ]
             if admin_only_fields:
                 # request.data is uncopied on this path and may be an immutable

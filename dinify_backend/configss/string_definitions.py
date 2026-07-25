@@ -1,11 +1,39 @@
 # string definitions in the application
 
-# restaurant status
-RestaurantStatus_Pending = 'pending'
-RestaurantStatus_Active = 'active'
-RestaurantStatus_Inactive = 'inactive'
-RestaurantStatus_Blocked = 'blocked'
-RestaurantStatus_Rejected = 'rejected'
+# restaurant lifecycle (PR-5)
+#
+# The constrained vocabulary that replaced the free-text pending/active/inactive/
+# blocked/rejected strings. FOUR states, no more: a restaurant is being set up, is
+# trading, is stopped but recoverable, or is commercially finished.
+#
+# `offboarded` is deliberately NOT `archived`: users_app.BaseModel already carries
+# `deleted` (the technical soft-delete) and a dormant `archived` boolean, and a
+# third overlapping "archived" concept would be a guaranteed future bug. This axis
+# is COMMERCIAL state; `deleted` remains the soft-delete mechanism and is untouched.
+#
+# `restaurants_app.controllers.lifecycle` is the ONLY writer of these values and
+# `restaurants_app.controllers.lifecycle_policy` is the ONLY place that says what
+# each one permits — do not re-derive either from a string comparison at a reader.
+RestaurantStatus_Onboarding = 'onboarding'
+RestaurantStatus_Live = 'live'
+RestaurantStatus_Suspended = 'suspended'
+RestaurantStatus_Offboarded = 'offboarded'
+
+# Declaration order is lifecycle order, which is also the order the field's
+# `choices` (and therefore any admin dropdown) present them in.
+RESTAURANT_LIFECYCLE_STATES = (
+    RestaurantStatus_Onboarding,
+    RestaurantStatus_Live,
+    RestaurantStatus_Suspended,
+    RestaurantStatus_Offboarded,
+)
+
+RESTAURANT_STATUS_CHOICES = [
+    (RestaurantStatus_Onboarding, 'Onboarding'),
+    (RestaurantStatus_Live, 'Live'),
+    (RestaurantStatus_Suspended, 'Suspended'),
+    (RestaurantStatus_Offboarded, 'Offboarded'),
+]
 
 # payment modes
 PaymentMode_Cash = 'cash'

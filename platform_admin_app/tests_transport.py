@@ -37,6 +37,7 @@ from rest_framework.response import Response
 from rest_framework.test import APIRequestFactory
 
 from dinify_backend.configss.string_definitions import (
+    RestaurantStatus_Live,
     ACCOUNT_TYPE_PLATFORM_STAFF,
     ACCOUNT_TYPE_RESTAURANT_USER,
     RESTAURANT_OWNER,
@@ -224,7 +225,7 @@ class AuthClassTests(TestCase):
     def test_reject_platform_staff_with_active_membership(self):
         owner = _make_user('auth_owner@t.com')
         restaurant = Restaurant.objects.create(
-            name='M', location='loc', status='active', owner=owner,
+            name='M', location='loc', status=RestaurantStatus_Live, owner=owner,
         )
         staff = _make_user('auth_dual@t.com', account_type=ACCOUNT_TYPE_PLATFORM_STAFF)
         # Dual-role fixture created out-of-band (mirrors a pre-flip standing row).

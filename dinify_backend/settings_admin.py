@@ -27,14 +27,22 @@ ALLOWED_HOSTS = config(
 )
 
 # --- Middleware -------------------------------------------------------------------
-# Prepend the admin request-id / client-ip middleware to the FULL inherited base
-# stack. Prepend-only: keeping Session/Auth/Message middleware satisfies the
+# Prepend the admin request-id / client-ip middleware to the inherited base stack.
+# Prepend-only: keeping Session/Auth/Message middleware satisfies the
 # admin.E408/E409/E410 system checks (django.contrib.admin is installed) and lets
 # CsrfViewMiddleware manage the CSRF cookie.
+#
+# The delegated-access gate is REMOVED here rather than inherited. Delegation is a
+# customer-plane credential; it has no meaning on the control plane, and no admin
+# route is on its allowlist. Dropping it keeps the two planes provably separate
+# instead of relying on the allowlist to refuse.
+_DELEGATED_ACCESS_MIDDLEWARE = (
+    'platform_admin_app.delegated_middleware.DelegatedAccessMiddleware'
+)
 MIDDLEWARE = [
     'platform_admin_app.middleware.RequestIDMiddleware',
     'platform_admin_app.middleware.ClientIPMiddleware',
-    *MIDDLEWARE,
+    *(m for m in MIDDLEWARE if m != _DELEGATED_ACCESS_MIDDLEWARE),
 ]
 
 # --- DRF: admin authenticator only, deny-by-default -------------------------------
@@ -71,6 +79,17 @@ ADMIN_LOCKOUT_DURATION = timedelta(minutes=15)
 # How recently a session must have cleared a second factor to perform a sensitive
 # action. Consumed by platform_admin_app.permissions (attached to nothing yet).
 ADMIN_ELEVATION_MAX_AGE = timedelta(minutes=5)
+
+# --- Admin delegation constants -----------------------------------------------------
+# Two independent clocks: the exchange code is a HANDOFF window (the admin has minutes
+# to pass it to the restaurant portal), while the delegated session it buys is a WORK
+# window. Conflating them would either make the code linger or cut the work short.
+ADMIN_DELEGATION_CODE_TTL = timedelta(minutes=3)
+ADMIN_DELEGATION_SESSION_TTL_DEFAULT = 900     # 15 minutes
+ADMIN_DELEGATION_SESSION_TTL_MAX = 3600        # 1 hour — a hard ceiling, not advice
+# How many live grants one administrator may hold at once, across all restaurants.
+# A runaway mint loop should hit a wall rather than fill a drawer with live codes.
+ADMIN_DELEGATION_MAX_LIVE_GRANTS = 5
 
 # --- CSRF (cookie auth is CSRF-susceptible; the SPA echoes X-CSRFToken) -----------
 CSRF_COOKIE_SAMESITE = 'Strict'

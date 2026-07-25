@@ -39,9 +39,11 @@ from restaurants_app.models import Restaurant, MenuItem
 from restaurants_app.controllers.utils.schedule_utils import (
     is_section_currently_active,
 )
-from dinify_backend.configss.string_definitions import RestaurantStatus_Active
+from restaurants_app.controllers.lifecycle_policy import (
+    DINER_MENU_ALLOWED, DINER_MENU_UNAVAILABLE, diner_menu_visibility,
+)
 from dinify_backend.configss.messages import (
-    MESSAGES, ERR_RESTAURANT_REFERENCE_REQUIRED,
+    MESSAGES, ERR_RESTAURANT_REFERENCE_REQUIRED, ERR_RESTAURANT_UNAVAILABLE,
 )
 
 # One canonical, opaque rejection for anything that cannot be resolved / ordered on
@@ -57,12 +59,14 @@ NOT_ON_MENU_MESSAGE = "One or more items are not on this restaurant's menu."
 
 def restaurant_can_serve_menu(restaurant) -> bool:
     """A restaurant may serve an anonymous diner menu only when it exists, is not
-    soft-deleted, and is in the active platform status. ``accepting_orders`` is NOT
-    a visibility condition (a restaurant may pause new orders yet show its menu)."""
+    soft-deleted, and is in a lifecycle state that serves the menu (``onboarding``
+    or ``live`` — the diner surface is needed during onboarding for the go-live
+    test order). ``accepting_orders`` is NOT a visibility condition (a restaurant
+    may pause new orders yet show its menu)."""
     return (
         restaurant is not None
         and not restaurant.deleted
-        and restaurant.status == RestaurantStatus_Active
+        and diner_menu_visibility(restaurant.status) == DINER_MENU_ALLOWED
     )
 
 
@@ -71,11 +75,19 @@ def resolve_public_restaurant(restaurant_ref):
     Resolve a caller-supplied restaurant reference for the public menu, failing
     closed. Returns ``(restaurant, None)`` on success or ``(None, error_dict)``:
 
-    * missing / blank        -> 400 (clean "reference required")
-    * malformed UUID         -> 404 (one generic, non-disclosing message)
-    * unknown / soft-deleted / pending / rejected / inactive / blocked -> same 404
+    * missing / blank                          -> 400 (clean "reference required")
+    * malformed UUID                           -> 404 (generic, non-disclosing)
+    * unknown / soft-deleted / offboarded      -> same 404
+    * suspended                                -> 503 "temporarily unavailable"
 
-    The generic 404 never reveals which lifecycle state a restaurant is in.
+    DISCLOSURE, DELIBERATE. Everything above collapses to one non-disclosing 404
+    except ``suspended``, which is answered with a graceful 503 — so that response
+    does admit "a restaurant exists at this id and is currently stopped". That is
+    the point of the state: a diner standing at a table with a printed QR needs to
+    be told the place is temporarily unavailable rather than that it never existed.
+    The tenant chose to be findable when it printed the code. Every other failure —
+    including ``offboarded``, where the relationship is over — stays a flat 404 and
+    reveals nothing.
     """
     if restaurant_ref is None or str(restaurant_ref).strip() == '':
         return None, {'status': 400, 'message': ERR_RESTAURANT_REFERENCE_REQUIRED}
@@ -84,7 +96,13 @@ def resolve_public_restaurant(restaurant_ref):
     except (ValueError, TypeError, AttributeError):
         return None, {'status': 404, 'message': MESSAGES.get('RESTAURANT_NOT_FOUND')}
     restaurant = Restaurant.objects.filter(id=rid).first()
-    if not restaurant_can_serve_menu(restaurant):
+    if restaurant is None or restaurant.deleted:
+        return None, {'status': 404, 'message': MESSAGES.get('RESTAURANT_NOT_FOUND')}
+
+    visibility = diner_menu_visibility(restaurant.status)
+    if visibility == DINER_MENU_UNAVAILABLE:
+        return None, {'status': 503, 'message': ERR_RESTAURANT_UNAVAILABLE}
+    if visibility != DINER_MENU_ALLOWED:
         return None, {'status': 404, 'message': MESSAGES.get('RESTAURANT_NOT_FOUND')}
     return restaurant, None
 

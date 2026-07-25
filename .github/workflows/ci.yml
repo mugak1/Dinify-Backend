@@ -74,9 +74,10 @@ jobs:
       - name: Tenant-isolation closure gate
         # Fail-fast adversarial boundary suite (TENANT-ISO-PR6A): the focused
         # closure matrix + the deep capability / relationship / concurrency /
-        # write-surface suites it builds on. Runs BEFORE the full suite so a
-        # broken restaurant/diner tenant boundary fails early with a clear
-        # signal. Mirrors scripts/verify.sh; does NOT replace "Run tests" below.
+        # write-surface / delegated-session suites it builds on. Runs BEFORE the
+        # full suite so a broken restaurant/diner tenant boundary — or a broken
+        # delegated-administrator boundary — fails early with a clear signal.
+        # Mirrors scripts/verify.sh; does NOT replace "Run tests" below.
         env:
           DATABASE_ENGINE: django.db.backends.postgresql
           DATABASE_NAME: test_dinify
@@ -91,6 +92,7 @@ jobs:
             restaurants_app.tests_menu_relationship_integrity \
             restaurants_app.tests_menu_relationships_concurrency \
             restaurants_app.tests_write_surface_tenancy \
+            platform_admin_app.tests_delegated_session \
             --settings=dinify_backend.test_settings --verbosity=2
 
       - name: Run tests

@@ -38,3 +38,39 @@ ADMIN_AUTH_RECOVERY_CODES_GENERATED = 'admin.auth.recovery_codes_generated'
 
 # --- admin.session: session lifecycle beyond login/logout ------------------------
 ADMIN_SESSION_REVOKED = 'admin.session.revoked'
+
+# --- admin.delegation: scoped, time-boxed access into one restaurant --------------
+# A grant was minted and the one-time exchange code handed to the administrator.
+ADMIN_DELEGATION_MINTED = 'admin.delegation.minted'
+# A mint was refused — stale elevation, a bad target, or the live-grant cap.
+ADMIN_DELEGATION_MINT_DENIED = 'admin.delegation.mint_denied'
+ADMIN_DELEGATION_REVOKED = 'admin.delegation.revoked'
+# An earlier unredeemed grant for the same admin+restaurant was auto-revoked because
+# a fresh one replaced it — its own action so it is never mistaken for a manual revoke.
+ADMIN_DELEGATION_SUPERSEDED = 'admin.delegation.superseded'
+
+# --- admin.delegation: the delegated session on the CUSTOMER plane ----------------
+# A one-time exchange code was redeemed and a delegated session minted. This is the
+# moment an administrator entered someone else's tenant — the row that answers
+# "who reached in, when, under what authority", and the reason delegated READS are
+# not audited one row per GET.
+ADMIN_DELEGATION_SESSION_STARTED = 'admin.delegation.session_started'
+# A redemption was refused: unknown, malformed, expired, already-used or revoked code.
+ADMIN_DELEGATION_SESSION_START_DENIED = 'admin.delegation.session_start_denied'
+# The administrator voluntarily left the tenant (distinct from an admin-plane revoke).
+ADMIN_DELEGATION_SESSION_ENDED = 'admin.delegation.session_ended'
+# A state-changing request performed under a delegated session, with its outcome.
+ADMIN_DELEGATION_ACTION_PERFORMED = 'admin.delegation.action_performed'
+# A delegated request refused — dead session, off-allowlist route, or a write the
+# scope does not carry.
+ADMIN_DELEGATION_ACTION_DENIED = 'admin.delegation.action_denied'
+
+# --- admin.restaurant: the commercial lifecycle -----------------------------
+# A restaurant moved between lifecycle states. before_state / after_state carry the
+# from- and to-states; the reason is mandatory at the service.
+ADMIN_RESTAURANT_LIFECYCLE_TRANSITION = 'admin.restaurant.lifecycle_transition'
+# A transition was refused — an unknown target, a missing or too-short reason, a
+# pair outside the matrix, or a failed precondition (go-live readiness, outstanding
+# receivables). Recorded rather than silently 400'd: an attempt to suspend or
+# offboard a tenant is worth knowing about even when it did not take effect.
+ADMIN_RESTAURANT_TRANSITION_DENIED = 'admin.restaurant.transition_denied'

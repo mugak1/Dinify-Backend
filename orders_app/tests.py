@@ -36,7 +36,7 @@ from restaurants_app.models import (
 from dinify_backend.configss.messages import OK_ORDER_UPDATED
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated, OrderStatus_Pending,
-    RestaurantStatus_Active, DINIFY_ADMIN, RESTAURANT_OWNER, RESTAURANT_STAFF,
+    RestaurantStatus_Live, DINIFY_ADMIN, RESTAURANT_OWNER, RESTAURANT_STAFF,
 )
 
 
@@ -1315,7 +1315,7 @@ class AdminSourceOrderInitiationAuthTests(TestCase):
         owner = self._make_user(owner_phone)
         restaurant = Restaurant.objects.create(
             name=f'OSrc Restaurant {tag}', location=f'loc-{tag}',
-            status=RestaurantStatus_Active, owner=owner, accepting_orders=True,
+            status=RestaurantStatus_Live, owner=owner, accepting_orders=True,
         )
         RestaurantEmployee.objects.create(
             user=owner, restaurant=restaurant, roles=[RESTAURANT_OWNER],

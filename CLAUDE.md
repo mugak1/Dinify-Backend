@@ -106,10 +106,13 @@ with PostgreSQL on AWS RDS.
   diners could edit). Phone is NOT self-editable (canonicalised via
   `normalise_msisdn`; a real change is 400, an echo of the stored value is a
   no-op) and an email already held by another user is rejected 400. The
-  never-finished profile-update approval queue was DELETED (the
-  `V2UserProfileEndpoint` GET now 405s; `profile_update_approvals.py` and
-  `COL_PROFILE_UPDATE_APPROVALS` removed). The manager path `update_user_profile`
-  (with OTP) is untouched
+  never-finished profile-update approval queue was DELETED
+  (`profile_update_approvals.py` and `COL_PROFILE_UPDATE_APPROVALS` removed).
+  `PUT users/user-profile/` is now the ONLY profile-write path: the manager-OTP
+  route went with it — `V2UserProfileEndpoint`, the `update_user_profile`
+  controller and the `SerPutUserProfile` write serializer were all DELETED as
+  dead surface (C5, PR #247), the frontend never having called them.
+  `SerGetUserProfile` is kept
 - Tenant isolation / role-permission ENFORCEMENT: ✅ Portal gates enforce
   per-module access via `can_user_access_module` / `get_module_restaurant_ids`
   (`users_app/controllers/permissions_check.py`) — see the "Tenant Isolation /
@@ -219,6 +222,59 @@ with PostgreSQL on AWS RDS.
   (`editable:false`), partial PUT merges over the effective grid under
   `select_for_update`. `create_employee` also surfaces the one-time
   `temp_password` in its owner-only response (PR #173)
+- Platform-admin identity layer: ✅ `User.account_type` (migration
+  `users_app/0010_user_account_type`, backfilled by the reversible data migration
+  `0011_flip_admin_account_type`) is the discriminator separating
+  `restaurant_user` from `platform_staff`; constants live in
+  `string_definitions.py` (`ACCOUNT_TYPE_*`). It is NEVER Secretary-editable and
+  never writable on a serializer — `platform_admin_app/services.py` is the only
+  writer, so promotion always runs through the invariant service. It enforces
+  MUTUAL REJECTION between the two planes (PR-2b): customer `login` refuses
+  platform staff AFTER `authenticate()` but BEFORE the unconditional
+  `RefreshToken.for_user` — deliberately above the client-controlled
+  `source='diner'` branch that skips the OTP gate — and `reset_password`'s single
+  `_resolve_user` carries the same guard, closing an email-only path to minting a
+  customer JWT as an administrator. `User.phone_number` also became `unique=True`
+  in the same PR (migration `0012_alter_user_phone_number`), staying `null=True`
+  so platform-staff accounts (which have no MSISDN) do not collide
+- Platform-admin control plane: ✅ `platform_admin_app` — a SEPARATE Django plane,
+  not a section of the customer API. Its isolation is structural: its own settings
+  (`dinify_backend/settings_admin.py`), root urlconf (`urls_admin.py`) and WSGI
+  entry (`wsgi_admin.py`), served on `admin.dinifyapp.com` behind a dedicated
+  Apache `WSGIDaemonProcess` (Topology A, same-origin — no CORS). The customer
+  urlconf carries NO admin routes and the admin urlconf carries NO customer
+  routes; every admin route is an explicit deny-by-default path, never a
+  `<str:action>/` catch-all. Built across PR-1 → PR-4b (migrations
+  `platform_admin_app/0001`–`0006`):
+  - `PlatformStaffAuth` — TOTP secret (encrypted via `ADMIN_SECRET_ENCRYPTION_KEY`),
+    SHA-256 recovery-code hashes, DB-backed lockout (NOT the DRF throttle, whose
+    LocMemCache counters are per-mod_wsgi-worker; throttles ship as defence in
+    depth), and `last_totp_counter` so a matched time step cannot be replayed
+  - `AdminLoginChallenge` + `AdminSession` — two-step login as separate models, so
+    "has a session" never stops meaning "fully authenticated": `auth/login/` checks
+    the password and mints a short-lived challenge in its own `__Host-` cookie, and
+    only `auth/verify/` (TOTP or recovery code) mints the opaque cookie session.
+    Every login failure returns one byte-identical body (the password check runs
+    against a dummy hash for unknown users so timing does not leak existence); the
+    real reason goes to the audit log. TOTP NEVER consults `ENV` — it shares no code
+    path with the restaurant OTP flow's `ENV=dev` `1234` shortcut. `auth/elevate/`
+    marks a session recently-elevated for the destructive routes
+  - `AdminAuditLog` — append-only (an update raises `AppendOnlyViolation`),
+    recording actor / session / action / resource / restaurant / delegation /
+    reason / before+after state / result / request id
+  - `DelegationGrant` + `DelegatedSession` (PR-4a/4b) — time-boxed, reason-required,
+    elevation-gated delegated access to ONE restaurant. Minting/listing/revoking
+    live on the admin plane; the CUSTOMER plane serves only redeem/inspect/end at
+    `api/v1/delegation/`. Authority is bounded TWICE and a request must clear both:
+    `SCOPE_MODULES` (inner — the same grid vocabulary every other principal is
+    evaluated by; `billing` and `team` are False for both scopes) and
+    `ALLOWED_ROUTES` (outer — (route, method) pairs enforced by
+    `DelegatedAccessMiddleware` BEFORE dispatch and before the credential binds to
+    `request.user`; no wildcard). Both live in
+    `platform_admin_app/configs/delegation_scopes.py`, which mirrors
+    `restaurants_app/configs/role_defaults.py` and must stay import-light — it is
+    imported by the customer-plane permission resolver. Credentials ride the
+    `X-Delegation-Session` / `X-Delegation-Code` headers
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -312,9 +368,9 @@ with PostgreSQL on AWS RDS.
   per-period loop). Rebuild contract: RAW enum values (the frontend owns display
   formatting — NO backend `.title()`-casing), a stable 0-filled shape, and
   grouped queries (no per-bucket / per-row N+1). Rebuilt: Sales
-  summary/listing/trends (PR #165, `sales.py`), Transactions summary/listing
+  listing/trends (PR #165, `sales.py`), Transactions summary/listing
   (PR #166, `transactions.py`), Diners summary/listing (PR #167, `diners.py`),
-  and Menu summary/listing (PR #168, `menu.py`; the menu-summary date-range cap
+  and Menu summary (PR #168, `menu.py`; the menu-summary date-range cap
   was later relaxed in PR #169) — each with its own `tests_*_report.py`.
   Sales additionally exposes `sales-hourly/` — an EAT-aware hour-of-day (0–23)
   distribution (PR #184, `bucket_sales_by_hour` via `ExtractHour(tzinfo=LOCAL_TZ)`,
@@ -324,6 +380,15 @@ with PostgreSQL on AWS RDS.
   day/year already ISO) so the frontend can `parseISO()` every bucket (PR #185);
   `REPORTS_CONTRACT_AUDIT.md` at the repo root is the cross-repo Reports contract
   reconciliation / test plan for the eventual live-data flip.
+  The LIVE slug set is exactly `dashboard`, `dashboard-v2`, `sales-listing`,
+  `sales-trends`, `sales-hourly`, `menu-summary`, `transactions-summary`,
+  `transactions-listing`, `diners-summary`, `diners-listing` — there is no
+  `menu-listing`. Two slugs were RETIRED as dead surface in PR #247:
+  `dashboard1` (C1, with `get_restaurant_dashboard_1` + `summarize_orders`) and
+  `sales-summary` (C2, with `generate_restaurant_sales_summary`; its permission
+  canaries and shared-invariant tests re-point onto `sales-listing`). Do not
+  reintroduce either — `dashboard` / `dashboard-v2` / `summarize_revenue` are
+  the live ones.
   Sales/Diners/Menu are Order-based and share `sale_filters`; Diners operates
   strictly on non-NULL-customer sale orders so anonymous-QR guests are never
   collapsed into a phantom repeat diner (guests are surfaced as a separate count,
@@ -336,6 +401,19 @@ with PostgreSQL on AWS RDS.
   + `payment_mode`, and the controller uses `select_related('order')`. The
   Dashboard endpoint and the admin `reports_app/controllers/dinify/` path
   (incl. `SerializerGetDinifyTransactionListing`) are separate and untouched
+- Dead-code / dead-endpoint audit: ✅ Program CLOSED — the closure record is
+  `DEAD_CODE_CLOSURE.md` at the repo root (sequenced across PRs #244, #245, #247).
+  It is the authority on what was retired and, as importantly, what was
+  consciously KEPT. Most of its retirements are already reflected in the sections
+  below (the `misc_public.py` directory endpoint, the manager-OTP profile path,
+  the `orders` setup vocab, the `dashboard1` / `sales-summary` report slugs, and
+  the authz closures in URL Structure). Read it before deleting a surface that
+  merely looks unreferenced, and refresh it when the deliberate keeps change.
+  Sibling records: `dinify_backend/tenancy/ASSURANCE.md` +
+  `TENANT_ISOLATION_CLOSURE.md` (tenant boundary), `REGULATORY_AUDIT.md`
+  (non-custodial posture), `REPORTS_CONTRACT_AUDIT.md` (cross-repo Reports
+  contract) and `BACKGROUND_TASKS.md` (management-command runbook — note there is
+  NO scheduler configuration in this repo; every command is invoked externally)
 - Login 500 regression: ✅ Resolved — not reproducible after the auth-stack work;
   login → refresh → logout verified working on UAT (closed June 2026)
 - Django 5.2 LTS upgrade: ✅ Complete — Django 4.2.30 → 5.2.15 (PRs #123–#125).
@@ -439,6 +517,18 @@ with PostgreSQL on AWS RDS.
 - `api/v1/reviews/` → reviews_app endpoints (`reviews_app/urls.py`):
   `submit/`, `summary/`, `analytics/`, `<int:review_id>/resolution/`,
   `` (root) — separate app
+- `api/v1/delegation/` → the CUSTOMER-plane half of delegated admin access
+  (`platform_admin_app/urls_delegation.py`, served by the customer urlconf even
+  though it lives in the admin app): `exchange/` (redeem a one-time code — NOT on
+  the `ALLOWED_ROUTES` allowlist, since it is reached with a code, not a session),
+  `session/`, `end/`. Minting / listing / revoking grants is the ADMIN plane's
+  `admin/v1/delegations/`. A test asserts every `ALLOWED_ROUTES` entry resolves to
+  a real route, so renaming one cannot silently strand it
+- `admin/v1/` → platform_admin_app control plane (`platform_admin_app/urls.py`,
+  mounted by `dinify_backend/urls_admin.py`; Apache strips the `/api` prefix).
+  Explicit deny-by-default routes only — health, `auth/*`, `delegations/*`, and
+  `restaurants/<uuid:id>/transition/` (the ONLY writer of `Restaurant.status`,
+  elevation-gated)
 
 ## Endpoint Pattern — CRITICAL
 New resource types get their own dedicated endpoint file in
@@ -446,7 +536,10 @@ New resource types get their own dedicated endpoint file in
 catch-all. Examples already following this pattern:
 - `reservations.py`, `waitlist.py`, `table_actions.py`, `preset_tags.py`,
   `restaurant_tags.py`, `upsell_config.py`, `manager_actions.py`,
-  `misc_public.py`, `order_journey.py`, `role_permissions.py`
+  `order_journey.py`, `role_permissions.py`
+(`misc_public.py` — the anonymous public-restaurant-directory endpoint — was
+DELETED as dead surface (C4, PR #247); the QR-capability flow superseded it. Do
+not reintroduce an anonymous directory read.)
 Always register new endpoint files in `restaurants_app/urls.py` ABOVE
 the catch-all `<str:config_detail>/` route.
 
@@ -470,15 +563,21 @@ the catch-all `<str:config_detail>/` route.
   only thing that can register a file edit — it keys on `key in self.data` (NOT
   "value is non-null"), so an explicit `null`-clear of a file field counts as a
   change and persists (HTTP 200), rather than collapsing to "no changes detected"
-- `status` (approval / payment-enforcement axis) and `flat_fee` (the Dinify
-  subscription price billed by `finance_app.tx_subscription`) are registered in
-  `EDIT_INFORMATION['restaurants']` but are PLATFORM-owned — the restaurant-setup
-  write path STRIPS both keys from a non-admin's `restaurants` PUT payload AFTER
-  `check_permission` and BEFORE the Secretary dispatch (PR #211), so an
-  owner/settings-manager of an active restaurant cannot zero `flat_fee` or
-  rewrite the approval `status`. Dinify admins keep full write access (the admin
-  `changeApprovalStatus` flow is unchanged). This is a post-gate payload strip,
-  NOT an EDIT_INFORMATION removal — do not delete them from EDIT_INFORMATION
+- `flat_fee` (the Dinify subscription price billed by
+  `finance_app.tx_subscription`) is registered in `EDIT_INFORMATION['restaurants']`
+  but is PLATFORM-owned — the restaurant-setup write path STRIPS the key from a
+  non-admin's `restaurants` PUT payload AFTER `check_permission` and BEFORE the
+  Secretary dispatch (PR #211), so an owner/settings-manager cannot zero their own
+  subscription price. Dinify admins keep write access. This is a post-gate payload
+  strip, NOT an EDIT_INFORMATION removal — do not delete it from EDIT_INFORMATION
+- `status` is DIFFERENT and stricter: PR-5 REMOVED it from
+  `EDIT_INFORMATION['restaurants']` entirely (and made it `read_only` on
+  `SerializerPutRestaurant`), so NO principal writes it through Secretary — see
+  the "Restaurant Lifecycle" section. `Table.status` was removed from
+  `EDIT_INFORMATION['table']` in the same PR for its own reason: the dedicated
+  `table-actions/update-status/` verb validates against `TABLE_STATUS_CHOICES` and
+  keeps `is_active` in step with `out_of_service`, which the generic path did not.
+  No `EDIT_INFORMATION` section exposes a `status` key any more
 - Check this file before adding any editable field — it may already be there
 
 ## Tenant Isolation / Role-Permission ENFORCEMENT — CRITICAL
@@ -519,8 +618,11 @@ the catch-all `<str:config_detail>/` route.
     effective grid — do NOT route this through EDIT_INFORMATION.
 - The `RestaurantSetupEndpoint` catch-all maps each record/`config_detail` →
   module via `_RECORD_MODULE` (restaurants→settings, employees→team
-  [owner-only, per Decision 1], menu*→menu, tables/diningareas→tables,
-  orders→reports). ONE map drives the write gate (`check_permission`), the GET
+  [owner-only, per Decision 1], menu*→menu, tables/diningareas→tables). The
+  `orders` vocab was RETIRED from the catch-all (C3, PR #247 — it duplicated the
+  reports surface), so `GET restaurant-setup/orders/` now falls through to the
+  generic unmapped-resource 403. ONE map drives the write gate
+  (`check_permission`), the GET
   list scoping (`scope_list_filter` + `LIST_RESTAURANT_PATH`), and the
   single-record detail read. The client `?restaurant=` can only narrow within
   the allowed set, never widen.
@@ -531,11 +633,76 @@ the catch-all `<str:config_detail>/` route.
 - Writes resolve the target restaurant SERVER-SIDE from the resource FK (by PK)
   via `_RESTAURANT_RESOLVERS`, then module-gate that resolved id — the spoof
   `{id: <victim record>, restaurant: <attacker own>}` cannot smuggle access.
-- Portal module access requires an ACTIVE restaurant (the resolver filters
-  `restaurant__status='active'`, consistent with the login permission grid);
-  pending restaurants are admin-managed until activated.
+- Portal module access requires a lifecycle state that GRANTS PORTAL ACCESS — the
+  three resolvers filter `restaurant__status__in=portal_access_states()`
+  (`onboarding` + `live`), never a literal. PR-5 WIDENED this: the filter used to
+  be `['active']`, so an owner at a not-yet-approved restaurant was denied the
+  portal entirely; `onboarding` now grants FULL staff access so the owner can build
+  a menu and provision tables before going live. `suspended` / `offboarded` deny.
+  See the "Restaurant Lifecycle" section below.
 - Any NEW read/write branch must map its resource to a module and route through
   these primitives — an unmapped resource fails closed (403/404)
+
+## Restaurant Lifecycle — CRITICAL
+
+- `Restaurant.status` is a CONSTRAINED four-state commercial lifecycle (PR-5,
+  migration `restaurants_app/0056_restaurant_lifecycle_states`):
+  `onboarding` → `live` → `suspended` → `offboarded`. Constants +
+  `RESTAURANT_STATUS_CHOICES` + `RESTAURANT_LIFECYCLE_STATES` live in
+  `string_definitions.py`. The legacy free-text vocabulary
+  (`pending`/`active`/`inactive`/`blocked`/`rejected`) and its five
+  `RestaurantStatus_*` constants were REMOVED — do not reintroduce them
+- `offboarded` is deliberately NOT `archived`: `users_app.BaseModel` already owns
+  `deleted` (the technical soft-delete) plus a dormant `archived` boolean. This
+  axis is COMMERCIAL state; `deleted` stays the soft-delete mechanism and is
+  orthogonal (a soft-deleted `live` restaurant is still invisible to diners)
+- ONE WRITER: `restaurants_app/controllers/lifecycle.py`
+  (`transition_restaurant`). No other code path may assign `status`. Enforcement
+  is two-layer — the field is ABSENT from `EDIT_INFORMATION['restaurants']`
+  (Secretary builds its payload solely from those keys) and `read_only` on
+  `SerializerPutRestaurant`. The legacy admin `changeApprovalStatus` PUT is
+  RETIRED: a Dinify admin can no longer write `status` through restaurant-setup
+  either. The `flat_fee` non-admin strip in `restaurant_setup.py` REMAINS
+- The service enforces the matrix against the row read under `select_for_update`
+  (so concurrent transitions serialize), requires a reason (≥10 chars, mirroring
+  `platform_admin_app.delegation.MIN_REASON_LENGTH`), and writes an
+  `AdminAuditLog` row IN THE SAME TRANSACTION — a failed audit unwinds the
+  transition. A REFUSED transition is audited too
+  (`admin.restaurant.transition_denied`) and then raises
+  `LifecycleTransitionError`. Allowed: onboarding→live (readiness-gated),
+  onboarding→offboarded, live↔suspended, live/suspended→offboarded.
+  `offboarded → live` is NEVER allowed — restoration is re-onboarding. There is
+  no self-transition
+- ONE POLICY: `restaurants_app/controllers/lifecycle_policy.py` is the single
+  source for what each state PERMITS — `CAPABILITY_MATRIX` is the spec table as
+  data and every predicate reads from it. Readers call a named predicate
+  (`grants_portal_access`, `allows_order_creation`, `allows_kitchen`,
+  `allows_support`, `diner_menu_visibility`, `effective_delegated_scope`) or the
+  derived set (`portal_access_states()`), NEVER `status == '<literal>'`. It is
+  import-light on purpose (imported by `permissions_check`) — no models, no
+  querysets. An unknown/legacy value fails CLOSED (denies everything, menu gone)
+- Per-state behaviour: staff portal + kitchen + order-create are allowed for
+  onboarding/live and blocked for suspended/offboarded; the diner menu is served
+  for onboarding/live, answers a graceful **503** for `suspended` (the ONE state
+  that does not collapse to the generic 404 — a diner at a printed QR is told the
+  place is temporarily unavailable) and a flat 404 for `offboarded`; support is
+  reachable in every state; a delegated admin session is CAPPED to `view` scope at
+  an `offboarded` restaurant (`DelegationContext.scope` applies the ceiling;
+  `granted_scope` exposes the as-minted value)
+- TWO PHASE-1 SEAMS, both named single-call functions with real call sites —
+  `check_go_live_readiness` (returns ready today; the hard blockers need
+  Phase-1 models) and `has_outstanding_receivables` (returns False today;
+  `SubscriptionInvoice` does not exist yet, and `DinifyTransaction` is never the
+  receivable). Do NOT inline either at a call site
+- Admin transition endpoint: `POST admin/v1/restaurants/<uuid:id>/transition/`
+  (`platform_admin_app/endpoints/restaurants.py`), `AdminAPIView` +
+  `IsRecentlyElevated` — body `{to_state, reason}`. It is deliberately ABSENT from
+  the delegated `ALLOWED_ROUTES` allowlist, so a delegated session can never
+  transition anything
+- The go-live owner notification (`restaurant-activated`) moved from the deleted
+  `Secretary.make_notification` hook into the lifecycle service, fired
+  post-commit and best-effort. There is no `restaurant-rejected` counterpart —
+  `rejected` is not a state in the new vocabulary
 
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns
@@ -614,11 +781,12 @@ the catch-all `<str:config_detail>/` route.
   NEVER returns `None` or a partial string). Its error messages never include the
   raw number, so they are safe to log or surface
 - Apply it at EVERY write/compare site. It is already wired into `self_register`
-  (registration / staff invite / admin onboarding),
-  `self_update_user_profile`/`update_user_profile` (before Secretary), payment
-  `initiate()` intake, and OTP `make_otp`/`verify_otp` (so create/verify compare
-  canonical-to-canonical). Do NOT reintroduce the deleted `clean_msisdn.py` /
-  `internationalise_msisdn` helper or hand-roll ad-hoc phone formatting
+  (registration / staff invite / admin onboarding), `self_update_user_profile`
+  (before Secretary — the manager-OTP `update_user_profile` sibling has since been
+  deleted), payment `initiate()` intake, and OTP `make_otp`/`verify_otp` (so
+  create/verify compare canonical-to-canonical). Do NOT reintroduce the deleted
+  `clean_msisdn.py` / `internationalise_msisdn` helper or hand-roll ad-hoc phone
+  formatting
 - `mask_msisdn()` (length-based, defensive) is the helper for logging phone-ish
   values without leaking them; `plan_msisdn_backfill()` is the pure, collision-safe
   planner behind migration `users_app/0008_backfill_canonical_msisdn` (idempotent,
@@ -724,17 +892,31 @@ the catch-all `<str:config_detail>/` route.
 - `reset_platform_admin_totp` in `platform_admin_app/management/commands/` — the
   documented break-glass path: re-provisions the TOTP secret + recovery codes for an
   existing admin and revokes all of its sessions. Does NOT change the password
+- Five more exist and are equally not-to-be-recreated: `vacuum_deleted_records` +
+  `vacuum_configuration` (`misc_app`), `send_messages` + `send_test_sms`
+  (`notifications_app`, the latter being the ENV-bypassing SMS credential probe
+  described under SMS / Yo Uganda), and `determine-customers` (`orders_app`).
+  `BACKGROUND_TASKS.md` is the full runbook — what each touches and where the
+  operational gaps are
 
 ## Database
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove
 - All migrations must be generated and included in PRs when models change
-- Latest migration: `restaurants_app/migrations/0055_sanitize_menu_item_extras.py`
+- Latest migration: `restaurants_app/migrations/0056_restaurant_lifecycle_states.py`
   (0054 adds `Table.qr_version`; 0055 data-repairs MenuItem extras — see the
-  "Write-time menu relationship integrity" bullet),
+  "Write-time menu relationship integrity" bullet; 0056 constrains
+  `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
+  "Restaurant Lifecycle"),
   `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
-  `users_app/migrations/0009_otp_hardening.py`,
+  `users_app/migrations/0012_alter_user_phone_number.py` (0010 adds
+  `User.account_type`; 0011 flips existing platform-role holders to
+  `platform_staff`; 0012 makes `phone_number` unique — see the "Platform-admin
+  identity layer" bullet),
+  `platform_admin_app/migrations/0006_delegatedsession.py` (0001 identity,
+  0002 `AdminSession`, 0003 `AdminAuditLog`, 0004 TOTP replay counter,
+  0005 `DelegationGrant`, 0006 `DelegatedSession`),
   `misc_app/migrations/0004_drop_service_tickets.py`
 
 ## CI — `.github/workflows/ci.yml`

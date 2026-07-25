@@ -56,7 +56,7 @@ from orders_app.models import Order
 from reviews_app.models import Review
 from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active, RESTAURANT_OWNER, RESTAURANT_STAFF,
+    RestaurantStatus_Live, RESTAURANT_OWNER, RESTAURANT_STAFF,
     OrderStatus_Served, OrderStatus_Pending, OrderStatus_Initiated,
     TransactionType_OrderPayment, TransactionStatus_Success,
     TransactionPlatform_Web,
@@ -95,7 +95,7 @@ class DinerCapabilityTestBase(TestCase):
         self.owner_a = self._user('256700009001')
         self.restaurant_a = Restaurant.objects.create(
             name='Cap Restaurant A', location='loc-a',
-            status=RestaurantStatus_Active, owner=self.owner_a,
+            status=RestaurantStatus_Live, owner=self.owner_a,
             accepting_orders=True,
         )
         RestaurantEmployee.objects.create(
@@ -128,7 +128,7 @@ class DinerCapabilityTestBase(TestCase):
         self.owner_b = self._user('256700009010')
         self.restaurant_b = Restaurant.objects.create(
             name='Cap Restaurant B', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.owner_b,
+            status=RestaurantStatus_Live, owner=self.owner_b,
             accepting_orders=True,
         )
         RestaurantEmployee.objects.create(

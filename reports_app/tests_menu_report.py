@@ -29,7 +29,7 @@ from restaurants_app.models import (
 )
 from orders_app.models import Order, OrderItem
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active,
+    RestaurantStatus_Live,
     OrderStatus_Served, OrderStatus_Paid, OrderStatus_Cancelled,
 )
 from reports_app.controllers.restaurant.menu import (
@@ -62,7 +62,7 @@ class MenuReportBase(TestCase):
         self.owner = make_user('256700000500')
         self.restaurant = Restaurant.objects.create(
             name='Test Restaurant', location='loc',
-            status=RestaurantStatus_Active, owner=self.owner,
+            status=RestaurantStatus_Live, owner=self.owner,
         )
         self.table = Table.objects.create(number=1, restaurant=self.restaurant)
 
@@ -70,7 +70,7 @@ class MenuReportBase(TestCase):
         self.other_owner = make_user('256700000501')
         self.restaurant_b = Restaurant.objects.create(
             name='Other Restaurant', location='loc-b',
-            status=RestaurantStatus_Active, owner=self.other_owner,
+            status=RestaurantStatus_Live, owner=self.other_owner,
         )
         self.table_b = Table.objects.create(number=1, restaurant=self.restaurant_b)
 

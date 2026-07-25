@@ -17,6 +17,8 @@ These close the gaps the pre-PR2 suites left open:
 Read behaviour only; the order/checkout parity lives in orders_app/tests.py.
 """
 
+from decimal import Decimal
+
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.db import connection
@@ -29,9 +31,10 @@ from restaurants_app.models import (
 from restaurants_app.serializers import UpsellConfigSerializer
 from restaurants_app.controllers import menu_publication as mp
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Active, RestaurantStatus_Pending,
-    RestaurantStatus_Rejected, RestaurantStatus_Blocked,
+    RestaurantStatus_Live, RestaurantStatus_Onboarding,
+    RestaurantStatus_Suspended, RestaurantStatus_Offboarded,
 )
+from dinify_backend.configss.messages import ERR_RESTAURANT_UNAVAILABLE
 
 SHOW_MENU_PATH = '/api/v1/orders/journey/show-menu/'
 
@@ -52,7 +55,7 @@ class PolicyMenuBase(TestCase):
         self.owner_a = _owner('256700010001')
         self.restaurant = Restaurant.objects.create(
             name='Policy R A', location='pol-a', owner=self.owner_a,
-            status=RestaurantStatus_Active, accepting_orders=True,
+            status=RestaurantStatus_Live, accepting_orders=True,
         )
         self.section = self._section('Published Section')
 
@@ -82,7 +85,7 @@ class PolicyMenuBase(TestCase):
         self.owner_b = _owner('256700010002')
         self.restaurant_b = Restaurant.objects.create(
             name='Policy R B', location='pol-b', owner=self.owner_b,
-            status=RestaurantStatus_Active,
+            status=RestaurantStatus_Live,
         )
         self.section_b = MenuSection.objects.create(
             name='B Section', restaurant=self.restaurant_b,
@@ -144,36 +147,76 @@ class RestaurantBoundaryTests(PolicyMenuBase):
         resp = APIClient().get(SHOW_MENU_PATH)
         self.assertEqual(resp.status_code, 400)
 
-    def test_malformed_unknown_deleted_pending_rejected_blocked_same_404(self):
+    def test_malformed_unknown_deleted_offboarded_same_404(self):
         import uuid as _uuid
         cases = []
         cases.append('not-a-uuid')
         cases.append(str(_uuid.uuid4()))  # unknown
         deleted = Restaurant.objects.create(
             name='Deleted R', location='d', owner=_owner('256700010010'),
-            status=RestaurantStatus_Active, deleted=True,
+            status=RestaurantStatus_Live, deleted=True,
         )
         cases.append(str(deleted.id))
-        for status in (RestaurantStatus_Pending, RestaurantStatus_Rejected,
-                       RestaurantStatus_Blocked):
-            r = Restaurant.objects.create(
-                name=f'{status} R', location=status,
-                owner=_owner(f'2567000100{20 + len(cases)}'), status=status,
-            )
-            cases.append(str(r.id))
+        offboarded = Restaurant.objects.create(
+            name='Offboarded R', location='off', owner=_owner('256700010021'),
+            status=RestaurantStatus_Offboarded,
+        )
+        cases.append(str(offboarded.id))
         messages = set()
         for ref in cases:
             resp = APIClient().get(SHOW_MENU_PATH, {'restaurant': ref})
             self.assertEqual(resp.status_code, 404, ref)
             messages.add(resp.json()['message'])
-        # One single, non-disclosing message for every unresolvable case.
+        # One single, non-disclosing message for every unresolvable case —
+        # `offboarded` included, so a finished tenant is indistinguishable from
+        # one that never existed.
         self.assertEqual(len(messages), 1, messages)
+
+    def test_onboarding_restaurant_serves_the_menu(self):
+        """
+        THE DELIBERATE WIDENING, diner side (PR-5).
+
+        `pending` used to 404 the public menu. `onboarding` serves it: the go-live
+        readiness checklist requires a successful end-to-end test order, which is
+        impossible if the diner surface is dark until go-live. The physical QR
+        deployment is the real gate on strangers finding the place.
+        """
+        onboarding = Restaurant.objects.create(
+            name='Onboarding R', location='onb', owner=_owner('256700010022'),
+            status=RestaurantStatus_Onboarding,
+        )
+        section = MenuSection.objects.create(
+            restaurant=onboarding, name='Mains', approved=True, enabled=True,
+            available=True, availability='always',
+        )
+        item = MenuItem.objects.create(
+            section=section, name='Test Dish',
+            primary_price=Decimal('1000.00'), approved=True, enabled=True,
+            available=True, in_stock=True,
+        )
+        resp = APIClient().get(SHOW_MENU_PATH, {'restaurant': str(onboarding.id)})
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIn(str(item.id), self._all_item_ids(resp.json()))
+
+    def test_suspended_restaurant_returns_graceful_503(self):
+        """
+        `suspended` is the ONE state answered with something other than the generic
+        404: a diner at a table with a printed QR is told the place is temporarily
+        unavailable rather than that it does not exist. The message never says why.
+        """
+        suspended = Restaurant.objects.create(
+            name='Suspended R', location='sus', owner=_owner('256700010023'),
+            status=RestaurantStatus_Suspended,
+        )
+        resp = APIClient().get(SHOW_MENU_PATH, {'restaurant': str(suspended.id)})
+        self.assertEqual(resp.status_code, 503, resp.content)
+        self.assertEqual(resp.json()['message'], ERR_RESTAURANT_UNAVAILABLE)
 
     def test_active_restaurant_no_visible_sections_returns_empty_200(self):
         empty_owner = _owner('256700010040')
         empty = Restaurant.objects.create(
             name='Empty R', location='e', owner=empty_owner,
-            status=RestaurantStatus_Active,
+            status=RestaurantStatus_Live,
         )
         resp = self._menu(restaurant=empty)
         self.assertEqual(resp.status_code, 200)
