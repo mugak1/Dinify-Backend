@@ -318,8 +318,10 @@ def transition_restaurant(*, restaurant, to_state, reason, actor=None, request=N
         from_state = locked.status
 
         if not is_allowed(from_state, target):
-            # Held deliberately outside this block: _deny opens its own atomic
-            # block, and raising from inside this one would mark it for rollback.
+            # A refusal is CAPTURED here and raised only after this block exits.
+            # _deny writes its audit row in an atomic block of its own, and raising
+            # from inside this one would mark the outer transaction for rollback and
+            # take the denial entry down with it.
             error = LifecycleTransitionError(
                 {'to_state': f'A restaurant cannot move from {from_state} to {target}.',
                  'allowed': allowed_targets(from_state)},

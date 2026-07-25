@@ -20,6 +20,7 @@ import importlib
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from dinify_backend.configss.edit_information import EDIT_INFORMATION
@@ -88,12 +89,19 @@ class LifecycleVocabularyTests(TestCase):
         self.assertEqual(restaurant.status, RestaurantStatus_Onboarding)
 
     def test_full_clean_rejects_a_legacy_value(self):
+        """`choices` is real validation, not decoration — and the error names `status`.
+
+        Asserting the FIELD (not merely that something raised) matters here: a bare
+        assertRaises would pass even if full_clean tripped over an unrelated field
+        and never looked at the lifecycle at all.
+        """
         restaurant = Restaurant(
             name='Legacy', location='loc', owner=_user('256760000002'),
             status='active',
         )
-        with self.assertRaises(Exception):
+        with self.assertRaises(ValidationError) as ctx:
             restaurant.full_clean()
+        self.assertIn('status', ctx.exception.error_dict)
 
 
 class LifecyclePolicyTests(TestCase):
