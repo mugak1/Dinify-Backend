@@ -151,7 +151,8 @@ with PostgreSQL on AWS RDS.
   route is now gated and migration `users_app/0013` blacklists outstanding
   platform-staff tokens. Cross-tenant reach on the customer plane comes from a
   delegation grant or from nowhere; `scripts/check_ambient_authority.py` +
-  `dinify_backend/tenancy/tests_ambient_authority.py` keep it that way
+  `dinify_backend/tenancy/tests_ambient_authority.py` keep it that way. PR-A is the
+  first rung of the four-PR Phase 0.5 ladder closed in `PHASE_0_5_CLOSURE.md`
 - Tenant isolation / role-permission ENFORCEMENT: ✅ Portal gates enforce
   per-module access via `can_user_access_module` / `get_module_restaurant_ids`
   (`users_app/controllers/permissions_check.py`) — see the "Tenant Isolation /
@@ -554,7 +555,9 @@ with PostgreSQL on AWS RDS.
   Sibling records: `dinify_backend/tenancy/ASSURANCE.md` +
   `TENANT_ISOLATION_CLOSURE.md` (tenant boundary), `REGULATORY_AUDIT.md`
   (non-custodial posture), `REPORTS_CONTRACT_AUDIT.md` (cross-repo Reports
-  contract) and `BACKGROUND_TASKS.md` (management-command runbook — note there is
+  contract), `PHASE_0_5_CLOSURE.md` (the four-PR Phase 0.5 pre-launch remediation
+  ladder — what it closed, what it deliberately left open, and the seams Phase 1
+  inherits) and `BACKGROUND_TASKS.md` (management-command runbook — note there is
   NO scheduler configuration in this repo; every command is invoked externally)
 - Login 500 regression: ✅ Resolved — not reproducible after the auth-stack work;
   login → refresh → logout verified working on UAT (closed June 2026)
@@ -839,7 +842,7 @@ the catch-all `<str:config_detail>/` route.
   import-light on purpose (imported by `permissions_check`) — no models, no
   querysets. An unknown/legacy value fails CLOSED (denies everything, menu gone)
 - THE LAUNCH BOUNDARY (PR-D): `onboarding` and `live` are NO LONGER identical. A
-  fifth capability key `CAP_LIVE_TRADING` (onboarding **False**, live True,
+  seventh capability key `CAP_LIVE_TRADING` (onboarding **False**, live True,
   suspended/offboarded False) is the one cell that differs, and two predicates read
   it: `allows_diner_ordering` (= `CAP_ORDER_CREATE and CAP_LIVE_TRADING`) refuses the
   PUBLIC at a restaurant that has not gone live, and `orders_are_commercial` is the
@@ -1021,9 +1024,11 @@ the catch-all `<str:config_detail>/` route.
   `Q(order__isnull=True) | Q(order__is_test=False)`, so order-less subscription rows
   survive), and `determine-customers` (which MINTS REAL USERS); and it cannot be
   reviewed (`submit_review` refuses it, because review analytics aggregate on the
-  denormalised `Review.restaurant` and would never see an `is_test` filter). The two
-  DELIBERATE inclusions are dashboard-v2's `_build_tables` and `_build_kds` — live
-  floor state, which must agree with the kitchen board. `has_completed_test_order`
+  denormalised `Review.restaurant` and would never see an `is_test` filter). The
+  DELIBERATE inclusions are dashboard-v2's `_build_kds` and the OCCUPANCY queryset
+  inside `_build_tables` — live floor state, which must agree with the kitchen board;
+  note `_build_tables` is split, so its median-visit / turns / avg-ticket metrics DO
+  filter `is_test=False` (history and money). `has_completed_test_order`
   (`orders_app/controllers/test_orders.py`) is the queryable fact Phase-1's readiness
   checklist consumes. Accepted and documented: a rehearsal order consumes a real
   `RestaurantDailyOrderCounter` ticket number
