@@ -34,11 +34,22 @@ one-click **"This year"** preset.
 | Dim | FE | BE | |
 |---|---|---|---|
 | Slug | `reports/restaurant/sales-trends/` (services/reports.service.ts:102) | `'sales-trends'` (reports_app/endpoints/restaurant_reports.py:71) | ✓ |
-| Params | `restaurant, from, to, category∈{daily,monthly}, result='table'` | reads `restaurant, from(def today), to(def today), category(def 'daily'), result(def 'table')` | ✓ names; ✗ FE never sends `annual` for year bucket (Blocker B2) |
+| Params | `restaurant, from, to, category∈{daily,monthly}, result='table'` | reads `restaurant, from(def today), to(def today), category(def 'daily'), result(def 'table')`; accepts `category∈{daily,weekly,monthly,quarterly,annual}` | ✓ names; ✗ FE never sends `annual` for year bucket (Blocker B2) |
 | Envelope | `res.data` → adapter `toArray` (array/records/results/rows) | `{status,message,data:[…]}` bare array | ✓ |
 | Fields | `period, orders←count, revenue, discount` (models/reports.models.ts:41-49; services/reports-adapter.ts:53-61) | row `{period, count, revenue, discount}` (controllers/restaurant/sales.py:230-238) | ✓ names; **✗ `period` FORMAT** |
 | Enums | n/a | n/a | — |
-| Caps | resolveTimeframe mirrors BE (utils/reports-timeframe.ts:42-47) | daily 31 / monthly 731 / quarterly 731 / annual 1850 (sales.py:50-55) | **✗ year→monthly collapse 400s** |
+| Caps | resolveTimeframe mirrors BE (utils/reports-timeframe.ts:42-47) | daily 31 / weekly 371 / monthly 731 / quarterly 731 / annual 1850 (sales.py:50-55) | **✗ year→monthly collapse 400s** |
+
+> **`weekly` (TRENDS-WEEKLY-00) — landed DORMANT.** The backend accepts
+> `category=weekly` (→ `TruncWeek`), capped at **371 days** (53 weeks exactly ⇒ ≤54
+> buckets) with the message `'Date range should not be greater than 1 year.'`. Its
+> `period` key is the **Monday boundary of the bucket in EAT**, `'YYYY-MM-DD'` — the
+> same format as `daily`, deliberately not an ISO `'YYYY-Wnn'` week string, which
+> would sort correctly but break the FE's `parseISO()`. Caveat for any consumer: a
+> range starting mid-week yields a first bucket labelled with the **preceding
+> Monday**, i.e. a key *before* `from`, holding only the in-range days. No frontend
+> sends `weekly` today (the FE column above is unchanged and still accurate); it is
+> accepted-but-unrequested exactly as `quarterly` is.
 
 ### 2. sales-listing  (GET · `api.loadAllPages`)
 | Dim | FE | BE | |

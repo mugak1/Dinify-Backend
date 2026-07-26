@@ -400,7 +400,9 @@ with PostgreSQL on AWS RDS.
   keyed by integer hour so deliberately NOT a `PERIOD_TRUNC` entry, zero-filled
   to a continuous 24-hour axis on the same revenue basis). Sales-trends now
   emits ISO/sortable `period` keys (`2024-03` for month, `2024-Q1` for quarter;
-  day/year already ISO) so the frontend can `parseISO()` every bucket (PR #185);
+  day/year already ISO; a `week` key is the Monday boundary of the bucket in EAT
+  as `YYYY-MM-DD`, NOT an ISO `2024-W10` string, which `parseISO()` cannot read)
+  so the frontend can `parseISO()` every bucket (PR #185);
   `REPORTS_CONTRACT_AUDIT.md` at the repo root is the cross-repo Reports contract
   reconciliation / test plan for the eventual live-data flip.
   The LIVE slug set is exactly `dashboard`, `dashboard-v2`, `sales-listing`,
