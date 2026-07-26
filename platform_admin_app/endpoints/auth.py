@@ -7,6 +7,13 @@ session and reveals nothing beyond "a second factor is required". ``verify/`` ta
 TOTP or recovery code, validates it against the challenge, and only then mints the
 ``AdminSession``. So a session never exists in a half-authenticated state.
 
+SECOND FACTOR. ``verify/`` and ``elevate/`` both require an explicit
+``{"method": "totp"|"recovery", "code": "..."}``. The method is NOT inferred and has
+no default: these endpoints used to try TOTP first and fall through to recovery, which
+chained both factors through ``ADMIN_SECRET_ENCRYPTION_KEY`` and meant a lost key took
+the recovery codes down with it. ``platform_admin_app.second_factor`` owns the
+dispatch and the reasoning; note that this module no longer imports ``totp`` at all.
+
 DISCLOSURE. Every failure at ``login/`` returns ONE byte-identical body:
 unknown user, wrong password, not platform staff, inactive, unenrolled, holding a
 restaurant membership, and locked-out are indistinguishable to the caller. The
@@ -32,7 +39,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
-from platform_admin_app import audit, challenges, lockout, recovery, sessions, totp
+from platform_admin_app import (
+    audit,
+    challenges,
+    lockout,
+    recovery,
+    second_factor,
+    sessions,
+)
 from platform_admin_app.audit_actions import (
     ADMIN_AUTH_CHALLENGE_ISSUED,
     ADMIN_AUTH_ELEVATED,
@@ -172,13 +186,14 @@ class AdminLoginView(APIView):
 
 
 class AdminVerifyView(APIView):
-    """POST a TOTP or recovery code against the challenge → a session."""
+    """POST ``{method, code}`` against the challenge → a session."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
     throttle_classes = [AdminLoginThrottle]
 
     def post(self, request):
+        method = second_factor.normalise_method(request.data.get('method'))
         code = str(request.data.get('code') or '').strip()
         challenge = challenges.resolve_challenge(
             request.COOKIES.get(challenge_cookie_name())
@@ -212,12 +227,8 @@ class AdminVerifyView(APIView):
             )
             return clear_challenge_cookie(_deny(GENERIC_VERIFY_ERROR))
 
-        used_recovery = False
-        if totp.verify(auth_row, code):
-            pass
-        elif recovery.consume(auth_row, code):
-            used_recovery = True
-        else:
+        verdict = second_factor.check(auth_row, method, code)
+        if not verdict.ok:
             challenges.record_attempt(challenge)
             triggered = lockout.register_failure(auth_row)
             audit.record_auth_event(
@@ -225,9 +236,12 @@ class AdminVerifyView(APIView):
                 ADMIN_AUTH_LOCKOUT if triggered else ADMIN_AUTH_TOTP_FAILURE,
                 result=RESULT_DENIED if triggered else RESULT_FAILURE,
                 actor=user, actor_label=user.username,
-                error_code='locked_out' if triggered else 'bad_code',
+                error_code='locked_out' if triggered else verdict.error_code,
+                reason=f'method={method}',
             )
             return _deny(GENERIC_VERIFY_ERROR)
+
+        used_recovery = verdict.used_recovery
 
         # Consume the challenge and mint the session together: a spent recovery code
         # must never be lost to a half-completed login.
@@ -245,6 +259,7 @@ class AdminVerifyView(APIView):
             ADMIN_AUTH_RECOVERY_CODE_USED if used_recovery else ADMIN_AUTH_LOGIN_SUCCESS,
             result=RESULT_SUCCESS,
             actor=user, actor_label=user.username, session=session,
+            reason=f'method={method}',
         )
 
         response = Response(
@@ -322,12 +337,13 @@ class AdminSessionView(APIView):
 
 
 class AdminElevateView(APIView):
-    """POST a TOTP or recovery code on a live session → stamp ``elevated_at``."""
+    """POST ``{method, code}`` on a live session → stamp ``elevated_at``."""
 
     authentication_classes = [AdminSessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        method = second_factor.normalise_method(request.data.get('method'))
         code = str(request.data.get('code') or '').strip()
         user = request.user
         session = request.auth
@@ -341,22 +357,20 @@ class AdminElevateView(APIView):
             )
             return _deny(GENERIC_VERIFY_ERROR, status=403)
 
-        used_recovery = False
-        if totp.verify(auth_row, code):
-            pass
-        elif recovery.consume(auth_row, code):
-            used_recovery = True
-        else:
+        verdict = second_factor.check(auth_row, method, code)
+        if not verdict.ok:
             triggered = lockout.register_failure(auth_row)
             audit.record_auth_event(
                 request,
                 ADMIN_AUTH_LOCKOUT if triggered else ADMIN_AUTH_TOTP_FAILURE,
                 result=RESULT_DENIED if triggered else RESULT_FAILURE,
                 actor=user, actor_label=user.username, session=session,
-                error_code='locked_out' if triggered else 'bad_code',
+                error_code='locked_out' if triggered else verdict.error_code,
+                reason=f'method={method}',
             )
             return _deny(GENERIC_VERIFY_ERROR, status=403)
 
+        used_recovery = verdict.used_recovery
         sessions.elevate(session)
         lockout.reset(auth_row)
         audit.record_auth_event(
@@ -364,6 +378,7 @@ class AdminElevateView(APIView):
             ADMIN_AUTH_RECOVERY_CODE_USED if used_recovery else ADMIN_AUTH_ELEVATED,
             result=RESULT_SUCCESS,
             actor=user, actor_label=user.username, session=session,
+            reason=f'method={method}',
         )
         return Response(
             {
