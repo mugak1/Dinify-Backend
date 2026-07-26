@@ -13,9 +13,9 @@ from dinify_backend.configss.string_definitions import (
     PaymentMode_MobileMoney,
     RestaurantStatus_Live,
     RESTAURANT_OWNER,
-    DINIFY_ADMIN,
 )
 from orders_app.tests import seed_order
+from platform_admin_app.testing import give_legacy_platform_role
 from restaurants_app.tests import (
     seed_restaurant, seed_menu_section, seed_menu_items, seed_tables,
     TEST_RESTAURANT_NAME,
@@ -142,8 +142,8 @@ def make_user(phone, roles=None):
 class SubscriptionTransactionTenancyTests(TestCase):
     """
     POST /api/v1/finances/transactions/ (subscription) must be writable for a
-    restaurant only by a dinify-admin or an active owner/manager of THAT
-    restaurant. The endpoint was authenticated-only and trusted the body
+    restaurant only by an active owner/manager of THAT restaurant. The endpoint
+    was authenticated-only and trusted the body
     ``restaurant_id``, so any authenticated principal — a diner employed
     nowhere, or an employee of a DIFFERENT restaurant — could write a
     DinifyTransaction under any tenant (created_by=attacker, msisdn=attacker,
@@ -185,8 +185,12 @@ class SubscriptionTransactionTenancyTests(TestCase):
         )
         # Role-less authenticated diner (valid JWT, employed nowhere).
         self.diner = make_user('256700000330')
-        # Dinify admin — the platform-wide bypass.
-        self.admin = make_user('256700000340', roles=[DINIFY_ADMIN])
+        # An account carrying the LEGACY platform role string. It used to be the
+        # platform-wide bypass here (can_manage_restaurant returned True for it at
+        # every restaurant); it now resolves like any other stranger. Written
+        # through the ORM because the write paths refuse the string outright.
+        self.legacy_role_holder = give_legacy_platform_role(
+            make_user('256700000340'))
 
     # --- request helpers ------------------------------------------------
     def auth(self, user):
@@ -234,15 +238,29 @@ class SubscriptionTransactionTenancyTests(TestCase):
         self.assertEqual(row.created_by, self.owner_a)
         self.assertEqual(row.processing_status, ProcessingStatus_Pending)
 
-    # --- 4. dinify-admin allowed ----------------------------------------
-    def test_admin_allowed(self, *mocks):
-        resp = self.post_subscription(self.admin, self.restaurant_a.id)
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(self.a_count(), 1)
+    # --- 4. the legacy platform role grants nothing ---------------------
+    def test_legacy_platform_role_denied(self, *mocks):
+        # Was `test_admin_allowed`: a dinify_admin role string used to write a
+        # subscription transaction under ANY tenant. It is now denied exactly like
+        # the role-less diner above, and writes nothing.
+        before = self.a_count()
+        resp = self.post_subscription(self.legacy_role_holder, self.restaurant_a.id)
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.assertEqual(self.a_count(), before)
+
+    def test_legacy_platform_role_is_indistinguishable_from_a_stranger(self, *mocks):
+        holder = self.post_subscription(self.legacy_role_holder, self.restaurant_a.id)
+        stranger = self.post_subscription(self.diner, self.restaurant_a.id)
+        self.assertEqual(holder.status_code, stranger.status_code)
+        self.assertEqual(holder.content, stranger.content)
 
     # --- 5. unknown id -> 404 not 500, no row ---------------------------
     def test_unknown_restaurant_id_is_404_not_500(self, *mocks):
-        resp = self.post_subscription(self.admin, uuid.uuid4())
+        # An owner (a principal the gate would otherwise admit) naming a
+        # restaurant that does not exist. can_manage_restaurant fails closed on an
+        # unresolvable id, so this 404s at the gate rather than reaching the
+        # controller — the client-visible outcome is unchanged, and still not 500.
+        resp = self.post_subscription(self.owner_a, uuid.uuid4())
         self.assertEqual(resp.status_code, 404, resp.content)
         self.assertEqual(DinifyTransaction.objects.count(), 0)
 
@@ -255,7 +273,7 @@ class SubscriptionTransactionTenancyTests(TestCase):
     # --- 7. non-disclosure: non-member and unknown-id are identical 404s -
     def test_non_member_and_unknown_id_are_identical_404(self, *mocks):
         non_member = self.post_subscription(self.diner, self.restaurant_a.id)
-        unknown = self.post_subscription(self.admin, uuid.uuid4())
+        unknown = self.post_subscription(self.owner_a, uuid.uuid4())
         self.assertEqual(non_member.status_code, 404, non_member.content)
         self.assertEqual(unknown.status_code, 404, unknown.content)
         # Byte-for-byte identical body: a caller cannot distinguish
@@ -264,6 +282,6 @@ class SubscriptionTransactionTenancyTests(TestCase):
 
     # --- 8. malformed (non-UUID) id -> 404 not 500 (no id shape 500s) ---
     def test_malformed_restaurant_id_is_404_not_500(self, *mocks):
-        resp = self.post_subscription(self.admin, 'not-a-uuid')
+        resp = self.post_subscription(self.owner_a, 'not-a-uuid')
         self.assertEqual(resp.status_code, 404, resp.content)
         self.assertEqual(DinifyTransaction.objects.count(), 0)

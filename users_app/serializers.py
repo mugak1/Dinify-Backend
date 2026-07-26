@@ -8,6 +8,14 @@ from users_app.models import User
 class SerGetUserProfile(ModelSerializer):
     """
     the serializer for the user profile
+
+    Output-only in practice (login + profile fetch), but ``roles`` is declared
+    ``read_only`` rather than left implicit: the field is emitted, so it would be
+    natural for someone to later bind this serializer with ``data=`` for a profile
+    write, and a writable ``roles`` there is a mass-assignment path straight into
+    the account's role list. ``account_type`` is protected by being absent from
+    ``fields`` at all; ``roles`` has to stay in the payload for the frontend, so it
+    gets the explicit lock instead.
     """
     restaurant_roles = SerializerMethodField()
 
@@ -21,6 +29,7 @@ class SerGetUserProfile(ModelSerializer):
             'email', 'phone_number', 'country', 'roles',
             'prompt_password_change', 'restaurant_roles'
         ]
+        read_only_fields = ['roles']
 
     def get_restaurant_roles(self, user):
         if 'restaurant_roles' in self.context:

@@ -108,8 +108,14 @@ Aggregator_DPO = 'dpo'
 Aggregator_Yo = 'yo'
 
 
-DINIFY_ADMIN = 'dinify_admin'
-DINIFY_ACCOUNT_MANAGER = 'dinify_account_manager'
+# RESTAURANT roles only. The platform-side `DINIFY_ADMIN` /
+# `DINIFY_ACCOUNT_MANAGER` constants were REMOVED: `User.roles` is no longer an
+# authority vocabulary anywhere, and a `restaurant_user` may not hold a platform
+# role. Platform staff are identified by `User.account_type` and live on the
+# admin plane. Those two literals survive only as the denylist
+# `platform_admin_app.services.PLATFORM_ONLY_ROLES`, which exists to REFUSE them
+# on write — never to grant anything. Do not reintroduce them here; a standing
+# gate (`dinify_backend/tenancy/ambient_authority.py`) fails the build if you do.
 RESTAURANT_OWNER = 'owner'
 RESTAURANT_MANAGER = 'manager'
 RESTAURANT_STAFF = 'restaurant_staff'

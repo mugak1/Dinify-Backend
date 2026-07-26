@@ -149,11 +149,13 @@ ALLOWED_ROUTES = {
     #   restaurant-setup writes, table-actions, reservations, waitlist, tags,
     #       upsell-config, role-permissions, manager-actions  all authenticate
     #       through decode_jwt_token, which stays JWT-only.
-    #   restaurant-setup/subscription-details/, finances/transactions/  billing
-    #       and the transaction ledger.
-    #   restaurant-setup/admin-register-restaurant/  creates a restaurant; there
-    #       is no target to scope to.
-    #   reports/dinify/*, support/admin/issues/  cross-tenant by design.
+    #   restaurant-setup/subscription-details/ (read), finances/transactions/
+    #       billing and the transaction ledger.
+    #   PR-A retired four routes outright rather than leaving them off this list:
+    #       restaurant-setup/admin-register-restaurant/ (no target to scope to),
+    #       the subscription-details WRITE, reports/dinify/* and
+    #       support/admin/issues/ (cross-tenant by design). Kept named here so a
+    #       future reader does not mistake their absence for an oversight.
     #   notifications/, users/user-profile/, users/user-lookup/, users/auth/*  no
     #       restaurant dimension at all; they act on request.user, i.e. on the
     #       administrator's own records.

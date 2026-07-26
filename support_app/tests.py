@@ -13,9 +13,8 @@ from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Live,
     RESTAURANT_OWNER,
     RESTAURANT_MANAGER,
-    DINIFY_ADMIN,
-    DINIFY_ACCOUNT_MANAGER,
 )
+from platform_admin_app.testing import give_legacy_platform_role
 from support_app.models import SupportIssue
 
 
@@ -73,9 +72,16 @@ class SupportAppTestBase(TestCase):
 
         # An authenticated user with no employment anywhere.
         self.outsider = make_user('256700000030', [])
-        # Dinify staff.
-        self.admin = make_user('256700000040', [DINIFY_ADMIN], first='Dinify', last='Admin')
-        self.account_manager = make_user('256700000050', [DINIFY_ACCOUNT_MANAGER])
+        # Two accounts carrying the RETIRED platform role strings. They used to be
+        # the only principals admitted to the admin triage surface; that surface is
+        # gone and the strings grant nothing. Written through the ORM, since the
+        # write paths refuse them.
+        self.legacy_admin = give_legacy_platform_role(
+            make_user('256700000040', [], first='Legacy', last='Holder'))
+        self.legacy_account_manager = give_legacy_platform_role(
+            make_user('256700000050', []), 'dinify_account_manager')
+        # A plain support agent identity, for assigned_to fixtures.
+        self.agent = make_user('256700000041', [], first='Support', last='Agent')
 
     # ---- request helpers -------------------------------------------------
     def auth(self, user):
@@ -175,7 +181,7 @@ class CreateTests(SupportAppTestBase):
             'title': 'Legit title', 'description': 'A legitimate description.',
             # Privileged fields a malicious client might try to set:
             'status': 'resolved',
-            'assigned_to': str(self.admin.id),
+            'assigned_to': str(self.agent.id),
             'internal_notes': 'should not stick',
             'resolution_summary': 'nope',
         })
@@ -240,7 +246,7 @@ class RestaurantDetailTests(SupportAppTestBase):
     def test_detail_own_issue_hides_internal_fields(self):
         issue = make_issue(
             self.restaurant_a, created_by=self.owner_a,
-            internal_notes='secret', assigned_to=self.admin,
+            internal_notes='secret', assigned_to=self.agent,
         )
         resp = self.client.get(
             f'{ISSUES_URL}{issue.id}/', **self.auth(self.owner_a),
@@ -259,84 +265,89 @@ class RestaurantDetailTests(SupportAppTestBase):
         self.assertEqual(resp.status_code, 404)
 
 
-class AdminGateTests(SupportAppTestBase):
-    def test_restaurant_user_rejected_from_admin_list(self):
-        resp = self.client.get(ADMIN_URL, **self.auth(self.owner_a))
-        self.assertEqual(resp.status_code, 403)
+class AdminIssuesRetirementTests(SupportAppTestBase):
+    """
+    ``/api/v1/support/admin/issues/`` is RETIRED — endpoint and route both.
 
-    def test_account_manager_rejected_from_admin_list(self):
-        resp = self.client.get(ADMIN_URL, **self.auth(self.account_manager))
-        self.assertEqual(resp.status_code, 403)
+    It read and wrote ANY tenant's support issues (an explicit unrestricted
+    ``SupportIssue.objects.all()`` write queryset, plus ``internal_notes`` and
+    ``assigned_to``) on the authority of a ``dinify_admin`` string in the caller's
+    ``User.roles``, and the deleted dinify-mgt frontend was its only consumer.
 
-    def test_restaurant_user_rejected_from_admin_put(self):
+    Retirement SUBSUMES the old gate matrix: previously a restaurant user got 403
+    and a role-holder got 200. Now nobody gets 200. A delegated administrator still
+    reaches ONE restaurant's issues through the restaurant-facing routes, which is
+    what delegation is for. Phase 1 rebuilds triage on /api/admin/v1.
+    """
+
+    def test_the_admin_route_is_gone_for_every_principal(self):
+        for user in (
+            self.owner_a, self.outsider,
+            self.legacy_admin, self.legacy_account_manager,
+        ):
+            with self.subTest(user=user.username):
+                listing = self.client.get(ADMIN_URL, **self.auth(user))
+                self.assertEqual(listing.status_code, 404, listing.content)
+
+    def test_the_admin_write_verb_is_gone_for_every_principal(self):
         issue = make_issue(self.restaurant_a)
-        resp = self.admin_put(self.owner_a, {'id': str(issue.id), 'status': 'resolved'})
-        self.assertEqual(resp.status_code, 403)
+        for user in (self.owner_a, self.legacy_admin):
+            with self.subTest(user=user.username):
+                resp = self.admin_put(
+                    user, {'id': str(issue.id), 'status': 'resolved'})
+                self.assertEqual(resp.status_code, 404, resp.content)
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, 'open')
+        self.assertIsNone(issue.resolved_at)
 
-    def test_admin_can_list_all_restaurants(self):
-        make_issue(self.restaurant_a)
-        make_issue(self.restaurant_b)
-        resp = self.client.get(ADMIN_URL, **self.auth(self.admin))
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.json()['data']['records']), 2)
-
-    def test_admin_list_includes_internal_notes(self):
-        issue = make_issue(self.restaurant_a, internal_notes='private note')
-        resp = self.client.get(ADMIN_URL, **self.auth(self.admin))
-        record = next(
-            r for r in resp.json()['data']['records'] if r['id'] == str(issue.id)
-        )
-        self.assertEqual(record['internal_notes'], 'private note')
-
-    def test_admin_list_filters_by_status(self):
-        open_issue = make_issue(self.restaurant_a, title='open one')
-        resolved_issue = make_issue(self.restaurant_a, title='resolved one')
-        SupportIssue.objects.filter(id=resolved_issue.id).update(status='resolved')
-        resp = self.client.get(f'{ADMIN_URL}?status=resolved', **self.auth(self.admin))
-        ids = {r['id'] for r in resp.json()['data']['records']}
-        self.assertIn(str(resolved_issue.id), ids)
-        self.assertNotIn(str(open_issue.id), ids)
+    def test_internal_notes_stay_unreachable_through_the_restaurant_routes(self):
+        # The tenant-facing surface never exposed the triage fields, and retiring
+        # the admin one must not have changed that.
+        issue = make_issue(
+            self.restaurant_a, created_by=self.owner_a, internal_notes='private')
+        resp = self.client.get(
+            f'{ISSUES_URL}{issue.id}/', **self.auth(self.owner_a))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertNotIn('internal_notes', resp.json()['data'])
 
 
-class AdminUpdateTests(SupportAppTestBase):
-    def test_resolve_sets_resolved_at(self):
+class IssueStatusStampingTests(SupportAppTestBase):
+    """
+    The resolved_at / closed_at stamping that ``AdminUpdateTests`` used to drive
+    through the retired admin PUT.
+
+    The behaviour lives in ``SupportIssue.save()``, not in the endpoint, so the
+    coverage moves down to the model rather than being dropped with the route.
+    """
+
+    def test_resolving_stamps_resolved_at(self):
         issue = make_issue(self.restaurant_a)
         self.assertIsNone(issue.resolved_at)
-        resp = self.admin_put(self.admin, {'id': str(issue.id), 'status': 'resolved'})
-        self.assertEqual(resp.status_code, 200, resp.content)
+        issue.status = 'resolved'
+        issue.save()
         issue.refresh_from_db()
-        self.assertEqual(issue.status, 'resolved')
         self.assertIsNotNone(issue.resolved_at)
         self.assertIsNone(issue.closed_at)
 
-    def test_close_sets_closed_at(self):
+    def test_closing_stamps_closed_at(self):
         issue = make_issue(self.restaurant_a)
-        resp = self.admin_put(self.admin, {'id': str(issue.id), 'status': 'closed'})
-        self.assertEqual(resp.status_code, 200, resp.content)
+        issue.status = 'closed'
+        issue.save()
         issue.refresh_from_db()
         self.assertIsNotNone(issue.closed_at)
 
-    def test_resolved_at_preserved_on_reopen(self):
+    def test_resolved_at_is_preserved_on_reopen(self):
         issue = make_issue(self.restaurant_a)
-        self.admin_put(self.admin, {'id': str(issue.id), 'status': 'resolved'})
+        issue.status = 'resolved'
+        issue.save()
         issue.refresh_from_db()
         first_resolved_at = issue.resolved_at
         self.assertIsNotNone(first_resolved_at)
-        # Reopen — resolved_at must NOT be cleared.
-        self.admin_put(self.admin, {'id': str(issue.id), 'status': 'open'})
+        issue.status = 'open'
+        issue.save()
         issue.refresh_from_db()
         self.assertEqual(issue.status, 'open')
         self.assertEqual(issue.resolved_at, first_resolved_at)
-
-    def test_admin_can_set_internal_notes(self):
-        issue = make_issue(self.restaurant_a)
-        resp = self.admin_put(
-            self.admin,
-            {'id': str(issue.id), 'internal_notes': 'triaged, contacted reporter'},
-        )
-        self.assertEqual(resp.status_code, 200, resp.content)
-        issue.refresh_from_db()
-        self.assertEqual(issue.internal_notes, 'triaged, contacted reporter')
 
 
 class NullSafetyTests(SupportAppTestBase):

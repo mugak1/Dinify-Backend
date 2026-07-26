@@ -44,8 +44,25 @@ isolation is proven." It is not. Read this before trusting the ratchet.
    related model (typo catch); `GlobalRelation` needs a non-empty reason; only the
    three constrained types are permitted in `tenant_relations`.
 
+7. **The retired ambient-authority mechanism cannot be reintroduced by name.**
+   `ambient_authority.py` + `scripts/check_ambient_authority.py` (TENANT-AUTH-00)
+   fail the build if any customer-plane production module references
+   `is_dinify_admin` / `is_dinify_superuser` / `dinify_roles` / the `DINIFY_*` role
+   constants, hard-codes a platform-only role string, or selects users by one
+   through a `roles__*` ORM lookup. Scope excludes `platform_admin_app` (the admin
+   plane, which owns the denylist), `*/migrations/` (immutable history) and test
+   modules (which must name the strings to assert they grant nothing). Unlike the
+   relation ratchet this is **not** a shrinking baseline — the tree is clean and the
+   allowlist is empty, asserted by its own meta-test.
+
 ## What is only CLASSIFIED (a conscious label — NOT a proof)
 
+- The ambient-authority gate is a **source-text** check. It proves the specific
+  retired mechanism has not come back **by name** — which is how this class of
+  regression usually returns — but it cannot recognise a *new* predicate, spelled
+  differently, that confers cross-tenant authority. The behavioural half lives in
+  `tests_ambient_authority.py` (the role string grants nothing) and in the closure
+  suite's I16 row.
 - A `SameTenant(path)` declares intent and typo-checks the path. **It enforces
   nothing at runtime by itself.** Real enforcement lives in serializer `validate()`
   via `restaurants_app/controllers/tenant_scope.py`, proven only by **two-tenant
@@ -88,3 +105,8 @@ relations and **forbids new unclassified/baselined ones**. It does **not** prove
 tenant isolation, does **not** cover non-FK identifiers, and its baseline count is
 **not** a vulnerability count. Isolation is proven only by two-tenant behavioural
 tests.
+
+The ambient-authority gate (TENANT-AUTH-00) is a separate, permanent guard with a
+narrower claim: the deleted role-based administrator mechanism is **not present by
+name** in the customer plane. That it grants nothing even where a legacy row still
+carries the string is proven behaviourally, not by the scanner.

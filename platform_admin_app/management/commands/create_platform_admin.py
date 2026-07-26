@@ -87,6 +87,9 @@ class Command(BaseCommand):
                 phone_number=None,
                 first_name=first_name or None,
                 last_name=last_name or None,
+                # The only production write of User.roles, and it writes nothing:
+                # a platform admin's authority comes from account_type, never from
+                # a role string. `roles` carries restaurant roles only.
                 roles=[],
                 prompt_password_change=False,
             )

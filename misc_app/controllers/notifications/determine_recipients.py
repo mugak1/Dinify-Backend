@@ -1,5 +1,5 @@
 from dinify_backend.configss.string_definitions import (
-    RESTAURANT_OWNER, RESTAURANT_MANAGER, DINIFY_ADMIN
+    RESTAURANT_OWNER, RESTAURANT_MANAGER
 )
 from restaurants_app.models import RestaurantEmployee
 from users_app.models import User
@@ -29,11 +29,11 @@ def determine_receipients(
             managers = [employee.user.email for employee in employees if RESTAURANT_MANAGER in employee.roles and employee.user.email]  # noqa
             tos = owners + managers
 
-    if message_type in ['admin-new-restaurant', 'new-restaurant']:
-        dinify_admins = User.objects.filter(
-            roles__contains=[DINIFY_ADMIN], email__isnull=False
-        ).exclude(email='')
-        ccs += [admin.email for admin in dinify_admins if admin.email]
+    # A `roles__contains=[DINIFY_ADMIN]` CC list used to sit here for the
+    # new-restaurant notifications. It had already stopped matching anything —
+    # platform staff are created with `roles=[]` and are identified by
+    # `account_type` — and it was the last place on this plane that read
+    # `User.roles` to mean "a platform administrator". Removed with the rest.
 
     if message_type in [
         'forgot-password',

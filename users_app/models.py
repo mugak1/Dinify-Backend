@@ -38,8 +38,7 @@ class User(AbstractUser):
     # Nullable ONLY so a platform-staff account can exist without one: the admin
     # plane authenticates by password + TOTP and must never need a phone or SMS.
     # It stays REQUIRED for restaurant users — enforced at the write sites
-    # (REQUIRED_INFORMATION['new_user'] via self_register / create_restaurant),
-    # not by the column. Postgres treats NULLs as distinct under a UNIQUE
+    # (REQUIRED_INFORMATION['new_user'] via self_register), not by the column. Postgres treats NULLs as distinct under a UNIQUE
     # constraint, so uniqueness for real numbers is unaffected.
     # NOTE: null=True WITHOUT blank=True is deliberate. `blank=True` would make
     # every ModelSerializer treat the field as required=False, silently loosening

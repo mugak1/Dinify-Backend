@@ -53,16 +53,18 @@ class SerializerPutRestaurant(ModelSerializer):
     Explicit write contract (TENANT-ISO-PR5): only the identity / settings / tax
     fields in EDIT_INFORMATION['restaurants'] are client-writable. `owner` and
     every audit / lifecycle / approval / billing-lifecycle field are server-owned
-    and read_only — `owner` is set at creation through the trusted save() channel
-    (create_restaurant), and the non-admin `flat_fee` post-gate strip stays in
-    restaurant_setup (PR#211).
+    and read_only — `owner` is set at creation through the trusted save() channel,
+    and the `flat_fee` post-gate strip stays in restaurant_setup (PR#211, made
+    unconditional by PR-A).
 
     `status` is read_only (PR-5): the lifecycle is a constrained axis with exactly
     one writer, ``restaurants_app.controllers.lifecycle``, which assigns the field
     on the model directly. Together with its removal from EDIT_INFORMATION this is
     belt-and-braces — Secretary only forwards EDIT_INFORMATION keys, and DRF drops
-    the field even if some future caller builds the serializer by hand. Creation
-    (admin_register_restaurant) relies on the model default, ``onboarding``.
+    the field even if some future caller builds the serializer by hand. Whatever
+    Phase 1 builds for restaurant creation will rely on the model default,
+    ``onboarding`` — the customer-plane creation path was retired with ambient
+    administrator authority (PR-A).
     """
     class Meta:
         model = Restaurant
@@ -147,17 +149,32 @@ class SerializerPutRestaurantEmployee(ModelSerializer):
 
     def validate(self, attrs):
         """
-        Enforce the platform-staff invariant at the single serializer choke point
-        for employee CREATE and REACTIVATE (active False->True): a platform-staff
-        account may not be given, or have reactivated, a restaurant membership.
-        Editing or deactivating an already-active membership is NOT the invariant's
-        concern — pre-existing dual-role rows are tolerated until the founder
-        account split (PR-2b). A no-op for ordinary restaurant_user accounts, so
-        normal employee create/reactivate flows are unaffected.
+        Enforce both halves of the platform-staff identity invariant at the single
+        serializer choke point for employee writes.
+
+        Roles: a membership may never carry a platform-only role
+        (``dinify_admin`` / ``dinify_account_manager``). Checked on EVERY write that
+        supplies ``roles``, create or update — ``roles`` is client-supplied at the
+        POST branches and through Secretary's ``restaurant_employee`` edit list, and
+        this is the one place all of them pass through.
+
+        Membership: a platform-staff account may not be given, or have reactivated,
+        a restaurant membership — checked on CREATE and REACTIVATE (active
+        False->True) only. Editing or deactivating an already-active membership is
+        NOT the invariant's concern; pre-existing dual-role rows are tolerated until
+        the founder account split (PR-2b).
+
+        Both are no-ops for ordinary restaurant_user accounts and ordinary
+        restaurant roles, so normal employee flows are unaffected.
         """
         attrs = super().validate(attrs)
         # Lazy import keeps app-load order safe and avoids an import cycle.
-        from platform_admin_app.services import guard_membership_creation
+        from platform_admin_app.services import (
+            assert_no_platform_roles, guard_membership_creation,
+        )
+
+        if 'roles' in attrs:
+            assert_no_platform_roles(attrs.get('roles'))
 
         if self.instance is None:
             # Creation: a new membership is active-by-intent unless explicitly not.

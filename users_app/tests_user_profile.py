@@ -19,6 +19,7 @@ import json
 from django.test import TestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from platform_admin_app.testing import give_legacy_platform_role
 from users_app.models import User
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
@@ -26,7 +27,6 @@ from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER,
     RESTAURANT_MANAGER,
     RESTAURANT_STAFF,
-    DINIFY_ADMIN,
 )
 
 SELF_URL = '/api/v1/users/user-profile/'
@@ -102,15 +102,31 @@ class SelfServiceProfileUpdateTests(TestCase):
         user.refresh_from_db()
         self.assertEqual(user.last_name, 'Staffer')
 
-    def test_dinify_admin_self_update_is_applied(self):
-        user = make_user('256750000013', roles=[DINIFY_ADMIN])
+    def test_legacy_platform_role_holder_self_update_is_applied(self):
+        # Self-update applies for EVERY role, and carrying the retired platform
+        # role string neither unlocks nor blocks it — the account is an ordinary
+        # restaurant_user whichever strings its roles list happens to hold.
+        user = give_legacy_platform_role(make_user('256750000013'))
         resp = put_json(self.client, SELF_URL, user, {
-            'first_name': 'Admin', 'email': 'admin.new@test.com',
+            'first_name': 'Legacy', 'email': 'legacy.new@test.com',
         })
         self.assertEqual(resp.status_code, 200, resp.content)
         user.refresh_from_db()
-        self.assertEqual(user.first_name, 'Admin')
-        self.assertEqual(user.email, 'admin.new@test.com')
+        self.assertEqual(user.first_name, 'Legacy')
+        self.assertEqual(user.email, 'legacy.new@test.com')
+
+    def test_self_update_cannot_write_roles(self):
+        # `roles` is read_only on SerGetUserProfile and absent from the write
+        # path's field list, so a client-supplied value is ignored, not applied.
+        user = self._employee('256750000015', [RESTAURANT_STAFF])
+        resp = put_json(self.client, SELF_URL, user, {
+            'first_name': 'Escalate', 'roles': ['dinify' '_admin'],
+        })
+        self.assertEqual(resp.status_code, 200, resp.content)
+        user.refresh_from_db()
+        self.assertEqual(user.first_name, 'Escalate')
+        # Restaurant roles live on RestaurantEmployee; User.roles stays empty.
+        self.assertEqual(user.roles, [])
 
     def test_roleless_diner_self_update_is_applied(self):
         # No regression: a role-less diner could always self-update.
@@ -193,8 +209,8 @@ class V2UserProfileEndpointRetiredTests(TestCase):
     def test_manager_update_profile_is_retired(self):
         # The manager-OTP path is retired: PUT user-profile/update-profile/ no
         # longer resolves to any view -> 404, and performs no write.
-        admin = make_user('256750000041', roles=[DINIFY_ADMIN])
-        resp = put_json(self.client, MANAGER_URL, admin, {'first_name': 'ViaManager'})
+        actor = make_user('256750000041')
+        resp = put_json(self.client, MANAGER_URL, actor, {'first_name': 'ViaManager'})
         self.assertEqual(resp.status_code, 404, resp.content)
-        admin.refresh_from_db()
-        self.assertNotEqual(admin.first_name, 'ViaManager')
+        actor.refresh_from_db()
+        self.assertNotEqual(actor.first_name, 'ViaManager')

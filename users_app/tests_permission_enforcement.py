@@ -21,6 +21,7 @@ import json
 from django.test import TestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from platform_admin_app.testing import give_legacy_platform_role
 from users_app.models import User
 from users_app.controllers.permissions_check import (
     can_user_access_module,
@@ -38,7 +39,6 @@ from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Live, RestaurantStatus_Onboarding,
     RestaurantStatus_Suspended, RestaurantStatus_Offboarded,
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN, RESTAURANT_STAFF,
-    DINIFY_ADMIN,
     MODULE_MENU, MODULE_TABLES, MODULE_REPORTS, MODULE_REVIEWS, MODULE_TEAM,
     MODULE_SETTINGS, MODULE_SUPPORT,
 )
@@ -98,13 +98,29 @@ class ScopingPrimitiveTests(TestCase):
         self.staff = make_user('256730000004')
         RestaurantEmployee.objects.create(
             user=self.staff, restaurant=self.restaurant, roles=[RESTAURANT_STAFF])
-        self.admin = make_user('256730000005', roles=[DINIFY_ADMIN])
+        # An account carrying the RETIRED platform role string — the
+        # principal the removed bypass was built for.
+        self.legacy_role_holder = give_legacy_platform_role(
+            make_user('256730000005'))
         self.outsider = make_user('256730000006')
         self.rid = str(self.restaurant.id)
 
-    def test_admin_is_unrestricted_none(self):
-        self.assertIsNone(get_module_restaurant_ids(self.admin, MODULE_MENU))
-        self.assertIsNone(get_employed_restaurant_ids(self.admin))
+    def test_legacy_platform_role_scopes_to_nothing(self):
+        # Was `test_admin_is_unrestricted_none`. Both resolvers used to answer
+        # `None` for a role-holder, which every caller reads as "do not scope" —
+        # the sentinel behind `model.objects.all()` and the untouched list filter.
+        # There is no unrestricted return any more: always a set, here an empty one.
+        self.assertEqual(
+            get_module_restaurant_ids(self.legacy_role_holder, MODULE_MENU), set())
+        self.assertEqual(get_employed_restaurant_ids(self.legacy_role_holder), set())
+
+    def test_no_principal_resolves_to_the_unrestricted_sentinel(self):
+        for user in (self.owner, self.manager, self.chef, self.staff,
+                     self.legacy_role_holder, self.outsider):
+            with self.subTest(user=user.username):
+                self.assertIsInstance(
+                    get_module_restaurant_ids(user, MODULE_MENU), set)
+                self.assertIsInstance(get_employed_restaurant_ids(user), set)
 
     def test_owner_has_every_module(self):
         for module in (MODULE_MENU, MODULE_TABLES, MODULE_REPORTS, MODULE_REVIEWS,
@@ -240,7 +256,10 @@ class CatchAllModuleEnforcementTests(TestCase):
         self.chef = make_user('256731000004')
         RestaurantEmployee.objects.create(
             user=self.chef, restaurant=self.restaurant, roles=[RESTAURANT_KITCHEN])
-        self.admin = make_user('256731000005', roles=[DINIFY_ADMIN])
+        # An account carrying the RETIRED platform role string — the
+        # principal the removed bypass was built for.
+        self.legacy_role_holder = give_legacy_platform_role(
+            make_user('256731000005'))
 
         self.section = MenuSection.objects.create(
             name='Mains', restaurant=self.restaurant, listing_position=0)
@@ -305,13 +324,16 @@ class CatchAllModuleEnforcementTests(TestCase):
         # ... but NOT team (employees -> team is owner-only), so it scopes empty
         self.assertEqual(records(self._get(self.manager, 'employees')), [])
 
-    def test_admin_unrestricted_across_tenants(self):
-        # admin reads restaurant B's menu items it has no employment at
-        self.assertIn(
-            str(self.item_b.id),
-            record_ids(self._get(self.admin, 'menuitems',
-                                 qs=f'restaurant={self.restaurant_b.id}')),
-        )
+    def test_legacy_platform_role_reads_no_tenant(self):
+        # Was `test_admin_unrestricted_across_tenants`: the role-holder read
+        # restaurant B's menu items despite holding no employment anywhere. It now
+        # reads neither B nor A.
+        for restaurant in (self.restaurant_b, self.restaurant):
+            self.assertEqual(
+                records(self._get(self.legacy_role_holder, 'menuitems',
+                                  qs=f'restaurant={restaurant.id}')),
+                [],
+            )
 
     # -- write gate: the module split -----------------------------------
 
@@ -461,7 +483,10 @@ class ReportsReviewsSupportEnforcementTests(TestCase):
         self.chef = make_user('256733000003')
         RestaurantEmployee.objects.create(
             user=self.chef, restaurant=self.restaurant, roles=[RESTAURANT_KITCHEN])
-        self.admin = make_user('256733000004', roles=[DINIFY_ADMIN])
+        # An account carrying the RETIRED platform role string — the
+        # principal the removed bypass was built for.
+        self.legacy_role_holder = give_legacy_platform_role(
+            make_user('256733000004'))
 
         self.table = Table.objects.create(
             number=1, str_number='1', restaurant=self.restaurant)
@@ -502,11 +527,11 @@ class ReportsReviewsSupportEnforcementTests(TestCase):
             **auth(self.chef))
         self.assertEqual(resp.status_code, 404)
 
-    def test_admin_reads_reports_any_tenant(self):
+    def test_legacy_platform_role_reads_reports_of_no_tenant(self):
         resp = self.client.get(
             f'{REPORTS_URL}sales-listing/?restaurant={self.restaurant_b.id}&{DATE_QS}',
-            **auth(self.admin))
-        self.assertEqual(resp.status_code, 200, resp.content)
+            **auth(self.legacy_role_holder))
+        self.assertEqual(resp.status_code, 404, resp.content)
 
     # reviews -> reviews module
     def test_owner_sees_reviews_staff_does_not(self):
@@ -566,7 +591,10 @@ class AdminElevatedActionsTests(TestCase):
         self.staff = make_user('256734000004')
         RestaurantEmployee.objects.create(
             user=self.staff, restaurant=self.restaurant, roles=[RESTAURANT_STAFF])
-        self.admin = make_user('256734000005', roles=[DINIFY_ADMIN])
+        # An account carrying the RETIRED platform role string — the
+        # principal the removed bypass was built for.
+        self.legacy_role_holder = give_legacy_platform_role(
+            make_user('256734000005'))
 
         self.table = Table.objects.create(
             number=1, str_number='1', restaurant=self.restaurant)
@@ -598,8 +626,14 @@ class AdminElevatedActionsTests(TestCase):
         return Review.objects.create(order=order, overall_rating=2)
 
     # kitchen goodwill-cancel (manage-level elevation over 'preparing')
-    def test_admin_can_goodwill_cancel(self):
-        resp = self._cancel(self.admin, self._preparing_order())
+    def test_legacy_platform_role_cannot_goodwill_cancel(self):
+        # `can_manage_restaurant` used to return True for a role-holder at every
+        # restaurant. Goodwill-cancel is now owner/manager only.
+        resp = self._cancel(self.legacy_role_holder, self._preparing_order())
+        self.assertEqual(resp.status_code, 403, resp.content)
+
+    def test_owner_can_goodwill_cancel(self):
+        resp = self._cancel(self.owner, self._preparing_order())
         self.assertEqual(resp.status_code, 200, resp.content)
 
     def test_chef_cannot_goodwill_cancel_preparing(self):
@@ -611,12 +645,16 @@ class AdminElevatedActionsTests(TestCase):
         resp = self.client.put(
             '/api/v1/kitchen/orders/00000000-0000-0000-0000-000000000000/cancel/',
             data=json.dumps({'cancellation_reason': 'other'}),
-            content_type='application/json', **auth(self.admin))
+            content_type='application/json', **auth(self.owner))
         self.assertEqual(resp.status_code, 404)
 
     # review resolution (can_manage_restaurant)
-    def test_admin_can_resolve_review(self):
-        resp = self._resolve(self.admin, self._review())
+    def test_legacy_platform_role_cannot_resolve_review(self):
+        resp = self._resolve(self.legacy_role_holder, self._review())
+        self.assertEqual(resp.status_code, 403, resp.content)
+
+    def test_owner_can_resolve_review(self):
+        resp = self._resolve(self.owner, self._review())
         self.assertEqual(resp.status_code, 200, resp.content)
 
     def test_manager_can_resolve_review(self):

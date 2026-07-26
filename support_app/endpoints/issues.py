@@ -41,9 +41,8 @@ class RestaurantIssuesEndpoint(APIView):
     def post(self, request):
         restaurant_id = request.data.get('restaurant')
         allowed = get_employed_restaurant_ids(request.user)
-        # `not allowed` rejects both the dinify-admin (None) and deny-all (set())
-        # cases — an admin doesn't raise issues on a restaurant's behalf, while
-        # ANY active employee of the restaurant may (support is ungated).
+        # ANY active employee of the restaurant may raise an issue (support is
+        # ungated); nobody else may. `not allowed` is the deny-all case.
         if not allowed or restaurant_id is None or str(restaurant_id) not in allowed:
             return Response(
                 {
@@ -84,14 +83,15 @@ class RestaurantIssuesEndpoint(APIView):
     def get(self, request):
         allowed = get_employed_restaurant_ids(request.user)
         orm_filter = {'deleted': False}
-        if allowed is not None:
-            # Non-admin: bind to the caller's own (employed) restaurants. A client
-            # ?restaurant= may only narrow within that set, never widen it.
-            client_restaurant = request.GET.get('restaurant')
-            if client_restaurant is not None and str(client_restaurant) in allowed:
-                orm_filter['restaurant__in'] = [str(client_restaurant)]
-            else:
-                orm_filter['restaurant__in'] = list(allowed)
+        # Bind to the caller's own (employed) restaurants, unconditionally: the
+        # resolver always returns a set (an empty one denies), so no principal
+        # skips this filter. A client ?restaurant= may only narrow within that
+        # set, never widen it.
+        client_restaurant = request.GET.get('restaurant')
+        if client_restaurant is not None and str(client_restaurant) in allowed:
+            orm_filter['restaurant__in'] = [str(client_restaurant)]
+        else:
+            orm_filter['restaurant__in'] = list(allowed)
 
         secretary_args = {
             'request': request,
@@ -118,9 +118,9 @@ class RestaurantIssueDetailEndpoint(APIView):
             )
         # 404 (not 403) on cross-tenant access so existence is not confirmed.
         # Any active employee of the issue's restaurant may read it (support is
-        # ungated); a dinify admin -> None -> unrestricted.
+        # ungated); nobody else may.
         allowed = get_employed_restaurant_ids(request.user)
-        if allowed is not None and str(issue.restaurant_id) not in allowed:
+        if str(issue.restaurant_id) not in allowed:
             return Response(
                 {'status': 404, 'message': 'Support issue not found.'},
                 status=404,

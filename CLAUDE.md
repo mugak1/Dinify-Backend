@@ -73,7 +73,12 @@ with PostgreSQL on AWS RDS.
   `default_socials`, `opening_hours` via `default_opening_hours` (per-weekday
   `{closed, open, close}` shape)
 - Auth: ✅ Refresh-token rotation + blacklist-on-logout + 7-day refresh lifetime
-  (SimpleJWT, `JWT_REFRESH_LIFETIME_DAYS`)
+  (SimpleJWT, `JWT_REFRESH_LIFETIME_DAYS`). `users_app/urls.py` mounts
+  `GatedTokenRefreshView` (`users_app/endpoints/token_refresh.py`), NOT the stock
+  `TokenRefreshView`: refresh is a place a customer token is produced, so it
+  carries the same `account_type` refusal as login. Platform staff get SimpleJWT's
+  own `token_not_valid` 401 — byte-identical to a bad token, so it is not an
+  account-type oracle — and the success body is unchanged. Do not revert the mount
 - OTP verification hardening: ✅ (PR #192) — the OTP verify path is no longer
   brute-forceable. `UserOtp` gains `attempts`/`consumed_at`/`salt`/`identifier`
   (migration `users_app/0009_otp_hardening`, which also purges pre-existing
@@ -113,6 +118,21 @@ with PostgreSQL on AWS RDS.
   controller and the `SerPutUserProfile` write serializer were all DELETED as
   dead surface (C5, PR #247), the frontend never having called them.
   `SerGetUserProfile` is kept
+- Ambient administrator authority — REMOVED: ✅ (Phase 0.5 PR-A) `User.roles` is no
+  longer an authority vocabulary. `account_type` decides the plane; `roles` carries
+  restaurant roles only. `is_dinify_admin` / `is_dinify_superuser` / `dinify_roles`
+  and the `DINIFY_ADMIN` / `DINIFY_ACCOUNT_MANAGER` constants are DELETED, along
+  with every grant they fed: the `check_permission` write bypass, the full-access
+  module map, the `None` "unrestricted" sentinel on both id resolvers (and with it
+  `build_scoped_instance_queryset`'s `model.objects.all()`), the `can_manage_restaurant`
+  short-circuit, the login `require_otp` arm, the `user-lookup` disjunct and the
+  first-time menu self-approval exemption. Four surfaces with no reachable
+  principal went with them — `admin-register-restaurant`, the subscription write,
+  `reports/dinify/*` and `support/admin/issues/` (see their sections). The refresh
+  route is now gated and migration `users_app/0013` blacklists outstanding
+  platform-staff tokens. Cross-tenant reach on the customer plane comes from a
+  delegation grant or from nowhere; `scripts/check_ambient_authority.py` +
+  `dinify_backend/tenancy/tests_ambient_authority.py` keep it that way
 - Tenant isolation / role-permission ENFORCEMENT: ✅ Portal gates enforce
   per-module access via `can_user_access_module` / `get_module_restaurant_ids`
   (`users_app/controllers/permissions_check.py`) — see the "Tenant Isolation /
@@ -281,11 +301,14 @@ with PostgreSQL on AWS RDS.
   still exists
 - Support module: ✅ `support_app` — restaurant-facing `SupportIssue`
   ticketing, Secretary-pattern
-  endpoints at `api/v1/support/` (`support_app/urls.py`): `issues/`,
-  `issues/<uuid:issue_id>/`, and dinify-admin `admin/issues/`. Support is an
-  UNGATED module: list/detail/create are widened to ANY active employee of the
-  restaurant via `get_employed_restaurant_ids` (dinify-admin excluded from
-  create); references are sequential, collision-safe `SUP-000123`. Migration
+  endpoints at `api/v1/support/` (`support_app/urls.py`): `issues/` and
+  `issues/<uuid:issue_id>/`. The dinify-admin `admin/issues/` triage endpoint was
+  RETIRED by PR-A (it read/wrote ANY tenant's issues on the strength of a
+  `dinify_admin` role string, via an unrestricted `SupportIssue.objects.all()`;
+  Phase 1 rebuilds triage on `/api/admin/v1`). Support is an UNGATED module:
+  list/detail/create are widened to ANY active employee of the restaurant via
+  `get_employed_restaurant_ids`; references are sequential, collision-safe
+  `SUP-000123`. Migration
   `support_app/0001_initial`. The legacy `crm_app.ServiceTicket` app it
   superseded was fully DELETED (PR #193) — its `api/v1/crm/service-tickets/`
   endpoint was `IsAuthenticated`-only with no tenant scoping (any token,
@@ -490,10 +513,14 @@ with PostgreSQL on AWS RDS.
   generic unmapped handling; dining-area creation with tables goes through
   `create_dining_area(create_tables=True)`. Authz closures (PR #244): the ungated
   POST `restaurants` self-service create branch was REMOVED (DC-BE-014 — it made
-  the caller owner after only a JWT decode); restaurant creation now flows ONLY
-  through the admin-gated `admin-register-restaurant` branch (the `create_restaurant`
-  controller function was removed; its `admin_register_restaurant` sibling in
-  `create_restaurant.py` remains). The last-active-owner guard moved onto the LIVE
+  the caller owner after only a JWT decode); restaurant creation then flowed ONLY
+  through the admin-gated `admin-register-restaurant` branch — which PR-A also
+  REMOVED, along with the whole `create_restaurant.py` module, because its only
+  gate was a `dinify_admin` role string. **There is currently NO API path that
+  creates a restaurant**; this is a knowingly accepted gap until Phase 1 builds
+  onboarding natively on `/api/admin/v1`. Do not re-add one on the customer plane.
+  `PUT restaurant-setup/subscription-details/` was retired in the same PR (405; the
+  settings-gated READ stays live). The last-active-owner guard moved onto the LIVE
   employee-deactivation path (PUT `employees` `{active:'false'}`), resolving the
   target through the server-scoped queryset and returning 409 — never 403, which
   force-logs-out the client (DC-BE-011). DELETE on `upsell-config/items/reorder/`
@@ -515,7 +542,7 @@ with PostgreSQL on AWS RDS.
   second gets a clean 400)
 - `api/v1/kitchen/` → Kitchen endpoints (urls_kitchen.py) — separate file
 - `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
-  `issues/`, `issues/<uuid:issue_id>/`, `admin/issues/` — separate app
+  `issues/`, `issues/<uuid:issue_id>/` — separate app (`admin/issues/` retired)
 - `api/v1/reviews/` → reviews_app endpoints (`reviews_app/urls.py`):
   `submit/`, `summary/`, `analytics/`, `<int:review_id>/resolution/`,
   `` (root) — separate app
@@ -567,11 +594,13 @@ the catch-all `<str:config_detail>/` route.
   change and persists (HTTP 200), rather than collapsing to "no changes detected"
 - `flat_fee` (the Dinify subscription price billed by
   `finance_app.tx_subscription`) is registered in `EDIT_INFORMATION['restaurants']`
-  but is PLATFORM-owned — the restaurant-setup write path STRIPS the key from a
-  non-admin's `restaurants` PUT payload AFTER `check_permission` and BEFORE the
-  Secretary dispatch (PR #211), so an owner/settings-manager cannot zero their own
-  subscription price. Dinify admins keep write access. This is a post-gate payload
-  strip, NOT an EDIT_INFORMATION removal — do not delete it from EDIT_INFORMATION
+  but is PLATFORM-owned — the restaurant-setup write path STRIPS the key from
+  EVERY `restaurants` PUT payload AFTER `check_permission` and BEFORE the Secretary
+  dispatch (PR #211; made unconditional by PR-A), so no principal on this plane can
+  zero a subscription price. It used to be stripped only for non-admins, which left
+  a `dinify_admin` role-holder able to write it. This is a post-gate payload strip,
+  NOT an EDIT_INFORMATION removal — the key deliberately STAYS in EDIT_INFORMATION
+  so the Phase-1 admin-plane writer can still go through Secretary
 - `status` is DIFFERENT and stricter: PR-5 REMOVED it from
   `EDIT_INFORMATION['restaurants']` entirely (and made it `read_only` on
   `SerializerPutRestaurant`), so NO principal writes it through Secretary — see
@@ -590,14 +619,15 @@ the catch-all `<str:config_detail>/` route.
   only constrains non-owner/manager roles (kitchen, staff) and custom
   `RestaurantRolePermission` overrides.
   - `can_user_access_module(user, restaurant_id, module)` → single-record /
-    single-restaurant gate (A's resolver — do NOT modify). Dinify admin → all
-    True; owner → all; otherwise the role grid. `support` is ungated (always
-    True). Fail closed — a None/unknown restaurant denies for non-admins.
+    single-restaurant gate (A's resolver — do NOT modify). Owner → all; otherwise
+    the role grid. `support` is ungated (always True). Fail closed — a
+    None/unknown restaurant denies.
   - `get_module_restaurant_ids(user, module)` → list-scoping counterpart:
-    `None` for a dinify admin (unrestricted — callers must NOT scope), `set()`
-    deny-all, otherwise the restaurant ids whose grid grants `module` (active
-    restaurant + active, non-deleted employment). `support` → every employed
-    restaurant.
+    ALWAYS a set — `set()` deny-all, otherwise the restaurant ids whose grid grants
+    `module` (active restaurant + active, non-deleted employment). `support` →
+    every employed restaurant. The `None` = "unrestricted, callers must NOT scope"
+    sentinel was REMOVED by PR-A: it was what turned a `dinify_admin` role string
+    into `model.objects.all()` and an untouched list filter. Do not reintroduce it.
   - `get_employed_restaurant_ids(user)` → role-agnostic employed set (no
     restaurant-status filter); powers the ungated `support` module's scoping.
   - `get_any_restaurant_roles(user)` (login/profile portal-role payload) also
@@ -608,8 +638,16 @@ the catch-all `<str:config_detail>/` route.
     `READ_ROLES` (owner/manager-only) were DELETED — do not reintroduce them.
     `can_manage_restaurant` / `MANAGE_ROLES` REMAIN, but only for the
     manage-level elevation gates ABOVE module access (review resolution,
-    kitchen goodwill-cancel) — these are intentionally NOT module-granular and
-    short-circuit dinify-admin.
+    kitchen goodwill-cancel) — these are intentionally NOT module-granular.
+  - NO PLATFORM SHORT-CIRCUIT EXISTS (PR-A). `is_dinify_admin` /
+    `is_dinify_superuser` / `dinify_roles` and the `DINIFY_ADMIN` /
+    `DINIFY_ACCOUNT_MANAGER` constants are DELETED. `User.roles` is never read for
+    platform authority anywhere on this plane; `account_type` is the sole
+    plane discriminator and `roles` carries restaurant roles only. A platform
+    administrator reaches tenant data ONLY through a delegation grant. A standing
+    CI gate (`scripts/check_ambient_authority.py` +
+    `dinify_backend/tenancy/ambient_authority.py`, TENANT-AUTH-00, empty allowlist)
+    fails the build if any of it regrows by name.
   - The per-(restaurant, role) grids have an owner-only MANAGEMENT surface —
     `RolePermissionsEndpoint` (GET/PUT `restaurant-setup/role-permissions/`,
     `team`-gated) over the `RestaurantRolePermission` override model, seeded by
@@ -912,10 +950,12 @@ the catch-all `<str:config_detail>/` route.
   `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
-  `users_app/migrations/0012_alter_user_phone_number.py` (0010 adds
+  `users_app/migrations/0013_close_ambient_admin_authority.py` (0010 adds
   `User.account_type`; 0011 flips existing platform-role holders to
   `platform_staff`; 0012 makes `phone_number` unique — see the "Platform-admin
-  identity layer" bullet),
+  identity layer" bullet; 0013 blacklists outstanding platform-staff refresh
+  tokens and strips platform-only roles from `restaurant_user` rows, data-only and
+  idempotent — see "Tenant Isolation / Role-Permission ENFORCEMENT"),
   `platform_admin_app/migrations/0006_delegatedsession.py` (0001 identity,
   0002 `AdminSession`, 0003 `AdminAuditLog`, 0004 TOTP replay counter,
   0005 `DelegationGrant`, 0006 `DelegatedSession`),
@@ -931,6 +971,14 @@ the catch-all `<str:config_detail>/` route.
 - Spins up a real Postgres 15, runs `django check`,
   `makemigrations --check --dry-run`, then the money-field guard
   (`scripts/check_money_fields.py`) against `dinify_backend.test_settings`
+- Then the ambient-authority gate (`scripts/check_ambient_authority.py`,
+  TENANT-AUTH-00): no customer-plane production module may reference the retired
+  role-based admin predicates/constants, hard-code a platform-only role string, or
+  select users by one through a `roles__*` ORM lookup. Unlike the ratchet below
+  this is a flat zero-tolerance check with an EMPTY allowlist, and it is PERMANENT
+  — there is no future state in which reintroducing the mechanism is acceptable.
+  Scope + the four documented exclusions live in
+  `dinify_backend/tenancy/ambient_authority.py`
 - Also runs the tenant-relation ratchet (`scripts/check_tenant_relation_ratchet.py`,
   TENANT-STRUCT-00): the `dinify_backend/tenancy/baseline.txt` of not-yet-classified
   writable serializer relations may only SHRINK (PR base or, on push,
