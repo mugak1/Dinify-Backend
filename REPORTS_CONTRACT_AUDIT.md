@@ -23,6 +23,10 @@ everything else ✓. The single highest-risk seam is the **sales-trends period
 label format** (BE emits `'Mar-24'`, FE `parseISO()` throws) — triggered by the
 one-click **"This year"** preset.
 
+> §9 (`dashboard-v2`) was added after this audit and is **not** covered by the verdict
+> above: it documents that endpoint's granularity contract only, and carries one open
+> seam of its own (no bucket-count cap).
+
 > Backend file:line citations refer to `mugak1/Dinify-Backend`; frontend
 > citations are paths relative to `src/app/restaurant-mgt/reports/` unless noted.
 
@@ -120,6 +124,49 @@ one-click **"This year"** preset.
 | Fields | `customer_id, name, phone_number, no_orders, total_spend, average_spend, last_order_date` (reports.models.ts:174-185) | same keys; `customer_id` UUID, money `#` (diners.py:179-194) | ✓ (UUID→String) |
 | Enums | n/a | n/a | — |
 | Caps | `recentWindow` caps span→31 (diners/diners-view.ts:80-88; diners-report.component.ts:120) | `>31d → 400` (diners.py:150-154) | ✓ |
+
+### 9. dashboard-v2  (GET · `api.get`) — granularity contract only
+| Dim | FE | BE | |
+|---|---|---|---|
+| Slug | `…/dashboard-v2/` | `'dashboard-v2'` (restaurant_reports.py:109) | ✓ |
+| Params | today: `restaurant, from, to, period∈{day,week,month,ytd}`; after TIMEFRAME-01B: `restaurant, from, to, bucket∈{hour,day,month,year}` | reads `restaurant, from(def today), to(def today), period(def 'day')`, `bucket` (**no default**) | ✓ both accepted; `bucket` wins when both sent |
+| Envelope | `res.data` | `{status, data:{…}}` on 200 — note **no `message` key**, unlike the eight reports above; `{status, message}` on 400 | ⚠ asymmetric, pre-existing, deliberately unchanged |
+| Fields | `revenue, payment_methods, orders, popular_items, tables, kds` | unchanged by DASH-PERIOD-00 | ✓ |
+| Enums | granularity vocabulary (below) | `hour, day, month, year` | ✓ |
+| Caps | none | **none** — `clean_dates` only parses/orders the dates | ✗ see the note |
+
+> **`bucket` (DASH-PERIOD-00) — the honest granularity vocabulary.** The backend
+> accepts `bucket ∈ {hour, day, month, year}` (→ `TruncHour`/`Day`/`Month`/`Year`),
+> resolved **fail-CLOSED**: an unrecognised value is a **400** whose message names the
+> accepted values, never a silent default. Absent — omitted, empty, or
+> whitespace-only — falls back to the legacy `period`, so a stray `&bucket=` is not an
+> error. When both are supplied **`bucket` wins** and does not error.
+>
+> **`period` is DEPRECATED but fully honoured**, including its fail-OPEN hourly
+> default, so this backend could merge and auto-deploy *before* the frontend's
+> TIMEFRAME-01B. It is removed in a follow-up once no caller sends it.
+>
+> **Why a new parameter and not an alias.** The vocabularies collide — the same
+> string means different things:
+>
+> | value | as `period` (legacy) | as `bucket` (honest) |
+> |---|---|---|
+> | `day` | `TruncHour` | `TruncDay` |
+> | `month` | `TruncDay` | `TruncMonth` |
+>
+> No alias table can express both, so the two maps (`TRUNC_MAP` / `BUCKET_TRUNC` in
+> `controllers/restaurant/dashboard.py`) are deliberately **not** unified;
+> `reports_app/tests_dashboard_report.py` pins the divergence against a future tidy-up.
+> There is deliberately **no `week`** entry — the dashboard ladder does not emit a
+> weekly bucket. This is also *not* `common/bucketing.py::PERIOD_TRUNC`, which has no
+> `hour` and carries `week`/`quarter` this endpoint has no caller for; `sales-trends`'
+> `weekly` (TRENDS-WEEKLY-00) is a different endpoint with a different ladder.
+>
+> **Open seam — no bucket-count cap.** Fail-closing the vocabulary stops the *typo*
+> path, but nothing bounds the bucket count of a *valid* request: `bucket=hour` over a
+> 200-day range is still ~4,800 buckets, and unlike `sales-trends` (`TREND_CAPS`) this
+> endpoint has no per-granularity date cap. Recommended follow-up, sized once
+> TIMEFRAME-01B pins the ranges the frontend actually requests.
 
 ---
 
