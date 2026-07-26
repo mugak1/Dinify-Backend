@@ -20,6 +20,7 @@ from django.db import transaction, IntegrityError
 from django.utils import timezone
 
 from orders_app.models import Order, RestaurantDailyOrderCounter
+from restaurants_app.controllers.lifecycle_policy import orders_are_commercial
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated,
     PaymentStatus_Pending,
@@ -223,6 +224,14 @@ def _create_order(*, restaurant, table, items,
                         order_date=order_date,
                         fulfilment_status='new',
                         fulfilment_status_updated_at=timezone.now(),
+
+                        # The launch boundary, decided from the restaurant's lifecycle
+                        # state and nothing the caller sent. An order created before
+                        # go-live is a rehearsal; one created after is commerce. Read
+                        # here — inside the transaction, from the same `restaurant`
+                        # the rest of this function is working against — so it cannot
+                        # drift from the gate that let the order through.
+                        is_test=not orders_are_commercial(restaurant.status),
                     )
             except IntegrityError:
                 # concurrent double-tap: a racing request with the same

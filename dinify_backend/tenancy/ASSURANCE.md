@@ -97,6 +97,14 @@ isolation is proven." It is not. Read this before trusting the ratchet.
 - A serializer built by a metaclass/dynamically with no `*Serializer` base in source
   can still slip past AST detection; such patterns are exotic and would need a manual
   addition here if introduced.
+- **`AdminAuditLog` immutability is APPLICATION-enforced, not database-enforced.**
+  The `save()` / `delete()` overrides and the manager's queryset guard stop ordinary
+  code paths and mistakes. They do **not** stop `bulk_create` (which never calls
+  `save()`), `QuerySet.raw`, direct SQL, or anyone holding the database credentials.
+  So the audit log is trustworthy against application bugs, and is **not** evidence
+  against an attacker who already has database access or a compromised application
+  process. A Postgres `BEFORE UPDATE OR DELETE` trigger is the strictly stronger
+  option and the named next step; it is deliberately not built (PR-D §2.5).
 
 ## One-line summary
 

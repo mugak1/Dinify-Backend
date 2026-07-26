@@ -74,9 +74,14 @@ class Command(BaseCommand):
         with transaction.atomic():
             # get the paid orders where the customer is null
             # TODO only consider paid orders
+            # Test orders are excluded, and this is the exclusion that matters most:
+            # unmatched contact details here CREATE a real platform User with a random
+            # password. A rehearsal order carrying the owner's own phone number would
+            # otherwise mint an account for them every time this runs.
             orders = Order.objects.filter(
                 customer=None,
-                customer_match_attempted=False
+                customer_match_attempted=False,
+                is_test=False,
             )
             for order in orders:
                 customer_phone = None

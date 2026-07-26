@@ -16,6 +16,7 @@ import logging
 from datetime import timedelta
 
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.db.models import Q, Prefetch
 from django.utils import timezone
 from rest_framework.views import APIView
@@ -354,7 +355,21 @@ class KitchenMenuItemStockView(APIView):
             item.in_stock = bool(request.data.get('in_stock'))
         else:
             item.in_stock = not item.in_stock
-        item.save(update_fields=['in_stock', 'time_last_updated'])
+
+        # ONE transaction for the write and its audit. This is one of the two tenant
+        # writes a delegated administrator can reach, and the audit used to be written
+        # by the middleware after this view had already returned — too late to unwind
+        # anything. Recording it here means a failed audit rolls the toggle back.
+        # A no-op for ordinary staff: the helper returns False and writes nothing.
+        from platform_admin_app.delegated_audit import audit_delegated_write
+
+        with transaction.atomic():
+            item.save(update_fields=['in_stock', 'time_last_updated'])
+            audit_delegated_write(request, after_state={
+                'resource': 'MenuItem',
+                'menu_item_id': str(item.id),
+                'in_stock': item.in_stock,
+            })
 
         return Response(
             {

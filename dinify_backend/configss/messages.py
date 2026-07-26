@@ -27,6 +27,10 @@ MESSAGES = {
     'DUPLICATE_RESTAURANT_NAME': 'You already have a restaurant with this name',
     'OK_CREATE_RESTAURANT': 'The restaurant has been created succesfully.',
     'BLOCKED_RESTAURANT': 'Sorry, the restaurant cannot accept orders at this time',  # noqa
+    # A restaurant that exists and is being set up, but has not gone live. Said in
+    # plain language because a diner standing at a table reads it — they have done
+    # nothing wrong and there is nothing for them to fix.
+    'NOT_OPEN_YET': 'This restaurant is not open for orders yet. Please check back soon.',  # noqa
     'RESTAURANT_NOT_FOUND': 'Sorry, the provided restaurant is not supported',
 
     # deletion

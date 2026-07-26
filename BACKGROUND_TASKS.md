@@ -159,6 +159,20 @@ This sequence is covered end to end by `platform_admin_app/tests_second_factor.p
 
 ---
 
+## Go-live is blocked until Phase 1 (deliberate)
+
+`restaurants_app.controllers.lifecycle.check_go_live_readiness` **fails closed** as of PR-D: it returns not-ready with the single blocker `readiness_not_configured`, so the `onboarding → live` transition is refused on every path — the admin endpoint, the service, the shell.
+
+It previously returned ready unconditionally without ever reading the restaurant it was passed. That is worse than having no gate: the one check standing between a half-built restaurant and real diners always said yes, while reading as protection.
+
+**Nothing is stranded by this today.** There is no API path that creates a restaurant (PR-A retired the last one), and the single production restaurant is already `live`. So there is no restaurant that needs to go live and cannot.
+
+**There is deliberately no override.** Not a flag, not a management command, not a service parameter. A bypass built "just until Phase 1" is exactly the kind that outlives its reason, and the thing being bypassed is the launch gate. Phase 1 replaces the function body — the seam's shape, its call site and its blocker vocabulary are already in place.
+
+If a restaurant genuinely must go live before Phase 1 lands, that is a decision to make explicitly and with a code change, not an operational workaround.
+
+---
+
 ## Operational Gaps
 
 ### No scheduling infrastructure

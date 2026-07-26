@@ -399,14 +399,18 @@ class AdminAuditLog(models.Model):
     transaction): rows here are written synchronously, inside the caller's
     transaction, and a failed write raises. See ``platform_admin_app.audit``.
 
-    APPEND-ONLY ENFORCEMENT is service-layer, in three places: ``save()`` refuses
-    to update an already-persisted row, ``delete()`` refuses outright, and the
-    manager's queryset refuses ``update()`` / ``delete()``. Known residual bypasses
-    — ``bulk_create`` (never calls ``save()``), ``QuerySet.raw`` and direct SQL —
-    are NOT closed here. A Postgres rule or ``BEFORE UPDATE OR DELETE`` trigger is
-    the strictly stronger option and the natural next step if the log ever needs
-    to resist a compromised application process; it is deliberately not added in
-    this PR.
+    APPEND-ONLY ENFORCEMENT IS APPLICATION-ENFORCED, **NOT DATABASE-ENFORCED**. Say
+    it plainly, because "append-only" otherwise reads as a stronger guarantee than
+    the code delivers. Three service-layer places enforce it: ``save()`` refuses to
+    update an already-persisted row, ``delete()`` refuses outright, and the manager's
+    queryset refuses ``update()`` / ``delete()``. Known residual bypasses —
+    ``bulk_create`` (never calls ``save()``), ``QuerySet.raw``, direct SQL, and
+    anything holding the database credentials — are NOT closed here and cannot be
+    closed at this layer. The log therefore resists mistakes and ordinary code paths;
+    it does NOT resist a compromised application process or anyone with database
+    access. A Postgres rule or ``BEFORE UPDATE OR DELETE`` trigger is the strictly
+    stronger option and the natural next step if it ever needs to; it is deliberately
+    not added here.
 
     No ``BaseModel`` inheritance and no soft-delete fields: ``deleted`` /
     ``deletion_reason`` / ``deleted_by`` / ``archived`` / ``vacuumed`` /

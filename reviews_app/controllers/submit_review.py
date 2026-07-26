@@ -106,6 +106,18 @@ def submit_review(order_id, rating_fields, comment=None, tags=None,
             'message': 'This order is not eligible for review.',
         }
 
+    #    A pre-go-live rehearsal order is not reviewable either, and shares the same
+    #    restrained message. Blocked at the door rather than filtered downstream
+    #    because Review denormalises `restaurant` and the analytics aggregate on THAT
+    #    — they never join Order, so an `is_test` filter would not reach them and a
+    #    rehearsal review would move the restaurant's real rating average and land in
+    #    the service-recovery queue.
+    if order.is_test:
+        return {
+            'status': 400,
+            'message': 'This order is not eligible for review.',
+        }
+
     # 3. Already reviewed (409). The reverse OneToOne raises
     #    RelatedObjectDoesNotExist when absent, so probe with hasattr. This
     #    friendly pre-check intentionally precedes the write serializer's

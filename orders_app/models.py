@@ -60,6 +60,21 @@ class Order(BaseModel):
     # idempotency key supplied by the diner app (Phase 3); absent today
     client_order_id = models.UUIDField(null=True, blank=True, db_index=True)
 
+    # === the launch boundary (PR-D) ===
+    # A rehearsal order, placed by the owner while the restaurant was still
+    # `onboarding` so they could prove the flow end to end before going live.
+    #
+    # OPERATIONALLY REAL, COMMERCIALLY INVISIBLE. It occupies its table, reaches the
+    # kitchen board and is served or cancelled like any other order — that is the
+    # entire point of the rehearsal — but it is excluded from every revenue,
+    # historical and diner-analytics consumer, and it cannot be reviewed.
+    #
+    # SERVER-DERIVED, NEVER CLIENT-SUPPLIED: set in `_create_order` from
+    # `lifecycle_policy.orders_are_commercial(restaurant.status)`. There is no request
+    # field for it, so it cannot be spoofed in either direction — a diner cannot mark
+    # a real order as test, and an owner cannot mark a rehearsal as real.
+    is_test = models.BooleanField(default=False, db_index=True)
+
     # === kitchen-owned fulfilment axis (Phase 2) ===
     # Kitchen writes these fields on every transition. It ALSO writes
     # order_status on two transitions — the serve/recall completion transition

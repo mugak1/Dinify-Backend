@@ -62,8 +62,15 @@ def sale_orders(restaurant_id, date_from, date_to):
     The queryset is lazy (no query runs until it is evaluated) and filters on:
       * ``restaurant`` == ``restaurant_id``
       * ``order_status__in`` == :data:`SALE_STATUSES`
+      * ``is_test`` is False — a pre-go-live rehearsal order is not a sale
       * ``time_created`` within the inclusive local-day range
         ``[date_from, date_to]``
+
+    THIS IS THE CHOKEPOINT for test-order exclusion. Sales listing/trends/hourly,
+    diners summary/listing and menu summary all derive their base queryset from here,
+    so they inherit the ``is_test`` filter and must not re-add it. The dashboards and
+    the transactions report build their own querysets and carry their own exclusion —
+    see ``restaurant/dashboard.py`` and ``restaurant/transactions.py``.
 
     Date filtering aligns to the *local* day (EAT). Under ``USE_TZ = True`` the
     ``__date`` lookup extracts the date in the active timezone, so a ``__date``
@@ -76,6 +83,7 @@ def sale_orders(restaurant_id, date_from, date_to):
     return Order.objects.filter(
         restaurant=restaurant_id,
         order_status__in=SALE_STATUSES,
+        is_test=False,
         time_created__date__gte=date_from,
         time_created__date__lte=date_to,
     )

@@ -24,7 +24,7 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from dinify_backend.configss.edit_information import EDIT_INFORMATION
-from dinify_backend.configss.messages import ERR_RESTAURANT_UNAVAILABLE
+from dinify_backend.configss.messages import ERR_RESTAURANT_UNAVAILABLE, MESSAGES
 from dinify_backend.configss.string_definitions import (
     MODULE_KITCHEN,
     MODULE_MENU,
@@ -118,6 +118,33 @@ class LifecyclePolicyTests(TestCase):
         self.assertTrue(policy.allows_order_creation(RestaurantStatus_Live))
         self.assertFalse(policy.allows_order_creation(RestaurantStatus_Suspended))
         self.assertFalse(policy.allows_order_creation(RestaurantStatus_Offboarded))
+
+    def test_live_trading_row(self):
+        """THE LAUNCH BOUNDARY — the one cell where onboarding and live differ."""
+        self.assertFalse(policy.orders_are_commercial(RestaurantStatus_Onboarding))
+        self.assertTrue(policy.orders_are_commercial(RestaurantStatus_Live))
+        self.assertFalse(policy.orders_are_commercial(RestaurantStatus_Suspended))
+        self.assertFalse(policy.orders_are_commercial(RestaurantStatus_Offboarded))
+
+    def test_diner_ordering_row(self):
+        self.assertFalse(policy.allows_diner_ordering(RestaurantStatus_Onboarding))
+        self.assertTrue(policy.allows_diner_ordering(RestaurantStatus_Live))
+        self.assertFalse(policy.allows_diner_ordering(RestaurantStatus_Suspended))
+        self.assertFalse(policy.allows_diner_ordering(RestaurantStatus_Offboarded))
+
+    def test_onboarding_and_live_are_no_longer_identical(self):
+        """
+        The defect PR-D corrects, asserted directly.
+
+        Before, every cell of the two rows matched, so going live changed nothing a
+        diner or a restaurant could observe — which made the go-live transition, and
+        the readiness gate guarding it, ceremonial.
+        """
+        onboarding = policy.CAPABILITY_MATRIX[RestaurantStatus_Onboarding]
+        live = policy.CAPABILITY_MATRIX[RestaurantStatus_Live]
+        self.assertNotEqual(onboarding, live)
+        differing = {k for k in live if onboarding[k] != live[k]}
+        self.assertEqual(differing, {policy.CAP_LIVE_TRADING})
 
     def test_kitchen_row(self):
         self.assertTrue(policy.allows_kitchen(RestaurantStatus_Onboarding))
@@ -232,11 +259,13 @@ class PerStateBehaviourTests(TestCase):
         self.restaurant.status = state
         self.restaurant.save(update_fields=['status'])
 
-    def _order(self):
+    def _order(self, created_by=None):
+        """``created_by=None`` is the anonymous diner path; a user is the staff path."""
         return ConOrder.initiate_order(
             restaurant_id=str(self.restaurant.id),
             table_id=str(self.table.id),
             items=[{'item': str(self.item.id), 'quantity': 1}],
+            created_by=created_by,
         )
 
     # --- staff portal / kitchen -------------------------------------------
@@ -316,8 +345,20 @@ class PerStateBehaviourTests(TestCase):
         self.assertEqual(error['status'], 404)
 
     # --- order creation ----------------------------------------------------
-    def test_order_create_allowed_while_onboarding(self):
+    def test_diner_order_refused_while_onboarding(self):
+        """THE LAUNCH BOUNDARY: onboarding no longer trades with the public."""
         self._set(RestaurantStatus_Onboarding)
+        response = self._order()
+        self.assertEqual(response.get('status'), 400)
+        self.assertEqual(response.get('message'), MESSAGES.get('NOT_OPEN_YET'))
+
+    def test_staff_rehearsal_order_allowed_while_onboarding(self):
+        """...but the owner can still place the end-to-end test order."""
+        self._set(RestaurantStatus_Onboarding)
+        self.assertEqual(self._order(created_by=self.owner).get('status'), 200)
+
+    def test_diner_order_allowed_once_live(self):
+        self._set(RestaurantStatus_Live)
         self.assertEqual(self._order().get('status'), 200)
 
     def test_order_create_blocked_when_suspended(self):
@@ -351,6 +392,16 @@ class TransitionMatrixTests(TestCase):
         )
 
     def test_every_allowed_transition_succeeds(self):
+        # Readiness is held open for the whole sweep: this test is about the MATRIX,
+        # and onboarding->live is otherwise refused by the (now fail-closed) seam.
+        # The seam's own behaviour is TransitionSeamTests' subject.
+        with patch.object(
+            lifecycle, 'check_go_live_readiness',
+            return_value=lifecycle.ReadinessResult(True, []),
+        ):
+            self._every_allowed_transition_succeeds()
+
+    def _every_allowed_transition_succeeds(self):
         for from_state, to_state in sorted(lifecycle.ALLOWED_TRANSITIONS):
             with self.subTest(f'{from_state}->{to_state}'):
                 self._at(from_state)
@@ -513,6 +564,18 @@ class TransitionAuditTests(TestCase):
                 action=ADMIN_RESTAURANT_LIFECYCLE_TRANSITION).exists()
         )
 
+    def _ready(self):
+        """Hold the readiness seam open. These tests are about the NOTIFICATION.
+
+        Go-live is refused outright while readiness fails closed (PR-D), so a test
+        whose subject is what happens ON going live has to supply the readiness
+        answer. TransitionSeamTests owns the seam's own behaviour.
+        """
+        return patch.object(
+            lifecycle, 'check_go_live_readiness',
+            return_value=lifecycle.ReadinessResult(True, []),
+        )
+
     def test_go_live_notifies_the_owner(self):
         """
         The notification that used to fire from Secretary.make_notification now
@@ -525,10 +588,11 @@ class TransitionAuditTests(TestCase):
             'misc_app.controllers.notifications.notification.Notification'
         ) as MockNotification:
             MockNotification.return_value.create_notification.return_value = None
-            lifecycle.transition_restaurant(
-                restaurant=self.restaurant, to_state=RestaurantStatus_Live,
-                reason='Readiness confirmed, going live', actor=self.actor,
-            )
+            with self._ready():
+                lifecycle.transition_restaurant(
+                    restaurant=self.restaurant, to_state=RestaurantStatus_Live,
+                    reason='Readiness confirmed, going live', actor=self.actor,
+                )
         MockNotification.assert_called_once()
         msg_data = MockNotification.call_args.kwargs['msg_data']
         self.assertEqual(msg_data['msg_type'], 'restaurant-activated')
@@ -546,10 +610,11 @@ class TransitionAuditTests(TestCase):
             'misc_app.controllers.notifications.notification.Notification'
         ) as MockNotification:
             MockNotification.return_value.create_notification.return_value = None
-            lifecycle.transition_restaurant(
-                restaurant=self.restaurant, to_state=RestaurantStatus_Live,
-                reason='Readiness confirmed, going live', actor=self.actor,
-            )
+            with self._ready():
+                lifecycle.transition_restaurant(
+                    restaurant=self.restaurant, to_state=RestaurantStatus_Live,
+                    reason='Readiness confirmed, going live', actor=self.actor,
+                )
         self.assertEqual(
             MockNotification.call_args.kwargs['msg_data']['first_name'], 'there',
         )
@@ -563,10 +628,11 @@ class TransitionAuditTests(TestCase):
             'misc_app.controllers.notifications.notification.Notification',
             side_effect=RuntimeError('mongo down'),
         ):
-            updated = lifecycle.transition_restaurant(
-                restaurant=self.restaurant, to_state=RestaurantStatus_Live,
-                reason='Readiness confirmed, going live', actor=self.actor,
-            )
+            with self._ready():
+                updated = lifecycle.transition_restaurant(
+                    restaurant=self.restaurant, to_state=RestaurantStatus_Live,
+                    reason='Readiness confirmed, going live', actor=self.actor,
+                )
         self.assertEqual(updated.status, RestaurantStatus_Live)
         self.restaurant.refresh_from_db()
         self.assertEqual(self.restaurant.status, RestaurantStatus_Live)
@@ -592,10 +658,20 @@ class TransitionSeamTests(TestCase):
             status=RestaurantStatus_Onboarding,
         )
 
-    def test_readiness_seam_defaults_to_ready(self):
+    def test_readiness_seam_fails_closed(self):
+        """
+        The seam denies until Phase 1 wires the real checklist.
+
+        This assertion used to be its exact inverse — an empty restaurant with no menu
+        and no tables was asserted READY, pinning a fail-open safety gate as correct
+        behaviour. Failing closed is the point: a gate that always says yes is worse
+        than no gate, because it reads as protection.
+        """
         result = lifecycle.check_go_live_readiness(self.restaurant)
-        self.assertTrue(result.ready)
-        self.assertEqual(result.blockers, [])
+        self.assertFalse(result.ready)
+        self.assertEqual(
+            result.blockers, [lifecycle.BLOCKER_READINESS_NOT_CONFIGURED],
+        )
 
     def test_receivables_seam_defaults_to_none_outstanding(self):
         self.assertFalse(lifecycle.has_outstanding_receivables(self.restaurant))

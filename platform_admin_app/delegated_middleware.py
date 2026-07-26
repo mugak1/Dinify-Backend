@@ -254,14 +254,23 @@ class DelegatedAccessMiddleware:
 
     def _audit_performed(self, request, context, *, status, result, error_code=''):
         """
-        Record a delegated write. Where PR-3's no-audit-no-action contract stops.
+        Record a delegated write that was NOT already recorded transactionally.
 
-        The exchange path DOES hold that contract — its ``session_started`` row is
-        written inside the same transaction as the grant and the session, so a failed
-        audit unwinds the credential it would have described. This cannot: by the time
-        the outcome is known the view's own transaction has already committed, so
-        there is nothing left to unwind and raising would only turn a change that
-        landed into a misleading 500. Logged loudly instead.
+        This is no longer the mechanism of record. Both tenant writes a delegation can
+        reach — the support-issue create and the menu-item stock toggle — now call
+        ``platform_admin_app.delegated_audit.audit_delegated_write`` inside their own
+        transaction, so a failed audit unwinds the write, and they set
+        ``_delegation_audited`` so ``_finalize`` skips this path entirely. That is the
+        no-audit-no-action contract holding here too, which it did not before.
+
+        What still arrives here: ``POST api/v1/delegation/end/``, whose real record is
+        the ``session_ended`` row ``delegated_sessions.end_session`` writes inside its
+        own transaction; and any future non-safe route added to the allowlist before it
+        is brought under transactional audit. For those the old limitation stands — by
+        the time the outcome is known the view has committed, so there is nothing to
+        unwind and raising would turn a change that landed into a misleading 500.
+        Logged loudly instead. A new delegated tenant write should be given a
+        transactional audit rather than left to rely on this.
         """
         try:
             self._record(
