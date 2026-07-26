@@ -340,6 +340,20 @@ with PostgreSQL on AWS RDS.
   - `AdminAuditLog` — append-only (an update raises `AppendOnlyViolation`),
     recording actor / session / action / resource / restaurant / delegation /
     reason / before+after state / result / request id
+  - DELEGATED WRITES ARE AUDITED TRANSACTIONALLY (PR-D): both tenant writes a
+    delegation can reach — `POST api/v1/support/issues/` and
+    `PUT api/v1/kitchen/menu-items/<pk>/stock/` — call
+    `platform_admin_app.delegated_audit.audit_delegated_write` INSIDE their own
+    `transaction.atomic()`, so a failed audit rolls the write back. The middleware
+    used to write that row from `_finalize` after the view had committed, where it
+    could only swallow a failure and log it — the one place the no-audit-no-action
+    contract did not hold. Each call sets `_delegation_audited` (on the UNDERLYING
+    `HttpRequest`, since DRF's wrapper does not proxy `__setattr__`) so the middleware
+    does not double-write. The middleware still owns DENIALS and `process_exception`.
+    The third non-safe allowlisted route, `POST api/v1/delegation/end/`, is
+    admin-plane only and already self-audits `session_ended`. A NEW delegated tenant
+    write must be given a transactional audit or kept off `ALLOWED_ROUTES` — a test
+    asserts the non-safe route set so it cannot grow silently
   - `DelegationGrant` + `DelegatedSession` (PR-4a/4b) — time-boxed, reason-required,
     elevation-gated delegated access to ONE restaurant. Minting/listing/revoking
     live on the admin plane; the CUSTOMER plane serves only redeem/inspect/end at
@@ -779,6 +793,17 @@ the catch-all `<str:config_detail>/` route.
   derived set (`portal_access_states()`), NEVER `status == '<literal>'`. It is
   import-light on purpose (imported by `permissions_check`) — no models, no
   querysets. An unknown/legacy value fails CLOSED (denies everything, menu gone)
+- THE LAUNCH BOUNDARY (PR-D): `onboarding` and `live` are NO LONGER identical. A
+  fifth capability key `CAP_LIVE_TRADING` (onboarding **False**, live True,
+  suspended/offboarded False) is the one cell that differs, and two predicates read
+  it: `allows_diner_ordering` (= `CAP_ORDER_CREATE and CAP_LIVE_TRADING`) refuses the
+  PUBLIC at a restaurant that has not gone live, and `orders_are_commercial` is the
+  sole source of `Order.is_test`. `CAP_ORDER_CREATE` deliberately STAYS True at
+  onboarding so the owner can place the end-to-end rehearsal order the Phase-1
+  checklist requires. The diner gate lives in `ConOrder.initiate_order` beside the
+  other three `created_by is None` gates and returns `MESSAGES['NOT_OPEN_YET']`; the
+  diner MENU still renders during onboarding (only ordering is refused), so the owner
+  can preview the real QR → menu experience
 - Per-state behaviour: staff portal + kitchen + order-create are allowed for
   onboarding/live and blocked for suspended/offboarded; the diner menu is served
   for onboarding/live, answers a graceful **503** for `suspended` (the ONE state
@@ -788,10 +813,16 @@ the catch-all `<str:config_detail>/` route.
   an `offboarded` restaurant (`DelegationContext.scope` applies the ceiling;
   `granted_scope` exposes the as-minted value)
 - TWO PHASE-1 SEAMS, both named single-call functions with real call sites —
-  `check_go_live_readiness` (returns ready today; the hard blockers need
-  Phase-1 models) and `has_outstanding_receivables` (returns False today;
-  `SubscriptionInvoice` does not exist yet, and `DinifyTransaction` is never the
-  receivable). Do NOT inline either at a call site
+  `check_go_live_readiness` and `has_outstanding_receivables`. Do NOT inline either at
+  a call site. **`check_go_live_readiness` FAILS CLOSED (PR-D)**: it returns
+  not-ready with the single blocker `readiness_not_configured`
+  (`lifecycle.BLOCKER_READINESS_NOT_CONFIGURED`), so `onboarding → live` is refused
+  on EVERY path until Phase 1 wires the real checklist. It used to return ready
+  unconditionally without reading its argument — a safety gate that always said yes.
+  Nothing is stranded: no API path creates a restaurant, and the one production
+  restaurant is already `live`. There is deliberately NO override — do not add one.
+  `has_outstanding_receivables` still returns False (`SubscriptionInvoice` does not
+  exist yet, and `DinifyTransaction` is never the receivable)
 - Admin transition endpoint: `POST admin/v1/restaurants/<uuid:id>/transition/`
   (`platform_admin_app/endpoints/restaurants.py`), `AdminAPIView` +
   `IsRecentlyElevated` — body `{to_state, reason}`. It is deliberately ABSENT from
@@ -933,6 +964,24 @@ the catch-all `<str:config_detail>/` route.
 - `MenuItem.listing_position` and `MenuSection.listing_position` are
   authoritative for ordering; reorder writes go through `ConMenuItem`
   / the section-reorder path, never ad-hoc updates
+- `Order.is_test` (migration `orders_app/0035`, indexed) marks a PRE-GO-LIVE
+  REHEARSAL order — one created while the restaurant was still `onboarding`. It is
+  SERVER-DERIVED in `_create_order` from
+  `lifecycle_policy.orders_are_commercial(restaurant.status)`; there is no request
+  field for it and it must never gain one. The governing rule: **a test order is
+  operationally real and commercially invisible** — it occupies its table, reaches
+  the kitchen board and is served/cancelled normally, but is excluded from
+  `sale_filters.sale_orders()` (the chokepoint that sales/diners/menu inherit), both
+  dashboards, `summarize_revenue`, the transactions report (via
+  `Q(order__isnull=True) | Q(order__is_test=False)`, so order-less subscription rows
+  survive), and `determine-customers` (which MINTS REAL USERS); and it cannot be
+  reviewed (`submit_review` refuses it, because review analytics aggregate on the
+  denormalised `Review.restaurant` and would never see an `is_test` filter). The two
+  DELIBERATE inclusions are dashboard-v2's `_build_tables` and `_build_kds` — live
+  floor state, which must agree with the kitchen board. `has_completed_test_order`
+  (`orders_app/controllers/test_orders.py`) is the queryable fact Phase-1's readiness
+  checklist consumes. Accepted and documented: a rehearsal order consumes a real
+  `RestaurantDailyOrderCounter` ticket number
 - `Order.order_remarks` was REMOVED (migration
   `0032_remove_order_order_remarks`, dormant field) along with the dead
   `item_note` emit from the orders API — do not reintroduce either
@@ -1017,7 +1066,8 @@ the catch-all `<str:config_detail>/` route.
   "Write-time menu relationship integrity" bullet; 0056 constrains
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
   "Restaurant Lifecycle"),
-  `orders_app/migrations/0034_remove_order_block_review_and_more.py`,
+  `orders_app/migrations/0035_order_is_test.py` (0034 removed the inline review
+  fields; 0035 adds the launch-boundary `Order.is_test` flag),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
   `users_app/migrations/0013_close_ambient_admin_authority.py` (0010 adds

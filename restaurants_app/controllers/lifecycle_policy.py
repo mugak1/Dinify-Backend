@@ -38,6 +38,11 @@ CAP_ORDER_CREATE = 'order_create'
 CAP_KITCHEN = 'kitchen'
 CAP_SUPPORT = 'support'
 CAP_DELEGATED_ACCESS = 'delegated_access'
+# THE LAUNCH BOUNDARY. Is this restaurant open for real business? One key, because
+# that is one fact — it decides both whether the public may order and whether the
+# orders that do exist are commercial. `onboarding` is the state where the answer is
+# no while everything else is yes, which is precisely what makes it onboarding.
+CAP_LIVE_TRADING = 'live_trading'
 
 # --- diner-menu outcomes ----------------------------------------------------
 # The diner read is the one capability with THREE outcomes rather than two: a
@@ -64,6 +69,7 @@ DELEGATED_SCOPE_VIEW = 'view'
 # | Staff portal    | Full       | Full | Blocked          | Blocked           |
 # | Diner scan/menu | Allowed    | Allow| Unavailable      | Gone (404)        |
 # | Order create    | Allowed    | Allow| Blocked          | Blocked           |
+# | Live trading    | **NO**     | Yes  | Blocked          | Blocked           |
 # | Kitchen board   | Allowed    | Allow| Blocked          | Blocked           |
 # | Support access  | Allowed    | Allow| Allowed          | Read-only (admin) |
 # | Delegated admin | Allowed    | Allow| Allowed          | `view` scope only |
@@ -73,6 +79,15 @@ DELEGATED_SCOPE_VIEW = 'view'
 # every non-active restaurant. The owner must be able to build a menu and provision
 # tables BEFORE going live, and the go-live readiness checklist depends on exactly
 # that work having happened. `suspended` and `offboarded` continue to deny.
+#
+# ONBOARDING IS NOT LIVE TRADING — the correction PR-D makes. That widening also
+# handed `onboarding` public diner ordering, which was never the intent: a restaurant
+# could take real money from real diners before anyone had asserted it was ready,
+# which is exactly what the go-live transition and its readiness gate exist to
+# prevent. `CAP_ORDER_CREATE` still says yes at `onboarding` because the owner must
+# be able to place ONE end-to-end rehearsal order (a hard blocker on the Phase-1
+# checklist); `CAP_LIVE_TRADING` says no, which is what refuses the public and marks
+# whatever IS created as a test order. The two predicates below read them together.
 #
 # SUPPORT stays reachable in every state. At `offboarded` the row reads "read-only
 # via admin" and that is what the surrounding machinery already produces rather than
@@ -84,6 +99,7 @@ CAPABILITY_MATRIX = {
         CAP_STAFF_PORTAL: True,
         CAP_DINER_MENU: DINER_MENU_ALLOWED,
         CAP_ORDER_CREATE: True,
+        CAP_LIVE_TRADING: False,
         CAP_KITCHEN: True,
         CAP_SUPPORT: True,
         CAP_DELEGATED_ACCESS: None,
@@ -92,6 +108,7 @@ CAPABILITY_MATRIX = {
         CAP_STAFF_PORTAL: True,
         CAP_DINER_MENU: DINER_MENU_ALLOWED,
         CAP_ORDER_CREATE: True,
+        CAP_LIVE_TRADING: True,
         CAP_KITCHEN: True,
         CAP_SUPPORT: True,
         CAP_DELEGATED_ACCESS: None,
@@ -100,6 +117,7 @@ CAPABILITY_MATRIX = {
         CAP_STAFF_PORTAL: False,
         CAP_DINER_MENU: DINER_MENU_UNAVAILABLE,
         CAP_ORDER_CREATE: False,
+        CAP_LIVE_TRADING: False,
         CAP_KITCHEN: False,
         CAP_SUPPORT: True,
         CAP_DELEGATED_ACCESS: None,
@@ -108,6 +126,7 @@ CAPABILITY_MATRIX = {
         CAP_STAFF_PORTAL: False,
         CAP_DINER_MENU: DINER_MENU_GONE,
         CAP_ORDER_CREATE: False,
+        CAP_LIVE_TRADING: False,
         CAP_KITCHEN: False,
         CAP_SUPPORT: True,
         CAP_DELEGATED_ACCESS: DELEGATED_SCOPE_VIEW,
@@ -128,6 +147,7 @@ def _row(status):
         CAP_STAFF_PORTAL: False,
         CAP_DINER_MENU: DINER_MENU_GONE,
         CAP_ORDER_CREATE: False,
+        CAP_LIVE_TRADING: False,
         CAP_KITCHEN: False,
         CAP_SUPPORT: False,
         CAP_DELEGATED_ACCESS: DELEGATED_SCOPE_VIEW,
@@ -153,6 +173,13 @@ DINER_MENU_STATES = frozenset(
     if CAPABILITY_MATRIX[status][CAP_DINER_MENU] == DINER_MENU_ALLOWED
 )
 
+# The states in which an order is real commerce. Everything outside this set either
+# cannot produce an order at all or produces a rehearsal one.
+LIVE_TRADING_STATES = frozenset(
+    status for status in RESTAURANT_LIFECYCLE_STATES
+    if CAPABILITY_MATRIX[status][CAP_LIVE_TRADING]
+)
+
 
 def portal_access_states():
     """The states that grant staff-portal / module access, as a sorted list.
@@ -171,8 +198,38 @@ def grants_portal_access(status) -> bool:
 
 
 def allows_order_creation(status) -> bool:
-    """Whether a new order may be created against a restaurant in this state."""
+    """
+    Whether ANY new order may be created against a restaurant in this state.
+
+    True at ``onboarding`` — the owner's end-to-end rehearsal order needs it. This is
+    NOT the predicate that decides whether the public may order; see
+    ``allows_diner_ordering``.
+    """
     return bool(_row(status)[CAP_ORDER_CREATE])
+
+
+def allows_diner_ordering(status) -> bool:
+    """
+    Whether an ANONYMOUS DINER may create an order — the launch boundary.
+
+    Both halves must hold: the restaurant must be able to take an order at all, AND
+    it must be trading for real. That second half is what `onboarding` fails, so a
+    diner who scans a printed QR at a restaurant that has not gone live is refused
+    while the owner can still rehearse.
+    """
+    row = _row(status)
+    return bool(row[CAP_ORDER_CREATE] and row[CAP_LIVE_TRADING])
+
+
+def orders_are_commercial(status) -> bool:
+    """
+    Whether orders created in this state count as real business.
+
+    The single source for ``Order.is_test``: an order created while the answer is no
+    is a rehearsal — operationally real (it occupies its table and reaches the
+    kitchen) but invisible to revenue, history and diner analytics.
+    """
+    return bool(_row(status)[CAP_LIVE_TRADING])
 
 
 def allows_kitchen(status) -> bool:

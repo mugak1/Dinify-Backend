@@ -354,6 +354,47 @@ in [`BACKGROUND_TASKS.md`](BACKGROUND_TASKS.md).
 
 ---
 
+## 9. Diner ordering is refused before a restaurant goes live
+
+**Endpoint:** `POST /api/v2/orders/initiate/` (the anonymous diner branch)
+
+**Affected users:** Diners scanning a table QR at a restaurant whose lifecycle state
+is still `onboarding`. Live restaurants are completely unaffected.
+
+**Why:** `onboarding` and `live` were operationally identical, so a restaurant could
+take real orders from real diners before anyone had asserted it was ready — which is
+what the go-live transition exists to prevent.
+
+**Before:** an onboarding restaurant accepted diner orders exactly like a live one.
+
+**After:**
+```json
+400 {"status": 400,
+     "message": "This restaurant is not open for orders yet. Please check back soon."}
+```
+
+Deliberately distinct from the suspended/offboarded refusal, which keeps its existing
+wording (`"Sorry, the restaurant cannot accept orders at this time"`) — *not open yet*
+and *no longer open* are different facts and a diner should be told which.
+
+**The diner MENU still renders during onboarding.** Only ordering is refused. The
+owner needs to preview the real QR → menu experience before launch, and a rendered
+menu carrying an explicit "not open yet" message tells a stray scanner more than a
+bare 503 would.
+
+**Unchanged:** staff/owner ordering (`source: "admin"`) still works while onboarding —
+that is how the owner places the end-to-end rehearsal order the go-live checklist
+requires. Such an order is flagged `is_test` server-side and is excluded from all
+revenue, dashboard and diner-analytics figures; it cannot be reviewed.
+
+**Frontend action required:**
+- Diner app: surface the message as-is. No new state to handle — it is an ordinary
+  400 on the existing initiate call.
+- Portal: an owner viewing reports during onboarding will see rehearsal orders absent
+  from every figure while they still appear on the kitchen board. That is intended.
+
+---
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
@@ -373,6 +414,8 @@ in [`BACKGROUND_TASKS.md`](BACKGROUND_TASKS.md).
 7. **Admin lockout break-glass:** read `recovery_code_required` from the login
    response and prompt for a recovery code when it is `true`; surface
    `lockout_cleared` from `verify/`. Admin control plane only.
+8. **Pre-launch ordering:** handle the new 400 on `api/v2/orders/initiate/` for a
+   restaurant that has not gone live — surface the message verbatim.
 
 ---
 

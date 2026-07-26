@@ -21,7 +21,7 @@ Corrected over the legacy bugs:
 """
 from typing import Optional
 
-from django.db.models import Count, Sum
+from django.db.models import Count, Q, Sum
 
 from finance_app.models import DinifyTransaction
 from finance_app.serializers import SerializerGetRestaurantTransactionListing
@@ -62,7 +62,14 @@ def generate_restaurant_transaction_summary(
     date_from = dates['date_from']
     date_to = dates['date_to']
 
+    # This report is scoped by `restaurant_id` directly rather than through the order
+    # FK, so it does NOT inherit sale_filters' test-order exclusion — it needs its own.
+    # The Q() form is load-bearing: `order` is nullable and subscription rows carry no
+    # order at all, so a bare `.exclude(order__is_test=True)` would be a join-shaped
+    # filter that silently drops them. Keep rows with no order, and order-backed rows
+    # only when the order is real.
     base = DinifyTransaction.objects.filter(
+        Q(order__isnull=True) | Q(order__is_test=False),
         restaurant_id=restaurant_id,
         time_created__date__gte=date_from,
         time_created__date__lte=date_to,

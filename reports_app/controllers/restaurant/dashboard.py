@@ -45,13 +45,18 @@ def generate_restaurant_dashboard_details(
     date_from = dates.get('date_from')
     date_to = dates.get('date_to')
 
+    # Pre-go-live rehearsal orders are excluded from every figure below: this whole
+    # report is commercial history. The live floor and KDS cards in dashboard-v2 are
+    # the deliberate exception — see _build_tables / _build_kds.
     orders = Order.objects.filter(
         restaurant=restaurant_id,
+        is_test=False,
         time_created__gte=date_from,
         time_created__lte=date_to
     )
     order_items = OrderItem.objects.filter(
         order__restaurant=restaurant_id,
+        order__is_test=False,
         order__time_created__gte=date_from,
         order__time_created__lte=date_to
     )
@@ -121,6 +126,7 @@ def generate_restaurant_dashboard_details(
 def summarize_revenue(restaurant_id: str):
     orders = Order.objects.filter(
         restaurant=restaurant_id,
+        is_test=False,
         payment_status=PaymentStatus_Paid
     )
     total_revenue = orders.aggregate(total_revenue=Sum('actual_cost'))['total_revenue']
@@ -242,6 +248,7 @@ def _build_revenue(restaurant_id, date_from, date_to, trunc_fn,
     def _series_and_totals(d_from, d_to):
         base = Order.objects.filter(
             restaurant=restaurant_id,
+            is_test=False,
             time_created__gte=d_from,
             time_created__lte=d_to,
         )
@@ -301,6 +308,7 @@ def _build_payment_methods(restaurant_id, date_from, date_to):
             transaction_type=TransactionType_OrderPayment,
             transaction_status=TransactionStatus_Success,
             order__restaurant=restaurant_id,
+            order__is_test=False,
             order__time_created__gte=date_from,
             order__time_created__lte=date_to,
         )
@@ -324,6 +332,7 @@ def _build_orders(restaurant_id, date_from, date_to, trunc_fn,
     def _series_and_total(d_from, d_to):
         base = Order.objects.filter(
             restaurant=restaurant_id,
+            is_test=False,
             time_created__gte=d_from,
             time_created__lte=d_to,
         )
@@ -344,6 +353,7 @@ def _build_orders(restaurant_id, date_from, date_to, trunc_fn,
 
     base = Order.objects.filter(
         restaurant=restaurant_id,
+        is_test=False,
         time_created__gte=date_from,
         time_created__lte=date_to,
     )
@@ -373,6 +383,7 @@ def _build_popular_items(restaurant_id, date_from, date_to):
     rows = (
         OrderItem.objects.filter(
             order__restaurant=restaurant_id,
+            order__is_test=False,
             order__time_created__gte=date_from,
             order__time_created__lte=date_to,
         )
@@ -403,6 +414,10 @@ def _build_tables(restaurant_id):
         restaurant=restaurant_id, enabled=True, deleted=False,
     ).count()
 
+    # DELIBERATELY includes test orders. This is LIVE FLOOR STATE, not history: a
+    # rehearsal order really does occupy its table, and this card must agree with the
+    # occupancy helpers and the table cards, which also count it. Excluding it here
+    # would show a table free while a ticket for it sat on the kitchen board.
     active_orders = Order.objects.filter(
         restaurant=restaurant_id,
         payment_status=PaymentStatus_Pending,
@@ -420,6 +435,7 @@ def _build_tables(restaurant_id):
     # Median visit duration for today's closed orders
     closed_today = Order.objects.filter(
         restaurant=restaurant_id,
+        is_test=False,
         payment_status=PaymentStatus_Paid,
         time_created__date=today,
     )
@@ -436,6 +452,7 @@ def _build_tables(restaurant_id):
     closed_today_count = closed_today.count()
     closed_yesterday_count = Order.objects.filter(
         restaurant=restaurant_id,
+        is_test=False,
         payment_status=PaymentStatus_Paid,
         time_created__date=yesterday,
     ).count()
@@ -452,6 +469,7 @@ def _build_tables(restaurant_id):
     avg_today = closed_today.aggregate(v=Avg('actual_cost'))['v']
     avg_yesterday = Order.objects.filter(
         restaurant=restaurant_id,
+        is_test=False,
         payment_status=PaymentStatus_Paid,
         time_created__date=yesterday,
     ).aggregate(v=Avg('actual_cost'))['v']
@@ -479,6 +497,11 @@ def _build_kds(restaurant_id):
     today = now.date()
 
     # Open = orders still moving through the kitchen fulfilment axis.
+    # DELIBERATELY includes test orders, for the same reason as _build_tables: the
+    # kitchen genuinely is working a rehearsal ticket, and this card must agree with
+    # the kitchen board itself. The fulfilment metrics below share that basis, so the
+    # whole KDS card is coherent — open tickets and the time taken to clear them are
+    # measured over the same set.
     open_orders = Order.objects.filter(
         restaurant=restaurant_id,
         fulfilment_status__in=['new', 'preparing', 'ready'],

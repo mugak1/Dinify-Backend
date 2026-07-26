@@ -7,6 +7,7 @@ owner/manager-only) and bound SERVER-SIDE via `get_employed_restaurant_ids`
 restaurants, never widen. A dinify admin is unrestricted; issue CREATE stays
 admin-excluded (an admin doesn't raise issues on a restaurant's behalf).
 """
+from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
@@ -77,7 +78,25 @@ class RestaurantIssuesEndpoint(APIView):
             # restaurant (read_only) + created_by (the actor) are server-derived.
             'server_values': {'restaurant_id': str(restaurant_id)},
         }
-        response = Secretary(secretary_args).create()
+        # ONE transaction for the create and its audit — the other tenant write a
+        # delegated administrator can reach. Secretary opens its own atomic block,
+        # which nests as a savepoint inside this one, so a failed audit unwinds the
+        # issue it would have described instead of leaving it unrecorded. Audited only
+        # on success: a refused create is the middleware's `refused_downstream` row.
+        # A no-op for ordinary staff.
+        from platform_admin_app.delegated_audit import audit_delegated_write
+
+        with transaction.atomic():
+            response = Secretary(secretary_args).create()
+            if 200 <= response.get('status', 500) < 300:
+                audit_delegated_write(
+                    request,
+                    status=response['status'],
+                    after_state={
+                        'resource': 'SupportIssue',
+                        'restaurant_id': str(restaurant_id),
+                    },
+                )
         return Response(response, status=response['status'])
 
     def get(self, request):

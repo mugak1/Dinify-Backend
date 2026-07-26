@@ -22,7 +22,10 @@ from orders_app.controllers.services.create_order import _create_order
 from restaurants_app.controllers.menu_publication import (
     NOT_ON_MENU_MESSAGE, validate_order_selections,
 )
-from restaurants_app.controllers.lifecycle_policy import allows_order_creation
+from restaurants_app.controllers.lifecycle_policy import (
+    allows_diner_ordering,
+    allows_order_creation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -739,6 +742,17 @@ class ConOrder:
             return {
                 'status': 400,
                 'message': MESSAGES.get('GENERAL_ERROR')
+            }
+
+        # THE LAUNCH BOUNDARY. A restaurant that has not gone live does not trade with
+        # the public, however many QR codes are already printed. Diner-only, like the
+        # three gates below it: the owner must still be able to place the one
+        # end-to-end rehearsal order the go-live checklist requires, and that order is
+        # marked `is_test` at creation so it never becomes commercial reality.
+        if created_by is None and not allows_diner_ordering(restaurant.status):
+            return {
+                'status': 400,
+                'message': MESSAGES.get('NOT_OPEN_YET')
             }
 
         # availability: a diner cannot place an order while the restaurant has

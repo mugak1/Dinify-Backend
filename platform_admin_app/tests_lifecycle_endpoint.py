@@ -8,6 +8,8 @@ service's, and are covered in ``restaurants_app.tests_lifecycle``.
 """
 from datetime import timedelta
 
+from unittest.mock import patch
+
 from django.conf import settings as dj_settings
 from django.test import Client, TestCase, override_settings
 from django.utils import timezone
@@ -28,6 +30,7 @@ from platform_admin_app.audit_actions import (
 from platform_admin_app.cookies import cookie_name
 from platform_admin_app.models import RESULT_DENIED, RESULT_SUCCESS, AdminAuditLog
 from platform_admin_app.testing import AuditAssertionsMixin
+from restaurants_app.controllers import lifecycle
 from restaurants_app.models import Restaurant
 from users_app.models import User
 
@@ -236,12 +239,46 @@ class LifecycleTransitionEndpointTests(AuditAssertionsMixin, TestCase):
     def test_get_is_not_allowed(self):
         self.assertEqual(self.client.get(self._url()).status_code, 405)
 
-    def test_full_onboarding_to_live_journey(self):
-        """The go-live path an operator actually walks."""
+    def test_go_live_is_refused_while_readiness_is_unconfigured(self):
+        """
+        THE FAIL-CLOSED SEAM, through the endpoint (PR-D).
+
+        Readiness returns not-ready until Phase 1 wires the real checklist, so an
+        operator calling this route today gets an explicit, machine-readable refusal
+        naming the blocker — not a generic error and not a silent success.
+        """
         Restaurant.objects.filter(pk=self.restaurant.pk).update(
             status=RestaurantStatus_Onboarding)
         response = self._post(
             to_state=RestaurantStatus_Live, reason='Readiness confirmed on site.')
+
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body['code'], 'not_ready_for_go_live')
+        self.assertEqual(
+            body['errors']['blockers'],
+            [lifecycle.BLOCKER_READINESS_NOT_CONFIGURED],
+        )
+        self.restaurant.refresh_from_db()
+        self.assertEqual(self.restaurant.status, RestaurantStatus_Onboarding)
+
+    def test_full_onboarding_to_live_journey(self):
+        """
+        The go-live path an operator actually walks, once readiness passes.
+
+        Readiness is supplied here because this test's subject is the ENDPOINT
+        journey; the seam's own fail-closed behaviour is asserted directly above.
+        """
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(
+            status=RestaurantStatus_Onboarding)
+        with patch.object(
+            lifecycle, 'check_go_live_readiness',
+            return_value=lifecycle.ReadinessResult(True, []),
+        ):
+            response = self._post(
+                to_state=RestaurantStatus_Live,
+                reason='Readiness confirmed on site.',
+            )
         self.assertEqual(response.status_code, 200, response.content)
         self.restaurant.refresh_from_db()
         self.assertEqual(self.restaurant.status, RestaurantStatus_Live)

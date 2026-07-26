@@ -43,6 +43,11 @@ logger = logging.getLogger(__name__)
 # reason, and the two surfaces should not disagree about how long one has to be.
 MIN_REASON_LENGTH = 10
 
+# The blocker `check_go_live_readiness` reports while its checklist is unbuilt. A
+# named constant because it travels to the caller inside `errors['blockers']` and the
+# tests assert on it — Phase 1 removes it when it fills the seam in.
+BLOCKER_READINESS_NOT_CONFIGURED = 'readiness_not_configured'
+
 # --- the matrix -------------------------------------------------------------
 #
 # | From       | To         | Allowed                                            |
@@ -115,8 +120,19 @@ def check_go_live_readiness(restaurant) -> ReadinessResult:
 
     Returning a ``ReadinessResult`` rather than a bool is the point of the seam: the
     blocker list is what the portal renders, and callers already handle it.
+
+    IT FAILS CLOSED. Until that checklist exists this returns NOT ready, so
+    ``onboarding -> live`` is refused on every path. It used to return ready
+    unconditionally, which meant the one gate standing between a half-built
+    restaurant and real diners was a stub that always said yes — a safety seam that
+    fails open is worse than no seam, because it reads as protection.
+
+    Nothing is stranded by this: there is currently no API path that creates a
+    restaurant at all, and the one production restaurant is already ``live``.
+    Deliberately there is no override — a bypass built "just until Phase 1" is
+    exactly the kind that outlives its reason. See BACKGROUND_TASKS.md.
     """
-    return ReadinessResult(ready=True, blockers=[])
+    return ReadinessResult(ready=False, blockers=[BLOCKER_READINESS_NOT_CONFIGURED])
 
 
 def has_outstanding_receivables(restaurant) -> bool:
