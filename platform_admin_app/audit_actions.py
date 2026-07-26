@@ -28,6 +28,12 @@ ADMIN_AUTH_TOTP_FAILURE = 'admin.auth.totp_failure'
 ADMIN_AUTH_RECOVERY_CODE_USED = 'admin.auth.recovery_code_used'
 # The failed-attempt threshold was crossed and the account is now locked.
 ADMIN_AUTH_LOCKOUT = 'admin.auth.lockout'
+# A lockout was cleared by the break-glass path (a correct password plus a one-shot
+# recovery code) or by the unlock_platform_admin command. Its own action rather than a
+# flavour of login_success: clearing a lock is the interesting event, and it is
+# emitted INSTEAD of the ordinary success entry so the one-entry-per-request
+# convention holds.
+ADMIN_AUTH_LOCKOUT_CLEARED = 'admin.auth.lockout_cleared'
 # A live session re-cleared a second factor (step-up for a sensitive action).
 ADMIN_AUTH_ELEVATED = 'admin.auth.elevated'
 

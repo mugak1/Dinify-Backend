@@ -466,10 +466,14 @@ class RecoveryWithoutKeyEndpointTests(
             self._verify('000000', METHOD_TOTP)
         self.auth.refresh_from_db()
         self.assertTrue(lockout.is_locked(self.auth))
-        # A valid recovery code buys nothing while locked.
+
+        # TOTP buys nothing while locked: the challenge a locked account receives is
+        # recovery-only. A recovery code DOES clear the lock now — that break-glass
+        # path is covered in tests_admin_lockout.py — so this asserts only that no
+        # code was spent getting here.
         self._login()
         self.assertEqual(
-            self._verify(self.codes[0], METHOD_RECOVERY).status_code, 401,
+            self._verify(_code(self.secret), METHOD_TOTP).status_code, 401,
         )
         self.assertEqual(recovery.remaining(self.auth), 10)
 

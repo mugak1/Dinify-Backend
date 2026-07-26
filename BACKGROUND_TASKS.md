@@ -92,6 +92,30 @@ These two are **operator commands, not scheduled tasks** — they are run by han
 | **Requires** | `ADMIN_SECRET_ENCRYPTION_KEY` — it **encrypts** the new secret, so the key must be valid *before* it runs. |
 | **Idempotency** | Safe to re-run; each run invalidates the previous authenticator and code set. |
 
+#### `unlock_platform_admin`
+
+| | |
+|---|---|
+| **Run** | `python manage.py unlock_platform_admin --username <u>` |
+| **Arguments** | `--username` (required) |
+| **What it does** | Clears `failed_attempts` and `locked_until` for a platform-staff account, under a row lock, and writes one `admin.auth.lockout_cleared` audit row recording the before/after counts. |
+| **Does NOT** | Touch the password, the TOTP secret or the recovery codes. This is the narrow tool — reaching for `reset_platform_admin_totp` to undo a lockout destroys the authenticator and all ten recovery codes for no reason. |
+| **Requires** | Nothing beyond database access. It never decrypts, so it works during a Fernet-key incident too. |
+| **Idempotency** | **Good.** Safe on an already-unlocked account; says so and changes nothing. |
+
+##### Nuisance lockouts, and the two ways out
+
+Lockout is durable and per-account (`PlatformStaffAuth.failed_attempts` / `locked_until`) because the DRF throttles are per-process and reset on restart. Policy: **10 cumulative failures, then the window doubles per further failure** — 10th → 1 min, 11th → 2, 12th → 4, 13th → 8, 14th → 16, 15th → 32, 16th and beyond → 60 (cap). Wrong passwords and wrong second factors advance the same counter.
+
+The counter is **cumulative**: waiting out a window does not forgive it, so the next failure re-locks at the next step up. That is deliberate — it is what makes the backoff escalate instead of resetting to one minute forever.
+
+With one administrator and a discoverable username, anyone who learns it can push the account to the 60-minute cap and keep it there. Two escapes exist, and **neither is available to a lockout attacker**, because both need a secret they do not hold:
+
+1. **Over HTTP — password + a one-shot recovery code.** Sign in normally: a locked account with the *correct* password receives a challenge whose response carries `recovery_code_required: true`. Send `{"method": "recovery", "code": "<one-of-your-ten>"}` to `auth/verify/`. This clears the lock and signs you in (`lockout_cleared: true`). A TOTP code is refused against such a challenge — TOTP is what an attacker can make you fail; a recovery code is not.
+2. **On the box — `python manage.py unlock_platform_admin --username <u>`.** Use this when you would rather not spend a recovery code.
+
+Both are audited as `admin.auth.lockout_cleared`.
+
 ##### Break-glass: recovering when `ADMIN_SECRET_ENCRYPTION_KEY` is lost
 
 `ADMIN_SECRET_ENCRYPTION_KEY` encrypts the TOTP secret at rest. **While that key is missing or corrupt, TOTP cannot be verified at all — the stored secret is unreadable, so even a correct 6-digit code is refused. Recovery codes are the only way in.** They work because the recovery path never touches the key (`platform_admin_app/second_factor.py`); do not "simplify" that by letting a recovery attempt fall through TOTP.
@@ -131,6 +155,7 @@ This sequence is covered end to end by `platform_admin_app/tests_second_factor.p
 | `vacuum_deleted_records` | misc | PG | Good | Minimal | — |
 | `create_platform_admin` | platform_admin | PG | N/A (refuses duplicates) | Fail-closed | — |
 | `reset_platform_admin_totp` | platform_admin | PG | Good (re-runnable) | Fail-closed | — |
+| `unlock_platform_admin` | platform_admin | PG | Good | Fail-closed | — |
 
 ---
 
