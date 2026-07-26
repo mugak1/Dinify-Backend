@@ -197,7 +197,7 @@ def record_from_request(request, action, *, result, **kwargs):
 
 def record_auth_event(
     request, action, *, result, actor=None, actor_label='', error_code='',
-    session=None,
+    session=None, reason='',
 ):
     """
     Record an authentication event, where there may be no user and no session yet.
@@ -207,6 +207,11 @@ def record_auth_event(
     verbatim for forensics. The session is never INFERRED here — at login time it
     does not exist yet, and on a failure path it must not be implied — but the
     completed-login event may pass the session it just minted explicitly.
+
+    ``reason`` is free text for context the enumerable ``action`` / ``error_code``
+    pair cannot carry — the second-factor paths use it to record WHICH factor the
+    caller presented. It is never a place for a credential: unlike
+    ``before_state`` / ``after_state`` it is stored verbatim, not redacted.
     """
     return record(
         action=action,
@@ -215,5 +220,6 @@ def record_auth_event(
         actor_label=actor_label,
         error_code=error_code,
         session=session,
+        reason=reason,
         **_request_context(request),
     )

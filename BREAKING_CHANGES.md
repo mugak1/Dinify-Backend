@@ -235,6 +235,58 @@ diner operation (`order-details`, `payment-details`,
 
 ---
 
+## 7. Admin second factor now requires an explicit `method`
+
+**Endpoints:** `POST /admin/v1/auth/verify/`, `POST /admin/v1/auth/elevate/`
+
+**Affected users:** Platform staff on the admin control plane
+(`admin.dinifyapp.com`). No deployed consumer exists yet — there is no
+`Dinify-Admin` SPA — so this is a contract change with no migration burden. It is
+recorded here because it is the contract the eventual admin frontend must be built
+against.
+
+**Before:** a single `code` field, with the server guessing the factor by trying
+TOTP first and falling back to a recovery code.
+```json
+{ "code": "123456" }
+```
+
+**After:** the factor type is explicit and **required**.
+```json
+{ "method": "totp",     "code": "123456" }
+{ "method": "recovery", "code": "aBcDeF12-gHiJkL34_mn" }
+```
+
+**What changed:** the old ordering decrypted the stored TOTP secret before it could
+reject a wrong code. `ADMIN_SECRET_ENCRYPTION_KEY` is fail-closed, so if that key
+were ever lost or corrupted the decryption raised and the recovery-code branch was
+never reached — the two factors, which exist precisely as independent failure
+paths, were chained through one key. With `method: "recovery"` no decryption happens
+anywhere on the request, so recovery codes now work with the key missing. This is
+the difference between a bad afternoon and a permanently locked-out platform.
+
+- `method` accepts `"totp"` or `"recovery"`, case-insensitive.
+- There is **no default**. An absent or unrecognised `method` is refused — a
+  default would silently reinstate the ordering this change removes.
+- A denial is byte-identical whatever the cause: a wrong code, the wrong method for
+  the code, an unrecognised method and an unusable encryption key are
+  indistinguishable to the caller. `verify/` denies `401`, `elevate/` denies `403`,
+  both with `{"status": <code>, "message": "Invalid or expired verification."}`.
+  The specific cause is recorded in the audit log only.
+- Everything else is unchanged: lockout accounting, the TOTP replay guard, one-shot
+  recovery-code consumption, `used_recovery_code` / `recovery_codes_remaining` in
+  the success body, and throttling.
+
+**Frontend action required:**
+- Send `method` on every call to `verify/` and `elevate/`. Offer the operator an
+  explicit "use a recovery code instead" affordance rather than posting one code
+  into a single field and hoping the server sorts it out.
+
+**Operators:** the tested key-loss recovery sequence is in
+[`BACKGROUND_TASKS.md`](BACKGROUND_TASKS.md) under `reset_platform_admin_totp`.
+
+---
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
@@ -248,6 +300,9 @@ diner operation (`order-details`, `payment-details`,
 5. **Diner entry:** Scan with a signed credential in the `X-Diner-Credential`
    header (not `?table=`); send the diner session in the `X-Diner-Session`
    header on every anonymous op (not in the query string or request body).
+6. **Admin second factor:** send an explicit `method` (`"totp"` or `"recovery"`)
+   alongside `code` on `admin/v1/auth/verify/` and `admin/v1/auth/elevate/`.
+   Applies to the admin control plane only, which has no frontend yet.
 
 ---
 

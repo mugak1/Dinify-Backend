@@ -279,6 +279,26 @@ with PostgreSQL on AWS RDS.
     real reason goes to the audit log. TOTP NEVER consults `ENV` — it shares no code
     path with the restaurant OTP flow's `ENV=dev` `1234` shortcut. `auth/elevate/`
     marks a session recently-elevated for the destructive routes
+  - The SECOND FACTOR IS METHOD-EXPLICIT (PR-B): `auth/verify/` and `auth/elevate/`
+    both require `{"method": "totp"|"recovery", "code": "..."}`, dispatched by
+    `platform_admin_app/second_factor.py` (`check()` → a total `FactorVerdict`,
+    never raising). They used to read a bare `code` and try TOTP first, falling
+    through to recovery — but `totp.verify` decrypts the secret BEFORE it can
+    reject a wrong code and `crypto` fails closed, so a lost/corrupt
+    `ADMIN_SECRET_ENCRYPTION_KEY` raised out of the TOTP attempt and the recovery
+    branch was never reached. Two deliberately-independent failure paths were
+    chained through one key. **`method='recovery'` must never touch `totp` or
+    decrypt anything** — that is what makes a lost key recoverable, and
+    `endpoints/auth.py` no longer imports `totp` at all so the property is visible
+    rather than buried in a branch. `method` has NO default (a default reinstates
+    the flawed ordering); the TOTP branch converts `ImproperlyConfigured` into an
+    ordinary failure so a broken key is never a 500 or a config leak, while
+    enrolment (`totp.encrypt_for_storage`) still fails LOUDLY. Every denial is
+    byte-identical — wrong code, wrong method for the code, unknown method and
+    unusable key are indistinguishable; the cause rides the audit `error_code` and
+    the attempted method the audit `reason`. Break-glass sequence:
+    `BACKGROUND_TASKS.md`; contract: `BREAKING_CHANGES.md` §7. Key rotation /
+    `MultiFernet` is NOT built
   - `AdminAuditLog` — append-only (an update raises `AppendOnlyViolation`),
     recording actor / session / action / resource / restaurant / delegation /
     reason / before+after state / result / request id
@@ -931,7 +951,13 @@ the catch-all `<str:config_detail>/` route.
   username, or a missing `ADMIN_SECRET_ENCRYPTION_KEY`. Requires a TTY
 - `reset_platform_admin_totp` in `platform_admin_app/management/commands/` — the
   documented break-glass path: re-provisions the TOTP secret + recovery codes for an
-  existing admin and revokes all of its sessions. Does NOT change the password
+  existing admin and revokes all of its sessions. Does NOT change the password, and
+  never DECRYPTS (it re-provisions from scratch), so it survives key loss — but it
+  does ENCRYPT the new secret, so a valid `ADMIN_SECRET_ENCRYPTION_KEY` must be
+  installed BEFORE it runs. Accepts `--username` + `--noinput`. The four-step
+  key-loss sequence (recovery-code sign-in → install a new key → re-provision →
+  re-enrol) is in `BACKGROUND_TASKS.md` and is covered end to end by
+  `platform_admin_app/tests_second_factor.py::BreakGlassSequenceTests`
 - Five more exist and are equally not-to-be-recreated: `vacuum_deleted_records` +
   `vacuum_configuration` (`misc_app`), `send_messages` + `send_test_sms`
   (`notifications_app`, the latter being the ENV-bypassing SMS credential probe
