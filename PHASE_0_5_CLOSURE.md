@@ -148,7 +148,15 @@ CONDITIONAL and returns bool; `resolve_challenge(..., for_update=True)` locks wi
 
 **Two things to get right.** **LOCK ORDER is `AdminLoginChallenge` then
 `PlatformStaffAuth`, never the reverse** — elevate and `lockout.register_failure`
-take only the second; reversing it anywhere introduces a deadlock cycle. And the
+take only the second; reversing it anywhere introduces a deadlock cycle.
+*(Extended post-ladder by Closure PR 1, #266: the full order is now `User` →
+`AdminLoginChallenge` → `PlatformStaffAuth`. `challenges.create_challenge` takes the
+new FIRST level and only that one. It must not take `PlatformStaffAuth` instead —
+it goes on to write-lock challenge rows through its consuming `UPDATE`, so holding
+the auth row first would give `PlatformStaffAuth` → `AdminLoginChallenge`, the exact
+reverse of verification's order. `User` is safe to take first precisely because
+`resolve_challenge(for_update=True)` passes `of=('self',)`, so nothing else holds
+it.)* And the
 **failure-audit rule**: ordinary denials audit INSIDE the transaction and commit
 with their own failure accounting, so either a failure is both counted and
 recorded or neither. The ONE path that must roll back — losing the challenge race,
@@ -195,7 +203,7 @@ record's own numbering.
 | B3 | Every second-factor denial is byte-identical; a broken key is never a 500 or a config leak, while TOTP enrolment still fails loudly | `platform_admin_app.tests_second_factor` |
 | C1 | Verification is one transaction: the factor is consumed, the TOTP counter advanced, the session minted and the audit written together, or none of it happens. The raw token reaches the cookie only after commit | `platform_admin_app.tests_admin_auth_atomicity` (7 tests) |
 | C2 | A live `AdminSession` cannot exist without its success audit row — a failed audit unwinds the session that would have been minted | `platform_admin_app.tests_admin_auth_atomicity` |
-| C3 | Two concurrent verifications of the same challenge mint exactly ONE session | `platform_admin_app.tests_admin_auth_concurrency` (3 tests, `@tag('concurrency')`, PostgreSQL-only) |
+| C3 | Two concurrent verifications of the same challenge mint exactly ONE session | `platform_admin_app.tests_admin_auth_concurrency::AdminVerifyConcurrencyTests` (3 tests, `@tag('concurrency')`, PostgreSQL-only). Scoped to the class post-ladder: Closure PR 1 (#266) added a second class, `AdminLoginChallengeConcurrencyTests`, for the separate challenge-MINTING race, so a bare module count no longer describes what proves this row |
 | C4 | Failure accounting is lost-update-free, and an ordinary denial's failure is both counted and recorded, or neither | `platform_admin_app.tests_admin_lockout` (25 tests); `tests_admin_auth_atomicity` |
 | C5 | Lockout is a nuisance, not a denial of service: threshold 10, then a window that doubles per further failure from 1 min to a 60 min cap. `failed_attempts` is CUMULATIVE, which is what makes the backoff escalate; the per-challenge attempt cap is its own `ADMIN_CHALLENGE_MAX_ATTEMPTS` (5) so raising the threshold cannot silently widen the guess budget | `platform_admin_app.tests_admin_lockout` |
 | C6 | A locked-out administrator recovers WITHOUT operator involvement: with the correct password, `login/` mints a `recovery_only` challenge, `verify/` accepts only `method='recovery'` against it, and success clears the lock and emits `ADMIN_AUTH_LOCKOUT_CLEARED`. An attacker cannot ride this path — it needs the password AND a one-shot recovery code. Responses stay generic; lockout is never an account-existence oracle | `platform_admin_app.tests_admin_lockout`; the shell equivalent is `manage.py unlock_platform_admin` |
@@ -203,7 +211,7 @@ record's own numbering.
 | D2 | `Order.is_test` is SERVER-DERIVED from `orders_are_commercial(restaurant.status)`; there is no request field for it and it must never gain one | `orders_app.tests_launch_boundary` |
 | D3 | A rehearsal order is excluded from every money / history / diner-analytics consumer — the `sale_filters.sale_orders()` chokepoint, both dashboards, `summarize_revenue`, the transactions report, `determine-customers`, and review submission — and deliberately INCLUDED wherever the answer is live floor state: `any_present_ongoing_order` occupancy, `Table.has_unsettled_orders()`, the kitchen active and completed boards, dashboard-v2's `_build_kds` and the occupancy queryset inside `_build_tables`, and the idempotency lookups | `orders_app.tests_launch_boundary` (one assertion per consumer, both directions) |
 | D4 | `onboarding → live` is refused on EVERY path — service and endpoint — with `code='not_ready_for_go_live'` and the single machine-readable blocker `readiness_not_configured`. `suspended → live` remains deliberately un-readiness-gated | `restaurants_app.tests_lifecycle`; `platform_admin_app.tests_lifecycle_endpoint::test_go_live_is_refused_while_readiness_is_unconfigured` |
-| D5 | The no-audit-no-action contract is universal: both delegated tenant writes call `audit_delegated_write` inside their own `transaction.atomic()`, so a failed audit rolls the write back. The non-safe allowlisted route set is asserted, so it cannot grow silently | `platform_admin_app.tests_delegated_audit` (8 tests) |
+| D5 | Both delegated tenant writes call `audit_delegated_write` inside their own `transaction.atomic()`, so a failed audit rolls the write back. The non-safe allowlisted route set is asserted, so it cannot grow silently. **Wording corrected post-ladder:** this row originally read "the no-audit-no-action contract is universal", which overstated it in two directions — the contract is deliberately ASYMMETRIC (privileged successful state changes and credential issuance are audit-atomic; denials, failure accounting and safety-reducing revocations may be best-effort, because losing a revocation to a failed audit is worse than an unaudited revocation), and one credential-issuing path — admin login-challenge issuance — was still outside a shared transaction until Closure PR 1 (#266) wrapped it. See `platform_admin_app/audit.py` for the contract as stated | `platform_admin_app.tests_delegated_audit` (8 tests) |
 
 ## Decisions record
 
