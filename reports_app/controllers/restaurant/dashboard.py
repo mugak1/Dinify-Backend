@@ -4,7 +4,7 @@ import statistics
 
 from misc_app.controllers.clean_dates import clean_dates
 from django.db.models import Count, Sum, Avg, F, Q  # noqa
-from django.db.models.functions import TruncHour, TruncDay, TruncMonth
+from django.db.models.functions import TruncHour, TruncDay, TruncMonth, TruncYear
 from django.utils import timezone
 
 from orders_app.models import Order, OrderItem
@@ -146,12 +146,78 @@ def summarize_revenue(restaurant_id: str):
 # Dashboard V2
 # ---------------------------------------------------------------------------
 
+# LEGACY vocabulary — keyed on the caller's UI SELECTION, not on a granularity.
+# 'day' does not mean "bucket by day"; it means "the user picked Day, so bucket by
+# hour". Deprecated in favour of `bucket` / BUCKET_TRUNC below, and retained only so
+# the currently-deployed frontend keeps working across the deploy window. Its
+# resolution deliberately stays fail-OPEN (unknown -> TruncHour): that is this
+# parameter's established behaviour, and tightening it is exactly the breakage the
+# new parameter exists to avoid.
 TRUNC_MAP = {
     'day': TruncHour,
     'week': TruncDay,
     'month': TruncDay,
     'ytd': TruncMonth,
 }
+
+# HONEST vocabulary — keyed on the GRANULARITY itself, and resolved fail-CLOSED.
+#
+# These two maps CANNOT be merged, and the collision is the whole reason `bucket` is
+# a new parameter rather than an alias of `period`:
+#
+#     'day'    legacy -> TruncHour     honest -> TruncDay
+#     'month'  legacy -> TruncDay      honest -> TruncMonth
+#
+# The same string means different things in each, so no alias table can express
+# both. `reports_app/tests_dashboard_report.py` pins the divergence — if you are
+# here to "tidy up" by unifying these, that test is the reason not to.
+#
+# No 'week' entry: the dashboard ladder does not emit a weekly bucket, and unused
+# vocabulary is surface we would have to keep correct for no caller. (`sales-trends`
+# gained `weekly` in TRENDS-WEEKLY-00 — a different endpoint with a different
+# ladder, deliberately not unified here. This is also NOT
+# `reports_app.controllers.common.bucketing.PERIOD_TRUNC`, which has no 'hour' and
+# carries 'week'/'quarter' that this endpoint has no caller for.)
+BUCKET_TRUNC = {
+    'hour': TruncHour,
+    'day': TruncDay,
+    'month': TruncMonth,
+    'year': TruncYear,
+}
+
+
+def _resolve_bucket_trunc(bucket, period):
+    """Resolve the chart truncation, preferring the honest ``bucket`` vocabulary.
+
+    :returns: ``(trunc_fn, None)`` on success, or ``(None, error)`` where ``error``
+        is the ``{'status': 400, 'message': ...}`` envelope the endpoint turns into
+        an HTTP 400.
+
+    An ABSENT ``bucket`` — ``None``, empty, or whitespace-only — falls through to the
+    legacy ``period`` path unchanged, so a stray ``&bucket=`` in a URL is not an
+    error and deployed callers keep today's exact behaviour.
+
+    A ``bucket`` that IS supplied must name a real granularity: unknown values fail
+    CLOSED. The fail-open default they used to hit silently returned hourly buckets,
+    and hourly bucketing of an arbitrary date range is an enormous payload (a 200-day
+    window is ~4,800 buckets), not an error the caller can see. Lookup is exact —
+    'DAY' is not 'day' — so a mismatch surfaces here rather than downstream.
+    """
+    key = (bucket or '').strip()
+    if key:
+        try:
+            return BUCKET_TRUNC[key], None
+        except KeyError:
+            return None, {
+                'status': 400,
+                'message': (
+                    f"Unsupported bucket '{key}'; expected one of "
+                    f"{', '.join(BUCKET_TRUNC)}"
+                ),
+            }
+    # Legacy path, untouched — an unknown `period` still defaults to hourly.
+    return TRUNC_MAP.get(period, TruncHour), None
+
 
 PAYMENT_LABEL_MAP = {
     'momo': 'Mobile Money',
@@ -479,16 +545,39 @@ def generate_restaurant_dashboard_v2(
     date_from: str,
     date_to: str,
     period: str = 'day',
+    bucket: str | None = None,
 ) -> dict:
+    """Build the v2 dashboard payload over ``[date_from, date_to]``.
+
+    :param period: DEPRECATED — the legacy chart-granularity selector, keyed on the
+        caller's UI selection rather than on a granularity (see ``TRUNC_MAP``).
+        Honoured unchanged, fail-open hourly default included, so the currently
+        deployed frontend keeps working across the deploy window. It is removed once
+        no caller sends it — a follow-up PR gated on the frontend's TIMEFRAME-01B
+        shipping, not this one.
+    :param bucket: the honest chart granularity — one of ``hour``, ``day``,
+        ``month``, ``year`` (see ``BUCKET_TRUNC``). An unknown value is a 400; absent
+        (or empty / whitespace-only) falls back to ``period``. When BOTH are supplied
+        ``bucket`` wins rather than erroring — the frontend sends only one, and a
+        defensive precedence rule is cheaper than a failure mode.
+
+    Note that ``'day'`` means different things in the two vocabularies — legacy
+    hourly vs honest daily — which is why ``bucket`` is a new parameter rather than
+    an alias of ``period``.
+    """
     dates = clean_dates(date_from=date_from, date_to=date_to)
     if dates.get('status') != 200:
         return dates
     date_from = dates.get('date_from')
     date_to = dates.get('date_to')
 
-    trunc_fn = TRUNC_MAP.get(period, TruncHour)
+    trunc_fn, bucket_error = _resolve_bucket_trunc(bucket, period)
+    if bucket_error is not None:
+        return bucket_error
 
-    # Compute previous period of equal length
+    # Compute previous period of equal length. Derived from the DATE RANGE alone — it
+    # never reads `period` / `bucket`, so the comparison window stays identical
+    # across every granularity.
     delta = (date_to - date_from) + timedelta(days=1)
     prev_from = date_from - delta
     prev_to = date_from - timedelta(days=1)
