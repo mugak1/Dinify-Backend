@@ -287,6 +287,73 @@ the difference between a bad afternoon and a permanently locked-out platform.
 
 ---
 
+## 8. Admin login answers a locked account differently (break-glass path)
+
+**Endpoints:** `POST /admin/v1/auth/login/`, `POST /admin/v1/auth/verify/`
+
+**Affected users:** Platform staff on the admin control plane. Still no deployed
+consumer (no `Dinify-Admin` SPA), so this is the contract the eventual admin frontend
+must be built against.
+
+**Why:** with one administrator and a discoverable username, the old policy — 5
+combined failures → a flat 15-minute lock, and a locked account refusing even a
+correct password — let anyone who learned the username hold the platform shut
+indefinitely. Lockout is not removed; it now escalates, and it gains a way out that
+requires a secret an attacker does not have.
+
+**Before:** while locked, `login/` returned `401` for every password, correct or not.
+There was no way to present a recovery code, so the lock was absolute until it lapsed.
+
+**After:** while locked, `login/` still checks the password.
+
+```json
+// wrong password while locked — unchanged
+401 {"status": 401, "message": "Invalid credentials."}
+
+// CORRECT password while locked — a recovery-only challenge
+200 {"status": 200, "message": "Second factor required.",
+     "data": {"second_factor_required": true, "recovery_code_required": true}}
+```
+
+`recovery_code_required` is new on **every** login response (`false` in the ordinary
+case). When it is `true`, `verify/` accepts **only** `{"method": "recovery"}`:
+
+```json
+// TOTP against a recovery-only challenge — refused as an ordinary bad code
+401 {"status": 401, "message": "Invalid or expired verification."}
+
+// a valid recovery code — clears the lockout and signs in
+200 {"status": 200, "message": "Signed in.",
+     "data": {"username": "...", "expires_at": "...", "used_recovery_code": true,
+              "lockout_cleared": true, "recovery_codes_remaining": 9}}
+```
+
+`lockout_cleared` is also new on every successful `verify/` response (`false`
+normally).
+
+**New lockout policy:** threshold **10** cumulative failures, then the window doubles
+per further failure — 10th → 1 min, 11th → 2, 12th → 4, 13th → 8, 14th → 16,
+15th → 32, 16th and beyond → 60 (cap). The counter is cumulative: an elapsed window
+does not forgive it, so the next failure re-locks at the next step up. Only a
+successful verification, the break-glass path above, or
+`manage.py unlock_platform_admin` clears it.
+
+**Honest cost:** while locked, a correct password is now distinguishable from a wrong
+one. That is the same oracle an ordinary unlocked login already presents, not a new
+class of leak — and denial bodies remain byte-identical, so lockout still never
+reveals whether an account exists.
+
+**Frontend action required:**
+- Read `recovery_code_required` from the login response and, when `true`, prompt for a
+  recovery code rather than an authenticator code.
+- Surface `lockout_cleared` after `verify/` so the operator knows the lock is gone and
+  that they have one fewer recovery code.
+
+**Operators:** the nuisance-lockout recovery path and the shell unlock are documented
+in [`BACKGROUND_TASKS.md`](BACKGROUND_TASKS.md).
+
+---
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
@@ -303,6 +370,9 @@ the difference between a bad afternoon and a permanently locked-out platform.
 6. **Admin second factor:** send an explicit `method` (`"totp"` or `"recovery"`)
    alongside `code` on `admin/v1/auth/verify/` and `admin/v1/auth/elevate/`.
    Applies to the admin control plane only, which has no frontend yet.
+7. **Admin lockout break-glass:** read `recovery_code_required` from the login
+   response and prompt for a recovery code when it is `true`; surface
+   `lockout_cleared` from `verify/`. Admin control plane only.
 
 ---
 

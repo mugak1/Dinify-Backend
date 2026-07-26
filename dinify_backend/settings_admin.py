@@ -73,9 +73,20 @@ ADMIN_TRUSTED_PROXY_DEPTH = 0
 # The first-factor challenge: minutes, not hours — it only bridges password → TOTP.
 ADMIN_CHALLENGE_COOKIE_NAME = '__Host-dinify_admin_challenge'
 ADMIN_CHALLENGE_TTL = timedelta(minutes=5)
+# Second-factor guesses one challenge tolerates. Its OWN setting — it used to read
+# ADMIN_LOCKOUT_THRESHOLD, which coupled the per-challenge budget to the account
+# lockout policy and would have widened when that threshold was raised.
+ADMIN_CHALLENGE_MAX_ATTEMPTS = 5
 # Durable, DB-backed lockout (the throttles are per-process and cannot be relied on).
-ADMIN_LOCKOUT_THRESHOLD = 5
-ADMIN_LOCKOUT_DURATION = timedelta(minutes=15)
+# Threshold + progressive backoff rather than a flat window: with ONE administrator
+# and a discoverable username, 5-strikes-then-15-flat-minutes let anybody who learned
+# the username deny the founder access indefinitely. The window now doubles per
+# failure past the threshold — 10th → 1 min, 11th → 2, 12th → 4 … 16th+ → 60 (cap) —
+# and a correct password plus a one-shot recovery code clears a lock outright
+# (endpoints/auth.py), which a lockout attacker cannot trigger.
+ADMIN_LOCKOUT_THRESHOLD = 10
+ADMIN_LOCKOUT_BACKOFF_BASE = timedelta(minutes=1)
+ADMIN_LOCKOUT_BACKOFF_CAP = timedelta(minutes=60)
 # How recently a session must have cleared a second factor to perform a sensitive
 # action. Consumed by platform_admin_app.permissions (attached to nothing yet).
 ADMIN_ELEVATION_MAX_AGE = timedelta(minutes=5)

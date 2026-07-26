@@ -270,6 +270,44 @@ with PostgreSQL on AWS RDS.
     SHA-256 recovery-code hashes, DB-backed lockout (NOT the DRF throttle, whose
     LocMemCache counters are per-mod_wsgi-worker; throttles ship as defence in
     depth), and `last_totp_counter` so a matched time step cannot be replayed
+  - VERIFICATION IS ATOMIC AND LOCKED (PR-C): `auth/verify/` and `auth/elevate/` each
+    do ALL their work in ONE `transaction.atomic()` under `select_for_update`, and the
+    raw session token reaches the response cookie only after it commits. They used to
+    consume the second factor OUTSIDE the session transaction and audit AFTER it
+    committed, so a recovery code could be burned or a TOTP counter advanced with no
+    session produced, a live `AdminSession` could exist with no success audit row, and
+    two concurrent requests could both mint. **LOCK ORDER: `AdminLoginChallenge` then
+    `PlatformStaffAuth`, never the reverse** (elevate and `lockout.register_failure`
+    take only the second) — keep it that way or you introduce a deadlock cycle.
+    `challenges.consume` is now CONDITIONAL and returns bool (a lost race rolls the
+    whole request back); `resolve_challenge(..., for_update=True)` locks with
+    `of=('self',)` so the joined `User` row is not locked as a side effect;
+    `record_attempt` and `lockout.register_failure` are lost-update-free (an `F()`
+    update and a `select_for_update` re-read respectively). FAILURE-AUDIT RULE:
+    ordinary denials audit INSIDE the transaction and commit with their own failure
+    accounting (either a failure is both counted and recorded, or neither); the ONE
+    path that must roll back — losing the challenge race, factor already consumed —
+    audits AFTER the block via `_LostChallengeRace`, the house carry-out pattern from
+    `restaurants_app.controllers.lifecycle._deny` and
+    `platform_admin_app.delegated_sessions.exchange_code`. The repo uses NO
+    `transaction.on_commit` / `durable=` / `set_rollback` / `savepoint=` anywhere —
+    statement order is the whole mechanism. `_ineligible_reason` is module-level and
+    re-checked by all three of login/verify/elevate
+  - LOCKOUT POLICY (PR-C): threshold **10** then progressive backoff — the window
+    doubles per further failure, 1 min → 60 min cap (`ADMIN_LOCKOUT_THRESHOLD`,
+    `ADMIN_LOCKOUT_BACKOFF_BASE`, `ADMIN_LOCKOUT_BACKOFF_CAP`; the flat
+    `ADMIN_LOCKOUT_DURATION` is GONE). `failed_attempts` is CUMULATIVE — an elapsed
+    window does not forgive it, which is what makes the backoff escalate. The
+    per-challenge attempt cap is now its OWN `ADMIN_CHALLENGE_MAX_ATTEMPTS` (5); it
+    used to read `ADMIN_LOCKOUT_THRESHOLD`, so raising the threshold would have
+    silently widened it. **BREAK-GLASS:** `login/` no longer refuses a locked account
+    before the password check — with the correct password it mints a
+    `recovery_only=True` challenge (migration `0007`), `verify/` accepts ONLY
+    `method='recovery'` against it, and success clears the lock and emits
+    `ADMIN_AUTH_LOCKOUT_CLEARED` INSTEAD of the ordinary success entry. An attacker
+    cannot ride this path: it needs the password AND a one-shot recovery code. The
+    shell equivalent is `manage.py unlock_platform_admin`. Responses stay generic
+    throughout — lockout is never an account-existence oracle
   - `AdminLoginChallenge` + `AdminSession` — two-step login as separate models, so
     "has a session" never stops meaning "fully authenticated": `auth/login/` checks
     the password and mints a short-lived challenge in its own `__Host-` cookie, and
@@ -958,6 +996,12 @@ the catch-all `<str:config_detail>/` route.
   key-loss sequence (recovery-code sign-in → install a new key → re-provision →
   re-enrol) is in `BACKGROUND_TASKS.md` and is covered end to end by
   `platform_admin_app/tests_second_factor.py::BreakGlassSequenceTests`
+- `unlock_platform_admin` in `platform_admin_app/management/commands/` — clears
+  `failed_attempts`/`locked_until` for a platform-staff account under a row lock and
+  audits `ADMIN_AUTH_LOCKOUT_CLEARED`. Does NOT touch the password, TOTP secret or
+  recovery codes, and needs no encryption key. The narrow tool: do NOT reach for
+  `reset_platform_admin_totp` to undo a lockout — it destroys the authenticator and all
+  ten recovery codes. See the nuisance-lockout section of `BACKGROUND_TASKS.md`
 - Five more exist and are equally not-to-be-recreated: `vacuum_deleted_records` +
   `vacuum_configuration` (`misc_app`), `send_messages` + `send_test_sms`
   (`notifications_app`, the latter being the ENV-bypassing SMS credential probe
@@ -982,9 +1026,10 @@ the catch-all `<str:config_detail>/` route.
   identity layer" bullet; 0013 blacklists outstanding platform-staff refresh
   tokens and strips platform-only roles from `restaurant_user` rows, data-only and
   idempotent — see "Tenant Isolation / Role-Permission ENFORCEMENT"),
-  `platform_admin_app/migrations/0006_delegatedsession.py` (0001 identity,
-  0002 `AdminSession`, 0003 `AdminAuditLog`, 0004 TOTP replay counter,
-  0005 `DelegationGrant`, 0006 `DelegatedSession`),
+  `platform_admin_app/migrations/0007_adminloginchallenge_recovery_only.py`
+  (0001 identity, 0002 `AdminSession`, 0003 `AdminAuditLog`, 0004 TOTP replay counter,
+  0005 `DelegationGrant`, 0006 `DelegatedSession`, 0007 the break-glass
+  `recovery_only` challenge flag — see "Platform-admin control plane"),
   `misc_app/migrations/0004_drop_service_tickets.py`
 
 ## CI — `.github/workflows/ci.yml`

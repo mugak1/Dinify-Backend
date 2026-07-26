@@ -149,6 +149,12 @@ class AdminLoginChallenge(models.Model):
     consumed_at = models.DateTimeField(null=True, blank=True)
     attempts = models.PositiveSmallIntegerField(default=0)
 
+    # Issued while the account was locked out, so it accepts ONLY a recovery code —
+    # the break-glass path out of a nuisance lockout. A TOTP code is refused on such
+    # a challenge, because TOTP is what an attacker can make you fail; a recovery
+    # code is a secret they do not hold. See endpoints/auth.py.
+    recovery_only = models.BooleanField(default=False)
+
     class Meta:
         db_table = 'admin_login_challenge'
 
