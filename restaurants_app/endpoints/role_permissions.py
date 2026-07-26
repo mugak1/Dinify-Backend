@@ -7,7 +7,7 @@ Owner-only role-permission management endpoint.
 Reads the four per-role module grids for a restaurant, and writes a non-owner
 role's grid. Both verbs gate on the ``team`` module at the target restaurant via
 can_user_access_module — which is owner-only (the resolver grants ``team`` only
-through the owner/admin short-circuit), so this is the owner-only management
+through the owner short-circuit), so this is the owner-only management
 surface that mirrors the create-employee (``employee`` → ``team``) gate from C.
 
 Catch-all placement note: this endpoint MUST be registered before the

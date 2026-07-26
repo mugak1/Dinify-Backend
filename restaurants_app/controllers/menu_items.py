@@ -26,8 +26,7 @@ class ConMenuItem:
         - ordered_ids: full ordered list of UUID strings for every non-deleted
           item in the section. Partial reorders are rejected — the caller is
           asserting a total ordering for the section.
-        - user: must be a Dinify admin or owner/manager of the restaurant the
-          section belongs to.
+        - user: must be an owner/manager of the restaurant the section belongs to.
         """
         if not section_id:
             return {

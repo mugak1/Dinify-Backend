@@ -134,8 +134,8 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                 # thereby skip every availability gate in initiate_order
                 # (accepting_orders, qr_mode, is_available_for_scan) at any
                 # restaurant. 404 (not 403) mirrors the reports/finance
-                # non-disclosure gates. can_user_access_module returns True for
-                # dinify admins and fails closed on a missing/empty id.
+                # non-disclosure gates. can_user_access_module fails closed on a
+                # missing/empty id.
                 if not can_user_access_module(
                     request.user, restaurant_id, MODULE_TABLES,
                 ):

@@ -25,7 +25,7 @@ def resolve_review(user, review_id, target_status, note=None):
     """
     Toggle a review's resolution_status to ``target_status``.
 
-    ``user``          : the requesting user (owner/manager or dinify admin).
+    ``user``          : the requesting user (owner/manager of the restaurant).
     ``review_id``     : the Review PK (an integer).
     ``target_status`` : 'open' or 'resolved'.
     ``note``          : optional resolution note. ``None`` (absent) leaves any

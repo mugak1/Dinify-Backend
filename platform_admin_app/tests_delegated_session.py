@@ -705,8 +705,9 @@ class AllowlistIntegrityTests(TestCase):
 
 class AuthoritySeamTests(TestCase):
     """
-    A delegated principal must fail closed in every resolver, including the three
-    that a Dinify admin passes through unrestricted.
+    A delegated principal must fail closed in every resolver — it is the only
+    platform-staff principal the customer plane admits, and it carries no
+    ownership, no manage-level authority and no reach beyond its one grant.
     """
 
     def setUp(self):

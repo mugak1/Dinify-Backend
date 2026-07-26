@@ -212,14 +212,21 @@ class AdminLoginView(APIView):
             )
             return _deny(GENERIC_AUTH_ERROR)
 
-        raw_token, _challenge = challenges.create_challenge(
-            user, recovery_only=locked,
-        )
-        audit.record_auth_event(
-            request, ADMIN_AUTH_CHALLENGE_ISSUED, result=RESULT_SUCCESS,
-            actor=user, actor_label=username,
-            reason='recovery_only (locked out)' if locked else '',
-        )
+        # AUDIT-ATOMIC. A challenge is a credential, so its issuance and its audit
+        # entry share one transaction — a failed audit write unwinds the challenge
+        # rather than leaving an unattributable one live. This was the last
+        # admin-plane credential-issuing path where the two were separately
+        # autocommitted. The block also carries create_challenge's own atomic (which
+        # becomes a savepoint here), so the User row lock is held across both.
+        with transaction.atomic():
+            raw_token, _challenge = challenges.create_challenge(
+                user, recovery_only=locked,
+            )
+            audit.record_auth_event(
+                request, ADMIN_AUTH_CHALLENGE_ISSUED, result=RESULT_SUCCESS,
+                actor=user, actor_label=username,
+                reason='recovery_only (locked out)' if locked else '',
+            )
         response = Response(
             {
                 'status': 200,

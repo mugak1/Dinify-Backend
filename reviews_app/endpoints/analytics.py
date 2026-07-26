@@ -25,10 +25,9 @@ def _resolve_restaurant(request):
 
     Returns ``(restaurant_id, None)`` on success, or ``(None, error_dict)``. The
     checks run require -> well-formed -> authorized, and crucially the UUID-format
-    check precedes the module gate: a dinify admin is authorized for any id, so
-    without it a malformed ``?restaurant=`` would reach the ORM and 500 on
-    Postgres (the Restaurant PK is a UUID). Failing closed with a uniform 400
-    mirrors submit_review's malformed-id handling.
+    check precedes the module gate: without it a malformed ``?restaurant=`` would
+    reach the ORM and 500 on Postgres (the Restaurant PK is a UUID). Failing closed
+    with a uniform 400 mirrors submit_review's malformed-id handling.
     """
     restaurant_id = request.GET.get('restaurant')
     if not restaurant_id:

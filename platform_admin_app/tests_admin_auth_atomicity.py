@@ -9,9 +9,9 @@ inverse — a live ``AdminSession`` with no successful-login audit row — contr
 "no audit, no action" contract ``audit.py`` documents.
 
 Every test here injects a failure at one of those two points and asserts the whole
-request unwound. **They all fail on `main`**, which is the point: on `main` the
-recovery code IS consumed, the TOTP counter HAS advanced, and (for the audit case) the
-session survives.
+request unwound. Before PR-C every one of them failed — the recovery code WAS consumed,
+the TOTP counter HAD advanced, and (for the audit case) the session survived. That is
+what they exist to keep from coming back.
 
 These are plain ``TestCase`` — no threads needed, so no Postgres requirement. The
 concurrency half of PR-C lives in ``tests_admin_auth_concurrency.py``.

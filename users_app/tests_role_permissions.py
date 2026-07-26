@@ -4,7 +4,7 @@ Tests for the role-based permission RESOLUTION layer (data + resolver + payload)
 This layer is purely additive — it applies NO enforcement. Covered surface:
   * resolve_module_permissions falls back to coded defaults when no override
     row exists, an override row supersedes the default, multi-role unions to the
-    most permissive, and the owner/admin short-circuit grants billing/team.
+    most permissive, and the owner short-circuit grants billing/team.
   * can_user_access_module treats ``support`` as ungated.
   * the resolved ``permissions`` map is attached identically by BOTH payload
     build points (get_any_restaurant_roles + SerGetUserProfile).
@@ -113,7 +113,7 @@ class RolePermissionResolverTests(TestCase):
         self.assertTrue(perms[MODULE_TABLES])    # from staff
         self.assertFalse(perms[MODULE_MENU])     # neither grants menu
 
-    # --- owner / admin short-circuit ------------------------------------
+    # --- owner short-circuit ---------------------------------------------
     def test_owner_short_circuit_grants_billing_team(self):
         perms = resolve_module_permissions(self.owner, self.restaurant.id)
         for key in ALL_KEYS:

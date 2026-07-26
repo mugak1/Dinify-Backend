@@ -35,7 +35,8 @@ def first_time_batch_approval(
     }
 
     # check that the user has the necessary rights — the `menu` module at this
-    # restaurant (a dinify admin passes via the resolver's admin short-circuit).
+    # restaurant. There is no platform short-circuit: the resolver grants only on
+    # ownership or the role grid.
     if not can_user_access_module(user, restaurant_id, MODULE_MENU):
         return {
             'status': 401,

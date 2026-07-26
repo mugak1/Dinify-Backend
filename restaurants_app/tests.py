@@ -928,8 +928,8 @@ class TenantIsolationTests(TestCase):
     """
     Cross-restaurant authorization tests for the RestaurantSetupEndpoint
     permission gate. Owner of restaurant A must NOT be able to mutate
-    resources belonging to restaurant B; only dinify admins or active
-    owner/manager employees of the *target* restaurant may write.
+    resources belonging to restaurant B; only active owner/manager employees
+    of the *target* restaurant may write.
 
     Headline security property: update/delete resolvers walk FK chains
     server-side from the record's id and ignore any client-supplied
@@ -944,7 +944,7 @@ class TenantIsolationTests(TestCase):
             first_name='Owner', last_name='A',
             email='owner_a@test.com', phone_number='256700000010',
             username='256700000010', country='Uganda', password='password',
-            roles=[],  # not a dinify admin
+            roles=[],  # authority comes from RestaurantEmployee, never from roles
         )
         self.restaurant_a = Restaurant.objects.create(
             name='Restaurant A', location='loc-a',
@@ -1457,8 +1457,7 @@ class TenantReadIsolationTests(TestCase):
     restaurant A must NOT be able to READ resources belonging to restaurant B
     by changing the ?restaurant= query param — covering tables, dining areas,
     menu items, employees (staff PII), and menu sections — while its own reads
-    keep working and a dinify admin retains its
-    legitimate cross-restaurant access.
+    keep working.
 
     Headline property: the returned queryset is authoritatively bound to the
     caller's owner/manager restaurants server-side; the client ?restaurant=

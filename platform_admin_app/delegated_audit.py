@@ -1,6 +1,6 @@
 """
-Transactional audit for delegated TENANT writes — where the no-audit-no-action
-contract finally becomes universal.
+Transactional audit for delegated TENANT writes — bringing them under the
+audit-atomic half of the contract in ``platform_admin_app.audit``.
 
 THE GAP THIS CLOSES. ``DelegatedAccessMiddleware`` audits a delegated write from
 ``_finalize``, i.e. after the view has returned. By then the view's own transaction has
