@@ -363,12 +363,22 @@ class LoginFlowTests(ThrottleIsolationMixin, AuditAssertionsMixin, TestCase):
 
     def test_lockout_after_threshold_failures(self):
         for _ in range(lockout.threshold()):
+            # The per-IP throttle would cap the loop short of the threshold.
+            cache.clear()
             self._login(password='wrong')
         self.auth.refresh_from_db()
         self.assertTrue(lockout.is_locked(self.auth))
         self.assertAudited(ADMIN_AUTH_LOCKOUT, result=RESULT_DENIED)
-        # Even the CORRECT password is refused while locked.
-        self.assertEqual(self._login().status_code, 401)
+
+        # A CORRECT password no longer meets a flat 401 while locked — it opens the
+        # break-glass path, a recovery-only challenge. TOTP is still refused on it, so
+        # an attacker who locked the account gains nothing from the change. The
+        # recovery half of this lives in tests_admin_lockout.py.
+        cache.clear()
+        response = self._login()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['data']['recovery_code_required'])
+        self.assertEqual(self._verify(_code(self.secret)).status_code, 401)
 
     def test_logout_revokes_and_is_idempotent(self):
         self._login()
