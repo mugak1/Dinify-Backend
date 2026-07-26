@@ -28,9 +28,6 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Paid, PaymentStatus_Paid,
 )
 from reports_app.controllers.restaurant.dashboard import summarize_revenue
-from reports_app.controllers.dinify.dashboard import (
-    summarize_orders as summarize_dinify_orders,
-)
 
 # 2026-07-31 22:30 UTC == 2026-08-01 01:30 EAT — an instant whose EAT calendar day
 # (and month) is one ahead of its UTC day (and month).
@@ -118,21 +115,18 @@ class RestaurantDashboardMonthBoundaryTests(TestCase):
         self.assertEqual(result['this_month'], Decimal('750.00'))
 
 
-class DinifyDashboardMonthBoundaryTests(TestCase):
-    """Same-shape assertion on the admin (dinify) dashboard summarize_orders."""
+class DinifyDashboardRetiredTests(TestCase):
+    """
+    The admin (dinify) dashboard used to carry a second copy of the same EAT
+    month-boundary logic, asserted here alongside the restaurant one.
 
-    def setUp(self):
-        self.owner = make_user('256700000902')
-        self.restaurant = Restaurant.objects.create(
-            name='TZ Restaurant', location='loc',
-            status=RestaurantStatus_Live, owner=self.owner,
-        )
-        self.table = Table.objects.create(number=1, restaurant=self.restaurant)
+    The whole `reports_app.controllers.dinify` package went with ambient
+    administrator authority (PR-A) — it served cross-tenant revenue on the strength
+    of a role string. The boundary behaviour it shared is still covered above by
+    `RestaurantDashboardMonthBoundaryTests` against the LIVE controller; this class
+    just pins the retirement so the import cannot quietly come back.
+    """
 
-    @mock.patch('django.utils.timezone.now', return_value=FROZEN_UTC)
-    def test_boundary_order_is_current_month(self, _now):
-        order = make_paid_order(self.restaurant, self.table)
-        Order.objects.filter(id=order.id).update(time_created=BOUNDARY_ORDER_UTC)
-        summary = summarize_dinify_orders()
-        self.assertEqual(summary['total'], 1)
-        self.assertEqual(summary['monthly'], 1)
+    def test_the_dinify_reports_controllers_are_gone(self):
+        with self.assertRaises(ImportError):
+            import reports_app.controllers.dinify  # noqa: F401

@@ -333,7 +333,7 @@ class TransitionMatrixTests(TestCase):
     """Every cell of the matrix, allowed and refused."""
 
     def setUp(self):
-        self.actor = _user('256762000001', roles=['dinify_admin'])
+        self.actor = _user('256762000001', roles=[])  # the actor is an identity for the audit row, not an authority
         self.restaurant = Restaurant.objects.create(
             name='Matrix R', location='loc', owner=_user('256762000002'),
             status=RestaurantStatus_Onboarding,
@@ -409,7 +409,7 @@ class TransitionValidationTests(TestCase):
     """Reason and target validation, and the audit entry each refusal leaves."""
 
     def setUp(self):
-        self.actor = _user('256763000001', roles=['dinify_admin'])
+        self.actor = _user('256763000001', roles=[])  # the actor is an identity for the audit row, not an authority
         self.restaurant = Restaurant.objects.create(
             name='Validate R', location='loc', owner=_user('256763000002'),
             status=RestaurantStatus_Live,
@@ -470,7 +470,7 @@ class TransitionAuditTests(TestCase):
     """The audit entry a successful transition writes, and its atomicity."""
 
     def setUp(self):
-        self.actor = _user('256764000001', roles=['dinify_admin'])
+        self.actor = _user('256764000001', roles=[])  # the actor is an identity for the audit row, not an authority
         self.restaurant = Restaurant.objects.create(
             name='Audit R', location='loc', owner=_user('256764000002'),
             status=RestaurantStatus_Live,
@@ -586,7 +586,7 @@ class TransitionSeamTests(TestCase):
     """The two Phase-1 seams: they exist, they are called, and they can refuse."""
 
     def setUp(self):
-        self.actor = _user('256765000001', roles=['dinify_admin'])
+        self.actor = _user('256765000001', roles=[])  # the actor is an identity for the audit row, not an authority
         self.restaurant = Restaurant.objects.create(
             name='Seam R', location='loc', owner=_user('256765000002'),
             status=RestaurantStatus_Onboarding,
@@ -665,7 +665,7 @@ class TransitionConcurrencyTests(TestCase):
     """The from-state comes from the LOCKED row, not the caller's instance."""
 
     def setUp(self):
-        self.actor = _user('256766000001', roles=['dinify_admin'])
+        self.actor = _user('256766000001', roles=[])  # the actor is an identity for the audit row, not an authority
         self.restaurant = Restaurant.objects.create(
             name='Race R', location='loc', owner=_user('256766000002'),
             status=RestaurantStatus_Live,

@@ -13,11 +13,7 @@ from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.save_action_log import save_action
 from users_app.controllers.otp_manager import OtpManager
-from users_app.controllers.permissions_check import (
-    is_dinify_admin,
-    is_dinify_superuser,
-    get_any_restaurant_roles
-)
+from users_app.controllers.permissions_check import get_any_restaurant_roles
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     RESTAURANT_OWNER,
@@ -145,9 +141,12 @@ def login(
         filter_information=None
     )
 
+    # OTP escalation is driven purely by RESTAURANT roles now. The
+    # `is_dinify_admin(...) or is_dinify_superuser(...)` clause that used to sit
+    # here read User.roles for platform authority; a restaurant_user can no
+    # longer hold a platform role (enforced at every write path), and platform
+    # staff are refused above, so the branch had no reachable holder.
     require_otp = False
-    if is_dinify_admin(user=auth_user) or is_dinify_superuser(user=auth_user):
-        require_otp = True
     restaurant_roles = get_any_restaurant_roles(user=auth_user)
 
     for restaurant_role in restaurant_roles:

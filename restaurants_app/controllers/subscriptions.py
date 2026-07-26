@@ -1,12 +1,17 @@
 """
-endpoints for restaurant subscriptions
+Read-side controller for restaurant subscription details.
+
+The WRITE verb (``update``) was REMOVED with ambient administrator authority:
+it was reachable on the strength of a ``dinify_admin`` string in the caller's
+``User.roles`` and could grant any restaurant an indefinite free subscription.
+Phase 1: setting subscription validity/expiry is admin-plane functionality,
+built natively on /api/admin/v1, where it gets elevation and an audit row. Do
+not re-add a write path here.
 """
 from django.core.exceptions import ValidationError
-from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework.response import Response
 
 from restaurants_app.models import Restaurant
-from users_app.controllers.permissions_check import is_dinify_admin
 
 
 class RestaurantSubscription:
@@ -30,9 +35,8 @@ class RestaurantSubscription:
                 'subscription_expiry_date',
             ).get(id=restaurant_id)
         except (Restaurant.DoesNotExist, ValueError, ValidationError):
-            # DoesNotExist, or a malformed (non-UUID) id — the latter reachable
-            # only on the admin path, which bypasses the endpoint's settings
-            # gate. Treat both as not found.
+            # DoesNotExist, or a malformed (non-UUID) id. Treat both as not found
+            # — defensive, so a bad value can never surface as a 500.
             return Response(
                 {'status': 404, 'message': 'Restaurant not found.'},
                 status=404,
@@ -48,75 +52,4 @@ class RestaurantSubscription:
             'message': 'Successfully retrieved the restaurant subscription information',
             'data': data
         }
-        return Response(response, status=200)
-
-    def update(self, request):
-        # WRITE is system/billing state: Dinify-admin ONLY. No restaurant user
-        # (the owner included) may self-set their subscription. The gate lives
-        # here in the controller so the capability is safe regardless of caller.
-        user = getattr(request, 'user', None)
-        if not (
-            user is not None
-            and getattr(user, 'is_authenticated', False)
-            and user.is_active
-            and is_dinify_admin(user)
-        ):
-            return Response(
-                {'status': 403, 'message': 'Not authorised.'},
-                status=403,
-            )
-
-        restaurant_id = request.data.get('restaurant')
-        subscription_validity = request.data.get('subscription_validity')
-        subscription_expiry_date = request.data.get('subscription_expiry_date')
-
-        if (
-            restaurant_id is None
-            or subscription_validity is None
-            or subscription_expiry_date is None
-        ):
-            return Response(
-                {
-                    'status': 400,
-                    'message': (
-                        'restaurant, subscription_validity and '
-                        'subscription_expiry_date are required.'
-                    ),
-                },
-                status=400,
-            )
-
-        if not isinstance(subscription_validity, bool):
-            return Response(
-                {'status': 400, 'message': 'subscription_validity must be a boolean.'},
-                status=400,
-            )
-
-        raw_expiry = str(subscription_expiry_date)
-        if parse_datetime(raw_expiry) is None and parse_date(raw_expiry) is None:
-            return Response(
-                {'status': 400, 'message': 'subscription_expiry_date must be a valid date.'},
-                status=400,
-            )
-
-        try:
-            restaurant = Restaurant.objects.get(id=restaurant_id)
-        except (Restaurant.DoesNotExist, ValueError, ValidationError):
-            return Response(
-                {'status': 404, 'message': 'Restaurant not found.'},
-                status=404,
-            )
-
-        restaurant.subscription_validity = subscription_validity
-        restaurant.subscription_expiry_date = subscription_expiry_date
-
-        restaurant.save()
-
-        # TODO save the subscription change in the logs
-
-        response = {
-            'status': 200,
-            'message': 'Successfully updated the restaurant subscription information'
-        }
-
         return Response(response, status=200)

@@ -36,30 +36,3 @@ class SerializerGetRestaurantTransactionListing(ModelSerializer):
             return None
         number = record.order.order_number
         return str(number) if number is not None else None
-
-
-class SerializerGetDinifyTransactionListing(ModelSerializer):
-    transaction_type = SerializerMethodField()
-    transaction_status = SerializerMethodField()
-    transaction_platform = SerializerMethodField()
-
-    class Meta:
-        model = DinifyTransaction
-        fields = (
-            'id', 'time_created', 'time_last_updated', 'transaction_type',
-            'transaction_amount', 'transaction_status',
-            'transaction_status', 'transaction_platform',
-            'manual_payment', 'manual_payment_details',
-            'payment_mode', 'aggregator', 'aggregator_reference',
-        )
-
-    def get_transaction_type(self, record):
-        return record.transaction_type.replace('_', ' ').title()
-
-    def get_transaction_status(self, record):
-        return record.transaction_status.replace('_', ' ').title()
-
-    def get_transaction_platform(self, record):
-        if record.transaction_platform == 'momo':
-            return 'MoMo'
-        return record.transaction_platform.replace('_', ' ').title()

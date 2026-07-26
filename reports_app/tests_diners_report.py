@@ -25,13 +25,13 @@ from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from users_app.models import User
-from restaurants_app.models import Restaurant, Table
+from restaurants_app.models import Restaurant, RestaurantEmployee, Table
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Live,
     OrderStatus_Served, OrderStatus_Paid, OrderStatus_Pending,
     OrderStatus_Cancelled,
-    DINIFY_ADMIN,
+    RESTAURANT_OWNER,
 )
 from reports_app.controllers.restaurant.diners import (
     generate_restaurant_diners_summary,
@@ -70,9 +70,12 @@ class DinersReportBase(TestCase):
         self.diner_c = self.make_diner('256700000603', 'Cara', 'Casual')
         self.unnamed_diner = self.make_diner('256700000604', None, None)
 
-        # A dinify admin — unrestricted module access for the endpoint test.
-        self.admin = self.make_diner('256700000699', 'Admin', 'User',
-                                     roles=[DINIFY_ADMIN])
+        # An AUTHORISED principal for the endpoint test: an owner EMPLOYMENT at
+        # the restaurant, which is what `can_user_access_module` resolves. (It used
+        # to be a dinify_admin role-holder relying on the unrestricted bypass; that
+        # bypass is gone, so the authorisation has to be real.)
+        RestaurantEmployee.objects.create(
+            user=self.owner, restaurant=self.restaurant, roles=[RESTAURANT_OWNER])
 
     def make_diner(self, phone, first_name='', last_name='', roles=None):
         return User.objects.create_user(
@@ -378,8 +381,9 @@ class DinersTrendsRemovedTests(DinersReportBase):
         self.assertFalse(hasattr(diners_module, 'generate_restaurant_diners_trends'))
 
     def test_diners_trends_endpoint_is_no_longer_served(self):
-        # Authorised (admin) request for the retired report -> 'Invalid report
-        # name', proving the dispatch branch was removed (not a 404 auth reject).
+        # Authorised (restaurant owner) request for the retired report ->
+        # 'Invalid report name', proving the dispatch branch was removed rather
+        # than the request being rejected by the module gate (which 404s).
         factory = APIRequestFactory()
         request = factory.get(
             '/api/v1/reports/restaurant/diners-trends/',
@@ -387,7 +391,7 @@ class DinersTrendsRemovedTests(DinersReportBase):
              'from': '2024-01-01', 'to': '2024-01-31',
              'category': 'daily', 'result': 'table'},
         )
-        force_authenticate(request, user=self.admin)
+        force_authenticate(request, user=self.owner)
         response = RestaurantReportsEndpoint.as_view()(request, report_name='diners-trends')
 
         self.assertEqual(response.status_code, 400)

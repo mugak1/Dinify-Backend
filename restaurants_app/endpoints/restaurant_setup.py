@@ -10,9 +10,6 @@ from rest_framework.response import Response
 
 logger = logging.getLogger(__name__)
 from rest_framework.views import APIView
-from restaurants_app.controllers.create_restaurant import (
-    admin_register_restaurant
-)
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from misc_app.controllers.define_filter_params import define_filter_params
 from misc_app.controllers.secretary import Secretary
@@ -61,7 +58,6 @@ from dinify_backend.configss.string_definitions import (
 )
 
 from users_app.controllers.permissions_check import (
-    is_dinify_admin,
     can_user_access_module,
     get_module_restaurant_ids,
 )
@@ -246,9 +242,12 @@ def check_permission(user, record: str, action: str, request_data) -> bool:
 
     Returns True iff:
       - the user is authenticated and active, AND
-      - the user is a dinify admin (bypass), OR may access the record's
-        permission module (``_RECORD_MODULE``) at the *target* restaurant
-        (``can_user_access_module``).
+      - the user may access the record's permission module (``_RECORD_MODULE``)
+        at the *target* restaurant (``can_user_access_module``).
+
+    There is no bypass. Every principal — including a delegated administrator —
+    is evaluated through the same module gate at the same server-resolved
+    restaurant.
 
     Resolution of the target restaurant is server-side (see
     _RESTAURANT_RESOLVERS): for create it reads the payload, for
@@ -264,8 +263,6 @@ def check_permission(user, record: str, action: str, request_data) -> bool:
         return False
     if not user.is_active:
         return False
-    if is_dinify_admin(user):
-        return True
 
     target_restaurant_id = _resolve_target_restaurant_id(record, action, request_data)
     if not target_restaurant_id:
@@ -318,16 +315,14 @@ def scope_list_filter(user, config_detail, orm_filter):
     longer leaks every tenant's records.
 
     Returns ``(orm_filter, ok)``. ``ok=False`` => deny (resource has no module
-    mapping or no known ownership path). A dinify admin is unrestricted and the
-    filter is left untouched; a caller without the module ends up with an empty
-    ``__in`` list (no rows).
+    mapping or no known ownership path). A caller without the module ends up with
+    an empty ``__in`` list (no rows). No principal is exempt from the binding —
+    the resolver always returns a set.
     """
     module = _RECORD_MODULE.get(config_detail)
     if module is None:
         return orm_filter, False
     allowed = get_module_restaurant_ids(user, module)
-    if allowed is None:
-        return orm_filter, True
     path = LIST_RESTAURANT_PATH.get(config_detail)
     if path is None:
         return orm_filter, False
@@ -356,19 +351,20 @@ def build_scoped_instance_queryset(user, config_detail, model):
     """
     Build the authoritative, server-scoped queryset that Secretary.update /
     Secretary.delete resolve the target row through (locked). Reuses the same
-    module gate + ownership path as the GET list scoping: a dinify admin is
-    unrestricted (all rows — an explicit decision); otherwise only rows whose
-    owning restaurant grants the caller the resource's module. A resource with no
-    module or no known ownership path yields ``none()`` (fail closed). This — not
-    the request body — is the object universe the mutation may touch, so a spoofed
+    module gate + ownership path as the GET list scoping: only rows whose owning
+    restaurant grants the caller the resource's module. A resource with no module
+    or no known ownership path yields ``none()`` (fail closed). This — not the
+    request body — is the object universe the mutation may touch, so a spoofed
     ``restaurant`` / foreign id can neither widen scope nor move a row.
+
+    There is no ``model.objects.all()`` branch. The unrestricted queryset that used
+    to serve a dinify admin was the single widest write surface on this plane; it
+    went with the role predicates and must not come back.
     """
     module = _RECORD_MODULE.get(config_detail)
     if module is None:
         return model.objects.none()
     allowed = get_module_restaurant_ids(user, module)
-    if allowed is None:  # dinify admin — unrestricted (explicit)
-        return model.objects.all()
     path = LIST_RESTAURANT_PATH.get(config_detail)
     if path is None:
         return model.objects.none()
@@ -432,40 +428,15 @@ class RestaurantSetupEndpoint(APIView):
         # decode the token
         auth = decode_jwt_token(request)
 
-        if config_detail == 'admin-register-restaurant':
-            # Admin-only trust boundary: this branch mints User accounts and
-            # dispatches credential SMS/email (self_register, skip_otp=True), so
-            # it must be gated before any data processing. request.user is only
-            # available here — the controller receives an auth_info dict.
-            if not (
-                request.user
-                and request.user.is_authenticated
-                and request.user.is_active
-                and is_dinify_admin(request.user)
-            ):
-                return Response(
-                    {'status': 403, 'message': 'Not authorised.'},
-                    status=403,
-                )
-
-            post_data = request.data
-            try:
-                post_data = post_data.dict()
-            except Exception as error:
-                logger.debug("Error converting data to dict: %s", error)
-
-            data = post_data.copy()
-            response = admin_register_restaurant(
-                data=data,
-                auth_info={
-                    'id': str(request.user.id),
-                    'user_id': str(request.user.id),
-                    'username': request.user.username,
-                    'first_name': request.user.first_name,
-                    'email': request.user.email
-                }
-            )
-            return Response(response, status=response['status'])
+        # Phase 1: restaurant onboarding is admin-plane functionality, built
+        # natively on /api/admin/v1. The `admin-register-restaurant` branch that
+        # used to live here minted User accounts, dispatched credential SMS/email
+        # (self_register, skip_otp=True) and created the Restaurant + owner
+        # membership — all on the authority of a `dinify_admin` string in the
+        # caller's User.roles. That is exactly the ambient authority this plane no
+        # longer recognises, and the capability needs elevation + audit, which only
+        # the admin plane provides. It is REMOVED here, not ported: an unknown
+        # config_detail now falls through to the generic handling below.
 
         if config_detail == 'create-employee':
             return self.handle_create_employee(request)
@@ -719,9 +690,11 @@ class RestaurantSetupEndpoint(APIView):
 
         if config_detail == 'subscription-details':
             # Tenant isolation: gate the subscription read on the `settings`
-            # module at the requested restaurant (a dinify admin reads any).
-            # 404, not 403, so we don't confirm whether another tenant's
-            # restaurant exists.
+            # module at the requested restaurant. 404, not 403, so we don't
+            # confirm whether another tenant's restaurant exists. There is no
+            # principal that reads any restaurant — the dinify-admin bypass that
+            # used to short-circuit this gate is gone — so an absent or foreign
+            # `?restaurant=` fails closed here and never reaches the controller.
             if not can_user_access_module(
                 request.user, request.GET.get('restaurant'), MODULE_SETTINGS,
             ):
@@ -908,12 +881,23 @@ class RestaurantSetupEndpoint(APIView):
         # Non-CRUD config_detail values (reorder + subscription) don't match
         # the resolver dispatch (which is keyed on CRUD resource names), so
         # they are handled above the generic gate. Each self-guards: the
-        # reorder / sort-mode controllers take user= and check internally, and
-        # RestaurantSubscription.update enforces a Dinify-admin-only gate on the
-        # subscription write. (The subscription READ is gated separately in
-        # get() on the settings module.)
+        # reorder / sort-mode controllers take user= and check internally.
+        #
+        # Phase 1: setting a restaurant's subscription validity/expiry is
+        # admin-plane functionality, built natively on /api/admin/v1. The write
+        # verb here was reachable on a `dinify_admin` role string alone and could
+        # grant any restaurant an indefinite free subscription; it is REMOVED, not
+        # ported. 405 (not 403) because the path itself is still live — the
+        # settings-gated subscription READ is served by get(). Mirrors the retired
+        # DELETE on upsell-config/items/reorder/ (DC-BE-004).
         if config_detail == 'subscription-details':
-            return RestaurantSubscription().update(request)
+            return Response(
+                {
+                    'status': 405,
+                    'message': 'This action is no longer available.',
+                },
+                status=405,
+            )
 
         if config_detail in ('reorder-menu-sections', 'reorder-menu-items'):
             if config_detail == 'reorder-menu-items':
@@ -986,32 +970,38 @@ class RestaurantSetupEndpoint(APIView):
 
         # `flat_fee` is the Dinify subscription price charged to the restaurant
         # (finance_app tx_subscription bills restaurant.flat_fee) — platform-owned
-        # state a tenant must never write, so a non-admin's value is silently
-        # stripped here while Dinify admins keep write access. Stripping (not 403)
-        # matches how Secretary already ignores non-applicable fields; the tenant
-        # portal never sends the field, so nothing legitimate breaks.
+        # state no principal on THIS plane may write, so it is stripped
+        # UNCONDITIONALLY. It used to be stripped only for non-admins, leaving a
+        # `dinify_admin` role-holder able to zero a subscription price through the
+        # tenant portal; with ambient admin authority gone there is no such
+        # principal, and the strip covers a delegated `settings`-scope session too.
+        # Phase 1: pricing is admin-plane functionality, built natively on
+        # /api/admin/v1 — the key deliberately STAYS in EDIT_INFORMATION so that
+        # writer can still go through Secretary. Stripping (not 403) matches how
+        # Secretary already ignores non-applicable fields; the tenant portal never
+        # sends the field, so nothing legitimate breaks.
         #
         # `status` USED TO BE STRIPPED HERE TOO. It no longer needs to be, and the
         # strip would now be misleading: PR-5 made the lifecycle a constrained axis
         # owned by ONE writer (restaurants_app.controllers.lifecycle). `status` left
         # EDIT_INFORMATION and is read_only on SerializerPutRestaurant, so NO caller
-        # reaches it through this path — not a tenant, and not a Dinify admin. The
-        # legacy admin changeApprovalStatus PUT is therefore retired; lifecycle
-        # changes happen only through POST admin/v1/restaurants/<id>/transition/.
-        if config_detail == 'restaurants' and not is_dinify_admin(request.user):
-            admin_only_fields = [
+        # reaches it through this path. The legacy admin changeApprovalStatus PUT is
+        # therefore retired; lifecycle changes happen only through
+        # POST admin/v1/restaurants/<id>/transition/.
+        if config_detail == 'restaurants':
+            platform_only_fields = [
                 key for key in ('flat_fee',) if key in put_data
             ]
-            if admin_only_fields:
+            if platform_only_fields:
                 # request.data is uncopied on this path and may be an immutable
                 # QueryDict (form/multipart) — copy before mutating.
                 put_data = put_data.copy()
-                for key in admin_only_fields:
+                for key in platform_only_fields:
                     put_data.pop(key, None)
                 logger.warning(
-                    'Stripped tenant-supplied admin-only restaurant field(s) %s. '
+                    'Stripped platform-owned restaurant field(s) %s. '
                     'user=%s restaurant=%s',
-                    admin_only_fields, auth.get('id'), put_data.get('id'),
+                    platform_only_fields, auth.get('id'), put_data.get('id'),
                 )
 
         # if editing a menu item,

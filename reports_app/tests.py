@@ -5,8 +5,9 @@ Every restaurant report is single-target (scoped by the client ``?restaurant=``)
 ``RestaurantReportsEndpoint.get`` authorizes that one restaurant via
 ``can_user_access_module(.., MODULE_REPORTS)`` before dispatching, returning 404
 (not 403) on a cross-tenant / non-member / missing-id read so a restaurant's
-existence is never confirmed to an outsider. A dinify admin is unrestricted;
-unauthenticated callers are stopped by the global IsAuthenticated default (401).
+existence is never confirmed to an outsider. There is no unrestricted principal —
+the dinify-admin bypass is gone, and so is the platform reports surface it served.
+Unauthenticated callers are stopped by the global IsAuthenticated default (401).
 The guard is report-name agnostic, so a single report name (``sales-listing``)
 exercises it. Owner/manager hold the ``reports`` module by default (these tests);
 roles without it are covered in users_app/tests_permission_enforcement.py.
@@ -16,8 +17,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from users_app.models import User
 from restaurants_app.models import Restaurant, RestaurantEmployee
+from platform_admin_app.testing import give_legacy_platform_role
 from dinify_backend.configss.string_definitions import (
-    RestaurantStatus_Live, RESTAURANT_OWNER, RESTAURANT_MANAGER, DINIFY_ADMIN,
+    RestaurantStatus_Live, RESTAURANT_OWNER, RESTAURANT_MANAGER,
 )
 
 # A 30-day range — deliberately inside sales-listing's 31-day cap — and an empty
@@ -65,8 +67,10 @@ class ReportsTenantScopeTests(TestCase):
 
         # Authenticated but employed nowhere (e.g. a diner with a valid JWT).
         self.outsider = make_user('256700000230')
-        # Dinify admin — unrestricted reads.
-        self.admin = make_user('256700000240', roles=[DINIFY_ADMIN])
+        # An account carrying the RETIRED platform role string. It used to read
+        # every restaurant's reports; it is now an outsider like any other.
+        self.legacy_role_holder = give_legacy_platform_role(
+            make_user('256700000240'))
 
     # --- request helpers ------------------------------------------------
     def auth(self, user):
@@ -88,11 +92,22 @@ class ReportsTenantScopeTests(TestCase):
         resp = self.get_report(self.manager_a, self.restaurant_a.id)
         self.assertEqual(resp.status_code, 200, resp.content)
 
-    def test_admin_reads_any_restaurant(self):
-        resp = self.get_report(self.admin, self.restaurant_b.id)
-        self.assertEqual(resp.status_code, 200, resp.content)
-
     # --- denied (404, fail closed, existence not confirmed) -------------
+    def test_legacy_platform_role_reads_nothing(self):
+        # Was `test_admin_reads_any_restaurant`. A dinify_admin role string used to
+        # make get_module_restaurant_ids return None ("do not scope"), which read
+        # straight through to every tenant's revenue. It now grants nothing at all
+        # — not restaurant B, and not restaurant A either.
+        for restaurant in (self.restaurant_a.id, self.restaurant_b.id):
+            resp = self.get_report(self.legacy_role_holder, restaurant)
+            self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_legacy_platform_role_is_indistinguishable_from_an_outsider(self):
+        holder = self.get_report(self.legacy_role_holder, self.restaurant_a.id)
+        outsider = self.get_report(self.outsider, self.restaurant_a.id)
+        self.assertEqual(holder.status_code, outsider.status_code)
+        self.assertEqual(holder.content, outsider.content)
+
     def test_owner_cannot_read_other_restaurant(self):
         resp = self.get_report(self.owner_a, self.restaurant_b.id)
         self.assertEqual(resp.status_code, 404, resp.content)
@@ -101,7 +116,7 @@ class ReportsTenantScopeTests(TestCase):
         resp = self.get_report(self.outsider, self.restaurant_a.id)
         self.assertEqual(resp.status_code, 404, resp.content)
 
-    def test_missing_restaurant_param_denied_for_non_admin(self):
+    def test_missing_restaurant_param_denied(self):
         resp = self.get_report(self.owner_a, restaurant=None)
         self.assertEqual(resp.status_code, 404, resp.content)
 
@@ -123,24 +138,22 @@ class ReportsTenantScopeTests(TestCase):
         self.assertEqual(resp.status_code, 400, resp.content)
 
 
-class DinifyReportsAdminGateTests(TestCase):
+class DinifyReportsRetirementTests(TestCase):
     """
-    Platform-admin reports (``/api/v1/reports/dinify/<name>/``) must be
-    dinify-admin-only. ``DinifyReportsEndpoint`` inherited only the global
-    IsAuthenticated default, so any authenticated principal — a self-registered
-    diner, or a real restaurant owner — could read cross-tenant revenue, owner
-    PII (restaurant-listing) and the entire transaction ledger. The gate denies
-    non-admins with 404 (existence non-disclosure), mirroring
-    RestaurantReportsEndpoint, and fires before the invalid-name 400 branch so
-    report-name validity is never leaked. The three controllers are unchanged.
+    The platform-admin reports surface (``/api/v1/reports/dinify/<name>/``) is
+    GONE — endpoint, route and the three cross-tenant controllers behind it.
+
+    It served every restaurant's revenue, owner PII (restaurant-listing) and the
+    entire transaction ledger, gated on nothing but a ``dinify_admin`` string in
+    the caller's ``User.roles``, and its only consumer was the deleted dinify-mgt
+    frontend. Full retirement SUBSUMES the old gate tests: with no route there is
+    no principal — role-holder, owner, diner or anonymous — for whom any of it
+    resolves. Phase 1 rebuilds platform reporting natively on /api/admin/v1.
     """
 
     SLUGS = ('dashboard', 'restaurant-listing', 'transactions-listing')
 
     def setUp(self):
-        # A real restaurant with a real owner — a genuine tenant principal that
-        # nonetheless holds no dinify-admin role. The seeded restaurant also
-        # backs the restaurant-listing row assertion below.
         self.owner = make_user('256700000251')
         self.restaurant = Restaurant.objects.create(
             name='Gate Restaurant', location='loc-gate',
@@ -150,12 +163,11 @@ class DinifyReportsAdminGateTests(TestCase):
             user=self.owner, restaurant=self.restaurant,
             roles=[RESTAURANT_OWNER],
         )
-        # Role-less authenticated diner (valid JWT, no roles, employed nowhere).
         self.diner = make_user('256700000252')
-        # Dinify admin — the only principal allowed to read platform reports.
-        self.admin = make_user('256700000250', roles=[DINIFY_ADMIN])
+        # Carries the retired role string — the principal that used to be allowed.
+        self.legacy_role_holder = give_legacy_platform_role(
+            make_user('256700000250'))
 
-    # --- request helpers ------------------------------------------------
     def auth(self, user):
         token = str(RefreshToken.for_user(user).access_token)
         return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
@@ -164,36 +176,23 @@ class DinifyReportsAdminGateTests(TestCase):
         headers = self.auth(user) if user is not None else {}
         return self.client.get(f'/api/v1/reports/dinify/{name}/', **headers)
 
-    # --- denied: role-less diner (404 on all three slugs) ---------------
-    def test_roleless_diner_denied_on_all_slugs(self):
-        for name in self.SLUGS:
-            resp = self.get_dinify(self.diner, name)
-            self.assertEqual(resp.status_code, 404, f'{name}: {resp.content}')
+    def test_the_route_is_retired_for_every_principal(self):
+        for user in (None, self.diner, self.owner, self.legacy_role_holder):
+            for name in self.SLUGS:
+                label = getattr(user, 'username', 'anonymous')
+                resp = self.get_dinify(user, name)
+                self.assertEqual(
+                    resp.status_code, 404, f'{label}/{name}: {resp.content}')
 
-    # --- denied: non-admin owner (404 on all three slugs) ---------------
-    def test_non_admin_owner_denied_on_all_slugs(self):
-        for name in self.SLUGS:
-            resp = self.get_dinify(self.owner, name)
-            self.assertEqual(resp.status_code, 404, f'{name}: {resp.content}')
+    def test_an_unknown_slug_is_equally_gone(self):
+        self.assertEqual(
+            self.get_dinify(self.legacy_role_holder, 'not-a-report').status_code, 404)
 
-    # --- allowed: dinify admin (200 on all three slugs) -----------------
-    def test_admin_allowed_on_all_slugs(self):
-        for name in self.SLUGS:
-            resp = self.get_dinify(self.admin, name)
-            self.assertEqual(resp.status_code, 200, f'{name}: {resp.content}')
-
-    def test_admin_restaurant_listing_returns_seeded_row(self):
-        resp = self.get_dinify(self.admin, 'restaurant-listing')
+    def test_the_restaurant_reports_route_still_serves_its_owner(self):
+        # Retiring the platform surface must not have taken the tenant one with it.
+        resp = self.client.get(
+            f'/api/v1/reports/restaurant/sales-listing/'
+            f'?restaurant={self.restaurant.id}&{DATE_QS}',
+            **self.auth(self.owner),
+        )
         self.assertEqual(resp.status_code, 200, resp.content)
-        ids = [row['id'] for row in resp.json()['data']]
-        self.assertIn(str(self.restaurant.id), ids)
-
-    # --- non-disclosure: gate answers before the invalid-name 400 -------
-    def test_non_admin_unknown_and_valid_name_both_404(self):
-        # For a non-admin, an unknown report name and a valid one are BOTH 404 —
-        # the gate (not the report-name branch) answers, so report validity is
-        # never leaked (an authorized invalid name would be 400).
-        unknown = self.get_dinify(self.diner, 'not-a-report')
-        valid = self.get_dinify(self.diner, 'dashboard')
-        self.assertEqual(unknown.status_code, 404, unknown.content)
-        self.assertEqual(valid.status_code, 404, valid.content)

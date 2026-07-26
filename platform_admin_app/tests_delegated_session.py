@@ -41,7 +41,6 @@ from dinify_backend.configss.string_definitions import (
     MODULE_TEAM,
     RESTAURANT_OWNER,
     RestaurantStatus_Live,
-    DINIFY_ADMIN,
 )
 from dinify_backend.tenancy.discovery import all_project_serializers
 from platform_admin_app import delegated_sessions, delegation, sessions
@@ -82,7 +81,9 @@ from platform_admin_app.models import (
     DelegationGrant,
 )
 from platform_admin_app.sessions import hash_token
-from platform_admin_app.testing import AuditAssertionsMixin
+from platform_admin_app.testing import (
+    LEGACY_PLATFORM_ROLE, AuditAssertionsMixin, give_legacy_platform_role,
+)
 from restaurants_app.models import (
     MenuItem,
     MenuSection,
@@ -580,12 +581,29 @@ class ScopeEnforcementTests(_DelegatedClientMixin, AuditAssertionsMixin, TestCas
             response = self.client.get(url, **self._headers(token))
             self.assertEqual(response.status_code, 403, msg=url)
 
-    def test_cross_tenant_reports_and_admin_surfaces_are_refused(self):
+    def test_cross_tenant_admin_surfaces_are_retired_outright(self):
+        # These two used to be refused with 403 by DelegatedAccessMiddleware —
+        # deliberately absent from ALLOWED_ROUTES because they are cross-tenant by
+        # design. PR-A removed the routes themselves (they were reachable on a
+        # `dinify_admin` role string alone), so a delegated session now meets a
+        # plain 404: there is nothing left to be refused FROM.
+        #
+        # 404 is the stronger outcome and SUBSUMES the old assertion — a route that
+        # does not exist cannot be reached by any principal, delegated or not. The
+        # middleware's allowlist refusal itself is still proven, against routes that
+        # DO exist, by test_endpoints_without_a_restaurant_dimension_are_refused and
+        # test_billing_and_team_records_are_refused_within_an_allowed_route.
         token, _ = _session_for(self.admin, self.restaurant, scope=SCOPE_SUPPORT)
         for url in ('/api/v1/reports/dinify/dashboard/', '/api/v1/support/admin/issues/'):
             self.assertEqual(
-                self.client.get(url, **self._headers(token)).status_code, 403, msg=url,
+                self.client.get(url, **self._headers(token)).status_code, 404, msg=url,
             )
+
+    def test_the_retired_surfaces_are_gone_for_an_undelegated_caller_too(self):
+        # The pairing that makes the 404 above meaningful: it is retirement, not a
+        # delegation-specific refusal dressed up as one.
+        for url in ('/api/v1/reports/dinify/dashboard/', '/api/v1/support/admin/issues/'):
+            self.assertEqual(self.client.get(url).status_code, 404, msg=url)
 
     def test_billing_and_team_records_are_refused_within_an_allowed_route(self):
         token, _ = _session_for(self.admin, self.restaurant, scope=SCOPE_SUPPORT)
@@ -701,13 +719,24 @@ class AuthoritySeamTests(TestCase):
         # validated the credential — asserted directly in PrincipalBindingTests.
         setattr(self.principal, PRINCIPAL_DELEGATION_ATTR, self.context)
 
-    def test_never_a_dinify_admin(self):
-        # Even if the account somehow carried a platform role, the delegation
-        # branch closes the full-access map, the two `None` returns and
-        # build_scoped_instance_queryset's `.all()` in one line.
-        self.principal.roles = [DINIFY_ADMIN]
-        self.assertFalse(permissions_check.is_dinify_admin(self.principal))
-        self.assertFalse(permissions_check.is_dinify_superuser(self.principal))
+    def test_a_platform_role_string_changes_nothing(self):
+        # This used to assert that the DELEGATION branch short-circuited the
+        # dinify-admin predicates. Those predicates are gone: the role string is
+        # inert for every principal, delegated or not, so the delegation's own
+        # bounds are the only thing that can be in play here. Asserted by setting
+        # the string and confirming the resolved scope is byte-identical.
+        before = permissions_check.resolve_module_permissions(
+            self.principal, self.restaurant.id)
+        self.principal.roles = [LEGACY_PLATFORM_ROLE]
+        after = permissions_check.resolve_module_permissions(
+            self.principal, self.restaurant.id)
+        self.assertEqual(before, after)
+        self.assertEqual(
+            permissions_check.get_module_restaurant_ids(self.principal, MODULE_MENU),
+            {str(self.restaurant.id)},
+        )
+        self.assertFalse(
+            permissions_check.can_manage_restaurant(self.principal, self.restaurant.id))
 
     def test_never_an_owner_and_never_manage_level(self):
         self.assertFalse(
@@ -787,10 +816,13 @@ class AuthoritySeamTests(TestCase):
         self.assertTrue(
             permissions_check.can_manage_restaurant(staff, self.restaurant.id),
         )
-        admin = _make_user('dinify@t.com', roles=[DINIFY_ADMIN])
-        # The dinify-admin unrestricted path is untouched for a real admin.
-        self.assertIsNone(
-            permissions_check.get_module_restaurant_ids(admin, MODULE_MENU),
+        # An account carrying the retired platform role is NOT a special case any
+        # more: it scopes to nothing, exactly like any unemployed stranger. There
+        # is no unrestricted principal left on this plane for delegation to be
+        # compared against.
+        holder = give_legacy_platform_role(_make_user('dinify@t.com'))
+        self.assertEqual(
+            permissions_check.get_module_restaurant_ids(holder, MODULE_MENU), set(),
         )
 
 

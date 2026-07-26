@@ -10,10 +10,12 @@
 #   1. django check
 #   2. makemigrations --check --dry-run  (fails if a model changed w/o a migration)
 #   3. money-field guard                 (fails if a monetary model field is a FloatField)
-#   4. tenant-relation ratchet           (fails if the tenant-relation baseline grew)
-#   5. tenant-isolation closure gate     (focused adversarial boundary suite, fail-fast;
+#   4. ambient-authority gate            (fails if the customer plane reads User.roles
+#                                         for platform authority)
+#   5. tenant-relation ratchet           (fails if the tenant-relation baseline grew)
+#   6. tenant-isolation closure gate     (focused adversarial boundary suite, fail-fast;
 #                                         includes the delegated-session auth path)
-#   6. test                              (full Django test suite)
+#   7. test                              (full Django test suite)
 #
 # test_settings falls back to SQLite in-memory for the fast checks, but the
 # tenant-isolation closure gate and the full suite include relationship-integrity
@@ -66,6 +68,7 @@ run_step() {
 run_step "django check"         "${PYTHON}" -m django check --settings="${SETTINGS}"
 run_step "makemigrations check" "${PYTHON}" -m django makemigrations --check --dry-run --settings="${SETTINGS}"
 run_step "money-field guard"    "${PYTHON}" scripts/check_money_fields.py
+run_step "ambient-authority gate" "${PYTHON}" scripts/check_ambient_authority.py
 run_step "tenant-relation ratchet" "${PYTHON}" scripts/check_tenant_relation_ratchet.py
 # Fail-fast adversarial tenant-isolation closure gate (TENANT-ISO-PR6A): the
 # focused boundary matrix + the deep capability / relationship / concurrency /
@@ -73,6 +76,7 @@ run_step "tenant-relation ratchet" "${PYTHON}" scripts/check_tenant_relation_rat
 # tenant boundary fails early. This does NOT replace the full suite below.
 run_step "tenant-isolation closure gate" "${PYTHON}" -m django test \
   dinify_backend.tenancy.tests_tenant_isolation_closure \
+  dinify_backend.tenancy.tests_ambient_authority \
   restaurants_app.tests_diner_capability \
   restaurants_app.tests_menu_relationship_integrity \
   restaurants_app.tests_menu_relationships_concurrency \

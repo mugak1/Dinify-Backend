@@ -15,7 +15,6 @@ from dinify_backend.mongo_db import MONGO_DB, ACTION_LOGS
 from users_app.models import User
 from users_app.controllers.permissions_check import (
     can_user_access_module,
-    is_dinify_superuser,
     is_restaurant_owner
 )
 
@@ -80,15 +79,20 @@ def first_time_batch_approval(
 
                 # user should not approve a menu that they created
                 if first_menu_section.created_by == auth.get('user_id'):
-                    # check if the user is not a restaurant owner or dinify admin
-                    if not is_dinify_superuser(user) and not is_restaurant_owner(user, restaurant_id):  # noqa
+                    # The owner is the one principal allowed to self-approve: it is
+                    # their restaurant, and separation of duties within a tenant
+                    # cannot bind the tenant's own principal. The Dinify-superuser
+                    # exemption that used to sit alongside it is gone — a role
+                    # string in User.roles is no longer an authority anywhere on
+                    # this plane.
+                    if not is_restaurant_owner(user, restaurant_id):
                         return {
                             'status': 400,
                             'message': 'Sorry, you cannot approve a menu that you created.'
                         }
 
-                # user who submitted menu for approval should not approve
-                # except for dinify superuser and restaurant owner
+                # user who submitted menu for approval should not approve,
+                # except for the restaurant owner
                 filter = {
                     'affected_model': 'restaurant-menu-approval',
                     'affected_record': restaurant_id,
@@ -108,7 +112,7 @@ def first_time_batch_approval(
                         break
 
                 if submitter_id == auth.get('user_id'):
-                    if not is_dinify_superuser(user) and not is_restaurant_owner(user, restaurant_id):
+                    if not is_restaurant_owner(user, restaurant_id):
                         return {
                             'status': 400,
                             'message': 'Sorry, you cannot approve a menu that you submitted.'

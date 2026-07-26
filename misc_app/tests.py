@@ -1015,8 +1015,13 @@ class SecretaryScopeBoundTests(TestCase):
         self.assertEqual(self.section_b.name, 'Widened Name')
 
     def test_explicit_global_scope_resolves_any_row(self):
-        # The deliberate unrestricted universe (e.g. support/admin_issues, which
-        # passes Model.objects.all() as an EXPLICIT admin decision).
+        # Secretary honours whatever universe the CALLER hands it, including an
+        # unrestricted one. This pins that mechanic, not a live capability: the one
+        # caller that used to pass `Model.objects.all()` (support/admin_issues) was
+        # retired with ambient administrator authority, and no customer-plane caller
+        # does so today. The behaviour still matters — Secretary must not silently
+        # narrow a queryset it was given — so the scoping decision stays visible at
+        # each call site rather than hidden in here.
         result = Secretary(self._update_args(
             {'id': str(self.section_b.id), 'name': 'Admin Renamed'},
             instance_queryset=MenuSection.objects.all(),

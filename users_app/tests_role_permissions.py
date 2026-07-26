@@ -12,6 +12,7 @@ This layer is purely additive — it applies NO enforcement. Covered surface:
 """
 from django.test import TestCase
 
+from platform_admin_app.testing import give_legacy_platform_role
 from users_app.models import User
 from users_app.serializers import SerGetUserProfile
 from users_app.controllers.permissions_check import (
@@ -27,7 +28,6 @@ from restaurants_app.configs.role_defaults import DEFAULT_ROLE_MODULES
 from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Live,
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN, RESTAURANT_STAFF,
-    DINIFY_ADMIN,
     GRID_MODULES, MODULE_BILLING, MODULE_TEAM, MODULE_SUPPORT,
     MODULE_KITCHEN, MODULE_TABLES, MODULE_MENU, MODULE_DASHBOARD,
 )
@@ -69,8 +69,10 @@ class RolePermissionResolverTests(TestCase):
         RestaurantEmployee.objects.create(
             user=self.multi, restaurant=self.restaurant,
             roles=[RESTAURANT_KITCHEN, RESTAURANT_STAFF])
-        # dinify admin (employed nowhere)
-        self.admin = make_user('256700000006', roles=[DINIFY_ADMIN])
+        # An account carrying the RETIRED platform role, employed nowhere. It used
+        # to resolve to the full-access map at every restaurant.
+        self.legacy_role_holder = give_legacy_platform_role(
+            make_user('256700000006'))
 
     # --- defaults (no override rows seeded) -----------------------------
     def test_chef_default_kitchen_only(self):
@@ -127,10 +129,22 @@ class RolePermissionResolverTests(TestCase):
         for key in ALL_KEYS:
             self.assertTrue(perms[key], key)
 
-    def test_admin_full_access(self):
-        perms = resolve_module_permissions(self.admin, self.restaurant.id)
+    def test_legacy_platform_role_resolves_to_no_access(self):
+        # Was `test_admin_full_access`: the role string short-circuited straight to
+        # `_full_access_map()` — every grid module PLUS billing and team — at any
+        # restaurant. It now resolves like the stranger it is: the stable key shape,
+        # all False.
+        perms = resolve_module_permissions(self.legacy_role_holder, self.restaurant.id)
+        self.assertEqual(set(perms.keys()), ALL_KEYS)
         for key in ALL_KEYS:
-            self.assertTrue(perms[key], key)
+            self.assertFalse(perms[key], key)
+
+    def test_legacy_platform_role_matches_an_unemployed_stranger(self):
+        stranger = make_user('256700000007')
+        self.assertEqual(
+            resolve_module_permissions(self.legacy_role_holder, self.restaurant.id),
+            resolve_module_permissions(stranger, self.restaurant.id),
+        )
 
     # --- can_user_access_module -----------------------------------------
     def test_support_always_allowed(self):

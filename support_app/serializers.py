@@ -34,7 +34,10 @@ class SupportIssueWriteSerializer(serializers.ModelSerializer):
     restaurant is resolved + gated by the endpoint and set via Secretary
     ``server_values`` on create; ``created_by`` is the resolved actor injected by
     Secretary through ``save()``. ``assigned_to`` is a platform-global support
-    agent, writable ONLY on the is_dinify_superuser admin path (GlobalRelation).
+    agent (GlobalRelation) with NO writer left on this plane: the Dinify-admin
+    triage endpoint that used to set it was removed with ambient administrator
+    authority, and the restaurant-facing create path whitelists its own fields,
+    so no request reaches it. Phase 1 rebuilds triage on /api/admin/v1.
     """
 
     class Meta:
@@ -48,9 +51,11 @@ class SupportIssueWriteSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'reference', 'restaurant', 'created_by']
         tenant_relations = {
             'assigned_to': GlobalRelation(
-                reason='Support agents are platform-global (not restaurant-scoped); '
-                       'assigned_to is writable only on the is_dinify_superuser admin '
-                       'triage path, which is deliberately unrestricted.'
+                reason='Support agents are platform-global (not restaurant-scoped). '
+                       'The admin triage path that wrote assigned_to is retired, so '
+                       'no customer-plane request reaches this field at all; the '
+                       'classification records that it is global by nature, not '
+                       'tenant-scoped, for whenever Phase 1 rebuilds triage.'
             ),
         }
 

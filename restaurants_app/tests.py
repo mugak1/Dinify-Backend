@@ -9,12 +9,10 @@ from dinify_backend.configss.string_definitions import (
 )
 from users_app.tests import TEST_PHONE, seed_user
 from users_app.models import User
-from restaurants_app.controllers.create_restaurant import (
-    admin_register_restaurant
-)
 from restaurants_app.controllers.dining_areas import create_dining_area
 from restaurants_app.controllers.menu_sections import ConMenuSection
 from restaurants_app.endpoints.restaurant_setup import normalize_ordered_section_ids
+from platform_admin_app.testing import give_legacy_platform_role
 from restaurants_app.models import (
     Restaurant, RestaurantEmployee, MenuSection, MenuItem, Table,
     SectionGroup, DiningArea, Reservation, WaitlistEntry,
@@ -240,32 +238,13 @@ class RestaurantAppTestFunctions(TestCase):
         seed_user()
         seed_restaurant()
 
-    def test_admin_register_restaurant(self):
-        user = User.objects.get(username=TEST_PHONE)
-        user_id = str(user.pk)
-        # get the otp for the user
-        # OtpManager().make_otp(user=user)
-        auth_info = {
-            'user_id': user_id,
-            'first_name': 'First',
-            'email': 'dummy@email.com'
-        }
-
-        data = {
-            'name': 'Test Restaurant',
-            'location': 'Test location',
-
-            'first_name': 'Test',
-            'last_name': 'Owner',
-            'email': 'sample@org.org',
-            'phone_number': '256777777777',
-            'country': 'UG',
-            # 'otp': '1234'
-        }
-
-        result = admin_register_restaurant(data, auth_info)
-        print(f'admin result: {result}')
-        self.assertEqual(result['status'], 200)
+    def test_admin_register_restaurant_controller_is_retired(self):
+        # `admin_register_restaurant` created a Restaurant, minted an owner User
+        # and dispatched credential SMS/email — on the authority of a
+        # `dinify_admin` string in the caller's User.roles. The whole module went
+        # with that authority. Phase 1 rebuilds onboarding on /api/admin/v1.
+        with self.assertRaises(ImportError):
+            from restaurants_app.controllers import create_restaurant  # noqa: F401
 
 
 def _seed_two_sections(restaurant):
@@ -1020,12 +999,14 @@ class TenantIsolationTests(TestCase):
             roles=[],
         )
 
-        # Independent dinify admin (no employments at either restaurant).
-        self.dinify_admin = User.objects.create_user(
-            first_name='Dinify', last_name='Admin',
-            email='admin@test.com', phone_number='256700000040',
-            username='256700000040', country='Uganda', password='password',
-            roles=['dinify_admin'],
+        # An account carrying the RETIRED platform role, employed nowhere.
+        # It used to be the unrestricted Dinify admin.
+        self.legacy_role_holder = give_legacy_platform_role(
+            User.objects.create_user(
+                first_name='Dinify', last_name='Admin',
+                email='admin@test.com', phone_number='256700000040',
+                username='256700000040', country='Uganda', password='password',
+            )
         )
 
     def _token_for(self, user):
@@ -1042,24 +1023,27 @@ class TenantIsolationTests(TestCase):
         }
         return getattr(self.client, method)(path, **kwargs)
 
-    # -- admin bypass --------------------------------------------------------
+    # -- the retired admin bypass --------------------------------------------
 
-    def test_dinify_admin_can_create_in_any_restaurant(self):
-        # Admin has no employment at restaurant B but should still be allowed.
-        response = self._request(
-            self.dinify_admin, 'post', 'menusections',
-            {'name': 'Admin Section', 'restaurant': str(self.restaurant_b.id)},
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(MenuSection.objects.filter(
-            name='Admin Section', restaurant=self.restaurant_b,
-        ).exists())
+    def test_legacy_platform_role_cannot_create_in_any_restaurant(self):
+        # Was `test_dinify_admin_can_create_in_any_restaurant`: check_permission
+        # returned True for a role-holder before it resolved a target restaurant at
+        # all. The bypass is gone, so an account with no employment at B is refused
+        # there — and, since the role granted the bypass everywhere, at A too.
+        for restaurant in (self.restaurant_b, self.restaurant_a):
+            with self.subTest(restaurant=restaurant.name):
+                response = self._request(
+                    self.legacy_role_holder, 'post', 'menusections',
+                    {'name': 'Admin Section', 'restaurant': str(restaurant.id)},
+                )
+                self.assertNotEqual(response.status_code, 200, response.content)
+        self.assertFalse(MenuSection.objects.filter(name='Admin Section').exists())
 
-    def test_inactive_dinify_admin_is_denied(self):
-        self.dinify_admin.is_active = False
-        self.dinify_admin.save(update_fields=['is_active'])
+    def test_inactive_legacy_platform_role_is_denied(self):
+        self.legacy_role_holder.is_active = False
+        self.legacy_role_holder.save(update_fields=['is_active'])
         response = self._request(
-            self.dinify_admin, 'post', 'menusections',
+            self.legacy_role_holder, 'post', 'menusections',
             {'name': 'Should Fail', 'restaurant': str(self.restaurant_b.id)},
         )
         # JWT auth itself rejects inactive users; the contract is "not 200".
@@ -1069,16 +1053,18 @@ class TenantIsolationTests(TestCase):
     # -- section-tables verb retirement (BUG-P3-10) --------------------------
 
     def test_section_tables_verb_is_retired(self):
-        """BUG-P3-10: the dead 'section-tables' POST verb is retired. A dinify
-        admin (the only caller RBAC ever let past the gate) no longer creates
-        tables — the request falls through to the generic unmapped-verb
-        handling. Guards against anyone re-adding a live section-tables verb."""
-        # An unmapped verb reaching a dinify admin now 500s in Secretary (None
-        # serializer); capture it as a response rather than letting it propagate.
+        """BUG-P3-10: the dead 'section-tables' POST verb is retired — it no
+        longer creates tables for anyone, and the request falls through to the
+        generic unmapped-verb handling. Guards against anyone re-adding a live
+        section-tables verb. (The caller here is the account that used to hold the
+        dinify-admin bypass, which is the only principal RBAC ever let past the
+        gate; it is refused twice over now.)"""
+        # An unmapped verb can surface as a Secretary 500 (None serializer);
+        # capture it as a response rather than letting it propagate.
         self.client.raise_request_exception = False
         before = Table.objects.filter(restaurant=self.restaurant_a).count()
         response = self._request(
-            self.dinify_admin, 'post', 'section-tables',
+            self.legacy_role_holder, 'post', 'section-tables',
             {'restaurant': str(self.restaurant_a.id), 'number': 3,
              'consideration': 'count'},
         )
@@ -1540,12 +1526,14 @@ class TenantReadIsolationTests(TestCase):
             number=1, str_number='1', restaurant=self.restaurant_b,
         )
 
-        # Independent dinify admin with no employment at either restaurant.
-        self.dinify_admin = User.objects.create_user(
-            first_name='Dinify', last_name='Admin',
-            email='read_admin@test.com', phone_number='256700000140',
-            username='256700000140', country='Uganda', password='password',
-            roles=['dinify_admin'],
+        # An account carrying the RETIRED platform role, employed nowhere.
+        # It used to be the unrestricted Dinify admin.
+        self.legacy_role_holder = give_legacy_platform_role(
+            User.objects.create_user(
+                first_name='Dinify', last_name='Admin',
+                email='read_admin@test.com', phone_number='256700000140',
+                username='256700000140', country='Uganda', password='password',
+            )
         )
 
     def _token_for(self, user):
@@ -1686,19 +1674,25 @@ class TenantReadIsolationTests(TestCase):
         )
         self.assertEqual(r.status_code, 200)
 
-    # -- role-awareness: dinify admin retains cross-restaurant access ---------
+    # -- role-awareness: the legacy platform role grants no read --------------
 
-    def test_dinify_admin_can_read_any_restaurant_tables(self):
-        r = self._get(self.dinify_admin, f'{self.BASE}/tables/?restaurant={self.restaurant_b.id}')
-        self.assertEqual(r.status_code, 200)
-        self.assertIn(str(self.table_b.id), self._record_ids(r))
-
-    def test_dinify_admin_can_read_any_restaurant_employee_detail(self):
+    def test_legacy_platform_role_reads_no_restaurant_tables(self):
+        # Was `test_dinify_admin_can_read_any_restaurant_tables`. The list read
+        # used to be unscoped for a role-holder (the resolver answered `None`); it
+        # now binds to an empty set, so B's table is absent.
         r = self._get(
-            self.dinify_admin,
+            self.legacy_role_holder,
+            f'{self.BASE}/tables/?restaurant={self.restaurant_b.id}',
+        )
+        self.assertNotIn(str(self.table_b.id), self._record_ids(r))
+
+    def test_legacy_platform_role_reads_no_employee_detail(self):
+        # 404, not 403 — the single-record read keeps its non-disclosing posture.
+        r = self._get(
+            self.legacy_role_holder,
             f'{self.BASE}/details/?record=employees&id={self.employment_b.id}',
         )
-        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.status_code, 404)
 
 
 class MenuSectionScheduleTests(TestCase):
@@ -4384,12 +4378,19 @@ class SubscriptionDetailsGateTests(TestCase):
     Authorization + validation for the subscription-details capability at
     ``/api/v1/restaurant-setup/subscription-details/``.
 
-    WRITE (PUT) is Dinify-admin ONLY — subscription validity/expiry is
-    system/billing state that no restaurant user (owner included) may self-set;
-    the gate lives inside ``RestaurantSubscription.update``. READ (GET) stays
-    gated upstream on the settings module (owner + manager + admin, 404 on
-    denial); these tests also cover the controller's input hardening (missing
-    restaurant -> 400, unknown restaurant -> 404, never a 500).
+    WRITE (PUT) is RETIRED — 405 for every principal. It was Dinify-admin only,
+    reachable on the strength of a ``dinify_admin`` string in ``User.roles``, and
+    could grant any restaurant an indefinite free subscription; with ambient
+    administrator authority gone it had no reachable caller. Phase 1 rebuilds it
+    on /api/admin/v1. The old three-way matrix (owner 403 / cross-tenant 403 /
+    admin 200) is SUBSUMED: nobody writes, so nothing persists.
+
+    READ (GET) is unchanged and stays gated upstream on the settings module
+    (owner + manager, 404 on denial). With no principal able to bypass that gate
+    any more, an absent or foreign ``?restaurant=`` fails closed at the gate with
+    the same non-disclosing 404 — it no longer reaches the controller's own
+    missing-parameter 400, which is tested directly below instead. Either way the
+    contract that matters holds: never a 500.
     """
 
     BASE = '/api/v1/restaurant-setup'
@@ -4436,12 +4437,15 @@ class SubscriptionDetailsGateTests(TestCase):
             roles=[ROLES.get('RESTAURANT_OWNER')],
         )
 
-        # Independent dinify admin, employed at neither restaurant.
-        self.dinify_admin = User.objects.create_user(
-            first_name='Dinify', last_name='Admin',
-            email='sub_admin@test.com', phone_number='256700000240',
-            username='256700000240', country='Uganda', password='password',
-            roles=['dinify_admin'],
+        # An account carrying the RETIRED platform role, employed at neither
+        # restaurant — the principal the PUT used to admit. Written through the
+        # ORM, since the write paths refuse the string.
+        self.legacy_role_holder = give_legacy_platform_role(
+            User.objects.create_user(
+                first_name='Legacy', last_name='Holder',
+                email='sub_admin@test.com', phone_number='256700000240',
+                username='256700000240', country='Uganda', password='password',
+            )
         )
 
     # -- helpers --------------------------------------------------------------
@@ -4471,59 +4475,36 @@ class SubscriptionDetailsGateTests(TestCase):
             'subscription_expiry_date': '2030-12-31',
         }
 
-    # -- PUT: write gate (the P0) --------------------------------------------
+    # -- PUT: the write verb is retired --------------------------------------
 
-    def test_put_owner_of_target_restaurant_forbidden(self):
-        response = self._put(self.owner_a, self._valid_body(self.restaurant_a.id))
-        self.assertEqual(response.status_code, 403)
+    def test_put_is_405_for_every_principal(self):
+        for user in (self.owner_a, self.owner_b, self.manager_a,
+                     self.legacy_role_holder):
+            with self.subTest(user=user.username):
+                response = self._put(user, self._valid_body(self.restaurant_a.id))
+                self.assertEqual(response.status_code, 405, response.content)
 
-    def test_put_user_of_different_restaurant_forbidden(self):
-        response = self._put(self.owner_b, self._valid_body(self.restaurant_a.id))
-        self.assertEqual(response.status_code, 403)
-
-    def test_put_dinify_admin_succeeds_and_persists(self):
-        self.assertTrue(self.restaurant_a.subscription_validity)
-        response = self._put(self.dinify_admin, {
+    def test_put_persists_nothing(self):
+        # The capability's real weight was the write, so assert absence of effect
+        # rather than only the status code.
+        original_validity = self.restaurant_a.subscription_validity
+        original_expiry = self.restaurant_a.subscription_expiry_date
+        self._put(self.legacy_role_holder, {
             'restaurant': str(self.restaurant_a.id),
-            'subscription_validity': False,
+            'subscription_validity': not original_validity,
             'subscription_expiry_date': '2031-01-15T10:00:00Z',
         })
-        self.assertEqual(response.status_code, 200)
         self.restaurant_a.refresh_from_db()
-        self.assertFalse(self.restaurant_a.subscription_validity)
-        self.assertIsNotNone(self.restaurant_a.subscription_expiry_date)
-        self.assertEqual(self.restaurant_a.subscription_expiry_date.year, 2031)
+        self.assertEqual(self.restaurant_a.subscription_validity, original_validity)
+        self.assertEqual(self.restaurant_a.subscription_expiry_date, original_expiry)
 
-    def test_put_owner_forbidden_before_any_db_write(self):
-        original = self.restaurant_a.subscription_validity
-        self._put(self.owner_a, {
-            'restaurant': str(self.restaurant_a.id),
-            'subscription_validity': not original,
-            'subscription_expiry_date': '2030-12-31',
-        })
-        self.restaurant_a.refresh_from_db()
-        self.assertEqual(self.restaurant_a.subscription_validity, original)
+    def test_the_update_controller_is_gone(self):
+        # 405 comes from the endpoint; this pins that the controller verb behind it
+        # was removed too, rather than left callable from somewhere else.
+        from restaurants_app.controllers.subscriptions import RestaurantSubscription
 
-    def test_put_admin_missing_field_returns_400(self):
-        response = self._put(self.dinify_admin, {
-            'restaurant': str(self.restaurant_a.id),
-            'subscription_validity': True,
-            # subscription_expiry_date deliberately omitted
-        })
-        self.assertEqual(response.status_code, 400)
-
-    def test_put_admin_non_boolean_validity_returns_400(self):
-        response = self._put(self.dinify_admin, {
-            'restaurant': str(self.restaurant_a.id),
-            'subscription_validity': 'yes',
-            'subscription_expiry_date': '2030-12-31',
-        })
-        self.assertEqual(response.status_code, 400)
-
-    def test_put_admin_nonexistent_restaurant_returns_404(self):
-        import uuid
-        response = self._put(self.dinify_admin, self._valid_body(uuid.uuid4()))
-        self.assertEqual(response.status_code, 404)
+        self.assertFalse(hasattr(RestaurantSubscription, 'update'))
+        self.assertTrue(hasattr(RestaurantSubscription, 'get_details'))
 
     # -- GET: read gate preserved (settings) + input hardening ---------------
 
@@ -4541,56 +4522,77 @@ class SubscriptionDetailsGateTests(TestCase):
         response = self._get(self.owner_b, self.restaurant_a.id)
         self.assertEqual(response.status_code, 404)
 
-    def test_get_dinify_admin_reads_any(self):
-        response = self._get(self.dinify_admin, self.restaurant_a.id)
-        self.assertEqual(response.status_code, 200)
+    def test_get_legacy_platform_role_reads_nothing(self):
+        # Was `test_get_dinify_admin_reads_any`: the role string used to read any
+        # restaurant's subscription. The settings-module gate now denies it with the
+        # ordinary non-disclosing 404.
+        response = self._get(self.legacy_role_holder, self.restaurant_a.id)
+        self.assertEqual(response.status_code, 404)
 
-    def test_get_admin_missing_restaurant_returns_400(self):
+    def test_get_missing_restaurant_fails_closed_at_the_gate(self):
+        # Previously 400 (from the controller) because a dinify admin bypassed the
+        # module gate and reached it. With no bypass, `can_user_access_module` is
+        # asked about a None restaurant, fails closed, and answers the ordinary
+        # non-disclosing 404 first. Stricter, and still never a 500.
         response = self.client.get(
             f'{self.BASE}/subscription-details/',
-            HTTP_AUTHORIZATION=f'Bearer {self._token_for(self.dinify_admin)}',
+            HTTP_AUTHORIZATION=f'Bearer {self._token_for(self.owner_a)}',
         )
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 404)
 
-    def test_get_admin_nonexistent_restaurant_returns_404(self):
+    def test_the_controllers_missing_restaurant_400_still_stands(self):
+        # The controller keeps its own input hardening even though the gate now
+        # answers first over HTTP — tested directly so the guard cannot rot behind
+        # an unreachable branch.
+        from rest_framework.test import APIRequestFactory
+
+        from restaurants_app.controllers.subscriptions import RestaurantSubscription
+
+        request = APIRequestFactory().get(f'{self.BASE}/subscription-details/')
+        response = RestaurantSubscription().get_details(request)
+        self.assertEqual(response.data['status'], 400)
+
+    def test_get_nonexistent_restaurant_returns_404(self):
         import uuid
-        response = self._get(self.dinify_admin, uuid.uuid4())
+        response = self._get(self.owner_a, uuid.uuid4())
         self.assertEqual(response.status_code, 404)
 
 
-class AdminRegisterRestaurantAuthorizationTests(TestCase):
+class AdminRegisterRestaurantRetirementTests(TestCase):
     """
-    Endpoint-level authorization for the admin restaurant-registration
-    capability at ``POST /api/v1/restaurant-setup/admin-register-restaurant/``.
+    ``POST /api/v1/restaurant-setup/admin-register-restaurant/`` is RETIRED.
 
-    This branch creates a restaurant, mints an owner ``User`` account and
-    dispatches credential SMS/email (``self_register`` with ``skip_otp=True`` —
-    no phone-ownership check), so it is Dinify-admin ONLY. The gate lives at the
-    endpoint (the trust boundary, and the only place ``request.user`` exists —
-    the controller receives an ``auth_info`` dict). Any other authenticated
-    user (a restaurant owner or a plain diner) must get a side-effect-free 403.
+    The branch created a restaurant, minted an owner ``User`` and dispatched
+    credential SMS/email (``self_register`` with ``skip_otp=True`` — no
+    phone-ownership check), gated on nothing but a ``dinify_admin`` string in the
+    caller's ``User.roles``. Removing ambient administrator authority left the
+    branch with no principal that could ever reach it, so it was removed outright
+    rather than left as authenticated-but-unreachable surface.
 
-    The existing controller-unit test ``test_admin_register_restaurant`` calls
-    the controller directly and is unaffected — the gate is at the endpoint.
+    Retirement SUBSUMES the old three-way gate matrix: previously an owner and a
+    plain user got a side-effect-free 403 while a role-holder got 200. Now NOBODY
+    gets 200 — including the role-holder, which is the case that matters. Phase 1
+    rebuilds onboarding natively on /api/admin/v1, with elevation and an audit row.
     """
 
     BASE = '/api/v1/restaurant-setup'
 
-    # A restaurant/owner that the admin-register call would mint on success.
+    # The restaurant/owner the call would have minted on success.
     NEW_RESTAURANT_NAME = 'Admin Registered Restaurant'
     NEW_OWNER_PHONE = '256788888888'
 
     def setUp(self):
-        # Dinify admin, employed at no restaurant.
-        self.dinify_admin = User.objects.create_user(
-            first_name='Dinify', last_name='Admin',
+        # An account carrying the retired platform role: the ONE principal this
+        # branch used to admit. Written through the ORM, since the write paths now
+        # refuse the string.
+        self.legacy_role_holder = User.objects.create_user(
+            first_name='Legacy', last_name='Holder',
             email='ar_admin@test.com', phone_number='256700000310',
             username='256700000310', country='Uganda', password='password',
-            roles=['dinify_admin'],
         )
+        give_legacy_platform_role(self.legacy_role_holder)
 
-        # A restaurant owner (non-admin): a plain user plus an active
-        # owner employment on their own restaurant.
+        # A restaurant owner: a plain user plus an active owner employment.
         self.owner = User.objects.create_user(
             first_name='Owner', last_name='AR',
             email='ar_owner@test.com', phone_number='256700000320',
@@ -4606,7 +4608,7 @@ class AdminRegisterRestaurantAuthorizationTests(TestCase):
             roles=[ROLES.get('RESTAURANT_OWNER')],
         )
 
-        # A plain authenticated user: no admin role, no employment.
+        # A plain authenticated user: no roles, no employment.
         self.plain_user = User.objects.create_user(
             first_name='Plain', last_name='User',
             email='ar_plain@test.com', phone_number='256700000330',
@@ -4640,6 +4642,8 @@ class AdminRegisterRestaurantAuthorizationTests(TestCase):
         }
 
     def _assert_nothing_minted(self):
+        # The real harm was minting an account + dispatching credentials, so every
+        # case asserts absence of side effects, not just the status code.
         self.assertFalse(
             Restaurant.objects.filter(name=self.NEW_RESTAURANT_NAME).exists()
         )
@@ -4647,29 +4651,22 @@ class AdminRegisterRestaurantAuthorizationTests(TestCase):
             User.objects.filter(phone_number=self.NEW_OWNER_PHONE).exists()
         )
 
-    # -- the gate (the P1) ----------------------------------------------------
+    # -- the retirement -------------------------------------------------------
 
-    def test_restaurant_owner_forbidden(self):
-        response = self._post(self.owner, self._valid_body())
-        self.assertEqual(response.status_code, 403)
-        # The real harm is minting an account + credential SMS: assert the
-        # denial happened with no side effects.
+    def test_no_principal_can_register_a_restaurant(self):
+        for user in (self.legacy_role_holder, self.owner, self.plain_user):
+            with self.subTest(user=user.username):
+                response = self._post(user, self._valid_body())
+                self.assertNotEqual(response.status_code, 200, response.content)
+                self._assert_nothing_minted()
+
+    def test_the_legacy_role_holder_is_treated_like_everyone_else(self):
+        # The load-bearing assertion: the principal the branch was BUILT for now
+        # gets the same answer as a stranger.
+        holder = self._post(self.legacy_role_holder, self._valid_body())
+        plain = self._post(self.plain_user, self._valid_body())
+        self.assertEqual(holder.status_code, plain.status_code)
         self._assert_nothing_minted()
-
-    def test_plain_user_forbidden(self):
-        response = self._post(self.plain_user, self._valid_body())
-        self.assertEqual(response.status_code, 403)
-        self._assert_nothing_minted()
-
-    def test_dinify_admin_succeeds(self):
-        response = self._post(self.dinify_admin, self._valid_body())
-        self.assertEqual(response.status_code, 200, response.content)
-        self.assertTrue(
-            Restaurant.objects.filter(name=self.NEW_RESTAURANT_NAME).exists()
-        )
-        self.assertTrue(
-            User.objects.filter(phone_number=self.NEW_OWNER_PHONE).exists()
-        )
 
 
 class TestDinerJourneyDetailHardening(TestCase):
@@ -4902,12 +4899,14 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
             roles=[ROLES.get('RESTAURANT_OWNER')],
         )
 
-        # Independent Dinify admin (no employment anywhere).
-        self.dinify_admin = User.objects.create_user(
-            first_name='Dinify', last_name='Admin',
-            email='admin_p3@test.com', phone_number='256700000213',
-            username='256700000213', country='Uganda', password='password',
-            roles=['dinify_admin'],
+        # An account carrying the RETIRED platform role, employed nowhere.
+        # It used to be the unrestricted Dinify admin.
+        self.legacy_role_holder = give_legacy_platform_role(
+            User.objects.create_user(
+                first_name='Dinify', last_name='Admin',
+                email='admin_p3@test.com', phone_number='256700000213',
+                username='256700000213', country='Uganda', password='password',
+            )
         )
 
     def _token_for(self, user):
@@ -4976,48 +4975,59 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
         self.active_restaurant.refresh_from_db()
         self.assertEqual(self.active_restaurant.name, 'Just A Rename')
 
-    # -- dinify admin retains full write (the legitimate path) ---------------
+    # -- the legacy platform role writes nothing at all -----------------------
 
-    def test_admin_status_write_is_now_ignored_too(self):
+    def test_legacy_platform_role_cannot_write_the_restaurant(self):
         """
-        The retired changeApprovalStatus flow: an admin PUT {id, status} no longer
-        moves the lifecycle. Status-only, so nothing applicable remains and
-        Secretary returns 400 — the point is that the state does not change.
+        Was three tests asserting an admin retained full write (status ignored,
+        name applied, flat_fee applied). All three collapse into one now: the
+        role-holder is not an authorised writer of this restaurant, so the request
+        is refused outright and NOTHING is applied — not the name, not the
+        lifecycle, and not the subscription price it could previously zero.
         """
-        response = self._put_restaurant(self.dinify_admin, {
-            'id': str(self.onboarding_restaurant.id),
-            'status': 'live',
-        })
-        self.assertEqual(response.status_code, 400)
-        self.onboarding_restaurant.refresh_from_db()
-        self.assertEqual(
-            self.onboarding_restaurant.status, RestaurantStatus_Onboarding,
-        )
-
-    def test_admin_status_write_alongside_real_edit_is_dropped(self):
-        """The companion case: the legitimate field applies, the lifecycle does not."""
-        response = self._put_restaurant(self.dinify_admin, {
-            'id': str(self.onboarding_restaurant.id),
-            'name': 'Admin Renamed Bistro',
-            'status': 'live',
-        })
-        self.assertEqual(response.status_code, 200)
-        self.onboarding_restaurant.refresh_from_db()
-        self.assertEqual(self.onboarding_restaurant.name, 'Admin Renamed Bistro')
-        self.assertEqual(
-            self.onboarding_restaurant.status, RestaurantStatus_Onboarding,
-        )
-
-    def test_admin_flat_fee_write_applies(self):
-        """Admin retains flat_fee (subscription price) write access."""
         from decimal import Decimal
-        response = self._put_restaurant(self.dinify_admin, {
+
+        original_name = self.active_restaurant.name
+        original_fee = self.active_restaurant.flat_fee
+        response = self._put_restaurant(self.legacy_role_holder, {
             'id': str(self.active_restaurant.id),
+            'name': 'Admin Renamed Bistro',
             'flat_fee': '1500.00',
         })
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 403, response.content)
         self.active_restaurant.refresh_from_db()
-        self.assertEqual(self.active_restaurant.flat_fee, Decimal('1500.00'))
+        self.assertEqual(self.active_restaurant.name, original_name)
+        self.assertEqual(self.active_restaurant.flat_fee, original_fee)
+        self.assertNotEqual(original_fee, Decimal('1500.00'))
+
+    def test_legacy_platform_role_cannot_move_the_lifecycle(self):
+        response = self._put_restaurant(self.legacy_role_holder, {
+            'id': str(self.onboarding_restaurant.id),
+            'status': 'live',
+        })
+        self.assertNotEqual(response.status_code, 200, response.content)
+        self.onboarding_restaurant.refresh_from_db()
+        self.assertEqual(
+            self.onboarding_restaurant.status, RestaurantStatus_Onboarding,
+        )
+
+    def test_flat_fee_is_stripped_from_the_owners_write_too(self):
+        """
+        The strip became UNCONDITIONAL: it used to spare `is_dinify_admin`, which
+        is what let a role-holder zero a subscription price. The owner reaches this
+        PUT legitimately, so they are the principal that proves the strip still
+        fires — the rename applies, the price does not move.
+        """
+        original_fee = self.active_restaurant.flat_fee
+        response = self._put_restaurant(self.owner, {
+            'id': str(self.active_restaurant.id),
+            'name': 'Owner Renamed Bistro',
+            'flat_fee': '1500.00',
+        })
+        self.assertEqual(response.status_code, 200, response.content)
+        self.active_restaurant.refresh_from_db()
+        self.assertEqual(self.active_restaurant.name, 'Owner Renamed Bistro')
+        self.assertEqual(self.active_restaurant.flat_fee, original_fee)
 
     # -- existing gate already blocks non-active restaurants (documentation) -
 

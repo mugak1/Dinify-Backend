@@ -58,14 +58,15 @@ class RestaurantReviewsEndpoint(APIView):
         # Review has NO soft-delete column, so (unlike support issues) the filter
         # starts empty — never add {'deleted': False} or it would FieldError.
         orm_filter = {}
-        if allowed is not None:
-            # Non-admin: bind to the caller's own restaurants. A client
-            # ?restaurant= may only narrow within that set, never widen it.
-            client_restaurant = request.GET.get('restaurant')
-            if client_restaurant is not None and str(client_restaurant) in allowed:
-                orm_filter['restaurant__in'] = [str(client_restaurant)]
-            else:
-                orm_filter['restaurant__in'] = list(allowed)
+        # Bind to the caller's own restaurants, unconditionally: the resolver
+        # always returns a set (an empty one denies), so there is no principal for
+        # whom this filter is skipped. A client ?restaurant= may only narrow within
+        # that set, never widen it.
+        client_restaurant = request.GET.get('restaurant')
+        if client_restaurant is not None and str(client_restaurant) in allowed:
+            orm_filter['restaurant__in'] = [str(client_restaurant)]
+        else:
+            orm_filter['restaurant__in'] = list(allowed)
 
         # Optional filters — all defensive so a bad value can never 500.
         rating = request.GET.get('rating')

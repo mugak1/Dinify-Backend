@@ -88,7 +88,8 @@ alongside the deep suites it builds on.
 | I12 | `get_detail` dynamic dispatch is allowlisted, module-gated, server-resolves the record's restaurant, and returns an indistinguishable 404 for cross-tenant/unknown/unmapped | `GetDetailDispatchClosureTests` |
 | I13 | Cross-repo contract constants (header names, salts, routes) match the frontend's | `ContractParityClosureTests` |
 | I14 | Menu relationship integrity + deterministic concurrency (the authoritative race proof — invoked, not replaced) | `restaurants_app.tests_menu_relationship_integrity`, `restaurants_app.tests_menu_relationships_concurrency` |
-| I15 | A delegated session for A reaches only A: list reads are scoped, `?restaurant=B` narrows to nothing, B's detail/kitchen/reports are refused and a `support`-scope write aimed at B changes nothing. The principal is never a Dinify admin, never manage-level, and its id resolvers never return the unrestricted `None`. A request WITHOUT `X-Delegation-Session` is unchanged, and the admin session cookie authenticates nothing on this plane | `DelegatedAdministratorClosureTests`; depth in `platform_admin_app.tests_delegated_session` |
+| I15 | A delegated session for A reaches only A: list reads are scoped, `?restaurant=B` narrows to nothing, B's detail/kitchen/reports are refused and a `support`-scope write aimed at B changes nothing. The principal is never manage-level. A request WITHOUT `X-Delegation-Session` is unchanged, and the admin session cookie authenticates nothing on this plane | `DelegatedAdministratorClosureTests`; depth in `platform_admin_app.tests_delegated_session` |
+| I16 | No customer-plane principal wields platform authority through `User.roles`. The role-based admin predicates are deleted, the "unrestricted" `None` sentinel is gone from both id resolvers, and an account carrying the legacy `dinify_admin` string resolves exactly like a stranger — no module, no list scope, no manage level, no write queryset. Platform staff cannot obtain OR refresh a customer JWT, and a `restaurant_user` cannot be given a platform role. Delegation is the only route from the platform to a tenant | `dinify_backend.tenancy.tests_ambient_authority`; `scripts/check_ambient_authority.py` (standing source gate) |
 
 ## 6. CI command (the closure gate)
 
@@ -98,6 +99,7 @@ fail-fast step **before** the full PostgreSQL suite (which it does not replace):
 ```
 python -m django test \
   dinify_backend.tenancy.tests_tenant_isolation_closure \
+  dinify_backend.tenancy.tests_ambient_authority \
   restaurants_app.tests_diner_capability \
   restaurants_app.tests_menu_relationship_integrity \
   restaurants_app.tests_menu_relationships_concurrency \

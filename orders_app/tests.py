@@ -30,13 +30,14 @@ from restaurants_app.tests import (
     TEST_OPTION_CHOICE_LARGE_ID,
     TEST_OPTION_CHOICE_SMALL_COST,
 )
+from platform_admin_app.testing import give_legacy_platform_role
 from restaurants_app.models import (
     Restaurant, Table, MenuItem, MenuSection, SectionGroup, RestaurantEmployee,
 )
 from dinify_backend.configss.messages import OK_ORDER_UPDATED
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated, OrderStatus_Pending,
-    RestaurantStatus_Live, DINIFY_ADMIN, RESTAURANT_OWNER, RESTAURANT_STAFF,
+    RestaurantStatus_Live, RESTAURANT_OWNER, RESTAURANT_STAFF,
 )
 
 
@@ -1301,6 +1302,10 @@ class AdminSourceOrderInitiationAuthTests(TestCase):
     set, returning 404 (non-disclosure) for a non-member. Anonymous/authenticated
     DINER ordering (source != 'admin') is untouched, and genuine staff still
     legitimately bypass the availability gates (a staff feature, not a diner one).
+
+    There is no platform-wide exception: the dinify-admin bypass that used to
+    admit a role-holder at every restaurant is gone, so "authorized at the target
+    restaurant" now means employment, with no second door.
     """
 
     def _make_user(self, phone, roles=None):
@@ -1347,8 +1352,11 @@ class AdminSourceOrderInitiationAuthTests(TestCase):
         )
         # Role-less authenticated diner (employed nowhere).
         self.diner = self._make_user('256700000640')
-        # Dinify admin.
-        self.admin = self._make_user('256700000650', roles=[DINIFY_ADMIN])
+        # An account carrying the RETIRED platform role string. It used to reach
+        # any restaurant's tables module through the dinify-admin bypass; it is now
+        # a stranger. Written through the ORM, since the write paths refuse it.
+        self.legacy_role_holder = give_legacy_platform_role(
+            self._make_user('256700000650'))
 
     # --- helpers --------------------------------------------------------
     def _client(self, user=None):
@@ -1455,12 +1463,25 @@ class AdminSourceOrderInitiationAuthTests(TestCase):
         self.assertEqual(
             Order.objects.get(id=self._order_id(resp)).created_by_id, self.staff_b.id)
 
-    # --- 6. dinify-admin allowed for any restaurant --------------------
-    def test_dinify_admin_admin_source_succeeds(self):
-        resp = self._initiate(self.admin, self.restaurant_b, self.table_b, self.item_b)
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(
-            Order.objects.get(id=self._order_id(resp)).created_by_id, self.admin.id)
+    # --- 6. the legacy platform role reaches no restaurant --------------
+    def test_legacy_platform_role_admin_source_denied(self):
+        # Was `test_dinify_admin_admin_source_succeeds`: the role string used to
+        # authorise source='admin' ordering at ANY restaurant, skipping every diner
+        # availability gate. It now 404s like any other non-member, and writes
+        # nothing.
+        before = Order.objects.count()
+        resp = self._initiate(
+            self.legacy_role_holder, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(resp.status_code, 404, resp.content)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_legacy_platform_role_is_indistinguishable_from_a_cross_tenant_employee(self):
+        holder = self._initiate(
+            self.legacy_role_holder, self.restaurant_b, self.table_b, self.item_b)
+        stranger = self._initiate(
+            self.owner_a, self.restaurant_b, self.table_b, self.item_b)
+        self.assertEqual(holder.status_code, stranger.status_code)
+        self.assertEqual(holder.content, stranger.content)
 
     # --- 7. diner flow unregressed -------------------------------------
     def test_anonymous_diner_initiate_still_works(self):

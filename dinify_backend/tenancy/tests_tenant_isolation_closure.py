@@ -68,21 +68,18 @@ from users_app.controllers.permissions_check import (
     can_user_access_module as can_user_access_module_closure,
 )
 from platform_admin_app.cookies import cookie_name as admin_cookie_name
+from platform_admin_app.testing import give_legacy_platform_role
 from platform_admin_app.models import (
     RESULT_DENIED, AdminAuditLog, SCOPE_SUPPORT, SCOPE_VIEW,
 )
 from restaurants_app.endpoints.restaurant_setup import build_scoped_instance_queryset
-from users_app.controllers.permissions_check import (
-    get_module_restaurant_ids,
-    is_dinify_admin,
-)
+from users_app.controllers.permissions_check import get_module_restaurant_ids
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     MODULE_MENU,
     RestaurantStatus_Live, RestaurantStatus_Onboarding,
     RestaurantStatus_Suspended, RestaurantStatus_Offboarded,
     RESTAURANT_OWNER, RESTAURANT_STAFF, RESTAURANT_KITCHEN,
-    DINIFY_ADMIN,
     OrderStatus_Served, OrderStatus_Pending, OrderStatus_Initiated,
     TransactionType_OrderPayment, TransactionStatus_Success,
     TransactionPlatform_Web, PaymentMode_MobileMoney,
@@ -261,8 +258,13 @@ class ClosureFixtureBase(TestCase):
             number=1, str_number='1', restaurant=cls.restaurant_b, dining_area=cls.area_b,
         )
 
-        # --- Dinify platform admin -------------------------------------------
-        cls.admin = cls._user('256700010099', roles=[DINIFY_ADMIN])
+        # --- an account carrying the RETIRED platform role --------------------
+        # It used to be the unrestricted Dinify admin: full-access grid at every
+        # restaurant, `None` from both id resolvers, `model.objects.all()` as its
+        # write queryset. The role string is now inert and the account is a
+        # stranger. Forced through the ORM, since every write path refuses it.
+        cls.legacy_role_holder = give_legacy_platform_role(
+            cls._user('256700010099'))
 
     # --- fixture / request helpers -------------------------------------------
     @classmethod
@@ -1135,11 +1137,36 @@ class StaffTenantIsolationClosureTests(ClosureFixtureBase):
         })
         self.assertEqual(denied.status_code, 403, denied.content)
 
-    def test_admin_unrestricted_scope_reads_both_tenants(self):
-        resp = self._setup_get(self.admin, 'menuitems')
+    def test_legacy_platform_role_reads_neither_tenant(self):
+        # Was `test_admin_unrestricted_scope_reads_both_tenants`. An unscoped list
+        # read (no ?restaurant=) used to return EVERY tenant's rows for a
+        # role-holder, because get_module_restaurant_ids answered `None` and
+        # scope_list_filter left the filter untouched. The resolver now returns an
+        # empty set, which binds the queryset to nothing.
+        resp = self._setup_get(self.legacy_role_holder, 'menuitems')
         ids = {i['id'] for i in resp.json()['data']['records']}
-        self.assertIn(str(self.item_a.id), ids)
-        self.assertIn(str(self.item_b.id), ids)
+        self.assertNotIn(str(self.item_a.id), ids)
+        self.assertNotIn(str(self.item_b.id), ids)
+
+    def test_legacy_platform_role_writes_neither_tenant(self):
+        for item in (self.item_a, self.item_b):
+            resp = self._setup_put(self.legacy_role_holder, 'menuitems', {
+                'id': str(item.id), 'name': 'Ambient hack',
+            })
+            self.assertEqual(resp.status_code, 403, resp.content)
+            item.refresh_from_db()
+            self.assertNotEqual(item.name, 'Ambient hack')
+
+    def test_legacy_platform_role_matches_a_cross_tenant_employee(self):
+        # The role-holder and an ordinary employee of the OTHER tenant get the
+        # same answer — the string buys exactly nothing.
+        holder = self._setup_put(self.legacy_role_holder, 'menuitems', {
+            'id': str(self.item_a.id), 'name': 'Ambient hack',
+        })
+        stranger = self._setup_put(self.owner_b, 'menuitems', {
+            'id': str(self.item_a.id), 'name': 'Ambient hack',
+        })
+        self.assertEqual(holder.status_code, stranger.status_code)
 
 
 # =============================================================================
@@ -1234,30 +1261,40 @@ class MassAssignmentClosureTests(ClosureFixtureBase):
         self.assertEqual(self.restaurant_a.status, RestaurantStatus_Live)
         self.assertEqual(self.restaurant_a.flat_fee, Decimal('50000.00'))     # not zeroed
 
-    def test_dinify_admin_also_cannot_write_status_through_setup_put(self):
-        """
-        The lifecycle is closed to the generic edit path for EVERY principal.
+    def test_flat_fee_is_stripped_for_the_owner_too(self):
+        # `flat_fee` used to be stripped only for non-admins, so a role-holder
+        # could zero its own subscription price. The strip is now unconditional —
+        # asserted here on the owner, the one principal who reaches this PUT at all.
+        before = self.restaurant_a.flat_fee
+        resp = self._setup_put(self.owner_a, 'restaurants', {
+            'id': str(self.restaurant_a.id), 'flat_fee': '0.00',
+        })
+        self.assertIn(resp.json().get('status'), (200, 400))
+        self.restaurant_a.refresh_from_db()
+        self.assertEqual(self.restaurant_a.flat_fee, before)
 
-        Before PR-5 a Dinify admin legitimately drove approval through this PUT
-        (`changeApprovalStatus`). That route is retired: `status` left
-        EDIT_INFORMATION and is read_only on the serializer, so an admin's value is
-        ignored exactly like a tenant's. Transitions go through
+    def test_the_legacy_platform_role_cannot_write_the_restaurant_at_all(self):
+        """
+        The lifecycle — and now the whole restaurant record — is closed to a
+        role-holder.
+
+        Before PR-5 a Dinify admin drove approval through this PUT
+        (`changeApprovalStatus`); PR-5 closed `status` to every principal, and this
+        PR closes the PUT itself: with no ambient authority the role-holder is not
+        an authorised writer of restaurant A, so the request is refused outright
+        rather than partly applied. Transitions go through
         POST admin/v1/restaurants/<id>/transition/, which enforces the matrix,
         requires a reason and writes an audit row.
         """
-        admin = User.objects.create_user(
-            first_name='Dinify', last_name='Admin', email='closure-status-admin@test.com',
-            phone_number='256700019999', username='256700019999', country='Uganda',
-            password='password', roles=[DINIFY_ADMIN],
-        )
-        resp = self._setup_put(admin, 'restaurants', {
+        original_name = self.restaurant_a.name
+        resp = self._setup_put(self.legacy_role_holder, 'restaurants', {
             'id': str(self.restaurant_a.id), 'name': 'Admin Renamed',
             'status': RestaurantStatus_Suspended,
         })
-        self.assertEqual(resp.json().get('status'), 200)
+        self.assertEqual(resp.status_code, 403, resp.content)
         self.restaurant_a.refresh_from_db()
-        self.assertEqual(self.restaurant_a.name, 'Admin Renamed')      # applied
-        self.assertEqual(self.restaurant_a.status, RestaurantStatus_Live)  # ignored
+        self.assertEqual(self.restaurant_a.name, original_name)             # not applied
+        self.assertEqual(self.restaurant_a.status, RestaurantStatus_Live)   # not applied
 
 
 # =============================================================================
@@ -1541,13 +1578,14 @@ class DelegatedAdministratorClosureTests(ClosureFixtureBase):
         self.assertEqual(response.status_code, 403, response.content)
 
     # --- the principal -------------------------------------------------------
-    def test_a_delegated_principal_is_never_the_unrestricted_dinify_admin(self):
+    def test_a_delegated_principal_is_bounded_to_its_one_restaurant(self):
         _headers, context = self._delegated(self.restaurant_a)
         principal = context.administrator
         setattr(principal, 'active_delegation', context)
-        # The three doors a dinify admin walks through, all shut at once.
-        self.assertFalse(is_dinify_admin(principal))
-        self.assertIsNotNone(get_module_restaurant_ids(principal, MODULE_MENU))
+        # This used to also assert `not is_dinify_admin(principal)` — the predicate
+        # is gone, so the unrestricted door it opened cannot be reached by anyone.
+        # What remains is the positive half: delegation is the ONLY way a platform
+        # administrator reaches tenant data, and it reaches exactly one tenant.
         self.assertEqual(
             get_module_restaurant_ids(principal, MODULE_MENU),
             {str(self.restaurant_a.id)},

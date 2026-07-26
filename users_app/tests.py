@@ -6,6 +6,9 @@ from django.contrib.auth.models import AnonymousUser
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 from dinify_backend.configss.messages import MESSAGES
+from dinify_backend.configss.string_definitions import (
+    RESTAURANT_OWNER, RestaurantStatus_Live,
+)
 from users_app.controllers.self_register import self_register
 from users_app.controllers.login import login
 from users_app.controllers.change_password import change_password
@@ -25,7 +28,12 @@ _PATCH_NOTIFICATION = 'misc_app.controllers.notifications.notification.Notificat
 
 
 def seed_user():
-    User.objects.create_user(
+    # `roles=[]`. This fixture used to carry 'dinify_admin', which conferred
+    # platform-wide authority across half the suite; the role vocabulary no longer
+    # grants anything, and a restaurant_user may not hold a platform role at all.
+    # Tests that need PRIVILEGE give the user a real RestaurantEmployee row —
+    # see `seed_privileged_user` below.
+    return User.objects.create_user(
         first_name='Test',
         last_name='User',
         email=TEST_EMAIL,
@@ -33,8 +41,30 @@ def seed_user():
         username=TEST_PHONE,
         country='Uganda',
         password='password',
-        roles=['dinify_admin']
+        roles=[],
     )
+
+
+def seed_privileged_user():
+    """
+    Seed TEST_PHONE as an active OWNER of a live restaurant.
+
+    Login escalates to OTP for owner/finance/manager EMPLOYMENTS — the only
+    privilege axis left, now that the dinify-admin arm of that branch is gone. The
+    security property under test ("a privileged login never returns tokens before
+    OTP") is unchanged; only the way the account becomes privileged is real.
+    """
+    from restaurants_app.models import Restaurant, RestaurantEmployee
+
+    user = seed_user()
+    restaurant = Restaurant.objects.create(
+        name='Login Security Restaurant', location='loc',
+        status=RestaurantStatus_Live, owner=user,
+    )
+    RestaurantEmployee.objects.create(
+        user=user, restaurant=restaurant, roles=[RESTAURANT_OWNER],
+    )
+    return user
 
 
 def seed_regular_user():
@@ -152,11 +182,11 @@ class LoginSecurityTests(TestCase):
     """Tests for auth-flow security fixes."""
 
     def setUp(self):
-        seed_user()
+        seed_privileged_user()
         seed_regular_user()
 
-    def test_admin_login_requires_otp_no_token_leak(self, *mocks):
-        """Admin login must NOT return tokens before OTP verification."""
+    def test_privileged_login_requires_otp_no_token_leak(self, *mocks):
+        """A privileged login must NOT return tokens before OTP verification."""
         response = login(TEST_PHONE, 'password', source='restaurant')
         self.assertEqual(response['status'], 200)
         self.assertTrue(response['data']['require_otp'])
@@ -166,7 +196,7 @@ class LoginSecurityTests(TestCase):
         # user_id should be present so frontend can call verify-otp
         self.assertIn('user_id', response['data'])
 
-    def test_admin_login_with_prompt_password_change_no_token_leak(self, *mocks):
+    def test_privileged_login_with_prompt_password_change_no_token_leak(self, *mocks):
         """Even with prompt_password_change=True, tokens must not leak before OTP."""
         user = User.objects.get(phone_number=TEST_PHONE)
         user.prompt_password_change = True
@@ -543,7 +573,7 @@ class OtpDeliveryTruthTests(TestCase):
     """
 
     def setUp(self):
-        seed_user()
+        seed_privileged_user()
         self.user = User.objects.get(phone_number=TEST_PHONE)
 
     def test_dev_returns_true_immediately_even_when_sender_would_fail(self):

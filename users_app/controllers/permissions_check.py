@@ -1,13 +1,26 @@
+"""
+Authority resolution for the CUSTOMER plane.
+
+There is exactly one way a principal reaches a restaurant here: an active,
+non-deleted ``RestaurantEmployee`` row at a restaurant whose lifecycle state
+grants portal access — or a ``DelegationGrant``, which is bounded to ONE
+restaurant, ONE scope, for a bounded time.
+
+There is no third way. In particular there is no platform-administrator
+short-circuit: ``User.roles`` is NOT consulted for platform authority anywhere
+in this module, and a customer JWT can never carry cross-tenant reach. Platform
+staff live on the admin plane (``platform_admin_app``), are identified by
+``User.account_type``, and cannot obtain a customer token at all. Reaching a
+tenant is what delegation is for. See ``dinify_backend/tenancy/ambient_authority.py``
+for the standing gate that keeps it that way.
+"""
 import logging
-from typing import Optional
 
 from users_app.models import User
 from restaurants_app.models import RestaurantEmployee, RestaurantRolePermission
 from restaurants_app.configs.role_defaults import DEFAULT_ROLE_MODULES
 from restaurants_app.controllers.lifecycle_policy import portal_access_states
 from dinify_backend.configss.string_definitions import (
-    DINIFY_ACCOUNT_MANAGER,
-    DINIFY_ADMIN,
     RESTAURANT_OWNER,
     RESTAURANT_MANAGER,
     GRID_MODULES,
@@ -19,12 +32,10 @@ from dinify_backend.configss.string_definitions import (
 
 logger = logging.getLogger(__name__)
 
-dinify_roles = [DINIFY_ACCOUNT_MANAGER, DINIFY_ADMIN]
-
-# Restaurant roles permitted to WRITE to a restaurant's data (owners + managers);
-# the dinify-admin bypass is handled separately. Used by ``can_manage_restaurant``
-# for the manage-level elevation gates (review resolution, kitchen goodwill-cancel)
-# that sit ABOVE module access and are intentionally NOT module-granular.
+# Restaurant roles permitted to WRITE to a restaurant's data (owners + managers).
+# Used by ``can_manage_restaurant`` for the manage-level elevation gates (review
+# resolution, kitchen goodwill-cancel) that sit ABOVE module access and are
+# intentionally NOT module-granular.
 MANAGE_ROLES = (RESTAURANT_OWNER, RESTAURANT_MANAGER)
 
 # The in-memory marker DelegatedSessionAuthentication puts on the principal of a
@@ -38,10 +49,10 @@ def _delegation(user):
     The delegation a principal is acting under, or ``None`` for everyone else.
 
     A platform administrator reaching into a tenant under a ``DelegationGrant`` is
-    NOT an employee of that tenant and NOT a Dinify admin: they hold one restaurant,
-    one scope, for a bounded time. Every public predicate below therefore checks
-    this FIRST and short-circuits, so a delegated principal is resolved from the
-    stored grant rather than from roles or employment it does not have.
+    NOT an employee of that tenant: they hold one restaurant, one scope, for a
+    bounded time. Every public predicate below therefore checks this FIRST and
+    short-circuits, so a delegated principal is resolved from the stored grant
+    rather than from employment it does not have.
 
     Set only by ``platform_admin_app.delegated_auth`` — an in-memory attribute on
     the user instance, never a model field, so it cannot be persisted and cannot be
@@ -92,22 +103,6 @@ def get_user_restaurant_roles(user_id: str, restaurant_id: str) -> list:
         return []
 
 
-def is_dinify_admin(user: User) -> bool:
-    # A delegated principal is NEVER a Dinify admin. This one line closes the three
-    # unrestricted-access short-circuits at once: the full-access map below,
-    # the ``None`` (= unscoped) returns from the two id resolvers, and
-    # ``build_scoped_instance_queryset``'s ``model.objects.all()``.
-    if _delegation(user) is not None:
-        return False
-    return any(role in dinify_roles for role in user.roles)
-
-
-def is_dinify_superuser(user: User) -> bool:
-    if _delegation(user) is not None:
-        return False
-    return any(role in [DINIFY_ADMIN] for role in user.roles)
-
-
 def is_restaurant_owner(user: User, restaurant_id: str) -> bool:
     # Delegation hands over bounded access, never the owner's identity — attribution
     # must not be launderable into "the owner did it".
@@ -117,24 +112,24 @@ def is_restaurant_owner(user: User, restaurant_id: str) -> bool:
 
 
 def _full_access_map() -> dict:
-    """Every grid module plus the owner/admin-only keys, all True."""
+    """Every grid module plus the owner-only keys, all True."""
     return {module: True for module in (*GRID_MODULES, *OWNER_ONLY_MODULES)}
 
 
-def _resolve_from_roles(roles, is_admin: bool, overrides_by_role: dict) -> dict:
+def _resolve_from_roles(roles, overrides_by_role: dict) -> dict:
     """
     Pure in-memory module resolution for ONE restaurant — no DB access.
 
-    ``roles`` is the caller's role list for that restaurant; ``is_admin`` is the
-    dinify-admin short-circuit; ``overrides_by_role`` is a ``{role: modules}``
-    map of the persisted RestaurantRolePermission rows for that restaurant.
+    ``roles`` is the caller's role list for that restaurant; ``overrides_by_role``
+    is a ``{role: modules}`` map of the persisted RestaurantRolePermission rows for
+    that restaurant.
 
-    Admin or owner -> full access (all grid + billing + team). Otherwise the
-    union (most permissive) across the caller's roles, each role's persisted
-    override OR its coded default; billing/team are never granted via the role
-    merge (owner/admin-only) so they resolve False.
+    Owner -> full access (all grid + billing + team). Otherwise the union (most
+    permissive) across the caller's roles, each role's persisted override OR its
+    coded default; billing/team are never granted via the role merge (owner-only)
+    so they resolve False.
     """
-    if is_admin or RESTAURANT_OWNER in (roles or []):
+    if RESTAURANT_OWNER in (roles or []):
         return _full_access_map()
     resolved = {module: False for module in GRID_MODULES}
     for role in (roles or []):
@@ -165,7 +160,6 @@ def get_any_restaurant_roles(user: User) -> list:
         overrides_by_restaurant.setdefault(
             str(row['restaurant_id']), {}
         )[row['role']] = row['modules']
-    is_admin = is_dinify_admin(user)
     return [
         {
             'restaurant_id': str(emp.restaurant.id),
@@ -173,7 +167,6 @@ def get_any_restaurant_roles(user: User) -> list:
             'roles': emp.roles,
             'permissions': _resolve_from_roles(
                 emp.roles,
-                is_admin,
                 overrides_by_restaurant.get(str(emp.restaurant.id), {}),
             ),
         }
@@ -185,12 +178,11 @@ def resolve_module_permissions(user: User, restaurant_id) -> dict:
     """
     Resolve the ``{module: bool}`` access map for ``user`` at ``restaurant_id``.
 
-    Dinify admin -> all True; owner of the restaurant -> all grid + billing +
-    team (short-circuit); otherwise the union across the user's roles for THAT
-    restaurant, each role's persisted RestaurantRolePermission row OR its coded
-    default (multi-role resolves to the most permissive). billing/team are
-    owner/admin-only; ``support`` is ungated and never represented here (see
-    ``can_user_access_module``).
+    Owner of the restaurant -> all grid + billing + team (short-circuit);
+    otherwise the union across the user's roles for THAT restaurant, each role's
+    persisted RestaurantRolePermission row OR its coded default (multi-role
+    resolves to the most permissive). billing/team are owner-only; ``support`` is
+    ungated and never represented here (see ``can_user_access_module``).
 
     A delegated administrator resolves from their grant instead: the scope's coded
     module grid at the grant's ONE restaurant, and all-False everywhere else.
@@ -200,22 +192,20 @@ def resolve_module_permissions(user: User, restaurant_id) -> dict:
         or not getattr(user, 'is_authenticated', False)
         or not user.is_active
     ):
-        return _resolve_from_roles([], False, {})
+        return _resolve_from_roles([], {})
     delegation = _delegation(user)
     if delegation is not None:
         from platform_admin_app.configs.delegation_scopes import scope_modules
 
         if not restaurant_id or str(restaurant_id) != delegation.restaurant_id:
             # A different tenant (or none named): a delegation confers nothing here.
-            return _resolve_from_roles([], False, {})
-        grid = _resolve_from_roles([], False, {})
+            return _resolve_from_roles([], {})
+        grid = _resolve_from_roles([], {})
         grid.update(scope_modules(delegation.scope))
         # Never the owner-only keys, whatever a scope grid might come to say.
         grid[MODULE_BILLING] = False
         grid[MODULE_TEAM] = False
         return grid
-    if is_dinify_admin(user):
-        return _full_access_map()
     roles = get_user_restaurant_roles(user, restaurant_id)
     overrides = {
         row['role']: row['modules']
@@ -225,7 +215,7 @@ def resolve_module_permissions(user: User, restaurant_id) -> dict:
             deleted=False,
         ).values('role', 'modules')
     } if roles else {}
-    return _resolve_from_roles(roles, False, overrides)
+    return _resolve_from_roles(roles, overrides)
 
 
 def can_user_access_module(user: User, restaurant_id, module: str) -> bool:
@@ -256,11 +246,10 @@ def can_user_access_module(user: User, restaurant_id, module: str) -> bool:
     return bool(resolve_module_permissions(user, restaurant_id).get(module, False))
 
 
-def get_employed_restaurant_ids(user: User) -> Optional[set]:
+def get_employed_restaurant_ids(user: User) -> set:
     """
     Return the set of restaurant ids where ``user`` holds ANY active,
-    non-deleted employment, or ``None`` for unrestricted access (a dinify
-    admin / account manager).
+    non-deleted employment.
 
     Role-agnostic on purpose: it powers the ungated ``support`` module's list
     scoping, where EVERY employee — not just owners/managers — may see their
@@ -268,14 +257,16 @@ def get_employed_restaurant_ids(user: User) -> Optional[set]:
     lifecycle state at all, which is what makes support reachable in every state
     (the ``Support access`` row of the ``lifecycle_policy`` matrix).
 
+    ALWAYS a set — the caller must scope by it unconditionally. There is no
+    "unrestricted" return: the ``None`` sentinel that used to mean "a dinify admin
+    may see every tenant, do not scope" was removed with the role predicates it
+    depended on, and must not come back. A delegated administrator holds NO
+    employment, so it resolves from the grant: the granted restaurant if the scope
+    reaches support, otherwise deny-all.
+
     Returns:
-        ``None``      -> unrestricted (dinify admin); callers must NOT scope.
         ``set()``     -> deny-all (anonymous, inactive, or no employment).
         ``{ids...}``  -> the restaurant ids (as strings) the user is employed at.
-
-    A delegated administrator holds NO employment, so it resolves from the grant:
-    the granted restaurant if the scope reaches support, otherwise deny-all. Never
-    ``None`` — a delegation must never be treated as unrestricted.
     """
     if user is None or not getattr(user, 'is_authenticated', False) or not user.is_active:
         return set()
@@ -284,8 +275,6 @@ def get_employed_restaurant_ids(user: User) -> Optional[set]:
         if delegation.scope in _support_module_scopes():
             return {delegation.restaurant_id}
         return set()
-    if is_dinify_admin(user):
-        return None
     return {
         str(restaurant_id)
         for restaurant_id in RestaurantEmployee.objects.filter(
@@ -296,10 +285,9 @@ def get_employed_restaurant_ids(user: User) -> Optional[set]:
     }
 
 
-def get_module_restaurant_ids(user: User, module: str) -> Optional[set]:
+def get_module_restaurant_ids(user: User, module: str) -> set:
     """
-    Return the set of restaurant ids where ``user`` may access ``module``, or
-    ``None`` for unrestricted access (a dinify admin / account manager).
+    Return the set of restaurant ids where ``user`` may access ``module``.
 
     The list-scoping counterpart of ``can_user_access_module`` (the single-record
     check): a GET list is authoritatively bound to exactly the restaurants where
@@ -309,15 +297,16 @@ def get_module_restaurant_ids(user: User, module: str) -> Optional[set]:
     portal access — ``onboarding`` or ``live``, per ``lifecycle_policy``) and
     batches the override rows in one query (no N+1).
 
+    ALWAYS a set, at most the ONE granted restaurant for a delegated administrator.
+    There is no "unrestricted" return. The ``None`` sentinel this used to have for a
+    dinify admin was load-bearing in the worst way: callers read it as "do not
+    scope", which is how ``scope_list_filter`` left a list filter untouched and
+    ``build_scoped_instance_queryset`` returned ``model.objects.all()``. It went with
+    the role predicates — do not reintroduce it.
+
     Returns:
-        ``None``      -> unrestricted (dinify admin); callers must NOT scope.
         ``set()``     -> deny-all.
         ``{ids...}``  -> the restaurant ids (as strings) whose grid grants ``module``.
-
-    A delegated administrator resolves to at most the ONE granted restaurant, and
-    never to ``None``. That matters beyond this function: callers treat ``None`` as
-    "do not scope", which is how ``scope_list_filter`` leaves a list filter untouched
-    and ``build_scoped_instance_queryset`` returns ``model.objects.all()``.
     """
     if user is None or not getattr(user, 'is_authenticated', False) or not user.is_active:
         return set()
@@ -328,8 +317,6 @@ def get_module_restaurant_ids(user: User, module: str) -> Optional[set]:
         if _delegation_grants(delegation, delegation.restaurant_id, module):
             return {delegation.restaurant_id}
         return set()
-    if is_dinify_admin(user):
-        return None
     if module == MODULE_SUPPORT:
         return get_employed_restaurant_ids(user)
     employments = list(
@@ -355,7 +342,7 @@ def get_module_restaurant_ids(user: User, module: str) -> Optional[set]:
         str(restaurant_id)
         for restaurant_id, roles in employments
         if _resolve_from_roles(
-            roles, False, overrides_by_restaurant.get(str(restaurant_id), {})
+            roles, overrides_by_restaurant.get(str(restaurant_id), {})
         ).get(module)
     }
 
@@ -365,10 +352,9 @@ def can_manage_restaurant(user: User, restaurant_id) -> bool:
     Whether ``user`` may WRITE to a single record owned by ``restaurant_id``.
 
     The manage-level elevation check that sits ABOVE module access (review
-    resolution, kitchen goodwill-cancel) — intentionally NOT module-granular:
-    a dinify admin may write anywhere; otherwise the user must hold an active
-    owner/manager role in that restaurant. A missing/empty ``restaurant_id`` is
-    denied for non-admins (fail closed).
+    resolution, kitchen goodwill-cancel) — intentionally NOT module-granular: the
+    user must hold an active owner/manager role in that restaurant. A missing/empty
+    ``restaurant_id`` is denied (fail closed).
 
     A delegation NEVER carries manage-level authority. Delegation is bounded,
     time-boxed help; the elevated actions behind this gate (resolving a diner's
@@ -377,8 +363,6 @@ def can_manage_restaurant(user: User, restaurant_id) -> bool:
     """
     if _delegation(user) is not None:
         return False
-    if is_dinify_admin(user):
-        return True
     if not restaurant_id:
         return False
     return any(

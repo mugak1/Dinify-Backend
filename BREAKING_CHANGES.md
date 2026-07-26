@@ -10,8 +10,10 @@ this branch into production.**
 
 **Endpoint:** `POST /users/auth/login/`
 
-**Affected users:** Privileged roles (restaurant owners, managers, finance,
-Dinify admins/superusers) when `source != 'diner'`.
+**Affected users:** Privileged restaurant roles (owners, managers, finance) when
+`source != 'diner'`. The Dinify admin/superuser arm of this branch was removed in
+Phase 0.5 PR-A — platform staff authenticate on the admin plane, and a customer
+account can no longer hold a platform role.
 
 **Before (old response when `require_otp=True`):**
 ```json

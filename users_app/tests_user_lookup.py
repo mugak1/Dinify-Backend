@@ -7,8 +7,9 @@ token) could resolve anyone's full identity, and the response returned the
 COMPLEMENTARY contact (search by phone -> get their email, and vice-versa).
 
 This suite pins the fix:
-  * the lookup is gated to Dinify admins + restaurant team-access holders
-    (team is owner/admin-only, so managers/kitchen/staff/diners are denied);
+  * the lookup is gated to restaurant team-access holders only (team is
+    owner-only, so managers/kitchen/staff/diners are denied, and so is an
+    account carrying the retired dinify_admin role string);
   * the response is minimized to existence + id + name only — never
     phone_number / email;
   * missing contact -> 400, unknown contact -> 404.
@@ -16,12 +17,13 @@ This suite pins the fix:
 from django.test import TestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from platform_admin_app.testing import give_legacy_platform_role
 from users_app.models import User
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Live,
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_STAFF,
-    DINIFY_ADMIN, DINER,
+    DINER,
 )
 
 URL = '/api/v1/users/user-lookup/'
@@ -55,7 +57,7 @@ class UserLookupEndpointTests(TestCase):
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.restaurant, roles=[RESTAURANT_OWNER])
 
-        # Employed, but without team access (team is owner/admin-only).
+        # Employed, but without team access (team is owner-only).
         self.manager = make_user('256750000002')
         RestaurantEmployee.objects.create(
             user=self.manager, restaurant=self.restaurant, roles=[RESTAURANT_MANAGER])
@@ -63,8 +65,10 @@ class UserLookupEndpointTests(TestCase):
         RestaurantEmployee.objects.create(
             user=self.staff, restaurant=self.restaurant, roles=[RESTAURANT_STAFF])
 
-        # Dinify admin (unrestricted), plus a plain user and a diner (no employment).
-        self.admin = make_user('256750000004', roles=[DINIFY_ADMIN])
+        # An account carrying the RETIRED platform role, plus a plain user and a
+        # diner (no employment). The role used to open this lookup on its own.
+        self.legacy_role_holder = give_legacy_platform_role(
+            make_user('256750000004'))
         self.plain = make_user('256750000005')
         self.diner = make_user('256750000006', roles=[DINER])
 
@@ -73,9 +77,21 @@ class UserLookupEndpointTests(TestCase):
         resp = self.client.get(URL, {'contact': self.target.email}, **auth(self.owner))
         self.assertEqual(resp.status_code, 200, resp.content)
 
-    def test_dinify_admin_allowed(self):
-        resp = self.client.get(URL, {'contact': self.target.email}, **auth(self.admin))
-        self.assertEqual(resp.status_code, 200, resp.content)
+    def test_legacy_platform_role_denied(self):
+        # Was `test_dinify_admin_allowed`. The gate is now team-module only, so the
+        # role string resolves a person's identity from a raw contact no more than
+        # a plain user does.
+        resp = self.client.get(
+            URL, {'contact': self.target.email}, **auth(self.legacy_role_holder))
+        self.assertEqual(resp.status_code, 403, resp.content)
+
+    def test_legacy_platform_role_is_indistinguishable_from_a_plain_user(self):
+        holder = self.client.get(
+            URL, {'contact': self.target.email}, **auth(self.legacy_role_holder))
+        plain = self.client.get(
+            URL, {'contact': self.target.email}, **auth(self.plain))
+        self.assertEqual(holder.status_code, plain.status_code)
+        self.assertEqual(holder.content, plain.content)
 
     def test_plain_user_denied(self):
         resp = self.client.get(URL, {'contact': self.target.email}, **auth(self.plain))
@@ -86,7 +102,7 @@ class UserLookupEndpointTests(TestCase):
         self.assertEqual(resp.status_code, 403, resp.content)
 
     def test_manager_denied(self):
-        # team is owner/admin-only, so an employed manager still cannot use it.
+        # team is owner-only, so an employed manager still cannot use it.
         resp = self.client.get(URL, {'contact': self.target.email}, **auth(self.manager))
         self.assertEqual(resp.status_code, 403, resp.content)
 
@@ -112,7 +128,7 @@ class UserLookupEndpointTests(TestCase):
 
     def test_response_minimized_when_searching_by_phone(self):
         # Searching by phone must not disclose the email (the complementary leak).
-        resp = self.client.get(URL, {'contact': self.target.phone_number}, **auth(self.admin))
+        resp = self.client.get(URL, {'contact': self.target.phone_number}, **auth(self.owner))
         self.assertEqual(resp.status_code, 200, resp.content)
         data = resp.json()['data']
         self.assertEqual(data['id'], str(self.target.id))

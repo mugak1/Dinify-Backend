@@ -58,6 +58,16 @@ jobs:
       - name: Money-field guard
         run: python scripts/check_money_fields.py
 
+      - name: Ambient-authority gate
+        # TENANT-AUTH-00: the customer plane must not read User.roles to grant
+        # platform authority. A Dinify administrator used to be defined by a role
+        # string, and that predicate was wired as a cross-tenant bypass across the
+        # portal — while account_type separately decided which plane an account
+        # could log into. The predicates are gone; this keeps them gone.
+        # PERMANENT (unlike the ratchet below, which self-terminates at zero):
+        # there is no future state in which reintroducing this is acceptable.
+        run: python scripts/check_ambient_authority.py
+
       - name: Tenant-relation ratchet
         # The committed tenant-relation baseline may only SHRINK — a new writable
         # relation must be classified, not baselined. Reads the baseline at the
@@ -88,6 +98,7 @@ jobs:
         run: |
           python -m django test \
             dinify_backend.tenancy.tests_tenant_isolation_closure \
+            dinify_backend.tenancy.tests_ambient_authority \
             restaurants_app.tests_diner_capability \
             restaurants_app.tests_menu_relationship_integrity \
             restaurants_app.tests_menu_relationships_concurrency \

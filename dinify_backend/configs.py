@@ -7,10 +7,10 @@ ACTION_LOG_STATUSES = {
     'unauthorised': 'unauthorised',
 }
 
-# the roles that can be granted on the system
+# the restaurant roles that can be granted on the system. The platform-side
+# 'DINIFY_ADMIN' / 'DINIFY_ACCOUNT_MANAGER' entries were REMOVED — see the note
+# in dinify_backend/configss/string_definitions.py.
 ROLES = {
-    'DINIFY_ADMIN': 'dinify_admin',
-    'DINIFY_ACCOUNT_MANAGER': 'dinify_account_manager',
     'RESTAURANT_OWNER': 'owner',
     'RESTAURANT_MANAGER': 'manager',
     'RESTAURANT_STAFF': 'restaurant_staff',
