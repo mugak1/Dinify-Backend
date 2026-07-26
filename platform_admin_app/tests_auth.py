@@ -54,6 +54,7 @@ from platform_admin_app.models import (
     PlatformStaffAuth,
 )
 from platform_admin_app.permissions import require_recent_elevation
+from platform_admin_app.second_factor import METHOD_RECOVERY, METHOD_TOTP
 from platform_admin_app.testing import AuditAssertionsMixin
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from users_app.controllers.login import login as customer_login
@@ -261,10 +262,10 @@ class LoginFlowTests(ThrottleIsolationMixin, AuditAssertionsMixin, TestCase):
             content_type='application/json',
         )
 
-    def _verify(self, code):
+    def _verify(self, code, method=METHOD_TOTP):
         return self.client.post(
             '/admin/v1/auth/verify/',
-            data={'code': code},
+            data={'method': method, 'code': code},
             content_type='application/json',
         )
 
@@ -348,7 +349,7 @@ class LoginFlowTests(ThrottleIsolationMixin, AuditAssertionsMixin, TestCase):
 
     def test_recovery_code_accepted_once_and_audited(self):
         self._login()
-        response = self._verify(self.codes[0])
+        response = self._verify(self.codes[0], method=METHOD_RECOVERY)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()['data']['used_recovery_code'])
         self.assertEqual(response.json()['data']['recovery_codes_remaining'], 9)
@@ -356,7 +357,9 @@ class LoginFlowTests(ThrottleIsolationMixin, AuditAssertionsMixin, TestCase):
 
         self.client.post('/admin/v1/auth/logout/')
         self._login()
-        self.assertEqual(self._verify(self.codes[0]).status_code, 401)
+        self.assertEqual(
+            self._verify(self.codes[0], method=METHOD_RECOVERY).status_code, 401,
+        )
 
     def test_lockout_after_threshold_failures(self):
         for _ in range(lockout.threshold()):
@@ -395,7 +398,7 @@ class LoginFlowTests(ThrottleIsolationMixin, AuditAssertionsMixin, TestCase):
 
         response = self.client.post(
             '/admin/v1/auth/elevate/',
-            data={'code': _code(self.secret, offset=1)},
+            data={'method': METHOD_TOTP, 'code': _code(self.secret, offset=1)},
             content_type='application/json',
         )
         self.assertEqual(response.status_code, 200)
@@ -407,7 +410,7 @@ class LoginFlowTests(ThrottleIsolationMixin, AuditAssertionsMixin, TestCase):
         self._verify(_code(self.secret))
         response = self.client.post(
             '/admin/v1/auth/elevate/',
-            data={'code': '000000'},
+            data={'method': METHOD_TOTP, 'code': '000000'},
             content_type='application/json',
         )
         self.assertEqual(response.status_code, 403)
