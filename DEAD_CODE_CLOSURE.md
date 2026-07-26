@@ -182,7 +182,10 @@ balances, disbursement, refunds, wallets, or the retired custodial models.
 
 Not a dead-code finding: PR-A is a security remediation whose *consequence* is a
 set of retirements, recorded here so this stays the one place to look before
-deleting — or resurrecting — a surface.
+deleting — or resurrecting — a surface. PR-A itself is the first rung of a
+four-PR ladder closed in `PHASE_0_5_CLOSURE.md`, which records the security
+remediation; the retirements below stay here, where a reader looking for a deleted
+surface will find them.
 
 `User.roles` was a second identity discriminator competing with `account_type`: a
 `dinify_admin` string granted cross-tenant authority on the customer plane. With
