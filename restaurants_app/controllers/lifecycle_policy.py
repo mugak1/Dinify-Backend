@@ -94,6 +94,37 @@ DELEGATED_SCOPE_VIEW = 'view'
 # anything enforced here: the staff portal is blocked, so the only principal that
 # can still reach the tickets is a delegated administrator — capped to `view` by the
 # row below. Support itself is an ungated module and is not filtered by status.
+#
+# ORDERS ALREADY IN FLIGHT ARE FROZEN, NOT DRAINED. This is the question the table
+# above does not obviously answer, so it is answered here: what becomes of an order
+# that was accepted (`pending`, `preparing`) when the restaurant is suspended?
+#
+# The row survives untouched — nothing cancels or rewrites it. But staff cannot SEE,
+# ADVANCE or CANCEL it while the restaurant is suspended, because `CAP_STAFF_PORTAL`
+# and `CAP_KITCHEN` are both False and kitchen authorisation resolves through the
+# portal-access state set. Fulfilment resumes if and when the restaurant returns to
+# `live`, with the ticket exactly where it was left. `offboarded` behaves the same
+# for in-flight orders and additionally removes the restaurant from the diner surface.
+#
+# This is the DELIBERATE reading of the matrix, not an accident of enforcement: the
+# matrix and the enforcement agree, and letting staff work the kitchen at `suspended`
+# would mean suspension no longer suspends. Two consequences follow from it, both
+# real and both left for Phase 1 rather than papered over here:
+#
+#   * THE TABLE IS NEVER FREED. Cancelling an order is what releases its table, and
+#     cancel is blocked at `suspended` — so a restaurant suspended mid-service comes
+#     back with those tables still showing occupied. Phase 1 needs an explicit
+#     resolution path (drain-on-suspend, or a supervised release) and the narrow
+#     cancel-only carve-out that would fix just this was considered and declined.
+#   * DINER-FACING READS ARE INCONSISTENT at `suspended`: the menu answers 503 (the
+#     graceful "temporarily unavailable" this policy specifies), but an existing
+#     order's `order-details` and `payment-details` still answer 200 and a review can
+#     still be submitted, because none of those paths consults lifecycle state. A
+#     diner mid-visit therefore sees a working order screen at a restaurant whose
+#     menu has gone dark.
+#
+# Neither is a regression introduced by the admission work — both predate it and are
+# recorded here so the next reader inherits the knowledge rather than rediscovering it.
 CAPABILITY_MATRIX = {
     RestaurantStatus_Onboarding: {
         CAP_STAFF_PORTAL: True,

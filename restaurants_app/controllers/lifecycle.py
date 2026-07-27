@@ -28,6 +28,7 @@ import logging
 
 from django.db import transaction
 
+from restaurants_app.controllers.admission_lock import lock_admission_exclusive
 from dinify_backend.configss.string_definitions import (
     RESTAURANT_LIFECYCLE_STATES,
     RestaurantStatus_Live,
@@ -330,6 +331,25 @@ def transition_restaurant(*, restaurant, to_state, reason, actor=None, request=N
 
     went_live = False
     with transaction.atomic():
+        # THE ADMISSION BARRIER, taken FIRST — before the row lock below, because
+        # the advisory lock is the single top level of the documented order
+        # (advisory -> Restaurant -> AdminAuditLog) and the order paths take the
+        # same lock first too.
+        #
+        # Exclusive here, shared there: any number of orders may be admitted at
+        # once, but a transition excludes them all. Once this returns, every
+        # admission is either finished (committed or rolled back) or has not yet
+        # read a status — so none can be admitted against the state this
+        # transaction is about to invalidate. Without it, suspending a restaurant
+        # left orders already past their gate still writing themselves into the
+        # kitchen, and the operator was told trading had stopped when it had not.
+        #
+        # A row lock could not have done this job: the order path does not touch
+        # the `restaurants` row, and this transition arrives on the ADMIN plane in
+        # a different mod_wsgi daemon process. Advisory locks are database-global,
+        # which is exactly the scope the two planes share.
+        lock_admission_exclusive(restaurant.pk)
+
         locked = Restaurant.objects.select_for_update().get(pk=restaurant.pk)
         from_state = locked.status
 
