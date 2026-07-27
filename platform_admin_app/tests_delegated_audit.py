@@ -1,5 +1,6 @@
 """
-PR-D — the delegated write audit is transactional, so no-audit-no-action is universal.
+PR-D — the delegated write audit is transactional, so delegated tenant writes are
+audit-atomic like every other privileged state change.
 
 ``DelegatedAccessMiddleware`` used to audit a delegated write from ``_finalize``, after
 the view had returned and its transaction had committed. A failed audit had nothing
@@ -7,8 +8,8 @@ left to unwind, so it was swallowed into a log line and the change stood unrecor
 the one place PR-3's contract did not hold, as the middleware's own docstring conceded.
 
 Both tenant writes a delegation can reach now audit inside their own transaction, so a
-failed audit rolls the write back. **The two atomicity tests here fail on `main`**:
-there the stock stays toggled and the support issue stays created.
+failed audit rolls the write back. Before that change the stock stayed toggled and the
+support issue stayed created; the two atomicity tests here are what pin it.
 
 The third non-safe allowlisted route, ``POST api/v1/delegation/end/``, is deliberately
 not covered by that mechanism — it writes admin-plane rows only and
@@ -132,7 +133,7 @@ class DelegatedStockToggleAuditTests(DelegatedWriteAuditFixture):
         )
 
     def test_a_failed_audit_rolls_the_toggle_back(self):
-        """NO AUDIT, NO ACTION. **Fails on `main`** — there the toggle survives."""
+        """Audit-atomic: a failed audit unwinds the toggle rather than leaving it."""
         self.assertTrue(self.item.in_stock)
 
         with self._raise_audit():
@@ -207,7 +208,7 @@ class DelegatedSupportIssueAuditTests(DelegatedWriteAuditFixture):
         self.assertTrue(entry.after_state.get('transactional'))
 
     def test_a_failed_audit_rolls_the_issue_back(self):
-        """NO AUDIT, NO ACTION. **Fails on `main`** — there the issue survives."""
+        """Audit-atomic: a failed audit unwinds the issue rather than leaving it."""
         with self._raise_audit():
             with self.assertRaises(RuntimeError):
                 self._raise_issue()

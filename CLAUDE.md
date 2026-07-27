@@ -79,6 +79,25 @@ with PostgreSQL on AWS RDS.
   carries the same `account_type` refusal as login. Platform staff get SimpleJWT's
   own `token_not_valid` 401 — byte-identical to a bad token, so it is not an
   account-type oracle — and the success body is unchanged. Do not revert the mount
+- Customer-plane JWT is `account_type`-gated ON EVERY PRESENTED TOKEN (Closure PR 1):
+  `users_app/authentication.py::CustomerJWTAuthentication` subclasses
+  `JWTAuthentication` and refuses `platform_staff` in `get_user`. Login and refresh
+  bind only where a token is MINTED, so an access token issued moments before a
+  promotion stayed valid for its full `ACCESS_TOKEN_LIFETIME` (30 min); migration
+  `users_app/0013` blacklists outstanding REFRESH tokens but access tokens are
+  stateless. **`USER_AUTHENTICATION_RULE` CANNOT do this job** — in SimpleJWT 5.5.1 it
+  is read only by `TokenObtainSerializer`/`TokenRefreshSerializer`, never by
+  `JWTAuthentication.get_user`, so a custom rule would gate only the two paths already
+  gated. It is WIRED IN TWO PLACES and both are load-bearing: the
+  `DEFAULT_AUTHENTICATION_CLASSES` entry, and
+  `misc_app/controllers/decode_auth_token.py`, which instantiates an authenticator
+  DIRECTLY outside the DRF chain for ~30 customer-plane call sites. The refusal reuses
+  SimpleJWT's own `user_inactive` 401, byte-identical to a deactivated customer, so it
+  is not an oracle. It must stay on the JWT path specifically — on this plane
+  `request.user.account_type == 'platform_staff'` is true IFF the request is
+  DELEGATED, so a middleware/permission-class check would break delegated drill-in.
+  `users_app/tests_customer_jwt_gate.py` pins both wirings and fails if any
+  customer-plane module imports the stock `JWTAuthentication`
 - OTP verification hardening: ✅ (PR #192) — the OTP verify path is no longer
   brute-forceable. `UserOtp` gains `attempts`/`consumed_at`/`salt`/`identifier`
   (migration `users_app/0009_otp_hardening`, which also purges pre-existing
@@ -277,9 +296,16 @@ with PostgreSQL on AWS RDS.
     consume the second factor OUTSIDE the session transaction and audit AFTER it
     committed, so a recovery code could be burned or a TOTP counter advanced with no
     session produced, a live `AdminSession` could exist with no success audit row, and
-    two concurrent requests could both mint. **LOCK ORDER: `AdminLoginChallenge` then
-    `PlatformStaffAuth`, never the reverse** (elevate and `lockout.register_failure`
-    take only the second) — keep it that way or you introduce a deadlock cycle.
+    two concurrent requests could both mint. **LOCK ORDER: `User` then
+    `AdminLoginChallenge` then `PlatformStaffAuth`, never out of order** (verify takes
+    the last two; elevate and `lockout.register_failure` take only the last;
+    `challenges.create_challenge` takes only the FIRST) — keep it that way or you
+    introduce a deadlock cycle. `create_challenge` deliberately locks `User` and NOT
+    `PlatformStaffAuth`: it goes on to write-lock challenge rows through its consuming
+    `UPDATE`, so holding the auth row first would give
+    `PlatformStaffAuth → AdminLoginChallenge`, the exact reverse of verification's
+    order. `User` is safe to take first precisely because
+    `resolve_challenge(for_update=True)` passes `of=('self',)` so nothing else holds it.
     `challenges.consume` is now CONDITIONAL and returns bool (a lost race rolls the
     whole request back); `resolve_challenge(..., for_update=True)` locks with
     `of=('self',)` so the joined `User` row is not locked as a side effect;
@@ -309,6 +335,18 @@ with PostgreSQL on AWS RDS.
     cannot ride this path: it needs the password AND a one-shot recovery code. The
     shell equivalent is `manage.py unlock_platform_admin`. Responses stay generic
     throughout — lockout is never an account-existence oracle
+  - ONE LIVE CHALLENGE PER USER (Closure PR 1): `challenges.create_challenge` runs in
+    ONE `transaction.atomic()` under a `User` row lock, and migration `0008` adds the
+    partial unique index `one_live_admin_challenge_per_user`
+    (`UniqueConstraint(fields=['user'], condition=Q(consumed_at__isnull=True))`) so the
+    invariant survives a caller that forgets. It used to consume and insert in two
+    autocommitted statements with no lock, so two simultaneous correct-password logins
+    interleaved `UPDATE → UPDATE → INSERT → INSERT` and left TWO spendable challenges.
+    The index condition CANNOT reference `expires_at` (a partial-index predicate must
+    be immutable), so "live" means UNCONSUMED — which is why the consuming `UPDATE`
+    stays load-bearing: it is what frees the slot. The login view wraps
+    `create_challenge` AND its `ADMIN_AUTH_CHALLENGE_ISSUED` audit in one
+    `transaction.atomic()` — a challenge is a credential, so it is audit-atomic
   - `AdminLoginChallenge` + `AdminSession` — two-step login as separate models, so
     "has a session" never stops meaning "fully authenticated": `auth/login/` checks
     the password and mints a short-lived challenge in its own `__Host-` cookie, and
@@ -340,7 +378,14 @@ with PostgreSQL on AWS RDS.
     `MultiFernet` is NOT built
   - `AdminAuditLog` — append-only (an update raises `AppendOnlyViolation`),
     recording actor / session / action / resource / restaurant / delegation /
-    reason / before+after state / result / request id
+    reason / before+after state / result / request id. THE AUDIT CONTRACT, stated
+    exactly (`platform_admin_app/audit.py`): privileged successful state changes and
+    credential issuance are AUDIT-ATOMIC — the action rolls back if its audit write
+    fails. Denials, failure accounting and safety-reducing revocations (logout,
+    session revocation) may be audited best-effort or in a separate transaction,
+    DELIBERATELY: losing a revocation because its audit failed would be worse than an
+    unaudited revocation. The asymmetry is the design, not an unfinished edge — do not
+    restate it as a universal "no audit, no action"
   - DELEGATED WRITES ARE AUDITED TRANSACTIONALLY (PR-D): both tenant writes a
     delegation can reach — `POST api/v1/support/issues/` and
     `PUT api/v1/kitchen/menu-items/<pk>/stock/` — call
@@ -1081,10 +1126,12 @@ the catch-all `<str:config_detail>/` route.
   identity layer" bullet; 0013 blacklists outstanding platform-staff refresh
   tokens and strips platform-only roles from `restaurant_user` rows, data-only and
   idempotent — see "Tenant Isolation / Role-Permission ENFORCEMENT"),
-  `platform_admin_app/migrations/0007_adminloginchallenge_recovery_only.py`
+  `platform_admin_app/migrations/0008_adminloginchallenge_one_live_admin_challenge_per_user.py`
   (0001 identity, 0002 `AdminSession`, 0003 `AdminAuditLog`, 0004 TOTP replay counter,
   0005 `DelegationGrant`, 0006 `DelegatedSession`, 0007 the break-glass
-  `recovery_only` challenge flag — see "Platform-admin control plane"),
+  `recovery_only` challenge flag, 0008 the one-live-challenge partial unique index
+  preceded by an idempotent duplicate-consuming data repair — see "Platform-admin
+  control plane"),
   `misc_app/migrations/0004_drop_service_tickets.py`
 
 ## CI — `.github/workflows/ci.yml`

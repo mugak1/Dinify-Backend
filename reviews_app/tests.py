@@ -584,8 +584,8 @@ class _ScopingTestsMixin:
         self.assertEqual(self._get(self.owner_a).status_code, 400)
 
     def test_malformed_restaurant_uuid_returns_400(self):
-        # The UUID guard fires before any ORM call (a malformed id would 500 on
-        # Postgres for a dinify admin otherwise).
+        # The UUID guard fires before any ORM call (a malformed id would otherwise
+        # reach the ORM and 500 on Postgres, where the Restaurant PK is a UUID).
         resp = self._get(self.owner_a, '?restaurant=not-a-uuid')
         self.assertEqual(resp.status_code, 400)
 

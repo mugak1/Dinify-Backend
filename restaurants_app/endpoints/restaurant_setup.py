@@ -376,8 +376,11 @@ class RestaurantSetupEndpoint(APIView):
     the endpoint for restaurant setups
     """
     def handle_create_employee(self, request):
-        # TODO if the user is not a Dinify admin,.
-        # then set the owner value from the auth details
+        # Authorization is `check_permission` below, which resolves the target
+        # restaurant server-side and gates it on the owner-only `team` module.
+        # (The TODO that stood here proposed deriving the owner from the auth
+        # details "if the user is not a Dinify admin" — a distinction that no
+        # longer exists on this plane.)
         data = request.data
         try:
             data = data.dict()
@@ -754,9 +757,9 @@ class RestaurantSetupEndpoint(APIView):
                 )
                 return Response(response, status=200)
 
-        # Authoritatively bind the read to the caller's restaurants. A dinify
-        # admin is unrestricted; everyone else is scoped to their owner/manager
-        # restaurants and the client ?restaurant= can only narrow within that set.
+        # Authoritatively bind the read to the caller's restaurants: the caller is
+        # scoped to the restaurants whose role grid grants this record's module,
+        # and the client ?restaurant= can only narrow within that set, never widen.
         orm_filter, scope_ok = scope_list_filter(request.user, config_detail, orm_filter)
         if not scope_ok:
             return Response(

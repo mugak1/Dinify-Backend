@@ -147,8 +147,8 @@ GRID_MODULES = [
     MODULE_DASHBOARD, MODULE_KITCHEN, MODULE_TABLES, MODULE_MENU,
     MODULE_REVIEWS, MODULE_REPORTS, MODULE_SETTINGS,
 ]
-# off-grid owner/admin-only keys (NEVER grid keys) — granted only by the
-# resolver's owner/admin short-circuit, never from a role's grid
+# off-grid owner-only keys (NEVER grid keys) — granted only by the resolver's
+# owner short-circuit, never from a role's grid
 MODULE_BILLING = 'billing'
 MODULE_TEAM = 'team'
 OWNER_ONLY_MODULES = [MODULE_BILLING, MODULE_TEAM]

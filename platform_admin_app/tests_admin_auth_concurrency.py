@@ -24,10 +24,13 @@ import threading
 from django.core.cache import cache
 from django.db import connection
 from django.test import Client, TransactionTestCase, override_settings, tag
+from django.utils import timezone
 
-from platform_admin_app import lockout, recovery
+from platform_admin_app import challenges, lockout, recovery
 from platform_admin_app.cookies import challenge_cookie_name
-from platform_admin_app.models import AdminSession, PlatformStaffAuth
+from platform_admin_app.models import (
+    AdminLoginChallenge, AdminSession, PlatformStaffAuth,
+)
 from platform_admin_app.second_factor import METHOD_RECOVERY, METHOD_TOTP
 from platform_admin_app.tests_auth import PASSWORD, _ADMIN_OVERRIDES, _code, _make_admin
 
@@ -216,3 +219,116 @@ class AdminVerifyConcurrencyTests(TransactionTestCase):
         # Below the threshold, so still unlocked — the count is the assertion.
         self.assertLess(attempts, lockout.threshold())
         self.assertFalse(lockout.is_locked(self.auth))
+
+
+def _successful_login_worker(username, results, key, barrier=None):
+    """One CORRECT-password login, to race challenge minting."""
+    try:
+        client = Client()
+        if barrier is not None:
+            barrier.wait(timeout=10)
+        response = client.post(
+            LOGIN_URL,
+            data={'username': username, 'password': PASSWORD},
+            content_type='application/json',
+        )
+        results[key] = str(response.status_code)
+    except Exception as exc:  # pragma: no cover - defensive
+        results[key] = f'error:{exc!r}'
+    finally:
+        connection.close()
+
+
+@tag('concurrency')
+@override_settings(**_ADMIN_OVERRIDES)
+class AdminLoginChallengeConcurrencyTests(TransactionTestCase):
+    """
+    A fourth race, closed after PR-C: ``create_challenge`` left two live challenges.
+
+    ``challenges.create_challenge`` promised that a fresh password submission
+    invalidates the previous half-finished attempt, but it consumed and inserted in
+    two separate autocommitted statements with no lock. Two simultaneous
+    correct-password logins could interleave ``UPDATE → UPDATE → INSERT → INSERT``
+    and leave the account holding TWO spendable challenges.
+
+    It could never reproduce PR-C's double-session bug — verification serialises on
+    ``PlatformStaffAuth`` and a consumed factor cannot be respent — so this is about
+    the promise being true rather than nearly true. It is now held twice over: a
+    ``User`` row lock serialises the minting, and the partial unique index
+    ``one_live_admin_challenge_per_user`` enforces it in the database.
+    """
+
+    reset_sequences = False
+
+    def setUp(self):
+        if connection.vendor != 'postgresql':
+            self.skipTest('row-level locking requires PostgreSQL')
+        super().setUp()
+        self.user, self.auth, self.secret, self.codes = _make_admin(
+            username='challenge-race-admin',
+        )
+
+    def _reset(self):
+        cache.clear()
+        PlatformStaffAuth.objects.filter(pk=self.auth.pk).update(
+            failed_attempts=0, locked_until=None, last_totp_counter=None,
+        )
+
+    def _live_challenges(self):
+        return AdminLoginChallenge.objects.filter(
+            user=self.user, consumed_at__isnull=True,
+        ).count()
+
+    def test_concurrent_logins_leave_exactly_one_live_challenge(self):
+        for _ in range(6):
+            self._reset()
+            AdminLoginChallenge.objects.filter(user=self.user).delete()
+
+            results = {}
+            _run([
+                (_successful_login_worker, (self.user.username, results, str(i)))
+                for i in range(4)
+            ])
+
+            # Every login must SUCCEED — the point is that they serialise, not that
+            # the loser is turned away. A 500 here would mean the unique index fired
+            # as an IntegrityError instead of the lock doing its job.
+            self.assertEqual(
+                sorted(results.values()), ['200'] * 4,
+                f'a concurrent login did not return 200: {results}',
+            )
+            self.assertEqual(
+                self._live_challenges(), 1,
+                'concurrent logins left more than one spendable challenge',
+            )
+
+    def test_the_surviving_challenge_is_the_one_handed_to_its_caller(self):
+        """
+        Serialising must not orphan the winner: the live row is a real, usable one.
+
+        A lock that produced exactly one row by discarding the token its own caller
+        was handed would satisfy the count above and still be broken — the browser
+        would hold a challenge the server had already consumed.
+        """
+        self._reset()
+        AdminLoginChallenge.objects.filter(user=self.user).delete()
+
+        results = {}
+        _run([
+            (_successful_login_worker, (self.user.username, results, str(i)))
+            for i in range(3)
+        ])
+
+        live = AdminLoginChallenge.objects.filter(
+            user=self.user, consumed_at__isnull=True,
+        )
+        self.assertEqual(live.count(), 1)
+
+        # Every condition `resolve_challenge` checks, so the survivor is spendable
+        # rather than a husk that would fail at verify/.
+        challenge = live.first()
+        self.assertIsNone(challenge.consumed_at)
+        self.assertEqual(challenge.attempts, 0)
+        self.assertLess(challenge.attempts, challenges.max_attempts())
+        self.assertGreater(challenge.expires_at, timezone.now())
+        self.assertFalse(challenge.recovery_only)

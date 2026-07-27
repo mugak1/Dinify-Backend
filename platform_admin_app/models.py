@@ -157,6 +157,20 @@ class AdminLoginChallenge(models.Model):
 
     class Meta:
         db_table = 'admin_login_challenge'
+        constraints = [
+            # "A new challenge invalidates every prior one" as a database fact
+            # rather than a convention `challenges.create_challenge` is trusted to
+            # keep. NOTE the condition is `consumed_at IS NULL` and NOT "unexpired":
+            # a partial index predicate must be immutable, so it cannot reference
+            # `now()`. An expired-but-unconsumed row therefore still holds the slot,
+            # which is exactly why create_challenge's consume step stays
+            # load-bearing — it is what frees it.
+            models.UniqueConstraint(
+                fields=['user'],
+                condition=models.Q(consumed_at__isnull=True),
+                name='one_live_admin_challenge_per_user',
+            ),
+        ]
 
     def __str__(self):
         return f'AdminLoginChallenge<{self.user_id}>'

@@ -34,8 +34,8 @@ class RestaurantReportsEndpoint(APIView):
     def get(self, request, report_name):
         # Tenant isolation: every restaurant report is single-target, scoped by
         # the client-supplied ?restaurant=. Gate that one restaurant on the
-        # `reports` module before dispatching — a dinify admin reads any; a role
-        # without `reports` (or a cross-tenant / missing id) is denied. 404, not
+        # `reports` module before dispatching — a role without `reports` (or a
+        # cross-tenant / missing id) is denied. 404, not
         # 403, so we don't confirm another tenant's restaurant exists, and the
         # guard runs before the invalid-name 400 so report validity isn't leaked.
         if not can_user_access_module(

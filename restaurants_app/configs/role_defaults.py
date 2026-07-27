@@ -5,8 +5,8 @@ These are the fallback the permission resolver
 (users_app.controllers.permissions_check.resolve_module_permissions) uses when
 no RestaurantRolePermission override row exists for a (restaurant, role). Only
 GRID modules appear here — the off-grid owner-only keys (billing, team) are
-granted exclusively by the resolver's owner/admin short-circuit, never from a
-role's default/override grid.
+granted exclusively by the resolver's owner short-circuit, never from a role's
+default/override grid.
 """
 from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER,

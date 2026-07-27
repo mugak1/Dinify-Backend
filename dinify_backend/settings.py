@@ -257,7 +257,12 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ),
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # NOT the stock JWTAuthentication: a customer access token minted before an
+        # account was promoted to platform staff stayed valid until it expired,
+        # because every account_type refusal bound at MINT time (login, refresh).
+        # This subclass refuses on every PRESENTED token. See users_app.authentication
+        # for why USER_AUTHENTICATION_RULE cannot do this job in SimpleJWT 5.5.1.
+        'users_app.authentication.CustomerJWTAuthentication',
         # Binds the administrator named by a delegated session that
         # DelegatedAccessMiddleware has ALREADY validated and allow-listed. It never
         # reads a header itself, so on any request the middleware did not clear it

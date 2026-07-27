@@ -28,7 +28,7 @@ class ConMenuItemSortMode:
         Return the restaurant's current sort mode.
 
         restaurant_id is required and the user must have owner/manager
-        permission on that restaurant (or be a Dinify admin).
+        permission on that restaurant.
         """
         if not restaurant_id:
             return {
@@ -59,8 +59,8 @@ class ConMenuItemSortMode:
         Persist a new sort mode on the restaurant.
 
         restaurant_id is required, the user must have owner/manager permission
-        on that restaurant (or be a Dinify admin), and `mode` must be one of
-        the values declared on the model field.
+        on that restaurant, and `mode` must be one of the values declared on the
+        model field.
         """
         if not restaurant_id:
             return {

@@ -4,8 +4,9 @@ Restaurant-facing support issue endpoints (Secretary pattern).
 Support is an UNGATED module, so authorization is ANY-active-employee (not
 owner/manager-only) and bound SERVER-SIDE via `get_employed_restaurant_ids`
 — a client-sent restaurant/issue id can only narrow within the caller's own
-restaurants, never widen. A dinify admin is unrestricted; issue CREATE stays
-admin-excluded (an admin doesn't raise issues on a restaurant's behalf).
+restaurants, never widen. There is no platform-administrator branch: the
+`admin/issues/` triage endpoint was retired with the ambient-authority mechanism
+that gated it, and Phase 1 rebuilds triage on the admin plane.
 """
 from django.db import transaction
 from rest_framework.views import APIView

@@ -1,11 +1,20 @@
 """
 The admin-plane audit recording service — synchronous, transactional, loud.
 
-NO AUDIT, NO ACTION. ``record()`` runs in-process on the calling thread, inside
-whatever transaction the caller has open, and does NOT catch its own exceptions.
-If the audit write fails, the exception propagates: the caller's transaction rolls
-back and the request fails. That is the intended behaviour — an administrative
-action that cannot be attributed must not be allowed to stand.
+``record()`` runs in-process on the calling thread, inside whatever transaction the
+caller has open, and does NOT catch its own exceptions. If the audit write fails, the
+exception propagates: the caller's transaction rolls back and the request fails.
+
+THE CONTRACT, STATED EXACTLY. Privileged successful state changes and credential
+issuance are audit-atomic — the action rolls back if its audit write fails. Denials,
+failure accounting and safety-reducing revocations (logout, session revocation) may
+be audited best-effort or in a separate transaction, deliberately: losing a
+revocation because its audit failed would be worse than an unaudited revocation.
+
+That asymmetry is the whole design, not an unfinished edge. An administrative action
+that cannot be attributed must not be allowed to stand — but a denial that is not
+recorded has still denied, and a revocation that is not recorded has still revoked.
+Only the first category has anything to gain from being undone.
 
 This is the deliberate inverse of the legacy ``misc_app.controllers.save_action_log``
 path, which spawns a daemon thread, wraps the write in ``except Exception`` →

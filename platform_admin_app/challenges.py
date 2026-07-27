@@ -11,6 +11,8 @@ import secrets
 from datetime import timedelta
 
 from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 
@@ -38,6 +40,7 @@ def max_attempts():
     return getattr(settings, 'ADMIN_CHALLENGE_MAX_ATTEMPTS', _MAX_ATTEMPTS_DEFAULT)
 
 
+@transaction.atomic
 def create_challenge(user, *, recovery_only=False):
     """
     Mint a challenge for ``user``; returns ``(raw_token, challenge)``.
@@ -49,8 +52,32 @@ def create_challenge(user, *, recovery_only=False):
     ``recovery_only=True`` marks it as the break-glass path out of a lockout: only a
     one-shot recovery code may spend it. ``login/`` sets this when the account is
     locked but the password was correct.
+
+    CONCURRENCY. The consume and the insert used to be two autocommitted statements
+    with no lock, so two simultaneous correct-password logins could interleave
+    ``UPDATE → UPDATE → INSERT → INSERT`` and leave the user holding TWO live
+    challenges — quietly breaking the promise the paragraph above makes. They are
+    now one transaction serialised on the ``User`` row, and a partial unique index
+    (``one_live_admin_challenge_per_user``, migration ``0008``) enforces the same
+    invariant in the database, where it cannot be forgotten by a future caller.
+
+    LOCK ORDER: ``User`` → ``AdminLoginChallenge`` → ``PlatformStaffAuth``. Locking
+    ``PlatformStaffAuth`` here instead would INVERT the order ``verify/`` takes:
+    this function goes on to write-lock challenge rows through its ``UPDATE``, so
+    holding the auth row first would give ``PlatformStaffAuth → AdminLoginChallenge``
+    against verification's ``AdminLoginChallenge → PlatformStaffAuth`` — a real
+    deadlock cycle. ``User`` is safe to take first precisely because nothing else
+    holds it: ``resolve_challenge(for_update=True)`` passes ``of=('self',)`` so its
+    ``select_related`` does not lock the joined ``User`` row as a side effect.
     """
+    # Serialise concurrent minting for this user. `.first()` rather than `.get()`:
+    # the row is guaranteed to exist (the caller resolved `user` from it), and this
+    # function's job is to lock, not to re-validate the account.
+    get_user_model().objects.select_for_update().filter(pk=user.pk).first()
+
     now = timezone.now()
+    # Re-read AFTER the lock: a concurrent login may have inserted and committed
+    # while this transaction waited, and that row is the one that must be consumed.
     AdminLoginChallenge.objects.filter(
         user=user, consumed_at__isnull=True,
     ).update(consumed_at=now)

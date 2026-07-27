@@ -74,7 +74,7 @@ def _stock_url(pk):
 
 class KitchenTestBase(TestCase):
     def setUp(self):
-        seed_user()                      # dinify_admin owner used by seed_restaurant
+        seed_user()                      # the owner seed_restaurant attaches below
         seed_restaurant(seed_owner=True)
         seed_menu_section()
         seed_menu_items()
@@ -105,7 +105,7 @@ class KitchenTestBase(TestCase):
             email=f'{phone}@test.com',
             phone_number=phone, username=phone,
             country='Uganda', password='password',
-            roles=[],  # NOT a dinify admin — exercises the restaurant-role path
+            roles=[],  # authority comes from RestaurantEmployee, never from roles
         )
         if restaurant_roles is not None:
             RestaurantEmployee.objects.create(

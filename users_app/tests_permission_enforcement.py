@@ -9,8 +9,8 @@ endpoints now ROUTE their gates through it:
   * the RestaurantSetupEndpoint catch-all (write gate + list scoping + detail read)
   * the dedicated endpoints (menu vs tables module split) + table-transfer
   * reports / reviews / support widening
-  * a dinify admin retains the manage-level elevation actions (kitchen
-    goodwill-cancel, review resolution)
+  * the manage-level elevation actions (kitchen goodwill-cancel, review
+    resolution) stay owner/manager-only and are NOT module-granular
 
 Behaviour is neutral for the seeded owner/manager defaults (both hold every grid
 module); the denials below are for non-owner/manager roles (kitchen, staff) and
