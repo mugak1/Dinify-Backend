@@ -56,6 +56,40 @@ with PostgreSQL on AWS RDS.
   true DRAFT that neither occupies its table nor reaches the kitchen board — the
   table is claimed only at `submit` (BUG-P2-2), whose transition is transactional
   and race-safe. Preserve these invariants in any future order-create work
+- Order admission vs lifecycle transitions — ATOMIC (Closure PR 2): both stages of
+  order creation now consult ONE admission primitive,
+  `orders_app/controllers/services/order_admission.py` (THE RULE), synchronised with
+  `transition_restaurant` by a **PostgreSQL advisory lock** whose primitive lives in
+  `restaurants_app/controllers/admission_lock.py` (the thing locked is a RESTAURANT,
+  so the lock sits with that domain and the lifecycle service imports its own app —
+  `restaurants_app` must NOT import `orders_app`). Two defects closed:
+  (1) SUBMIT ignored lifecycle state entirely — `initiate` while `live`, suspend,
+  then `submit` put the order on the kitchen board after trading was supposed to
+  have stopped; (2) admission read `Restaurant.status` in autocommit while the
+  transaction that WRITES the order locked only the `Table`, so a transition
+  committing in between was invisible and `is_test` was derived from a state that
+  no longer existed. The module exposes `evaluate` (THE RULE — pure, no DB: diner →
+  `allows_diner_ordering`, staff → `allows_order_creation`), `admit` (the
+  AUTHORITATIVE check — takes the shared lock, re-reads status under it, then
+  calls `evaluate`; raises if not inside a transaction, since an `_xact_` lock in
+  autocommit protects nothing), and `lock_admission_shared` /
+  `lock_admission_exclusive`. `con_orders.initiate_order` calls `evaluate` as a
+  PREFLIGHT only (fast feedback on a possibly-stale instance) and `_create_order`
+  calls `admit` as the load-bearing gate — the same preflight/authoritative split
+  `validate_order_selections` already uses, and both call the SAME function so the
+  two can never disagree about the rule. `_create_order` is therefore now
+  SELF-GUARDING for lifecycle as it already was for menu publication.
+  **`Order.is_test` is derived from `verdict.status`** — the value read under the
+  lock — never from the caller's instance. `_submit_order` passes the ORDER's
+  `created_by_id`, not the submitting user, so a diner's draft stays judged by the
+  diner rule whoever taps submit. `_xact_` (transaction-scoped) is MANDATORY given
+  `CONN_MAX_AGE=600`; the helpers no-op off PostgreSQL. Advisory locks were chosen
+  over a `Restaurant` row lock deliberately — Django cannot express `FOR SHARE`, so
+  a row lock would serialise every diner at a restaurant behind every other
+  (~70–90 ms per order) to guard an event that happens once in its lifetime, and it
+  would not span the two WSGI daemon processes the customer and admin planes run in.
+  Proven by `orders_app/tests_order_admission_concurrency.py` (7 of its 10 tests
+  fail on the pre-PR code)
 - Restaurant tag catalog: ✅ Per-restaurant tag catalog (migrations 0044–0045) +
   `restaurant_tags.py` endpoint + `EI_RESTAURANT_TAG`; menu items reference
   catalog tags via `tag_ids`. The endpoint also serves tag reorder
@@ -304,8 +338,18 @@ with PostgreSQL on AWS RDS.
     `PlatformStaffAuth`: it goes on to write-lock challenge rows through its consuming
     `UPDATE`, so holding the auth row first would give
     `PlatformStaffAuth → AdminLoginChallenge`, the exact reverse of verification's
-    order. `User` is safe to take first precisely because
-    `resolve_challenge(for_update=True)` passes `of=('self',)` so nothing else holds it.
+    order. `User` is safe to take first because `resolve_challenge(for_update=True)`
+    passes `of=('self',)`, so the join does not lock `User` as a side effect and the
+    admin-auth transactions therefore acquire it in one consistent position.
+    (CORRECTION, Closure PR 2: this used to read "precisely because nothing else
+    holds it". That is FALSE — `delegated_sessions.exchange_code` calls
+    `select_for_update()` with `select_related('administrator', 'restaurant')` and no
+    `of=`, which on PostgreSQL locks every row in the join, so it holds a `User` row
+    lock AND a `Restaurant` one. The lock ORDER is still sound — `exchange_code`
+    takes all three in a single statement, so it cannot self-deadlock or interleave —
+    but the justification was overstated. Its undeclared `Restaurant` lock is also
+    why the order path uses an advisory lock rather than adding a second row-lock
+    mechanism on the same table.)
     `challenges.consume` is now CONDITIONAL and returns bool (a lost race rolls the
     whole request back); `resolve_challenge(..., for_update=True)` locks with
     `of=('self',)` so the joined `User` row is not locked as a side effect;
@@ -654,7 +698,11 @@ with PostgreSQL on AWS RDS.
 - `api/v2/orders/` → v2 orders (v2_urls.py) — separate file, don't confuse;
   only `initiate` (POST) is live. `add-items` (POST/DELETE) was retired
   (PR #181) and the AllowAny, unscoped `details/` GET was retired (finding C1,
-  PR #182) — both 404 via the hardened dispatch. An `initiate`d order is a true
+  PR #182) — both 404 via the hardened dispatch. Its controller
+  `ConOrder.handle_add_order_items` still EXISTS but has no production caller
+  (only `orders_app/tests.py`); do not re-mount it without rewriting it — it takes
+  no advisory lock, does no lifecycle re-check, and acquires `OrderItem → Order`,
+  the INVERSE of the create path's order, so it is a dormant deadlock cycle. An `initiate`d order is a true
   DRAFT (`order_status='initiated'`) that does NOT occupy its table or reach the
   kitchen board; the table is claimed only at `submit` (PR #210) — that
   transition locks the table row and re-checks draft status + occupancy on the
@@ -823,6 +871,15 @@ the catch-all `<str:config_detail>/` route.
   `SerializerPutRestaurant`. The legacy admin `changeApprovalStatus` PUT is
   RETIRED: a Dinify admin can no longer write `status` through restaurant-setup
   either. The `flat_fee` non-admin strip in `restaurant_setup.py` REMAINS
+- The service takes `lock_admission_exclusive(restaurant.pk)` as the FIRST statement
+  in its transaction — before the `Restaurant` row lock — so a transition excludes
+  every in-flight order admission (Closure PR 2). **LOCK ORDER, and the advisory lock
+  is a single new TOP level in all three:**
+  `advisory(restaurant) SHARED → Table → Counter → Order → OrderItem` (order create),
+  `advisory(restaurant) SHARED → Table → Order` (order submit),
+  `advisory(restaurant) EXCLUSIVE → Restaurant → AdminAuditLog` (transition).
+  Take it FIRST or not at all — a transaction that takes a row lock and then reaches
+  for the advisory lock reintroduces the cycle this ordering prevents
 - The service enforces the matrix against the row read under `select_for_update`
   (so concurrent transitions serialize), requires a reason (≥10 chars, mirroring
   `platform_admin_app.delegation.MIN_REASON_LENGTH`), and writes an
@@ -859,7 +916,28 @@ the catch-all `<str:config_detail>/` route.
   place is temporarily unavailable) and a flat 404 for `offboarded`; support is
   reachable in every state; a delegated admin session is CAPPED to `view` scope at
   an `offboarded` restaurant (`DelegationContext.scope` applies the ceiling;
-  `granted_scope` exposes the as-minted value)
+  `granted_scope` exposes the as-minted value).
+  KNOWN GAP (found in Closure PR 2 recon, not fixed there): a DELEGATED
+  administrator still reads the kitchen board of a **suspended** restaurant —
+  `permissions_check.py` short-circuits on delegation BEFORE the lifecycle-filtered
+  resolver, and `suspended`'s delegated ceiling is `None`. Staff are blocked there
+  but a delegation is not
+- IN-FLIGHT ORDERS ARE **FROZEN, NOT DRAINED** (Closure PR 2, pinned in
+  `lifecycle_policy.py` beside the matrix and tested). An order already accepted
+  (`pending`, `preparing`) when the restaurant is suspended keeps its row untouched,
+  but staff cannot SEE, ADVANCE or CANCEL it — `CAP_STAFF_PORTAL` and `CAP_KITCHEN`
+  are both False, and kitchen authorisation resolves through the portal-access state
+  set. Fulfilment resumes if the restaurant returns to `live`. `offboarded` behaves
+  the same and additionally removes the restaurant from the diner surface. This is
+  the deliberate reading of the matrix, not an enforcement accident — letting staff
+  work the kitchen at `suspended` would mean suspension no longer suspends. TWO
+  CONSEQUENCES, both real and both left for Phase 1: **the table is never freed**
+  (cancel is what releases it, and cancel is 403, so a restaurant suspended
+  mid-service comes back with those tables still occupied — a narrow cancel-only
+  carve-out was considered and declined); and **diner-facing reads are inconsistent
+  at `suspended`** — the menu answers 503 but `order-details`/`payment-details` still
+  answer 200 and a review can still be submitted, none of those paths consulting
+  lifecycle state. Both predate the admission work
 - TWO PHASE-1 SEAMS, both named single-call functions with real call sites —
   `check_go_live_readiness` and `has_outstanding_receivables`. Do NOT inline either at
   a call site. **`check_go_live_readiness` FAILS CLOSED (PR-D)**: it returns

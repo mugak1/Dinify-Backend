@@ -71,7 +71,9 @@ def _submit_order(order: Order, user: Union[User, None]) -> dict:
 
     This is the transition that turns a draft into a real order and CLAIMS the
     table, so it is transactional and race-safe:
-      * lock the order's table row FIRST (matching _create_order's table->order
+      * ADMIT the submission first (shared advisory lock on the restaurant, then
+        lifecycle state re-read under it),
+      * lock the order's table row (matching _create_order's advisory->table->order
         lock order),
       * RE-READ the order under that lock — the instance handed in was fetched
         outside the transaction and may be stale,
@@ -79,11 +81,22 @@ def _submit_order(order: Order, user: Union[User, None]) -> dict:
         FRESH row before flipping.
     Two diners submitting for the same table therefore serialize on the table
     lock: the first claims it, the second gets a clean 400.
+
+    THE ADMISSION IS NOT A DUPLICATE OF THE ONE AT CREATION. Creation and
+    submission are separate moments and the restaurant's lifecycle state can
+    change between them — that gap is precisely how an order used to reach the
+    kitchen after trading had stopped: initiated while `live`, suspended by an
+    administrator, then submitted with nothing on this path ever asking. Both
+    stages now ask the same question of the same rule, each at its own moment.
     """
     # Local imports keep this off the module import graph and dodge the
     # con_orders <-> create_order import cycle.
     from restaurants_app.models import Table
     from orders_app.controllers.con_orders import ConOrder
+    from orders_app.controllers.services.order_admission import (
+        STAGE_SUBMIT,
+        admit,
+    )
 
     # an unauthenticated diner arrives as AnonymousUser (not None); never
     # assign it to a User FK — normalise to None so attribution stays null.
@@ -91,6 +104,26 @@ def _submit_order(order: Order, user: Union[User, None]) -> dict:
         user = None
 
     with transaction.atomic():
+        # Admission FIRST, before any row lock — the advisory lock is the top of
+        # the documented ordering, and `admit` re-reads the lifecycle state under
+        # it. `created_by` is the ORDER's creator, not the submitting user: a
+        # draft placed by an anonymous diner stays a diner order through submit,
+        # so it is judged by the diner rule (the launch boundary) rather than the
+        # laxer staff one. Passing `user` here would let a diner draft be
+        # submitted at a restaurant that has not gone live, simply because a staff
+        # member happened to be the one who tapped submit.
+        verdict = admit(
+            restaurant_id=order.restaurant_id,
+            created_by=order.created_by_id,
+            stage=STAGE_SUBMIT,
+        )
+        if not verdict.allowed:
+            logger.info(
+                "Order submission refused (order_id=%s, code=%s)",
+                order.pk, verdict.code,
+            )
+            return {'status': 400, 'message': verdict.message}
+
         if order.table_id is not None:
             # Table-first lock, then re-read the order under the same lock.
             locked_table = (

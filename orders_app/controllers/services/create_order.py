@@ -7,10 +7,17 @@ in order:
 
   1. idempotency (client_order_id) — return the existing order without gating
      or creating,
-  2. table-gating (only for genuinely new submissions),
-  3. daily order-number allocation (race-safe counter),
-  4. order-row creation with the kitchen fulfilment axis initialised,
-  5. order-item creation + amount roll-up.
+  2. ADMISSION — the shared advisory lock on the restaurant, then the lifecycle
+     decision taken from status re-read under it (and the `is_test`
+     classification that follows from the same value),
+  3. table-gating (only for genuinely new submissions),
+  4. daily order-number allocation (race-safe counter),
+  5. order-row creation with the kitchen fulfilment axis initialised,
+  6. order-item creation + amount roll-up.
+
+Steps 2 onward are the LOAD-BEARING checks. Their counterparts in
+``ConOrder.initiate_order`` are preflights that ran in autocommit and may be stale
+by the time a request reaches here, so nothing decided up there is trusted.
 
 This replaces the race-prone ``create_order_number`` pre_save signal.
 """
@@ -20,6 +27,10 @@ from django.db import transaction, IntegrityError
 from django.utils import timezone
 
 from orders_app.models import Order, RestaurantDailyOrderCounter
+from orders_app.controllers.services.order_admission import (
+    STAGE_CREATE,
+    admit,
+)
 from restaurants_app.controllers.lifecycle_policy import orders_are_commercial
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated,
@@ -117,6 +128,34 @@ def _create_order(*, restaurant, table, items,
                 ).first()
                 if existing is not None:
                     return {'status': 200, 'order': existing, 'idempotent': True}
+
+            # 1a. AUTHORITATIVE ADMISSION. Take the shared advisory lock on the
+            #     restaurant and decide from status re-read UNDER it — the endpoint
+            #     preflight ran in autocommit and can be stale by now, exactly like
+            #     the menu-publication preflight at step 2b.
+            #
+            #     FIRST among the locks, before the Table row lock below: the
+            #     advisory lock is the single top level of the documented ordering
+            #     (advisory -> Table -> Counter -> Order -> OrderItem), and taking
+            #     it after a row lock would reintroduce the cycle that ordering
+            #     exists to prevent.
+            #
+            #     AFTER step 1, so an idempotent replay returns the original order
+            #     without taking the lock or being re-admitted — the same contract
+            #     publication follows: a replay is never re-validated, so a
+            #     lifecycle change cannot retroactively refuse an order that was
+            #     already created and acknowledged.
+            verdict = admit(
+                restaurant_id=restaurant.pk,
+                created_by=created_by,
+                stage=STAGE_CREATE,
+            )
+            if not verdict.allowed:
+                logger.info(
+                    "Order admission refused (restaurant_id=%s, code=%s)",
+                    restaurant.pk, verdict.code,
+                )
+                return {'status': 400, 'message': verdict.message}
 
             # 1b. Lock the table row so concurrent same-table submissions serialize.
             #     Mirrors allocate_daily_order_number's select_for_update in this file:
@@ -227,11 +266,18 @@ def _create_order(*, restaurant, table, items,
 
                         # The launch boundary, decided from the restaurant's lifecycle
                         # state and nothing the caller sent. An order created before
-                        # go-live is a rehearsal; one created after is commerce. Read
-                        # here — inside the transaction, from the same `restaurant`
-                        # the rest of this function is working against — so it cannot
-                        # drift from the gate that let the order through.
-                        is_test=not orders_are_commercial(restaurant.status),
+                        # go-live is a rehearsal; one created after is commerce.
+                        #
+                        # Derived from `verdict.status` — the value the ADMISSION read
+                        # under the advisory lock at step 1a — and not from
+                        # `restaurant.status`, which came from an instance loaded in
+                        # autocommit before this transaction opened. Those two agreed
+                        # right up until they didn't: a go-live committing while this
+                        # request waited on the table lock left the instance saying
+                        # `onboarding`, and a real commercial order was written
+                        # `is_test=True` and vanished from every revenue report. The
+                        # lock is what makes this value still true at the INSERT.
+                        is_test=not orders_are_commercial(verdict.status),
                     )
             except IntegrityError:
                 # concurrent double-tap: a racing request with the same

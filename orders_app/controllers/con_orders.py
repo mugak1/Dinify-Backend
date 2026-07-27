@@ -22,9 +22,9 @@ from orders_app.controllers.services.create_order import _create_order
 from restaurants_app.controllers.menu_publication import (
     NOT_ON_MENU_MESSAGE, validate_order_selections,
 )
-from restaurants_app.controllers.lifecycle_policy import (
-    allows_diner_ordering,
-    allows_order_creation,
+from orders_app.controllers.services.order_admission import (
+    STAGE_CREATE,
+    evaluate,
 )
 
 logger = logging.getLogger(__name__)
@@ -722,16 +722,8 @@ class ConOrder:
         order_source: str = 'diner_self_service',
         client_order_id: Optional[str] = None
     ):
-        # Lifecycle gate: a restaurant only takes orders in a state that permits it
-        # (onboarding + live). `suspended` and `offboarded` are refused here — the
-        # policy owns which, so this never compares status to a literal.
         try:
             restaurant = Restaurant.objects.get(pk=restaurant_id)
-            if not allows_order_creation(restaurant.status):
-                return {
-                    'status': 400,
-                    'message': MESSAGES.get('BLOCKED_RESTAURANT')
-                }
         except ObjectDoesNotExist:
             return {
                 'status': 400,
@@ -744,15 +736,27 @@ class ConOrder:
                 'message': MESSAGES.get('GENERAL_ERROR')
             }
 
-        # THE LAUNCH BOUNDARY. A restaurant that has not gone live does not trade with
-        # the public, however many QR codes are already printed. Diner-only, like the
-        # three gates below it: the owner must still be able to place the one
-        # end-to-end rehearsal order the go-live checklist requires, and that order is
-        # marked `is_test` at creation so it never becomes commercial reality.
-        if created_by is None and not allows_diner_ordering(restaurant.status):
+        # Lifecycle admission (PREFLIGHT, FAST FEEDBACK): may this caller order at a
+        # restaurant in this state at all? One rule — `order_admission.evaluate` —
+        # covering both what used to be two separate gates here: whether the
+        # restaurant takes orders at all (`suspended`/`offboarded` do not) and THE
+        # LAUNCH BOUNDARY, which refuses the anonymous public at a restaurant that
+        # has not gone live however many QR codes are already printed. The owner can
+        # still place the one end-to-end rehearsal order the go-live checklist
+        # requires, and that order is marked `is_test` at creation so it never
+        # becomes commercial reality.
+        #
+        # This is preflight ONLY. It reads the instance loaded above, in autocommit,
+        # so it can go stale while the request waits on a lock — the LOAD-BEARING
+        # admission runs inside `_create_order`'s transaction, under the shared
+        # advisory lock, against status re-read there. Same split as the menu
+        # publication preflight below. Both call the SAME function, so the fast
+        # answer and the authoritative one can never disagree about the rule.
+        preflight_admission = evaluate(restaurant.status, created_by, STAGE_CREATE)
+        if not preflight_admission.allowed:
             return {
                 'status': 400,
-                'message': MESSAGES.get('NOT_OPEN_YET')
+                'message': preflight_admission.message
             }
 
         # availability: a diner cannot place an order while the restaurant has
