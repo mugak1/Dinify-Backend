@@ -66,9 +66,24 @@ def create_challenge(user, *, recovery_only=False):
     this function goes on to write-lock challenge rows through its ``UPDATE``, so
     holding the auth row first would give ``PlatformStaffAuth → AdminLoginChallenge``
     against verification's ``AdminLoginChallenge → PlatformStaffAuth`` — a real
-    deadlock cycle. ``User`` is safe to take first precisely because nothing else
-    holds it: ``resolve_challenge(for_update=True)`` passes ``of=('self',)`` so its
+    deadlock cycle. ``User`` is safe to take first because the admin-auth
+    transactions all acquire it in ONE consistent position:
+    ``resolve_challenge(for_update=True)`` passes ``of=('self',)``, so its
     ``select_related`` does not lock the joined ``User`` row as a side effect.
+
+    This used to read "precisely because nothing else holds it", which was FALSE and
+    is worth recording rather than quietly deleting. ``delegated_sessions.exchange_code``
+    held a ``User`` row lock — and a ``Restaurant`` one — because it combined
+    ``select_for_update()`` with a multi-table ``select_related()`` and no ``of=``,
+    which on PostgreSQL locks every row in the join. Its lock ORDER was never wrong
+    (it takes all three rows in a single statement, so it can neither self-deadlock
+    nor interleave), but the breadth was, and it closed a cycle against the lifecycle
+    transition service. PR-E scoped that lock too, so this module is once again the
+    only place that takes ``User`` EXCLUSIVELY — note the qualifier: every
+    ``AdminAuditLog`` insert takes ``FOR KEY SHARE`` on its actor's row, so "nothing
+    else locks it" was never going to be true as stated. That is the lesson worth
+    keeping: "nothing else does X" is a claim about the whole codebase, and this one
+    went stale without anyone touching this file.
     """
     # Serialise concurrent minting for this user. `.first()` rather than `.get()`:
     # the row is guaranteed to exist (the caller resolved `user` from it), and this

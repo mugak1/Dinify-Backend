@@ -44,10 +44,20 @@ ordering across the three transactions that take it stays acyclic by constructio
 
 Take it FIRST or not at all. A transaction that takes a row lock and then reaches
 for this one reintroduces the cycle this ordering exists to prevent.
+
+THAT TABLE IS NOW EXHAUSTIVE, which it was not when it was written. Delegation
+redemption used to take an undeclared EXCLUSIVE lock on a ``Restaurant`` row — and on
+a ``User`` row — because ``select_for_update()`` was chained with a multi-table
+``select_related()`` and PostgreSQL locks the whole join when no ``OF`` clause is
+given. It was a fourth transaction the table did not list, and it closed a real cycle
+against the lifecycle transition. PR-E scoped that lock with ``of=('self',)``, so the
+lifecycle service is once again the only transaction that takes a ``Restaurant`` row
+EXCLUSIVELY. Before adding a row lock anywhere, check what your ``select_related`` is
+quietly locking.
 """
 import uuid as uuid_module
 
-from django.db import connection
+from django.db import connection, transaction
 
 
 def advisory_key(restaurant_id) -> int:
@@ -75,6 +85,14 @@ def _lock(restaurant_id, *, exclusive: bool) -> None:
     """
     Take the transaction-scoped advisory lock for ``restaurant_id``.
 
+    MUST be called inside a transaction. A ``pg_advisory_xact_lock`` taken in
+    autocommit is released by the very statement that took it, so the caller holds
+    nothing and is told nothing — the guard lives HERE, in the primitive, rather than
+    only in ``order_admission.admit()``, because a silently ineffective lock is worse
+    than no lock at all: every test would still pass. Asserted BEFORE the vendor check
+    below, deliberately, so the misuse is caught on the SQLite unit run too and not
+    only where the lock is real.
+
     A no-op on any backend that is not PostgreSQL — the unit suite runs on SQLite
     unless the Postgres environment is exported, and there is no advisory-lock
     equivalent there. That is why every concurrency test in this repo skips itself
@@ -82,6 +100,12 @@ def _lock(restaurant_id, *, exclusive: bool) -> None:
     pass by not running. The same idiom guards the Postgres-only audit query in
     ``restaurants_app/migrations/0046_remove_menuitem__legacy_tags.py``.
     """
+    if not transaction.get_connection().in_atomic_block:
+        raise RuntimeError(
+            'admission_lock must be taken inside a transaction — a '
+            'transaction-scoped advisory lock taken in autocommit is released '
+            'immediately and protects nothing.'
+        )
     if connection.vendor != 'postgresql':
         return
     key = advisory_key(restaurant_id)

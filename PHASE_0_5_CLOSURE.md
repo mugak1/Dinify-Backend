@@ -154,9 +154,17 @@ take only the second; reversing it anywhere introduces a deadlock cycle.
 new FIRST level and only that one. It must not take `PlatformStaffAuth` instead —
 it goes on to write-lock challenge rows through its consuming `UPDATE`, so holding
 the auth row first would give `PlatformStaffAuth` → `AdminLoginChallenge`, the exact
-reverse of verification's order. `User` is safe to take first precisely because
-`resolve_challenge(for_update=True)` passes `of=('self',)`, so nothing else holds
-it.)* And the
+reverse of verification's order. `User` is safe to take first because
+`resolve_challenge(for_update=True)` passes `of=('self',)`, so the admin-auth
+transactions acquire it in one consistent position.)* *(Corrected by PR-E: this said
+"precisely because … so nothing else holds it", which was false at the time of
+writing. `delegated_sessions.exchange_code` chained `select_for_update()` with a
+multi-table `select_related()` and no `of=`, so it held a `User` row lock and a
+`Restaurant` one, closing an ABBA cycle with `transition_restaurant`. Its lock ORDER
+was always sound — one statement, so no self-deadlock and no interleaving — but the
+BREADTH was not. PR-E added `of=('self',)` there too; redemption now locks the grant
+row alone, and `platform_admin_app/tests_delegation_lock_scope.py` fails on the
+pre-PR-E code.)* And the
 **failure-audit rule**: ordinary denials audit INSIDE the transaction and commit
 with their own failure accounting, so either a failure is both counted and
 recorded or neither. The ONE path that must roll back — losing the challenge race,
