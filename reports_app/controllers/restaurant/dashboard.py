@@ -4,7 +4,9 @@ import statistics
 
 from misc_app.controllers.clean_dates import clean_dates
 from django.db.models import Count, Sum, Avg, F, Q  # noqa
-from django.db.models.functions import TruncHour, TruncDay, TruncMonth, TruncYear
+from django.db.models.functions import (
+    TruncHour, TruncDay, TruncWeek, TruncMonth, TruncYear,
+)
 from django.utils import timezone
 
 from orders_app.models import Order, OrderItem
@@ -178,15 +180,35 @@ TRUNC_MAP = {
 # both. `reports_app/tests_dashboard_report.py` pins the divergence — if you are
 # here to "tidy up" by unifying these, that test is the reason not to.
 #
-# No 'week' entry: the dashboard ladder does not emit a weekly bucket, and unused
-# vocabulary is surface we would have to keep correct for no caller. (`sales-trends`
-# gained `weekly` in TRENDS-WEEKLY-00 — a different endpoint with a different
-# ladder, deliberately not unified here. This is also NOT
-# `reports_app.controllers.common.bucketing.PERIOD_TRUNC`, which has no 'hour' and
-# carries 'week'/'quarter' that this endpoint has no caller for.)
+# 'week' was added in DASH-WEEK-00 for a real caller: the frontend timeframe ladder
+# jumped 'day' (<=31 days) straight to 'month', rendering a 60-day range as two points
+# instead of about nine. DASH-PERIOD-00 declined it on the grounds that unused
+# vocabulary is surface to keep correct for no caller — that reasoning expired the
+# moment the ladder started emitting it. Because `bucket` fails CLOSED, the ladder
+# change would otherwise have 400'd every 32-to-90-day range.
+#
+# `TruncWeek` is Monday-anchored, so a weekly `at` key is the MONDAY of its week in
+# EAT. The tz comes from the truncation itself: the `trunc_fn(...)` calls below pass
+# no `tzinfo=`, so Django truncates in — and returns a datetime aware in — the active
+# timezone (`TIME_ZONE = 'Africa/Nairobi'`), which is where every `at` key's +03:00
+# offset comes from. (`common/bucketing.py` reaches the same place by passing
+# `tzinfo=LOCAL_TZ` explicitly; different mechanism, same zone.)
+# `sales-trends` (`weekly`, TRENDS-WEEKLY-00) anchors to the same Monday. The two
+# endpoints emit it in different FORMATS — 'YYYY-MM-DD' there, a full ISO datetime
+# with the +03:00 offset here — but agreeing on the anchor is what lets one frontend
+# enumerator serve both, so do not move either boundary independently.
+#
+# This is still NOT a unification with
+# `reports_app.controllers.common.bucketing.PERIOD_TRUNC`, and the overlap is now
+# wide enough to look like an invitation to merge them. It is not: that map has no
+# 'hour', this one has no 'quarter', and each omission is a deliberate "no caller
+# needs it" rather than an oversight. The asymmetry IS the boundary between them.
+# No 'quarter' entry here for exactly the reason 'week' had none until now — the
+# dashboard ladder does not emit one.
 BUCKET_TRUNC = {
     'hour': TruncHour,
     'day': TruncDay,
+    'week': TruncWeek,
     'month': TruncMonth,
     'year': TruncYear,
 }
@@ -578,11 +600,12 @@ def generate_restaurant_dashboard_v2(
         deployed frontend keeps working across the deploy window. It is removed once
         no caller sends it — a follow-up PR gated on the frontend's TIMEFRAME-01B
         shipping, not this one.
-    :param bucket: the honest chart granularity — one of ``hour``, ``day``,
+    :param bucket: the honest chart granularity — one of ``hour``, ``day``, ``week``,
         ``month``, ``year`` (see ``BUCKET_TRUNC``). An unknown value is a 400; absent
         (or empty / whitespace-only) falls back to ``period``. When BOTH are supplied
         ``bucket`` wins rather than erroring — the frontend sends only one, and a
-        defensive precedence rule is cheaper than a failure mode.
+        defensive precedence rule is cheaper than a failure mode. A ``week`` bucket is
+        keyed on the MONDAY of its week in EAT.
 
     Note that ``'day'`` means different things in the two vocabularies — legacy
     hourly vs honest daily — which is why ``bucket`` is a new parameter rather than
