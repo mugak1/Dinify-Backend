@@ -19,7 +19,7 @@ Choosing the base (``resolve_base_ref``) is event-aware:
 
 Branch-protection note: when ``main`` requires PRs (no direct pushes), the
 pull_request comparison is the authoritative gate and the push comparison is
-defense-in-depth for direct pushes and for unprotected ``claude/**`` branches.
+defense-in-depth for direct pushes.
 
 Imported only by that script and the tests.
 """
