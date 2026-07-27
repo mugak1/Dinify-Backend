@@ -82,8 +82,8 @@ run_step "tenant-isolation closure gate" "${PYTHON}" -m django test \
   restaurants_app.tests_menu_relationships_concurrency \
   restaurants_app.tests_write_surface_tenancy \
   platform_admin_app.tests_delegated_session \
-  --settings="${SETTINGS}" --verbosity=2
-run_step "tests"                "${PYTHON}" -m django test --settings="${SETTINGS}" --verbosity=2
+  --settings="${SETTINGS}" --verbosity=2 --timing
+run_step "tests"                "${PYTHON}" -m django test --settings="${SETTINGS}" --verbosity=2 --timing
 
 echo
 echo "=================================================================="

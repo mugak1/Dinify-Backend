@@ -104,7 +104,7 @@ jobs:
             restaurants_app.tests_menu_relationships_concurrency \
             restaurants_app.tests_write_surface_tenancy \
             platform_admin_app.tests_delegated_session \
-            --settings=dinify_backend.test_settings --verbosity=2
+            --settings=dinify_backend.test_settings --verbosity=2 --timing
 
       - name: Run tests
         env:
@@ -115,4 +115,4 @@ jobs:
           DATABASE_HOST: localhost
           DATABASE_PORT: 5432
         run: |
-          python -m django test --settings=dinify_backend.test_settings --verbosity=2
+          python -m django test --settings=dinify_backend.test_settings --verbosity=2 --timing
