@@ -69,6 +69,12 @@ from dinify_backend.settings import *  # noqa: F401,F403,E402
 # fail_silently=True — which send_email no longer uses.)
 EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
 
+# Tests create hundreds of users; Django 5.2's default pbkdf2_sha256 runs
+# 1,000,000 iterations (~258ms per hash), which is a pure tax on the suite
+# with no test value — nothing here asserts on the hash algorithm. MD5 is
+# ~13,000x faster. TEST SETTINGS ONLY: never set this in settings.py.
+PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
+
 # Use whatever DATABASE_* env vars are active.  In CI this is PostgreSQL
 # (set by the workflow); locally it falls back to the SQLite defaults above.
 DATABASES = {
