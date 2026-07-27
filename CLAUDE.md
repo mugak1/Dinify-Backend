@@ -1135,7 +1135,7 @@ the catch-all `<str:config_detail>/` route.
   `misc_app/migrations/0004_drop_service_tickets.py`
 
 ## CI — `.github/workflows/ci.yml`
-- Runs on push to `main`, `develop`, `claude/**` and on PRs to `main`/`develop`
+- Runs on push to `main` and on PRs to `main`
 - Runs on **Python 3.10.12**, pinned in `ci.yml` to match the prod EC2 runtime
   (the UAT venv is `python3.10`) — keep CI and prod on the same interpreter; any
   dependency bump must satisfy `requires-python <= 3.10`. Note: Django 5.2.x is

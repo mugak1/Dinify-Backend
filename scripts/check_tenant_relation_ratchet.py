@@ -17,7 +17,7 @@ BEFORE the push (``github.event.before`` via ``GITHUB_EVENT_BEFORE`` — set in
 ci.yml), NOT the branch tip, which on a push already contains the new commit and
 would hide the addition; locally it falls back to ``main``. Under branch protection
 (PR-only merges to ``main``) the PR comparison is the authoritative gate; the push
-comparison is defense-in-depth for direct pushes / unprotected ``claude/**`` branches.
+comparison is defense-in-depth for direct pushes.
 
 The comparison logic lives in ``dinify_backend/tenancy/git_ratchet.check_ratchet``
 (so it is covered by real git integration tests). It FAILS CLOSED in CI: if this
