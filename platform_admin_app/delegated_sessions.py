@@ -176,6 +176,23 @@ def exchange_code(raw_code, *, ip=None, user_agent='', request=None):
     already set and is refused. The raw session token is returned to the caller
     EXACTLY ONCE — only its hash is stored.
 
+    ``of=('self',)`` KEEPS THE LOCK ON THE GRANT ROW ALONE, and is load-bearing. The
+    ``select_related`` below is a read optimisation — the administrator and the
+    restaurant are read here and again by the caller — but PostgreSQL applies a
+    ``FOR UPDATE`` with no ``OF`` clause to every table in the join, so without it
+    this transaction also took an EXCLUSIVE lock on a ``users`` row and a
+    ``restaurants`` row from which it reads five fields and writes none. That closed a
+    deadlock cycle with ``lifecycle.transition_restaurant``, which holds the
+    ``restaurants`` row and then takes ``FOR KEY SHARE`` on ``users`` through its
+    ``AdminAuditLog.actor`` FK: same administrator, same restaurant, concurrent, and
+    PostgreSQL resolves it by aborting one side. Same idiom, same reason, as
+    ``challenges.resolve_challenge``. Proved by
+    ``platform_admin_app.tests_delegation_lock_scope``.
+
+    Locking those rows protected nothing in any case: ``resolve_session`` re-runs the
+    very same eligibility and availability checks on EVERY delegated request with no
+    lock at all, so the authority test is already unlocked in steady state.
+
     Raises ``DelegatedSessionError`` for a missing, malformed, unknown, expired,
     already-redeemed or revoked code — all with one generic message.
     """
@@ -194,7 +211,7 @@ def exchange_code(raw_code, *, ip=None, user_agent='', request=None):
     with transaction.atomic():
         grant = (
             DelegationGrant.objects
-            .select_for_update()
+            .select_for_update(of=('self',))
             .select_related('administrator', 'restaurant')
             .filter(exchange_code_hash=hash_token(raw_code))
             .first()

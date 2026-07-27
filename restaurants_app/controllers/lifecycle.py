@@ -14,6 +14,21 @@ administrators transitioning the same restaurant serialize rather than racing, a
 a failed audit write unwinds the transition it would have described (the audit
 service raises rather than swallowing — see ``platform_admin_app.audit``).
 
+That ``select_for_update`` is now the only EXCLUSIVE lock taken on a ``Restaurant``
+row anywhere in the codebase, which it was not when this paragraph was written. (The
+qualifier matters: every insert of a row with a ``restaurant`` FK takes ``FOR KEY
+SHARE`` on it, which is ordinary and conflicts with nothing here.)
+``delegated_sessions.exchange_code`` took an exclusive one too — invisibly, by chaining
+``select_for_update()`` with a multi-table ``select_related()`` and no ``of=``, which
+on PostgreSQL locks every row in the join.
+Redemption's lock ORDER was sound (all three rows in a single statement, so it could
+neither self-deadlock nor interleave), but the breadth closed a real cycle: this
+service holds the ``Restaurant`` row and then takes ``FOR KEY SHARE`` on ``users``
+through the ``AdminAuditLog.actor`` FK, while redemption held ``users`` exclusively
+and waited for the ``Restaurant`` row. PR-E scoped that lock with ``of=('self',)``.
+The claim that this transaction is what serialises the row is therefore true today,
+and was not before — check what a ``select_related`` locks before relying on it again.
+
 DENIALS ARE AUDITED TOO. A refused transition writes ``transition_denied`` and
 then raises. An attempt to suspend a tenant that was rejected on a stale from-state
 is exactly the event the log exists to hold; returning a bare 400 with no trace

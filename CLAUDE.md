@@ -341,15 +341,23 @@ with PostgreSQL on AWS RDS.
     order. `User` is safe to take first because `resolve_challenge(for_update=True)`
     passes `of=('self',)`, so the join does not lock `User` as a side effect and the
     admin-auth transactions therefore acquire it in one consistent position.
-    (CORRECTION, Closure PR 2: this used to read "precisely because nothing else
-    holds it". That is FALSE — `delegated_sessions.exchange_code` calls
+    (CORRECTION, Closure PR 2, CLOSED by PR-E: this used to read "precisely because
+    nothing else holds it". That was FALSE — `delegated_sessions.exchange_code` called
     `select_for_update()` with `select_related('administrator', 'restaurant')` and no
-    `of=`, which on PostgreSQL locks every row in the join, so it holds a `User` row
-    lock AND a `Restaurant` one. The lock ORDER is still sound — `exchange_code`
-    takes all three in a single statement, so it cannot self-deadlock or interleave —
-    but the justification was overstated. Its undeclared `Restaurant` lock is also
-    why the order path uses an advisory lock rather than adding a second row-lock
-    mechanism on the same table.)
+    `of=`, which on PostgreSQL locks every row in the join, so it HELD a `User` row
+    lock AND a `Restaurant` one. Its lock ORDER was always sound — `exchange_code`
+    takes its rows in a single statement, so it can neither self-deadlock nor
+    interleave — but the BREADTH was wrong, and it closed a real ABBA cycle against
+    `transition_restaurant`: redemption held `User` and waited for `Restaurant` while
+    the transition held `Restaurant` and waited for `User` (the `FOR KEY SHARE` its
+    `AdminAuditLog.actor` FK insert takes). PostgreSQL aborted one side — a 500, not
+    corruption. **PR-E added `of=('self',)`, so redemption now locks the
+    `DelegationGrant` row and nothing else**, and the only row both transactions still
+    touch is `User`, which both take `FOR KEY SHARE` — compatible, so the cycle cannot
+    re-form. Proved by `platform_admin_app/tests_delegation_lock_scope.py`, whose two
+    tests fail on the pre-PR-E code. The advisory lock on the order path predates this
+    and stands on its own reasoning — shared/exclusive semantics and cross-process
+    reach — not on redemption's since-removed `Restaurant` lock.)
     `challenges.consume` is now CONDITIONAL and returns bool (a lost race rolls the
     whole request back); `resolve_challenge(..., for_update=True)` locks with
     `of=('self',)` so the joined `User` row is not locked as a side effect;
