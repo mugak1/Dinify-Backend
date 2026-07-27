@@ -9,18 +9,24 @@ fail-OPEN ``.get(period, TruncHour)``. Nothing on this path caps the date range
 long window silently returned an enormous hourly payload instead of an error.
 
 These cover the honest ``bucket`` vocabulary that replaces it
-(``hour``/``day``/``month``/``year``, fail-CLOSED) and — just as importantly — pin
-that the legacy ``period`` path is unchanged, since the deployed frontend still
-sends it and this backend auto-deploys on merge, before the frontend's
-TIMEFRAME-01B ships.
+(``hour``/``day``/``week``/``month``/``year``, fail-CLOSED) and — just as
+importantly — pin that the legacy ``period`` path is unchanged, since the deployed
+frontend still sends it and this backend auto-deploys on merge, before the
+frontend's TIMEFRAME-01B ships.
+
+``week`` joined the vocabulary in DASH-WEEK-00, once the frontend ladder started
+emitting it. Its own cases live in ``DashboardV2WeekBucketTests`` below.
 
 Granularity is asserted through the RETURNED SERIES, never by reading ``TRUNC_MAP``
 / ``BUCKET_TRUNC``: a test that asserts a map's contents still passes when the
 wiring is broken.
 
-The shared fixture seeds five paid orders inside 2024 chosen so that every
-granularity collapses to a DIFFERENT bucket count — 5 hourly / 3 daily / 2 monthly
-/ 1 yearly — so a wrong truncation cannot pass by coincidence. ``time_created`` is
+The shared fixture seeds five paid orders inside 2024 chosen so that the granularity
+ladder separates — 5 hourly / 3 daily / 2 monthly / 1 yearly — and a wrong truncation
+cannot pass by coincidence. ``week`` is the ONE value that does not separate by
+count: it also gives 2 buckets on this fixture, so it is asserted by BOUNDARY
+(Mondays 03-04 / 06-10, against monthly's 03-01 / 06-01) rather than by length, and
+its behavioural cases get their own fixture window. ``time_created`` is
 ``auto_now_add``, so it is set via ``.update()`` after create; instants are UTC
 (EAT is UTC+3, so 09:00 UTC == 12:00 EAT on the same calendar day).
 """
@@ -41,6 +47,7 @@ from dinify_backend.configss.string_definitions import (
 from reports_app.controllers.restaurant.dashboard import (
     generate_restaurant_dashboard_v2,
 )
+from reports_app.controllers.common.bucketing import PERIOD_TRUNC
 
 # Buckets are truncated on the LOCAL calendar (settings.TIME_ZONE), so the expected
 # boundaries are EAT instants.
@@ -70,7 +77,12 @@ def eat(year, month, day, hour=0, minute=0):
 
 
 class DashboardV2Base(TestCase):
-    """Paid 2024 orders whose granularity ladder is 5 / 3 / 2 / 1 buckets."""
+    """Paid 2024 orders whose granularity ladder is 5 / 3 / 2 / 1 buckets.
+
+    ``week`` sits outside that ladder — it collapses to 2 buckets here, colliding
+    with monthly, so it is pinned by boundary rather than by count. See the module
+    docstring.
+    """
 
     def setUp(self):
         self.owner = make_user('256700000500')
@@ -128,6 +140,17 @@ class DashboardV2Base(TestCase):
         self.assertEqual(result['status'], 200, result)
         return [row['at'] for row in result['data']['orders']['series']]
 
+    def order_bucket_counts(self, **kwargs):
+        """``(at, count)`` pairs — the probe for WHICH bucket an order landed in.
+
+        ``order_buckets`` alone cannot see an order moving between two buckets that
+        both already exist, which is exactly what the EAT-boundary case turns on.
+        """
+        result = self.dashboard(**kwargs)
+        self.assertEqual(result['status'], 200, result)
+        return [(row['at'], row['count'])
+                for row in result['data']['orders']['series']]
+
     def revenue_buckets(self, **kwargs):
         result = self.dashboard(**kwargs)
         self.assertEqual(result['status'], 200, result)
@@ -153,6 +176,20 @@ class DashboardV2BucketVocabularyTests(DashboardV2Base):
             [eat(2024, 3, 4), eat(2024, 3, 5), eat(2024, 6, 10)],
         )
 
+    def test_week_bucket_collapses_to_monday_boundaries(self):
+        # 2024-03-04 is a Monday and 03-05 the Tuesday of the same week, so the four
+        # March orders share ONE bucket; 2024-06-10 is a Monday of its own.
+        #
+        # Asserted by BOUNDARY, not by count, deliberately: weekly gives 2 buckets on
+        # this fixture and so does monthly, so a length assertion would pass under a
+        # TruncMonth wiring. The Monday keys are what distinguish them.
+        buckets = self.order_buckets(bucket='week')
+        self.assertEqual(
+            [datetime.fromisoformat(b) for b in buckets],
+            [eat(2024, 3, 4), eat(2024, 6, 10)],
+        )
+        self.assertNotEqual(buckets, self.order_buckets(bucket='month'))
+
     def test_month_bucket_collapses_to_month_boundaries(self):
         buckets = self.order_buckets(bucket='month')
         self.assertEqual(
@@ -174,25 +211,45 @@ class DashboardV2BucketVocabularyTests(DashboardV2Base):
             [5, 3, 2, 1],
         )
 
+    def test_the_revenue_series_buckets_weekly_too(self):
+        # 'week' is absent from the length ladder above because its count collides
+        # with monthly's. Asserting the revenue KEYS equal the orders keys carries
+        # the same "one trunc_fn drives both series" guarantee without that
+        # ambiguity — and would fail if only one of the two series were rewired.
+        self.assertEqual(
+            self.revenue_buckets(bucket='week'), self.order_buckets(bucket='week'),
+        )
+        self.assertEqual(
+            [datetime.fromisoformat(b) for b in self.revenue_buckets(bucket='week')],
+            [eat(2024, 3, 4), eat(2024, 6, 10)],
+        )
+
 
 class DashboardV2FailClosedTests(DashboardV2Base):
     """An unrecognised ``bucket`` is an error, never a silent hourly default."""
 
     def test_unknown_bucket_is_400_naming_the_accepted_values(self):
+        # The message is the contract a caller debugs against, and it is DERIVED
+        # from BUCKET_TRUNC — so this is what pins that adding a granularity also
+        # advertises it.
         result = self.dashboard(bucket='nonsense')
         self.assertEqual(result['status'], 400)
-        for accepted in ('hour', 'day', 'month', 'year'):
+        for accepted in ('hour', 'day', 'week', 'month', 'year'):
             self.assertIn(accepted, result['message'])
         self.assertNotIn('data', result)
 
     def test_the_vocabulary_is_not_the_sales_trends_one(self):
-        # 'week' / 'quarter' are PERIOD_TRUNC (sales-trends) entries. The dashboard
-        # ladder emits neither, and unused vocabulary is surface we would have to
-        # keep correct for no caller — so they must 400 here rather than quietly
-        # working. This pins the deliberate NON-unification of the two maps.
-        for absent in ('week', 'quarter'):
-            with self.subTest(bucket=absent):
-                self.assertEqual(self.dashboard(bucket=absent)['status'], 400)
+        # 'week' is now accepted here (DASH-WEEK-00) — but it was added because a
+        # real caller emits it, NOT by unifying this map with PERIOD_TRUNC. The
+        # two vocabularies still differ in both directions, and that asymmetry is
+        # the boundary between them: 'quarter' is a PERIOD_TRUNC entry the
+        # dashboard ladder has no caller for, so it must still 400; 'hour' is a
+        # dashboard entry PERIOD_TRUNC does not carry at all.
+        self.assertEqual(self.dashboard(bucket='quarter')['status'], 400)
+        self.assertEqual(self.dashboard(bucket='hour')['status'], 200)
+        # The one claim no dashboard response can express — the OTHER map's
+        # contents. This is the guard against a future "tidy-up" merging them.
+        self.assertNotIn('hour', PERIOD_TRUNC)
 
     def test_bucket_lookup_is_case_sensitive(self):
         self.assertEqual(self.dashboard(bucket='DAY')['status'], 400)
@@ -319,7 +376,7 @@ class DashboardV2PreviousWindowTests(DashboardV2Base):
     def test_previous_totals_are_identical_across_every_bucket(self):
         results = {
             b: self.dashboard(bucket=b)['data']
-            for b in ('hour', 'day', 'month', 'year')
+            for b in ('hour', 'day', 'week', 'month', 'year')
         }
         baseline = results['hour']['revenue']['previous_totals']
         # The 2023 order makes this a real comparison, not a pair of zeros.
@@ -335,6 +392,104 @@ class DashboardV2PreviousWindowTests(DashboardV2Base):
             with self.subTest(period=period):
                 data = self.dashboard(period=period)['data']
                 self.assertEqual(data['revenue']['previous_totals'], baseline)
+
+
+class DashboardV2WeekBucketTests(DashboardV2Base):
+    """``bucket='week'`` behaviour at the ENDPOINT, not at the helper (DASH-WEEK-00).
+
+    ``dashboard.py`` shares no code with ``common/bucketing.py`` — it rolls its own
+    grouped queries — so ``tests_reports_foundations.test_bucket_by_week`` says
+    nothing about this path. These cases cover it directly.
+
+    ``TruncWeek`` is Monday-anchored, and these buckets truncate on the local
+    calendar, so an ``at`` key is the MONDAY of its week in EAT. ``sales-trends``
+    anchors weeks to the same Monday; only the emitted FORMAT differs
+    ('YYYY-MM-DD' there, a full ISO datetime with +03:00 here).
+
+    Calendar facts these cases rely on: 2024-09-08 is a Sunday, sitting in the week
+    of Monday 2024-09-02; 2024-09-09 is a Monday; 2024-09-14 is the Saturday of the
+    09-09 week.
+
+    The window is September so the inherited base fixture (2024-03, 2024-06, 2023-06)
+    falls entirely outside it. ``WEEK_TO`` is padded past the last seeded order on
+    purpose: this controller date-filters with a raw ``time_created__lte=<date>``,
+    which Django coerces to MIDNIGHT in the active timezone, so a window ending on
+    2024-09-14 would silently drop that day's 12:00-EAT order.
+    """
+
+    WEEK_FROM = '2024-09-01'
+    WEEK_TO = '2024-09-30'
+
+    def setUp(self):
+        super().setUp()
+        self.make_order(when=utc(2024, 9, 8, 9))    # Sun 12:00 EAT -> week 09-02
+        self.make_order(when=utc(2024, 9, 9, 9))    # Mon 12:00 EAT -> week 09-09
+        self.make_order(when=utc(2024, 9, 14, 9))   # Sat 12:00 EAT -> week 09-09
+        # 2024-09-08 23:30 UTC == 2024-09-09 02:30 EAT: Sunday in UTC, Monday in
+        # EAT. Bucketed in UTC it would join the 09-02 week; in EAT it must not.
+        self.make_order(when=utc(2024, 9, 8, 23, 30))
+
+    def dashboard(self, **kwargs):
+        # Override the January-December default so a case that forgets its dates
+        # cannot silently mix these orders with the inherited base fixture.
+        kwargs.setdefault('date_from', self.WEEK_FROM)
+        kwargs.setdefault('date_to', self.WEEK_TO)
+        return super().dashboard(**kwargs)
+
+    def test_a_sunday_and_the_following_monday_are_different_buckets(self):
+        buckets = [datetime.fromisoformat(b)
+                   for b in self.order_buckets(bucket='week')]
+        self.assertEqual(buckets, [eat(2024, 9, 2), eat(2024, 9, 9)])
+
+    def test_a_monday_and_the_saturday_of_its_week_share_one_bucket(self):
+        # Both fall in the 09-09 week; the 02:30-EAT order joins them, so that
+        # bucket holds three of the four September orders and the Sunday one is
+        # alone in its own.
+        self.assertEqual(
+            self.order_bucket_counts(bucket='week'),
+            [(eat(2024, 9, 2).isoformat(), 1),
+             (eat(2024, 9, 9).isoformat(), 3)],
+        )
+
+    def test_the_week_boundary_is_eat_not_utc(self):
+        # The 2024-09-08 23:30 UTC order is 02:30 EAT on Monday 09-09 and must land
+        # in the LATER week. No clock is mocked: this path reads no clock, so the
+        # late-UTC instant IS the whole mechanism (the house pattern in
+        # tests_timezone_clocks.py).
+        #
+        # Counts are what carry this. Both bucket KEYS exist either way — under a
+        # UTC truncation the split would be (2, 2) instead of (1, 3), and the
+        # boundary offsets would read +00:00 rather than +03:00.
+        counts = dict(self.order_bucket_counts(bucket='week'))
+        self.assertEqual(counts[eat(2024, 9, 9).isoformat()], 3)
+        self.assertEqual(counts[eat(2024, 9, 2).isoformat()], 1)
+        for at in counts:
+            self.assertTrue(at.endswith('+03:00'), at)
+
+    def test_weekly_is_coarser_than_daily_over_the_same_window(self):
+        # Four orders on three distinct EAT days collapse into two weeks — proof
+        # the truncation changed rather than the window.
+        self.assertEqual(
+            [datetime.fromisoformat(b)
+             for b in self.order_buckets(bucket='day')],
+            [eat(2024, 9, 8), eat(2024, 9, 9), eat(2024, 9, 14)],
+        )
+        self.assertEqual(len(self.order_buckets(bucket='week')), 2)
+
+    def test_the_endpoint_serves_a_week_bucket(self):
+        token = str(RefreshToken.for_user(self.owner).access_token)
+        resp = self.client.get(
+            f'/api/v1/reports/restaurant/dashboard-v2/'
+            f'?restaurant={self.restaurant.id}'
+            f'&from={self.WEEK_FROM}&to={self.WEEK_TO}&bucket=week',
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        series = resp.json()['data']['orders']['series']
+        # The exact strings the frontend enumerator will parse.
+        self.assertEqual([row['at'] for row in series],
+                         ['2024-09-02T00:00:00+03:00',
+                          '2024-09-09T00:00:00+03:00'])
 
 
 class DashboardV2EndpointTests(DashboardV2Base):

@@ -129,14 +129,14 @@ one-click **"This year"** preset.
 | Dim | FE | BE | |
 |---|---|---|---|
 | Slug | `…/dashboard-v2/` | `'dashboard-v2'` (restaurant_reports.py:109) | ✓ |
-| Params | today: `restaurant, from, to, period∈{day,week,month,ytd}`; after TIMEFRAME-01B: `restaurant, from, to, bucket∈{hour,day,month,year}` | reads `restaurant, from(def today), to(def today), period(def 'day')`, `bucket` (**no default**) | ✓ both accepted; `bucket` wins when both sent |
+| Params | today: `restaurant, from, to, period∈{day,week,month,ytd}`; after TIMEFRAME-01B: `restaurant, from, to, bucket∈{hour,day,week,month,year}` | reads `restaurant, from(def today), to(def today), period(def 'day')`, `bucket` (**no default**) | ✓ both accepted; `bucket` wins when both sent |
 | Envelope | `res.data` | `{status, data:{…}}` on 200 — note **no `message` key**, unlike the eight reports above; `{status, message}` on 400 | ⚠ asymmetric, pre-existing, deliberately unchanged |
-| Fields | `revenue, payment_methods, orders, popular_items, tables, kds` | unchanged by DASH-PERIOD-00 | ✓ |
-| Enums | granularity vocabulary (below) | `hour, day, month, year` | ✓ |
+| Fields | `revenue, payment_methods, orders, popular_items, tables, kds` | unchanged by DASH-PERIOD-00 / DASH-WEEK-00 | ✓ |
+| Enums | granularity vocabulary (below) | `hour, day, week, month, year` | ✓ |
 | Caps | none | **none** — `clean_dates` only parses/orders the dates | ✗ see the note |
 
 > **`bucket` (DASH-PERIOD-00) — the honest granularity vocabulary.** The backend
-> accepts `bucket ∈ {hour, day, month, year}` (→ `TruncHour`/`Day`/`Month`/`Year`),
+> accepts `bucket ∈ {hour, day, week, month, year}` (→ `TruncHour`/`Day`/`Week`/`Month`/`Year`),
 > resolved **fail-CLOSED**: an unrecognised value is a **400** whose message names the
 > accepted values, never a silent default. Absent — omitted, empty, or
 > whitespace-only — falls back to the legacy `period`, so a stray `&bucket=` is not an
@@ -157,16 +157,55 @@ one-click **"This year"** preset.
 > No alias table can express both, so the two maps (`TRUNC_MAP` / `BUCKET_TRUNC` in
 > `controllers/restaurant/dashboard.py`) are deliberately **not** unified;
 > `reports_app/tests_dashboard_report.py` pins the divergence against a future tidy-up.
-> There is deliberately **no `week`** entry — the dashboard ladder does not emit a
-> weekly bucket. This is also *not* `common/bucketing.py::PERIOD_TRUNC`, which has no
-> `hour` and carries `week`/`quarter` this endpoint has no caller for; `sales-trends`'
-> `weekly` (TRENDS-WEEKLY-00) is a different endpoint with a different ladder.
+> There is deliberately **no `quarter`** entry — the dashboard ladder does not emit one.
+> This is also *not* `common/bucketing.py::PERIOD_TRUNC`, which has no `hour` and
+> carries a `quarter` this endpoint has no caller for; the overlap is now wide enough
+> to read as an invitation to merge them, and the remaining asymmetry **is** the
+> boundary between them.
+>
+> **`week` (DASH-WEEK-00) — added for a real caller.** DASH-PERIOD-00 declined `week`
+> because the frontend ladder did not emit one. That expired: the ladder jumped `day`
+> (≤31 days) straight to `month`, rendering a 60-day range as two points instead of
+> about nine, and the fix emits `week` from `resolveTimeframe`. Since `bucket` fails
+> CLOSED, the ladder change would otherwise have **400'd every 32–90-day range** — so
+> this backend had to merge and deploy first.
+>
+> **Key format (the thing a shared frontend enumerator turns on).** `dashboard-v2`'s
+> series key is **`at`** — *not* `period`, which is the `sales-trends` key — and its
+> value is a **full ISO-8601 datetime carrying the `+03:00` EAT offset**, e.g.
+> `'2024-09-09T00:00:00+03:00'`. It is produced by `.isoformat()` on the aware
+> truncated datetime (`dashboard.py:274` revenue, `:346` orders); no serializer
+> intervenes. This is **unchanged by DASH-WEEK-00** — every bucket has always emitted
+> this shape, and `week` simply lands on a Monday midnight.
+>
+> **Both endpoints anchor weeks to Monday in EAT, and only the format differs.**
+>
+> | | `dashboard-v2` `bucket=week` | `sales-trends` `category=weekly` |
+> |---|---|---|
+> | key name | `at` | `period` |
+> | value | `'2024-09-09T00:00:00+03:00'` | `'2024-09-09'` |
+> | anchor | Monday 00:00 EAT | Monday 00:00 EAT |
+> | mechanism | `TruncWeek`, active tz (`Africa/Nairobi`) | `TruncWeek`, explicit `tzinfo=LOCAL_TZ` |
+>
+> They are separate vocabularies on separate endpoints — `weekly` is not a `bucket`
+> value and `week` is not a `category` — but the **shared Monday anchor** is what lets
+> one frontend enumerator generate the week axis for both, formatting per endpoint.
+> Do not move either boundary independently. Both are `parseISO()`-readable, so
+> neither carries Blocker B1's `'Mar-24'` problem. The partial-edge caveat documented
+> for `sales-trends` above applies here too: a window starting mid-week yields a first
+> bucket labelled with the **preceding Monday**, a key before `from`, holding only the
+> in-range days.
 >
 > **Open seam — no bucket-count cap.** Fail-closing the vocabulary stops the *typo*
 > path, but nothing bounds the bucket count of a *valid* request: `bucket=hour` over a
 > 200-day range is still ~4,800 buckets, and unlike `sales-trends` (`TREND_CAPS`) this
 > endpoint has no per-granularity date cap. Recommended follow-up, sized once
 > TIMEFRAME-01B pins the ranges the frontend actually requests.
+>
+> DASH-WEEK-00 left this seam exactly as it found it. `week` is strictly coarser than
+> the already-uncapped `day`, so it cannot widen the worst case, and `sales-trends`'
+> 371-day `weekly` cap therefore has no counterpart here — that cap bounds *that*
+> endpoint's payload, it is not part of the shared Monday-anchor guarantee.
 
 ---
 
