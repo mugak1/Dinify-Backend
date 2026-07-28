@@ -299,8 +299,15 @@ def _create_order(*, restaurant, table, items,
             #    chokepoint aborts the whole transaction (see OrderItemRejected).
             #    Previously the return was ignored, so a rejected item/extra was
             #    silently dropped while the rest of the order committed.
+            #    `order` is passed alongside its id: this transaction is holding the
+            #    row it just created, so the chokepoint has no reason to re-SELECT it
+            #    (and then lazily load its restaurant) once per line. The instance is
+            #    the same one every line would have fetched — it was created in this
+            #    transaction and nothing has written to it since.
             for item in items:
-                item_result = ConOrder.add_order_item(item=item, order_id=str(order.id))
+                item_result = ConOrder.add_order_item(
+                    item=item, order_id=str(order.id), order=order,
+                )
                 if item_result.get('status') != 200:
                     raise OrderItemRejected(item_result)
             order = Order.objects.select_for_update().get(id=order.id)
