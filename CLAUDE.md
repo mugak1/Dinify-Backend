@@ -1316,9 +1316,17 @@ the catch-all `<str:config_detail>/` route.
   - On cutover — a new EC2 venv with `mod_wsgi` rebuilt against 3.12, which the
     deploy pipeline CANNOT do — DELETE the `3.10.12` leg and pin `3.12` to the
     box's exact patch. Never delete the `3.12` leg
-  - The matrix names the PR checks `test (3.10.12)` / `test (3.12)`, not `test`;
-    `main` is branch-protected, so editing the matrix means updating the
-    required-status-check list in repo settings to match
+  - The matrix job is keyed `suite`, so its legs report as `suite (3.10.12)` /
+    `suite (3.12)`. Branch protection on `main` requires a check literally named
+    `test`, which a matrix job can NEVER produce (it always suffixes the leg
+    value) — so the `test` job is an AGGREGATOR: `needs: [suite]`, `if:
+    always()`, failing unless every leg succeeded. It is the single required
+    check, and that is what lets the matrix change — add, remove or re-pin a leg,
+    including deleting `3.10.12` at cutover — with NO repo-settings change. Do
+    NOT rename the `test` job, drop the aggregator, or give it
+    `continue-on-error`; `if: always()` is load-bearing, because a SKIPPED
+    required check never reports a failure and would block merges on a pending
+    check instead of failing loudly
   - Note: Django 5.2.x is the LAST series supporting Python 3.10/3.11 — a future
     Django 6.0 upgrade requires bumping the prod interpreter first, which is the
     second reason this migration matters

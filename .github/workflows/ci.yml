@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  suite:
     runs-on: ubuntu-latest
 
     strategy:
@@ -127,3 +127,33 @@ jobs:
           DATABASE_PORT: 5432
         run: |
           python -m django test --settings=dinify_backend.test_settings --verbosity=2 --timing
+
+  # Branch protection on `main` requires a status check literally named `test`.
+  # A matrix job can never produce one: its legs report as `suite (3.10.12)` and
+  # `suite (3.12)`, so the bare name would sit "Expected — waiting for status to
+  # be reported" forever and no PR could merge.
+  #
+  # This aggregator owns that name and is the ONE required check. It goes green
+  # only when EVERY leg succeeded, which is what decouples the required-check
+  # list from the matrix: legs can be added, removed or re-pinned — including
+  # deleting 3.10.12 at cutover — with no repo-settings change.
+  #
+  # `if: always()` is load-bearing. Without it a failed leg would SKIP this job,
+  # and a skipped required check never reports a failure — the merge would block
+  # on a pending check instead of failing loudly.
+  #
+  # Do NOT rename this job or drop it, and do not add `continue-on-error`.
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    needs: [suite]
+    if: always()
+    steps:
+      - name: Require every Python matrix leg to have passed
+        run: |
+          echo "Matrix result: ${{ needs.suite.result }}"
+          if [ "${{ needs.suite.result }}" != "success" ]; then
+            echo "::error::One or more Python matrix legs did not succeed (${{ needs.suite.result }})." >&2
+            exit 1
+          fi
+          echo "All Python matrix legs passed."
