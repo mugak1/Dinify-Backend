@@ -1302,11 +1302,36 @@ the catch-all `<str:config_detail>/` route.
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main` and on PRs to `main`
-- Runs on **Python 3.10.12**, pinned in `ci.yml` to match the prod EC2 runtime
-  (the UAT venv is `python3.10`) — keep CI and prod on the same interpreter; any
-  dependency bump must satisfy `requires-python <= 3.10`. Note: Django 5.2.x is
-  the LAST series supporting Python 3.10/3.11 — a future Django 6.0 upgrade
-  requires bumping the prod interpreter first
+- Runs a TWO-LEG Python matrix in `ci.yml` (`fail-fast: false`, so one red leg
+  still reports the other) — a TEMPORARY state while the interpreter migrates,
+  Python 3.10 reaching EOL 2026-10-31:
+  - **`3.10.12`** mirrors the prod EC2 runtime (the UAT venv is `python3.10`) and
+    stays AUTHORITATIVE while the box is on 3.10 — CI must keep reproducing
+    prod's interpreter so a 3.10-only issue can't pass CI and then fail at the
+    live WSGI import; any dependency bump must still satisfy
+    `requires-python <= 3.10`
+  - **`3.12`** is the migration proving-ground, deliberately UNPINNED at patch
+    level (there is no prod 3.12 to mirror yet, and we want the newest patch
+    under test)
+  - On cutover — a new EC2 venv with `mod_wsgi` rebuilt against 3.12, which the
+    deploy pipeline CANNOT do — DELETE the `3.10.12` leg and pin `3.12` to the
+    box's exact patch. Never delete the `3.12` leg
+  - The matrix job is keyed `suite`, so its legs report as `suite (3.10.12)` /
+    `suite (3.12)`. Branch protection on `main` requires a check literally named
+    `test`, which a matrix job can NEVER produce (it always suffixes the leg
+    value) — so the `test` job is an AGGREGATOR: `needs: [suite]`, `if:
+    always()`, failing unless every leg succeeded. It is the single required
+    check, and that is what lets the matrix change — add, remove or re-pin a leg,
+    including deleting `3.10.12` at cutover — with NO repo-settings change. Do
+    NOT rename the `test` job, drop the aggregator, or give it
+    `continue-on-error`; `if: always()` is load-bearing, because a SKIPPED
+    required check never reports a failure and would block merges on a pending
+    check instead of failing loudly
+  - Note: Django 5.2.x is the LAST series supporting Python 3.10/3.11 — a future
+    Django 6.0 upgrade requires bumping the prod interpreter first, which is the
+    second reason this migration matters
+  - `.github/workflows/audit.yml` still pins `3.10.12` on its own; it moves with
+    the box, not with this matrix
 - Spins up a real Postgres 15, runs `django check`,
   `makemigrations --check --dry-run`, then the money-field guard
   (`scripts/check_money_fields.py`) against `dinify_backend.test_settings`

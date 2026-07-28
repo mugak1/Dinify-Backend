@@ -6,8 +6,8 @@ Django REST API backend for the Dinify restaurant management and ordering platfo
 
 | Component | Version / Package |
 |---|---|
-| Python | 3.10.12 (CI, pinned to match the prod EC2 runtime) — 3.10+ locally |
-| Django | 4.2.30 |
+| Python | CI runs a two-leg matrix: **3.10.12** (pinned to match the prod EC2 runtime) and **3.12** (migration target — 3.10 reaches EOL 2026-10-31) — 3.10+ locally |
+| Django | 5.2.15 (LTS) |
 | Django REST Framework | 3.17.1 |
 | Auth | `djangorestframework-simplejwt` 5.5.1 (JWT Bearer tokens) |
 | Database (primary) | PostgreSQL via `psycopg` 3.1.18 |
@@ -174,7 +174,7 @@ There is no multi-database router configuration — all models use the `default`
 
 CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-**What CI runs** (Python 3.10.12 on Ubuntu, against a **PostgreSQL 15** service, using `dinify_backend.test_settings`):
+**What CI runs** (a two-leg Python matrix — **3.10.12** and **3.12** — on Ubuntu, against a **PostgreSQL 15** service, using `dinify_backend.test_settings`):
 1. `pip install -r requirements.txt`
 2. `django check`
 3. `makemigrations --check --dry-run` — fails on un-generated migrations
