@@ -42,11 +42,39 @@ def create_tables_in_section(
     dining_area: Optional[DiningArea] = None
 ) -> dict:
     tables = []
-    restaurant = Restaurant.objects.get(id=restaurant_id)
     with transaction.atomic():
+        # The restaurant row is fetched HERE, inside the transaction, and LOCKED —
+        # it is what actually serialises table-number allocation.
+        #
+        # It used to be an unlocked fetch above the atomic block, and the count
+        # below carried `select_for_update()` instead. That lock was never taken:
+        # Django's `.count()` routes through `Query.get_aggregation()`, which sets
+        # `outer_query.select_for_update = False` before compiling (django/db/
+        # models/sql/query.py:625, Django 5.2), so `FOR UPDATE` was never emitted
+        # and the statement ran as a plain unlocked `SELECT COUNT(*)`. PostgreSQL
+        # would have rejected `SELECT COUNT(*) ... FOR UPDATE` outright — it never
+        # saw one. Two concurrent creations therefore both read the same count and
+        # both tried to write tables numbered count+1..count+N. Table's
+        # `unique_together = ['number', 'str_number', 'restaurant']` caught the
+        # collision, so this was never duplicated data — it was an uncaught
+        # IntegrityError propagating out as a 500 for whichever creation lost.
+        #
+        # Locking the PARENT row is the fix, not locking the counted rows: a row
+        # lock on existing tables would not stop a concurrent INSERT, which is the
+        # race that matters. Same shape as `allocate_daily_order_number`
+        # (orders_app/controllers/services/create_order.py) — lock the parent, read,
+        # allocate.
+        #
+        # Lock order: this transaction takes `Restaurant` and then INSERTs `Table`
+        # rows, and never reaches for the admission advisory lock. Order creation
+        # takes `advisory(SHARED) -> Table(row) -> ...` and never row-locks
+        # `Restaurant`; the lifecycle transition takes
+        # `advisory(EXCLUSIVE) -> Restaurant -> AdminAuditLog`. No cycle either way.
+        restaurant = Restaurant.objects.select_for_update().get(id=restaurant_id)
+
         if consideration == 'count':
             # get the count of tables at the restaurant
-            table_count = Table.objects.select_for_update().filter(
+            table_count = Table.objects.filter(
                 restaurant=restaurant
             ).count()
             for i in range(no_tables):
