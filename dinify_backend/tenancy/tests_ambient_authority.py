@@ -26,6 +26,8 @@ Green here proves the mechanism has not been reintroduced BY NAME and that the
 identity invariants hold at their write paths. It is not a proof of tenant
 isolation generally; see ``ASSURANCE.md`` for that boundary.
 """
+from unittest.mock import patch
+
 from django.test import SimpleTestCase, TestCase, tag
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.token_blacklist.models import (
@@ -52,7 +54,9 @@ from platform_admin_app.services import (
     PlatformStaffInvariantError,
     assert_no_platform_roles,
     platform_roles_in,
+    promote_to_platform_staff,
     revoke_customer_tokens,
+    revoke_pending_customer_otps,
 )
 from restaurants_app.models import (
     MenuItem, MenuSection, Restaurant, RestaurantEmployee, Table,
@@ -60,9 +64,19 @@ from restaurants_app.models import (
 from restaurants_app.serializers import SerializerPutRestaurantEmployee
 from users_app.controllers import permissions_check
 from users_app.controllers.login import login
-from users_app.models import User
+from users_app.controllers.otp_manager import OtpManager
+from users_app.models import User, UserOtp
 
 REFRESH_URL = '/api/v1/users/auth/token/refresh/'
+
+# make_otp fires a daemon notification thread even in ENV=dev, where its sends are
+# already no-ops. Patched so the OTP tests below touch neither the network nor the mail
+# outbox. Same three targets users_app/tests.py uses.
+_PATCH_OTP_SMS = 'users_app.controllers.otp_manager.send_sms'
+_PATCH_MESSENGER_EMAIL = (
+    'notifications_app.controllers.messenger.Messenger.send_email')
+_PATCH_NOTIFICATION = (
+    'misc_app.controllers.notifications.notification.Notification.create_notification')
 
 # The literal the tree must not contain, assembled at runtime so this module's own
 # source stays clean for the scanner (which skips test modules, but the point is
@@ -300,6 +314,125 @@ class PlatformStaffCustomerSessionTests(TestCase):
         for token in outstanding:
             self.assertTrue(
                 BlacklistedToken.objects.filter(token=token).exists())
+
+
+# =============================================================================
+# 2b. ...including through the OTP path — the last unguarded mint.
+# =============================================================================
+# Every other customer-token mint reads account_type: login (login.py:112), password
+# reset (reset_password.py:150 via _resolve_user) and refresh (token_refresh.py:51).
+# verify_otp did not, and it is reachable: a platform-staff account cannot ORIGINATE a
+# login OTP, but promotion did not invalidate one already in flight. So the sequence
+# below — issue, promote, verify — is the whole defect, and it is why these tests mint
+# the OTP BEFORE promotion. Minting after would pass against the pre-PR code and prove
+# nothing, the same discipline tests_customer_jwt_gate.py applies to access tokens.
+#
+# ENV is 'dev' under test settings, so make_otp writes the hardcoded '1234' and its
+# delivery is a no-op; the patches below stop the fire-and-forget notification thread
+# from touching the network or the outbox.
+@tag('tenant_closure')
+@patch(_PATCH_NOTIFICATION, return_value=None)
+@patch(_PATCH_MESSENGER_EMAIL, return_value=None)
+@patch(_PATCH_OTP_SMS, return_value=None)
+class PlatformStaffOtpMintTests(TestCase):
+
+    def setUp(self):
+        self.user = make_user('256790000003')
+
+    def _issue_login_otp(self):
+        self.assertTrue(OtpManager().make_otp(user=self.user, purpose='login'))
+
+    def _promote(self):
+        # Bypass the service so the pending OTP survives: this test is about the SINK,
+        # and promote_to_platform_staff now purges the row (asserted separately below).
+        User.objects.filter(pk=self.user.pk).update(
+            account_type=ACCOUNT_TYPE_PLATFORM_STAFF)
+
+    def test_platform_staff_cannot_obtain_tokens_through_the_otp_path(self, *mocks):
+        self._issue_login_otp()
+        self._promote()
+
+        result = OtpManager().verify_otp(user_id=str(self.user.id), otp='1234')
+
+        self.assertFalse(result['data']['valid'])
+        self.assertNotIn('token', result['data'])
+        self.assertNotIn('refresh', result['data'])
+
+    def test_no_outstanding_token_row_is_left_behind(self, *mocks):
+        # The reason this is worth closing even though CustomerJWTAuthentication would
+        # refuse the token at request time: minting one writes an OutstandingToken that
+        # says a platform-staff account holds a live customer session.
+        self._issue_login_otp()
+        self._promote()
+
+        OtpManager().verify_otp(user_id=str(self.user.id), otp='1234')
+
+        self.assertFalse(
+            OutstandingToken.objects.filter(user=self.user).exists())
+
+    def test_the_refusal_is_indistinguishable_from_a_wrong_code(self, *mocks):
+        # No account-type oracle. verify-otp is AllowAny with a client-supplied user
+        # id, so a distinct status, message or data shape would answer "is this account
+        # platform staff?" to an anonymous prober.
+        self._issue_login_otp()
+        self._promote()
+        refused = OtpManager().verify_otp(user_id=str(self.user.id), otp='1234')
+
+        other = make_user('256790000004')
+        OtpManager().make_otp(user=other, purpose='login')
+        wrong = OtpManager().verify_otp(user_id=str(other.id), otp='1111')
+
+        self.assertEqual(refused, wrong)
+
+    def test_a_restaurant_user_still_receives_tokens(self, *mocks):
+        # The gate only ever subtracts: the ordinary contract is untouched.
+        self._issue_login_otp()
+
+        result = OtpManager().verify_otp(user_id=str(self.user.id), otp='1234')
+
+        self.assertTrue(result['data']['valid'])
+        self.assertIn('token', result['data'])
+        self.assertIn('refresh', result['data'])
+
+    def test_a_non_login_purpose_is_unaffected(self, *mocks):
+        # Only the login branch mints. A reset/registration OTP returns valid=True with
+        # no tokens for anyone, and promotion must not change that — three controllers
+        # index ['data']['valid'] on it unguarded.
+        OtpManager().make_otp(user=self.user, purpose='reset')
+        self._promote()
+
+        result = OtpManager().verify_otp(user_id=str(self.user.id), otp='1234')
+
+        self.assertTrue(result['data']['valid'])
+        self.assertNotIn('token', result['data'])
+
+    def test_promotion_purges_pending_otp_challenges(self, *mocks):
+        # The source half. revoke_customer_tokens already blacklisted the tokens an
+        # account held; a pending login OTP is the other customer credential in flight.
+        self._issue_login_otp()
+
+        promote_to_platform_staff(self.user)
+
+        self.assertFalse(
+            UserOtp.objects.filter(
+                user=self.user, consumed_at__isnull=True).exists())
+
+    def test_purging_pending_otps_is_idempotent_and_safe_when_empty(self, *mocks):
+        self.assertEqual(revoke_pending_customer_otps(self.user), 0)
+        self._issue_login_otp()
+        self.assertEqual(revoke_pending_customer_otps(self.user), 1)
+        self.assertEqual(revoke_pending_customer_otps(self.user), 0)
+
+    def test_purging_does_not_extend_the_expiry_window(self, *mocks):
+        # UserOtp's pre_save hook re-stamps expiry_time on every save, so a per-row
+        # save() would hand each purged challenge a fresh five minutes. The queryset
+        # update bypasses it.
+        self._issue_login_otp()
+        before = UserOtp.objects.get(user=self.user).expiry_time
+
+        revoke_pending_customer_otps(self.user)
+
+        self.assertEqual(UserOtp.objects.get(user=self.user).expiry_time, before)
 
 
 # =============================================================================
