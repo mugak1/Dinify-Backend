@@ -15,6 +15,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from notifications_app.controllers.messenger import Messenger
 from notifications_app.controllers.sms import send_sms
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
+from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +248,26 @@ class OtpManager:
 
         # if the otp purpose is for login, make a token and return it
         if purpose == 'login':
+            # Platform staff authenticate on the admin origin only. Refused HERE,
+            # immediately above the mint, for the same reason login.py:112 sits above
+            # its own RefreshToken.for_user(): this is the LAST customer-token mint
+            # that did not read account_type. A platform-staff account cannot
+            # ORIGINATE a login OTP (make_otp(purpose='login') is only reached from
+            # login.py:176, below that refusal) — but promotion does not invalidate an
+            # OTP already in flight, so an owner who logged in moments before being
+            # promoted could still spend the pending code here. promote_to_platform_staff
+            # now purges those rows; this is the sink half, and it also covers rows left
+            # by any future promotion path.
+            #
+            # Returns the shared `invalid` dict, so the refusal is byte-identical to a
+            # wrong code. That is not politeness: verify-otp is AllowAny with a
+            # client-supplied user id, so a distinct shape or status would be an
+            # account-type oracle — and three callers index ['data']['valid'] unguarded.
+            if getattr(otp_user, 'account_type', None) == ACCOUNT_TYPE_PLATFORM_STAFF:
+                logger.info(
+                    'verify_otp: refused (platform staff on customer origin)')
+                return invalid
+
             token = RefreshToken.for_user(otp_user)
             return {
                 'status': 200,

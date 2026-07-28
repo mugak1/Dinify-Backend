@@ -21,6 +21,7 @@ Pre-existing dual-role rows (a ``platform_staff`` user that already holds an act
 membership at flip time) are TOLERATED — the guard only blocks NEW active
 memberships; the founder account split (gating PR-2b) resolves the standing rows.
 """
+from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
@@ -95,6 +96,34 @@ def revoke_customer_tokens(user):
     return revoked
 
 
+def revoke_pending_customer_otps(user):
+    """
+    Spend every unconsumed OTP challenge belonging to ``user``.
+
+    Returns the number of rows consumed. Idempotent — a second call matches nothing —
+    and safe on an empty set.
+
+    The exact counterpart to ``revoke_customer_tokens``, and here for the same reason.
+    A pending ``purpose='login'`` OTP is a customer credential in flight: it is
+    exchanged for a refresh token in ``OtpManager.verify_otp``. Promotion revoked the
+    tokens an account already held but left its pending codes live, so an owner who
+    logged in moments before being promoted could still spend one afterwards.
+
+    ``verify_otp`` refuses a platform-staff mint on its own, so this is defence in
+    depth rather than the load-bearing gate — but it is the half that stops a spendable
+    credential existing at all, rather than existing and being refused.
+
+    A queryset ``update`` rather than per-row saves: it is one statement, and it
+    bypasses ``UserOtp``'s ``pre_save`` hook, which re-stamps ``expiry_time`` on every
+    save and would otherwise hand each purged row a fresh five-minute window.
+    """
+    from users_app.models import UserOtp  # lazy: mirrors the imports above
+
+    return UserOtp.objects.filter(
+        user=user, consumed_at__isnull=True
+    ).update(consumed_at=timezone.now())
+
+
 def promote_to_platform_staff(user):
     """
     Promote ``user`` to platform staff and provision its auth adjunct.
@@ -102,8 +131,9 @@ def promote_to_platform_staff(user):
     Refuses (raises ``PlatformStaffInvariantError``) if the user still holds any
     active, non-deleted restaurant membership — the invariant forbids a
     ``platform_staff`` account with active memberships. On success sets
-    ``account_type``, revokes any customer session the account still holds, and
-    returns the created-or-existing ``PlatformStaffAuth``.
+    ``account_type``, revokes every customer credential the account still holds — both
+    outstanding refresh tokens and pending OTP challenges — and returns the
+    created-or-existing ``PlatformStaffAuth``.
     """
     if has_active_membership(user):
         raise PlatformStaffInvariantError(
@@ -114,6 +144,7 @@ def promote_to_platform_staff(user):
     user.account_type = ACCOUNT_TYPE_PLATFORM_STAFF
     user.save(update_fields=['account_type'])
     revoke_customer_tokens(user)
+    revoke_pending_customer_otps(user)
     auth, _ = PlatformStaffAuth.objects.get_or_create(user=user)
     return auth
 
