@@ -290,7 +290,7 @@ class TestOrderExclusionTests(LaunchBoundaryFixture):
             generate_restaurant_dashboard_v2,
         )
         data = generate_restaurant_dashboard_v2(
-            str(self.restaurant.id), **self._dates())['data']
+            str(self.restaurant.id), **self._dates(), bucket='day')['data']
         self.assertEqual(
             Decimal(str(data['revenue']['totals']['gross'])), Decimal('10000'),
         )
@@ -311,7 +311,7 @@ class TestOrderExclusionTests(LaunchBoundaryFixture):
                 transaction_amount=Decimal('10000'), payment_mode='cash',
             )
         data = generate_restaurant_dashboard_v2(
-            str(self.restaurant.id), **self._dates())['data']
+            str(self.restaurant.id), **self._dates(), bucket='day')['data']
         total = sum(Decimal(str(row['amount'])) for row in data['payment_methods'])
         self.assertEqual(total, Decimal('10000'))
 

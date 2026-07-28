@@ -154,31 +154,10 @@ def summarize_revenue(restaurant_id: str):
 # Dashboard V2
 # ---------------------------------------------------------------------------
 
-# LEGACY vocabulary — keyed on the caller's UI SELECTION, not on a granularity.
-# 'day' does not mean "bucket by day"; it means "the user picked Day, so bucket by
-# hour". Deprecated in favour of `bucket` / BUCKET_TRUNC below, and retained only so
-# the currently-deployed frontend keeps working across the deploy window. Its
-# resolution deliberately stays fail-OPEN (unknown -> TruncHour): that is this
-# parameter's established behaviour, and tightening it is exactly the breakage the
-# new parameter exists to avoid.
-TRUNC_MAP = {
-    'day': TruncHour,
-    'week': TruncDay,
-    'month': TruncDay,
-    'ytd': TruncMonth,
-}
-
-# HONEST vocabulary — keyed on the GRANULARITY itself, and resolved fail-CLOSED.
-#
-# These two maps CANNOT be merged, and the collision is the whole reason `bucket` is
-# a new parameter rather than an alias of `period`:
-#
-#     'day'    legacy -> TruncHour     honest -> TruncDay
-#     'month'  legacy -> TruncDay      honest -> TruncMonth
-#
-# The same string means different things in each, so no alias table can express
-# both. `reports_app/tests_dashboard_report.py` pins the divergence — if you are
-# here to "tidy up" by unifying these, that test is the reason not to.
+# The granularity vocabulary — keyed on the GRANULARITY itself, resolved fail-CLOSED,
+# and the ONLY one this endpoint has. It replaced a legacy `period` map keyed on the
+# caller's UI SELECTION ('day' meant "the user picked Day, so bucket by HOUR") which
+# DASH-PERIOD-00 deprecated and DASH-REMOVE-LEGACY-00 removed once no caller sent it.
 #
 # 'week' was added in DASH-WEEK-00 for a real caller: the frontend timeframe ladder
 # jumped 'day' (<=31 days) straight to 'month', rendering a 60-day range as two points
@@ -214,37 +193,40 @@ BUCKET_TRUNC = {
 }
 
 
-def _resolve_bucket_trunc(bucket, period):
-    """Resolve the chart truncation, preferring the honest ``bucket`` vocabulary.
+def _bucket_error(lead):
+    """The one 400 envelope both bucket failures share.
+
+    The accepted-value list is DERIVED from ``BUCKET_TRUNC``, never written out
+    separately, so adding a granularity cannot leave the message stale — and because
+    the map is ordered by coarseness, the message reads in granularity order.
+    """
+    return {
+        'status': 400,
+        'message': f"{lead}; expected one of {', '.join(BUCKET_TRUNC)}",
+    }
+
+
+def _resolve_bucket_trunc(bucket):
+    """Resolve the chart truncation from the ``bucket`` granularity.
 
     :returns: ``(trunc_fn, None)`` on success, or ``(None, error)`` where ``error``
         is the ``{'status': 400, 'message': ...}`` envelope the endpoint turns into
         an HTTP 400.
 
-    An ABSENT ``bucket`` — ``None``, empty, or whitespace-only — falls through to the
-    legacy ``period`` path unchanged, so a stray ``&bucket=`` in a URL is not an
-    error and deployed callers keep today's exact behaviour.
-
-    A ``bucket`` that IS supplied must name a real granularity: unknown values fail
-    CLOSED. The fail-open default they used to hit silently returned hourly buckets,
-    and hourly bucketing of an arbitrary date range is an enormous payload (a 200-day
-    window is ~4,800 buckets), not an error the caller can see. Lookup is exact —
-    'DAY' is not 'day' — so a mismatch surfaces here rather than downstream.
+    ``bucket`` is REQUIRED. There is no default granularity to fall back to and no
+    defensible one to invent: this endpoint caps neither the date range nor the bucket
+    count, so guessing wrong returns an enormous payload rather than an error the
+    caller can see. Absent, empty and whitespace-only are one case — they strip to the
+    same nothing — and all three 400 alongside unknown values. Lookup is exact ('DAY'
+    is not 'day') so a mismatch surfaces here rather than downstream.
     """
     key = (bucket or '').strip()
-    if key:
-        try:
-            return BUCKET_TRUNC[key], None
-        except KeyError:
-            return None, {
-                'status': 400,
-                'message': (
-                    f"Unsupported bucket '{key}'; expected one of "
-                    f"{', '.join(BUCKET_TRUNC)}"
-                ),
-            }
-    # Legacy path, untouched — an unknown `period` still defaults to hourly.
-    return TRUNC_MAP.get(period, TruncHour), None
+    if not key:
+        return None, _bucket_error('Missing bucket')
+    try:
+        return BUCKET_TRUNC[key], None
+    except KeyError:
+        return None, _bucket_error(f"Unsupported bucket '{key}'")
 
 
 PAYMENT_LABEL_MAP = {
@@ -265,62 +247,53 @@ def _dec(value):
     return str(Decimal(value).quantize(Decimal('0.01')))
 
 
-def _build_revenue(restaurant_id, date_from, date_to, trunc_fn,
-                   prev_from, prev_to):
-    def _series_and_totals(d_from, d_to):
-        base = Order.objects.filter(
-            restaurant=restaurant_id,
-            is_test=False,
-            time_created__gte=d_from,
-            time_created__lte=d_to,
-        )
-        paid = base.filter(payment_status=PaymentStatus_Paid)
-        refunded = base.filter(order_status=OrderStatus_Refunded)
+def _build_revenue(restaurant_id, date_from, date_to, trunc_fn):
+    base = Order.objects.filter(
+        restaurant=restaurant_id,
+        is_test=False,
+        time_created__gte=date_from,
+        time_created__lte=date_to,
+    )
+    paid = base.filter(payment_status=PaymentStatus_Paid)
+    refunded = base.filter(order_status=OrderStatus_Refunded)
 
-        paid_buckets = (
-            paid.annotate(bucket=trunc_fn('time_created'))
-            .values('bucket')
-            .annotate(gross=Sum('total_cost'), discounts=Sum('savings'))
-            .order_by('bucket')
-        )
-        refund_buckets = (
-            refunded.annotate(bucket=trunc_fn('time_created'))
-            .values('bucket')
-            .annotate(refunds=Sum('actual_cost'))
-            .order_by('bucket')
-        )
-        refund_map = {r['bucket']: r['refunds'] or _ZERO for r in refund_buckets}
+    paid_buckets = (
+        paid.annotate(bucket=trunc_fn('time_created'))
+        .values('bucket')
+        .annotate(gross=Sum('total_cost'), discounts=Sum('savings'))
+        .order_by('bucket')
+    )
+    refund_buckets = (
+        refunded.annotate(bucket=trunc_fn('time_created'))
+        .values('bucket')
+        .annotate(refunds=Sum('actual_cost'))
+        .order_by('bucket')
+    )
+    refund_map = {r['bucket']: r['refunds'] or _ZERO for r in refund_buckets}
 
-        series = []
-        for row in paid_buckets:
-            at = row['bucket'].isoformat() if row['bucket'] else None
-            series.append({
-                'at': at,
-                'gross': _dec(row['gross']),
-                'discounts': _dec(row['discounts']),
-                'refunds': _dec(refund_map.get(row['bucket'], _ZERO)),
-            })
+    series = []
+    for row in paid_buckets:
+        at = row['bucket'].isoformat() if row['bucket'] else None
+        series.append({
+            'at': at,
+            'gross': _dec(row['gross']),
+            'discounts': _dec(row['discounts']),
+            'refunds': _dec(refund_map.get(row['bucket'], _ZERO)),
+        })
 
-        gross_total = paid.aggregate(v=Sum('total_cost'))['v'] or _ZERO
-        discounts_total = paid.aggregate(v=Sum('savings'))['v'] or _ZERO
-        refunds_total = refunded.aggregate(v=Sum('actual_cost'))['v'] or _ZERO
-        net = Decimal(gross_total) - Decimal(discounts_total) - Decimal(refunds_total)
+    gross_total = paid.aggregate(v=Sum('total_cost'))['v'] or _ZERO
+    discounts_total = paid.aggregate(v=Sum('savings'))['v'] or _ZERO
+    refunds_total = refunded.aggregate(v=Sum('actual_cost'))['v'] or _ZERO
+    net = Decimal(gross_total) - Decimal(discounts_total) - Decimal(refunds_total)
 
-        totals = {
+    return {
+        'series': series,
+        'totals': {
             'gross': _dec(gross_total),
             'discounts': _dec(discounts_total),
             'refunds': _dec(refunds_total),
             'net': _dec(net),
-        }
-        return series, totals
-
-    series, totals = _series_and_totals(date_from, date_to)
-    prev_series, prev_totals = _series_and_totals(prev_from, prev_to)
-    return {
-        'series': series,
-        'previous_series': prev_series,
-        'totals': totals,
-        'previous_totals': prev_totals,
+        },
     }
 
 
@@ -349,36 +322,24 @@ def _build_payment_methods(restaurant_id, date_from, date_to):
     ]
 
 
-def _build_orders(restaurant_id, date_from, date_to, trunc_fn,
-                  prev_from, prev_to):
-    def _series_and_total(d_from, d_to):
-        base = Order.objects.filter(
-            restaurant=restaurant_id,
-            is_test=False,
-            time_created__gte=d_from,
-            time_created__lte=d_to,
-        )
-        buckets = (
-            base.annotate(bucket=trunc_fn('time_created'))
-            .values('bucket')
-            .annotate(count=Count('id'))
-            .order_by('bucket')
-        )
-        series = [
-            {'at': r['bucket'].isoformat() if r['bucket'] else None, 'count': r['count']}
-            for r in buckets
-        ]
-        return series, base.count()
-
-    series, total = _series_and_total(date_from, date_to)
-    prev_series, prev_total = _series_and_total(prev_from, prev_to)
-
+def _build_orders(restaurant_id, date_from, date_to, trunc_fn):
     base = Order.objects.filter(
         restaurant=restaurant_id,
         is_test=False,
         time_created__gte=date_from,
         time_created__lte=date_to,
     )
+    buckets = (
+        base.annotate(bucket=trunc_fn('time_created'))
+        .values('bucket')
+        .annotate(count=Count('id'))
+        .order_by('bucket')
+    )
+    series = [
+        {'at': r['bucket'].isoformat() if r['bucket'] else None, 'count': r['count']}
+        for r in buckets
+    ]
+
     breakdown = [
         {'status': 'paid', 'count': base.filter(payment_status=PaymentStatus_Paid).count()},
         {'status': 'open', 'count': base.filter(
@@ -394,10 +355,8 @@ def _build_orders(restaurant_id, date_from, date_to, trunc_fn,
 
     return {
         'series': series,
-        'previous_series': prev_series,
         'breakdown': breakdown,
-        'total': total,
-        'previous_total': prev_total,
+        'total': base.count(),
     }
 
 
@@ -589,27 +548,21 @@ def generate_restaurant_dashboard_v2(
     restaurant_id: str,
     date_from: str,
     date_to: str,
-    period: str = 'day',
     bucket: str | None = None,
 ) -> dict:
     """Build the v2 dashboard payload over ``[date_from, date_to]``.
 
-    :param period: DEPRECATED — the legacy chart-granularity selector, keyed on the
-        caller's UI selection rather than on a granularity (see ``TRUNC_MAP``).
-        Honoured unchanged, fail-open hourly default included, so the currently
-        deployed frontend keeps working across the deploy window. It is removed once
-        no caller sends it — a follow-up PR gated on the frontend's TIMEFRAME-01B
-        shipping, not this one.
-    :param bucket: the honest chart granularity — one of ``hour``, ``day``, ``week``,
-        ``month``, ``year`` (see ``BUCKET_TRUNC``). An unknown value is a 400; absent
-        (or empty / whitespace-only) falls back to ``period``. When BOTH are supplied
-        ``bucket`` wins rather than erroring — the frontend sends only one, and a
-        defensive precedence rule is cheaper than a failure mode. A ``week`` bucket is
-        keyed on the MONDAY of its week in EAT.
+    :param bucket: REQUIRED — the chart granularity, one of ``hour``, ``day``,
+        ``week``, ``month``, ``year`` (see ``BUCKET_TRUNC``). Unknown, absent, empty
+        and whitespace-only values are all a 400 naming the accepted values; there is
+        no default granularity, because this endpoint bounds neither the date range
+        nor the bucket count and so has no defensible one. A ``week`` bucket is keyed
+        on the MONDAY of its week in EAT.
 
-    Note that ``'day'`` means different things in the two vocabularies — legacy
-    hourly vs honest daily — which is why ``bucket`` is a new parameter rather than
-    an alias of ``period``.
+    The payload carries ONE window. The preceding-equal-length comparison this used to
+    compute server-side (``previous_totals`` / ``previous_total`` / ``previous_series``)
+    was removed in DASH-REMOVE-LEGACY-00: the frontend now issues a second call for the
+    basis the user actually selected, which the server cannot infer.
     """
     dates = clean_dates(date_from=date_from, date_to=date_to)
     if dates.get('status') != 200:
@@ -617,28 +570,21 @@ def generate_restaurant_dashboard_v2(
     date_from = dates.get('date_from')
     date_to = dates.get('date_to')
 
-    trunc_fn, bucket_error = _resolve_bucket_trunc(bucket, period)
+    trunc_fn, bucket_error = _resolve_bucket_trunc(bucket)
     if bucket_error is not None:
         return bucket_error
-
-    # Compute previous period of equal length. Derived from the DATE RANGE alone — it
-    # never reads `period` / `bucket`, so the comparison window stays identical
-    # across every granularity.
-    delta = (date_to - date_from) + timedelta(days=1)
-    prev_from = date_from - delta
-    prev_to = date_from - timedelta(days=1)
 
     return {
         'status': 200,
         'data': {
             'revenue': _build_revenue(
-                restaurant_id, date_from, date_to, trunc_fn, prev_from, prev_to,
+                restaurant_id, date_from, date_to, trunc_fn,
             ),
             'payment_methods': _build_payment_methods(
                 restaurant_id, date_from, date_to,
             ),
             'orders': _build_orders(
-                restaurant_id, date_from, date_to, trunc_fn, prev_from, prev_to,
+                restaurant_id, date_from, date_to, trunc_fn,
             ),
             'popular_items': _build_popular_items(
                 restaurant_id, date_from, date_to,

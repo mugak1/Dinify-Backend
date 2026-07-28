@@ -1,5 +1,5 @@
 """
-Tests for the ``dashboard-v2`` chart-granularity vocabulary (DASH-PERIOD-00).
+Tests for the ``dashboard-v2`` chart-granularity vocabulary.
 
 ``generate_restaurant_dashboard_v2`` historically resolved its bucketing through
 ``TRUNC_MAP`` — a map keyed on the caller's UI SELECTION rather than on a
@@ -8,17 +8,22 @@ fail-OPEN ``.get(period, TruncHour)``. Nothing on this path caps the date range
 (``clean_dates`` only parses and orders the dates), so an unrecognised value over a
 long window silently returned an enormous hourly payload instead of an error.
 
-These cover the honest ``bucket`` vocabulary that replaces it
-(``hour``/``day``/``week``/``month``/``year``, fail-CLOSED) and — just as
-importantly — pin that the legacy ``period`` path is unchanged, since the deployed
-frontend still sends it and this backend auto-deploys on merge, before the
-frontend's TIMEFRAME-01B ships.
+DASH-PERIOD-00 added the honest ``bucket`` vocabulary
+(``hour``/``day``/``week``/``month``/``year``, fail-CLOSED) beside it;
+DASH-REMOVE-LEGACY-00 removed ``period`` once the frontend stopped sending it, and
+with it the last fail-open path — ``bucket`` is now REQUIRED, so absent, empty,
+whitespace-only and unknown are one 400.
+
+The same PR removed the server-computed preceding-window comparison
+(``previous_totals`` / ``previous_total`` / ``previous_series``); the frontend now
+issues a second call for the basis the user selected. ``DashboardV2ResponseShapeTests``
+guards against those fields creeping back.
 
 ``week`` joined the vocabulary in DASH-WEEK-00, once the frontend ladder started
 emitting it. Its own cases live in ``DashboardV2WeekBucketTests`` below.
 
-Granularity is asserted through the RETURNED SERIES, never by reading ``TRUNC_MAP``
-/ ``BUCKET_TRUNC``: a test that asserts a map's contents still passes when the
+Granularity is asserted through the RETURNED SERIES, never by reading
+``BUCKET_TRUNC``: a test that asserts a map's contents still passes when the
 wiring is broken.
 
 The shared fixture seeds five paid orders inside 2024 chosen so that the granularity
@@ -104,9 +109,10 @@ class DashboardV2Base(TestCase):
         self.make_order(when=utc(2024, 3, 5, 9))
         # ... and a second month in the same year.
         self.make_order(when=utc(2024, 6, 10, 9))
-        # One order in the PREVIOUS window (2022-12-31..2023-12-31 for this range),
-        # so previous_totals is non-zero and the comparison-window test is not
-        # trivially satisfied by a pair of zeros.
+        # One order OUTSIDE the range, so every count and total below is proof the
+        # window filter bites rather than a total of everything seeded. (It was
+        # originally seeded to make the removed `previous_totals` comparison
+        # non-trivial; it earns its place on the primary window too.)
         self.make_order(when=utc(2023, 6, 15, 9))
 
     def make_order(self, when):
@@ -254,144 +260,47 @@ class DashboardV2FailClosedTests(DashboardV2Base):
     def test_bucket_lookup_is_case_sensitive(self):
         self.assertEqual(self.dashboard(bucket='DAY')['status'], 400)
 
-    def test_a_legacy_period_typo_still_fails_open_to_hourly(self):
-        # The LEGACY parameter deliberately keeps its fail-open default — tightening
-        # it is exactly the breakage the new parameter exists to avoid.
-        self.assertEqual(len(self.order_buckets(period='nonsense')), 5)
 
+class DashboardV2RequiredBucketTests(DashboardV2Base):
+    """``bucket`` is REQUIRED — absent, empty and whitespace-only are all a 400.
 
-class DashboardV2LegacyPeriodCompatibilityTests(DashboardV2Base):
-    """With ``bucket`` absent, every legacy ``period`` behaves exactly as before.
-
-    This is the compatibility guarantee that lets this backend merge and deploy
-    BEFORE the frontend's TIMEFRAME-01B ships: legacy 'day' -> hourly,
-    'week' -> daily, 'month' -> daily, 'ytd' -> monthly.
+    Until DASH-REMOVE-LEGACY-00 these fell through to the legacy ``period`` path and
+    its fail-open hourly default. With ``period`` gone there is nothing to fall back
+    to, and this endpoint bounds neither the date range nor the bucket count, so it
+    has no defensible default to invent. Absence is a caller bug, and it says so.
     """
 
-    LEGACY_BUCKET_COUNTS = {'day': 5, 'week': 3, 'month': 3, 'ytd': 2}
+    def test_omitting_bucket_entirely_is_400(self):
+        result = self.dashboard()
+        self.assertEqual(result['status'], 400)
+        self.assertNotIn('data', result)
 
-    def test_each_legacy_period_keeps_its_granularity(self):
-        for period, expected in self.LEGACY_BUCKET_COUNTS.items():
-            with self.subTest(period=period):
-                self.assertEqual(len(self.order_buckets(period=period)), expected)
+    def test_empty_string_is_400(self):
+        self.assertEqual(self.dashboard(bucket='')['status'], 400)
 
-    def test_legacy_week_and_month_are_both_daily(self):
-        # The legacy map points 'week' AND 'month' at the same truncation
-        # (TruncDay). Pinned because it looks like a bug and is not one.
-        self.assertEqual(
-            self.order_buckets(period='week'), self.order_buckets(period='month'),
-        )
+    def test_whitespace_only_is_400(self):
+        self.assertEqual(self.dashboard(bucket='   ')['status'], 400)
 
-    def test_the_default_period_is_hourly(self):
-        # Neither parameter supplied — the signature default ('day') resolves
-        # through the legacy map to TruncHour, as it always has.
-        self.assertEqual(len(self.order_buckets()), 5)
+    def test_explicit_none_is_400(self):
+        self.assertEqual(self.dashboard(bucket=None)['status'], 400)
 
-    def test_omitting_bucket_matches_passing_none_explicitly(self):
-        self.assertEqual(
-            self.order_buckets(period='ytd'),
-            self.order_buckets(period='ytd', bucket=None),
-        )
+    def test_the_missing_message_names_the_accepted_values_too(self):
+        # Same envelope and same DERIVED accepted-value tail as an unknown value —
+        # a caller who omitted the parameter learns what to send, not just that
+        # something was wrong.
+        result = self.dashboard(bucket='')
+        for accepted in ('hour', 'day', 'week', 'month', 'year'):
+            self.assertIn(accepted, result['message'])
 
-
-class DashboardV2AbsentBucketTests(DashboardV2Base):
-    """Empty / whitespace-only ``bucket`` is ABSENT, not an unknown granularity.
-
-    A stray ``&bucket=`` in a URL must not 400.
-    """
-
-    def test_empty_string_falls_back_to_the_legacy_path(self):
-        result = self.dashboard(period='ytd', bucket='')
-        self.assertEqual(result['status'], 200)
-        self.assertEqual(len(result['data']['orders']['series']), 2)  # monthly
-
-    def test_whitespace_only_falls_back_to_the_legacy_path(self):
-        result = self.dashboard(period='ytd', bucket='   ')
-        self.assertEqual(result['status'], 200)
-        self.assertEqual(len(result['data']['orders']['series']), 2)
+    def test_missing_and_unknown_are_distinguishable(self):
+        # One shape, two causes. The lead clause differs so a caller can tell
+        # "you sent nothing" from "you sent something wrong".
+        self.assertIn('Missing', self.dashboard(bucket='')['message'])
+        self.assertIn('Unsupported', self.dashboard(bucket='nope')['message'])
 
     def test_a_padded_but_real_bucket_still_resolves(self):
+        # Stripping is for padding, not for inventing a default.
         self.assertEqual(len(self.order_buckets(bucket='  day  ')), 3)
-
-
-class DashboardV2PrecedenceTests(DashboardV2Base):
-    """When both are supplied ``bucket`` wins — it never errors on the conflict."""
-
-    def test_bucket_overrides_a_disagreeing_period(self):
-        # period='ytd' alone is monthly (2 buckets); bucket='hour' must win (5).
-        self.assertEqual(len(self.order_buckets(period='ytd')), 2)
-        self.assertEqual(len(self.order_buckets(period='ytd', bucket='hour')), 5)
-
-    def test_bucket_overrides_in_the_coarsening_direction_too(self):
-        # period='day' alone is hourly (5); bucket='year' must win (1).
-        self.assertEqual(len(self.order_buckets(period='day')), 5)
-        self.assertEqual(len(self.order_buckets(period='day', bucket='year')), 1)
-
-    def test_an_unknown_bucket_400s_even_beside_a_valid_period(self):
-        # Precedence is not a fallback: `bucket` winning means a BAD `bucket` is an
-        # error, not a quiet demotion to the legacy path.
-        result = self.dashboard(period='day', bucket='nonsense')
-        self.assertEqual(result['status'], 400)
-
-
-class DashboardV2VocabularyCollisionTests(DashboardV2Base):
-    """THE reason ``bucket`` is a new parameter rather than an alias of ``period``.
-
-    The same string means DIFFERENT granularities in the two vocabularies::
-
-        'day'    period -> TruncHour     bucket -> TruncDay
-        'month'  period -> TruncDay      bucket -> TruncMonth
-
-    so no alias table could express both, and a hard cutover would have broken the
-    deployed frontend in the window between this backend auto-deploying on merge and
-    TIMEFRAME-01B shipping. If you are reading this because you want to merge
-    ``TRUNC_MAP`` and ``BUCKET_TRUNC`` into one map: this is what would break.
-    """
-
-    def test_day_means_hourly_as_a_period_and_daily_as_a_bucket(self):
-        self.assertEqual(len(self.order_buckets(period='day')), 5)   # hourly
-        self.assertEqual(len(self.order_buckets(bucket='day')), 3)   # daily
-        self.assertNotEqual(
-            self.order_buckets(period='day'), self.order_buckets(bucket='day'),
-        )
-
-    def test_month_means_daily_as_a_period_and_monthly_as_a_bucket(self):
-        self.assertEqual(len(self.order_buckets(period='month')), 3)  # daily
-        self.assertEqual(len(self.order_buckets(bucket='month')), 2)  # monthly
-        self.assertNotEqual(
-            self.order_buckets(period='month'), self.order_buckets(bucket='month'),
-        )
-
-
-class DashboardV2PreviousWindowTests(DashboardV2Base):
-    """The comparison window is a pure function of the DATES, never the bucketing.
-
-    ``previous_totals`` / ``previous_total`` come from ``.aggregate()`` /
-    ``.count()`` over a window derived only from ``(date_to - date_from)``, so they
-    must be identical across every granularity. (``previous_series`` is deliberately
-    NOT asserted here — it runs through the same ``trunc_fn`` and is
-    bucket-dependent by design.)
-    """
-
-    def test_previous_totals_are_identical_across_every_bucket(self):
-        results = {
-            b: self.dashboard(bucket=b)['data']
-            for b in ('hour', 'day', 'week', 'month', 'year')
-        }
-        baseline = results['hour']['revenue']['previous_totals']
-        # The 2023 order makes this a real comparison, not a pair of zeros.
-        self.assertEqual(baseline['gross'], '1000.00')
-        for name, data in results.items():
-            with self.subTest(bucket=name):
-                self.assertEqual(data['revenue']['previous_totals'], baseline)
-                self.assertEqual(data['orders']['previous_total'], 1)
-
-    def test_previous_totals_are_identical_across_legacy_periods_too(self):
-        baseline = self.dashboard(period='day')['data']['revenue']['previous_totals']
-        for period in ('week', 'month', 'ytd'):
-            with self.subTest(period=period):
-                data = self.dashboard(period=period)['data']
-                self.assertEqual(data['revenue']['previous_totals'], baseline)
 
 
 class DashboardV2WeekBucketTests(DashboardV2Base):
@@ -492,12 +401,93 @@ class DashboardV2WeekBucketTests(DashboardV2Base):
                           '2024-09-09T00:00:00+03:00'])
 
 
-class DashboardV2EndpointTests(DashboardV2Base):
-    """The endpoint threads ``bucket`` through and maps the 400 to an HTTP status.
+class DashboardV2ResponseShapeTests(DashboardV2Base):
+    """The payload carries ONE window, and the primary window's numbers are pinned.
 
-    ``bucket`` is read with NO default, so absence stays distinguishable from an
-    empty string at the HTTP layer too.
+    DASH-REMOVE-LEGACY-00 removed the server-computed preceding-equal-length
+    comparison. The frontend now issues a second call for the basis the user selected
+    — which the server cannot infer — so re-adding these fields would restore a
+    second aggregate pass over a second date window on every dashboard load, per
+    card, for nobody.
     """
+
+    LEGACY_FIELDS = ('previous_series', 'previous_totals', 'previous_total')
+
+    def test_no_previous_period_fields_survive_anywhere(self):
+        for bucket in ('hour', 'day', 'week', 'month', 'year'):
+            data = self.dashboard(bucket=bucket)['data']
+            for card in ('revenue', 'orders'):
+                for field in self.LEGACY_FIELDS:
+                    with self.subTest(bucket=bucket, card=card, field=field):
+                        self.assertNotIn(field, data[card])
+
+    def test_the_card_shapes_are_exactly_what_remains(self):
+        data = self.dashboard(bucket='day')['data']
+        self.assertEqual(set(data['revenue']), {'series', 'totals'})
+        self.assertEqual(set(data['orders']), {'series', 'breakdown', 'total'})
+
+    def test_the_primary_window_totals_are_unchanged(self):
+        # Five in-range paid orders at 1000.00 gross / 200.00 savings / 750.00
+        # actual, none refunded — and the sixth, 2023 order excluded by the window.
+        # These are the pre-refactor values; the previous window never fed them.
+        totals = self.dashboard(bucket='day')['data']['revenue']['totals']
+        self.assertEqual(totals, {
+            'gross': '5000.00',
+            'discounts': '1000.00',
+            'refunds': '0.00',
+            'net': '4000.00',
+        })
+
+    def test_the_primary_window_order_total_is_unchanged(self):
+        orders = self.dashboard(bucket='day')['data']['orders']
+        self.assertEqual(orders['total'], 5)
+        self.assertEqual(
+            {row['status']: row['count'] for row in orders['breakdown']},
+            {'paid': 5, 'open': 0, 'cancelled': 0, 'refunded': 0},
+        )
+
+    def test_the_totals_do_not_move_with_the_bucket(self):
+        # Granularity reshapes the SERIES, never the totals.
+        baseline = self.dashboard(bucket='hour')['data']
+        for bucket in ('day', 'week', 'month', 'year'):
+            with self.subTest(bucket=bucket):
+                data = self.dashboard(bucket=bucket)['data']
+                self.assertEqual(data['revenue']['totals'],
+                                 baseline['revenue']['totals'])
+                self.assertEqual(data['orders']['total'],
+                                 baseline['orders']['total'])
+
+
+class DashboardV2QueryCountTests(DashboardV2Base):
+    """The point of removing the previous window: it halved the aggregation.
+
+    Each card used to run its ENTIRE aggregation twice — once per window — so the
+    second window cost 5 queries in revenue (paid buckets, refund buckets, three
+    aggregates) and 2 in orders (bucket rows, count). Pinned because the shape of
+    the deletion is invisible in a response assertion.
+    """
+
+    def test_revenue_and_orders_each_query_one_window(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from reports_app.controllers.restaurant import dashboard as d
+        from misc_app.controllers.clean_dates import clean_dates
+
+        dates = clean_dates(date_from=RANGE_FROM, date_to=RANGE_TO)
+        args = (str(self.restaurant.id), dates['date_from'], dates['date_to'],
+                d.BUCKET_TRUNC['day'])
+
+        with CaptureQueriesContext(connection) as ctx:
+            d._build_revenue(*args)
+        self.assertEqual(len(ctx), 5)          # was 10
+
+        with CaptureQueriesContext(connection) as ctx:
+            d._build_orders(*args)
+        self.assertEqual(len(ctx), 6)          # was 8 (4 are the breakdown counts)
+
+
+class DashboardV2EndpointTests(DashboardV2Base):
+    """The endpoint threads ``bucket`` through and maps the 400 to an HTTP status."""
 
     def url(self, query=''):
         return (
@@ -519,16 +509,31 @@ class DashboardV2EndpointTests(DashboardV2Base):
         resp = self.client.get(self.url('bucket=year'), **self.auth())
         self.assertEqual(resp.status_code, 200, resp.content)
         # Proof the parameter was threaded: yearly collapses the fixture to ONE
-        # bucket, where the endpoint's default period ('day') would give five.
+        # bucket, where hourly would give five.
         self.assertEqual(len(resp.json()['data']['orders']['series']), 1)
 
-    def test_an_empty_bucket_query_parameter_is_http_200(self):
-        # A stray `&bucket=` must not 400; it falls back to the period default.
+    def test_an_empty_bucket_query_parameter_is_http_400(self):
+        # A stray `&bucket=` used to fall back to the legacy period default. There
+        # is no fallback left, so it is now the same 400 as any other absence.
         resp = self.client.get(self.url('bucket='), **self.auth())
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(len(resp.json()['data']['orders']['series']), 5)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn('hour', resp.json()['message'])
 
-    def test_no_bucket_parameter_keeps_the_legacy_period_behaviour(self):
+    def test_no_bucket_parameter_is_http_400(self):
+        resp = self.client.get(self.url(), **self.auth())
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertNotIn('data', resp.json())
+
+    def test_a_stray_period_parameter_is_ignored_not_honoured(self):
+        # `period` is gone. A caller still sending it gets the 400 for the absent
+        # `bucket` — never the granularity the retired parameter used to select.
         resp = self.client.get(self.url('period=ytd'), **self.auth())
+        self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_period_no_longer_selects_a_granularity(self):
+        # The collision that forced `bucket` to be a NEW parameter rather than an
+        # alias: 'day' meant hourly as a period and daily as a bucket. Only the
+        # bucket meaning survives, so this is daily (3) and never hourly (5).
+        resp = self.client.get(self.url('period=day&bucket=day'), **self.auth())
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(len(resp.json()['data']['orders']['series']), 2)
+        self.assertEqual(len(resp.json()['data']['orders']['series']), 3)

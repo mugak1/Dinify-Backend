@@ -395,6 +395,65 @@ revenue, dashboard and diner-analytics figures; it cannot be reviewed.
 
 ---
 
+## 10. `dashboard-v2` requires `bucket`, and no longer returns a previous-period comparison
+
+**Endpoint:** `GET /api/v1/reports/restaurant/dashboard-v2/`
+
+**Affected users:** none in practice — every deployed caller sends `bucket` and none
+reads the removed fields. That makes this change *safe*, not *non-breaking*: the wire
+contract did narrow, and a caller written against the old one would break.
+
+### `bucket` is now required
+
+**Why:** `bucket` was introduced (DASH-PERIOD-00) alongside a legacy `period`
+parameter keyed on the caller's UI selection rather than on a granularity — `period=day`
+meant "the user picked Day, so bucket by *hour*". Absent, empty and whitespace-only
+`bucket` fell through to `period` and *its* fail-open hourly default. The frontend
+stopped sending `period`, so it has been removed; with it goes the only fallback.
+
+There is no defensible default left to invent. This endpoint bounds neither the date
+range nor the bucket count, so a guessed granularity returns an enormous payload rather
+than an error the caller can see — `bucket=hour` over a 200-day range is ~4,800 buckets.
+
+**Before:** omitting `bucket` returned 200 with hourly buckets.
+
+**After:**
+```json
+400 {"status": 400,
+     "message": "Missing bucket; expected one of hour, day, week, month, year"}
+```
+
+Same envelope and same accepted-value tail as an unrecognised value, which reads
+`Unsupported bucket 'x'; expected one of …`. The lead clause is the only difference, so
+a caller can tell "you sent nothing" from "you sent something wrong". The accepted-value
+list is derived from the vocabulary itself, so it cannot go stale.
+
+`period` is no longer read at all. A caller still sending it gets the `Missing bucket`
+400, never the granularity `period` used to select.
+
+### `previous_totals` / `previous_total` / `previous_series` are gone
+
+**Why:** the server computed a preceding-equal-length window from the date range alone.
+The frontend now issues a second call for the comparison basis the user actually
+selected, which the server cannot infer. Each card had been running its **entire**
+aggregation twice — once per window — so removing it drops **7 queries per dashboard
+load** (`revenue` 10→5, `orders` 8→6).
+
+**Before:** `data.revenue` was `{series, previous_series, totals, previous_totals}` and
+`data.orders` was `{series, previous_series, breakdown, total, previous_total}`.
+
+**After:** `data.revenue` is `{series, totals}`; `data.orders` is
+`{series, breakdown, total}`.
+
+**Unchanged:** the six top-level `data` keys, the primary window's series and totals,
+the `at` key format (full ISO-8601 with the `+03:00` EAT offset), the bucket vocabulary,
+and the `{status, message}` error envelope.
+
+**Frontend action required:** none — both changes were made after the frontend had
+already migrated off `period` and off every previous-period field.
+
+---
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
