@@ -55,6 +55,27 @@ one-click **"This year"** preset.
 > sends `weekly` today (the FE column above is unchanged and still accurate); it is
 > accepted-but-unrequested exactly as `quarterly` is.
 
+> **CONTRACT — the series is DENSE (BUCKETS-ZEROFILL-00).** `sales-trends` returns
+> **one row per period in the requested window**, in ascending order, with periods
+> that had no orders emitted as zeros (`count: 0`, `revenue: 0`, `discount: 0`)
+> rather than omitted. The axis comes from
+> `common/bucketing.py::period_boundaries`, and it holds for every `category`.
+> A consumer may rely on this: the row count is a function of the window and the
+> granularity alone, never of whether the restaurant traded.
+>
+> Two consequences worth stating plainly. **The frontend's `normalizeSeries`
+> gap-fill is now a no-op** — it finds nothing to fill. It is deliberately being
+> left in place as a safety net, not removed. And the **partial-edge week is now
+> always emitted**: a window opening mid-week starts at the preceding Monday
+> whether or not that week traded, because clipping it would leave the window's
+> first days with no bucket to land in. The caveat above stops being a caveat about
+> *which keys appear* and becomes one purely about *where the first key falls*.
+>
+> This also closes, for `sales-trends`, the "graph payload has no series at all on
+> an empty window" shape: `make_graph_series_data` derives its series names from
+> the rows it is given, so a dense axis means `Revenue` and `Count` lines always
+> exist, all-zero rather than absent.
+
 ### 2. sales-listing  (GET · `api.loadAllPages`)
 | Dim | FE | BE | |
 |---|---|---|---|
@@ -201,11 +222,49 @@ one-click **"This year"** preset.
 > bucket labelled with the **preceding Monday**, a key before `from`, holding only the
 > in-range days.
 >
-> **Open seam — no bucket-count cap.** Fail-closing the vocabulary stops the *typo*
-> path, but nothing bounds the bucket count of a *valid* request: `bucket=hour` over a
-> 200-day range is still ~4,800 buckets, and unlike `sales-trends` (`TREND_CAPS`) this
-> endpoint has no per-granularity date cap. Recommended follow-up, sized once the
-> frontend's timeframe ladder pins the ranges it actually requests.
+> Note the enumerator sentence above is now a statement about FORMATTING only. Both
+> endpoints emit a dense axis themselves (below), so the frontend no longer has to
+> generate one to fill gaps — it reads the keys it is given.
+
+> **CONTRACT — both series are DENSE (BUCKETS-ZEROFILL-00).** `revenue.series` and
+> `orders.series` each return **one row per bucket in the requested window**, in
+> ascending order, with buckets that had no orders emitted as zeros (`gross`,
+> `discounts`, `refunds` = `'0.00'`; `count` = `0`) rather than omitted. Both cards
+> share ONE axis, key-for-key, from
+> `common/bucketing.py::period_boundaries` — the same helper `sales-trends` uses,
+> which spans both vocabularies ('hour' AND 'quarter') precisely so the two
+> TRUNCATION maps still do not have to merge.
+>
+> This is what the Dashboard chart actually needed: it does no client-side filling,
+> so an omitted bucket made the line join its neighbours and imply trading that did
+> not happen. `adaptRevenueSeries` is a bare `.map`, so dense rows in means a dense
+> series out — **no frontend change was required**.
+>
+> **Watch the basis if you touch `_build_revenue`.** Its series is driven by PAID
+> orders with refunds joined in, so a bucket holding only a refund has no paid row.
+> The fill INSERTS where that basis has no bucket and never overwrites a real row,
+> and it does not widen the axis to `paid ∪ refunded` — the axis is the window. A
+> refund-only bucket therefore now surfaces its real refund (it was absent
+> entirely before) rather than a `'0.00'` that would contradict `totals.refunds`.
+>
+> **Open seam — no bucket-count cap. BUCKETS-ZEROFILL-00 made it worse, deliberately.**
+> Fail-closing the vocabulary stops the *typo* path, but nothing bounds the bucket
+> count of a *valid* request: `bucket=hour` over a 200-day range is ~4,800 buckets,
+> and unlike `sales-trends` (`TREND_CAPS`) this endpoint has no per-granularity date
+> cap. That figure used to be a *worst case*, reached only if every hour traded; with
+> a dense series **it is now the floor** — an empty 200-day hourly window returns
+> ~4,800 zero rows where it previously returned few or none. The seam PRE-EXISTS this
+> change; the fill did not create it, it removed the sparsity that was accidentally
+> masking it.
+>
+> **Named follow-up — DASH-BUCKET-CAP-00.** Bound the bucket count in
+> `_resolve_bucket_trunc`, which already owns the granularity's one failure path:
+> compute `len(period_boundaries(date_from, date_to, key))` and return
+> `_bucket_error(...)` — the existing 400 envelope, so no new response shape — when it
+> exceeds a limit. A cap in the low thousands covers every range the frontend's
+> timeframe ladder emits (`hour` is only selected for short windows) while refusing a
+> hand-crafted multi-year hourly request. It needs the ladder's real ranges to pick the
+> number, which is the only reason it is not done here.
 >
 > DASH-WEEK-00 left this seam exactly as it found it. `week` is strictly coarser than
 > the already-uncapped `day`, so it cannot widen the worst case, and `sales-trends`'
@@ -241,6 +300,7 @@ one-click **"This year"** preset.
 - **G1 — `payment_mode` vocab gap** (BE `momo/card/cash` vs FE union `MTN MoMo/Airtel MoMo/Cash`). Already documented in CLAUDE.md; arrives properly only with the PSP (Gate 2 — BE cannot distinguish MTN vs Airtel, stores only `momo`). Degrades gracefully: Transactions tab maps via `methodDisplay` (`transactions-view.ts:23-33`, unknown→raw). FE casts `as PaymentMode` at `reports-adapter.ts:70,113` (type-lie, runtime-safe). BE `finance_app/serializers.py:39`. *Cosmetic sub-item:* the **Sales** per-order "Method" column renders the raw token (`format:'text'`, `sales-report.component.ts:61`) — would show `'momo'` literally on flip.
 - **G2 — Refunds in Transactions** have no backend source today. BE `SUMMARY_TYPES = [order_payment, subscription]` (`transactions.py:48-51`) excludes `order_refund`, so the summary's `by_type` carries no refund row → FE "Refunded" bucket reads 0 and is flagged `mockOnly` (`transactions-view.ts:79,93,109,125,129`). Correctly slotted as dormant. (Gate 2.)
 - **G3 — sales-hourly dormant FE branch** — contract verified clean for the later flip: `{hour 0–23, count, revenue, discount}` × 24 zero-filled, identity-mapped. FE renders an 11:00–22:00 display window (`sales-view.ts:209-229`). Ready.
+- **G4 — DASH-BUCKET-CAP-00: `dashboard-v2` has no bucket-count cap.** Pre-exists BUCKETS-ZEROFILL-00, which made it sharper rather than creating it: `bucket=hour` over a 200-day range is ~4,800 rows, and with a dense series that is now the **floor** rather than a worst case. Shape of the fix is scoped in §9 above — cap in `_resolve_bucket_trunc` off `len(period_boundaries(...))`, returning the existing `_bucket_error` 400 envelope so no new response shape is introduced. Deferred only because picking the number needs the frontend timeframe ladder's real ranges. Not a flip-blocker: every range the ladder actually emits is small, and `hour` is selected only for short windows.
 
 ### COSMETIC (label/format/tidy only — no functional break)
 
@@ -257,7 +317,7 @@ one-click **"This year"** preset.
 2. **DRF `DateTimeField` wire format** for `time_created` / `last_order_date` vs the FE `'datetime'` formatter — assumed standard ISO 8601; unverified live.
 3. **transactions.py / diners.py listing return shapes** — `sales.py` was line-read directly; the other two were taken from cross-repo exploration (bare array in `data`). High confidence, not independently line-verified here.
 4. **Live enum reality** — whether production data ever carries a `transaction_type/status/payment_mode` value outside the documented sets. FE fallbacks humanize unknowns, so low risk.
-5. **Empty/absent `data` on a 200** with zero rows — FE treats `[]`/`{}` as truthy (fine); a literal `null` `data` would coerce to an error/empty state. Unverified.
+5. **Empty/absent `data` on a 200** with zero rows — FE treats `[]`/`{}` as truthy (fine); a literal `null` `data` would coerce to an error/empty state. Unverified. *Narrowed by BUCKETS-ZEROFILL-00:* `sales-trends` and both `dashboard-v2` series can no longer return an empty array for a valid window — a zero-trading window returns a full axis of zero rows. The blind spot still stands for the listing reports, which remain legitimately `[]` when empty.
 
 > Per the flip-time gate (CLAUDE.md › Mock Data Pattern › ReportsService flip-time gate),
 > all five blind spots are exactly what gate step (2) ("re-verify ALL FOUR reports

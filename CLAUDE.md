@@ -560,7 +560,24 @@ with PostgreSQL on AWS RDS.
   `bucketing.py` (single grouped-query, EAT-aligned period bucketing — no
   per-period loop). Rebuild contract: RAW enum values (the frontend owns display
   formatting — NO backend `.title()`-casing), a stable 0-filled shape, and
-  grouped queries (no per-bucket / per-row N+1). Rebuilt: Sales
+  grouped queries (no per-bucket / per-row N+1).
+  **BUCKET SERIES ARE DENSE (BUCKETS-ZEROFILL-00)** — `sales-trends` and BOTH
+  `dashboard-v2` series (`revenue`, `orders`) return one row per bucket in the
+  requested window, empty ones zeroed, never omitted. `bucketing.py` states ONE
+  density policy for both of its paths: a grouped query can only return groups
+  that have rows, so the CALLER enumerates the axis and fills — hour-of-day onto
+  `range(24)` (a fixed domain), a period onto `period_boundaries(date_from,
+  date_to, period)` (window-dependent, so the module derives it). `bucket_sales`
+  itself takes NO window and its signature must stay that way — a caller may hand
+  it an unbounded queryset. `BOUNDARY_PERIODS` spans BOTH bucketing vocabularies
+  (`hour` AND `quarter`) precisely so `PERIOD_TRUNC` and `BUCKET_TRUNC` do NOT
+  have to merge; adding `hour` to the axis did not add it to `PERIOD_TRUNC`, and
+  the documented asymmetry between those two maps still stands. When filling
+  `dashboard-v2`'s `revenue` series, WATCH THE BASIS: it is driven by PAID orders
+  with refunds joined in, so the fill inserts only where that basis has no bucket,
+  never overwrites a real row, and never widens the axis to `paid ∪ refunded` — a
+  refund-only bucket surfaces its real refund, not a `0.00` contradicting
+  `totals.refunds`. Rebuilt: Sales
   listing/trends (PR #165, `sales.py`), Transactions summary/listing
   (PR #166, `transactions.py`), Diners summary/listing (PR #167, `diners.py`),
   and Menu summary (PR #168, `menu.py`; the menu-summary date-range cap
@@ -587,7 +604,10 @@ with PostgreSQL on AWS RDS.
   `dashboard-v2` takes `bucket` ∈ {hour, day, week, month, year} (`BUCKET_TRUNC`)
   and `bucket` is REQUIRED — absent/empty/whitespace-only is a 400 alongside
   unknown values, because the endpoint caps neither the date range nor the bucket
-  count and so has no defensible default granularity. Its legacy `period`
+  count and so has no defensible default granularity. That missing bucket-count
+  cap is a KNOWN OPEN SEAM, scoped as `DASH-BUCKET-CAP-00` in
+  `REPORTS_CONTRACT_AUDIT.md` §9/G4: it pre-dates the zero-fill, but the fill made
+  `bucket=hour` over a long window a payload FLOOR rather than a worst case. Its legacy `period`
   selector and the server-computed previous-period comparison
   (`previous_totals` / `previous_total` / `previous_series` on the `revenue` and
   `orders` cards) were REMOVED once the frontend stopped using them — the latter

@@ -357,6 +357,11 @@ class SalesTrendsWeeklyTests(SalesReportBase):
     Calendar facts these cases rely on: 2024-03-04 and 2024-03-11 are Mondays;
     2024-03-01 (Fri) and 2024-03-03 (Sun) both sit in the week of 2024-02-26;
     2024-03-20 (Wed) sits in the week of 2024-03-18.
+
+    The series is DENSE (BUCKETS-ZEROFILL-00): every week in the window is
+    emitted, traded or not. So these cases assert the whole axis and read the
+    weeks that matter by COUNT — a week landing in the right bucket now shows
+    up as which key holds the order, not as which key exists.
     """
 
     def test_weekly_table_buckets_by_week(self):
@@ -372,12 +377,16 @@ class SalesTrendsWeeklyTests(SalesReportBase):
             trend_category='weekly', trend_result='table',
         )['data']
 
-        # Ascending, and every key is the Monday of its week.
+        # Ascending, and every key is the Monday of its week. March 2024 spans
+        # five: 02-26 (the partial-edge week holding 03-01..03-03) through 03-25.
         self.assertEqual([r['period'] for r in table],
-                         ['2024-03-04', '2024-03-11', '2024-03-18'])
-        self.assertEqual([r['count'] for r in table], [2, 1, 1])
+                         ['2024-02-26', '2024-03-04', '2024-03-11',
+                          '2024-03-18', '2024-03-25'])
+        # The two untraded weeks are present and zeroed, not absent.
+        self.assertEqual([r['count'] for r in table], [0, 2, 1, 1, 0])
         self.assertEqual([r['revenue'] for r in table],
-                         [Decimal('1500.00'), Decimal('750.00'), Decimal('750.00')])
+                         [0, Decimal('1500.00'), Decimal('750.00'),
+                          Decimal('750.00'), 0])
 
     def test_weekly_buckets_are_monday_anchored(self):
         # Sunday 03-03 belongs to the PREVIOUS week (Monday 02-26); Monday 03-04
@@ -408,9 +417,13 @@ class SalesTrendsWeeklyTests(SalesReportBase):
             trend_category='weekly', trend_result='table',
         )['data']
 
-        self.assertEqual([r['period'] for r in table], ['2024-03-04'])
-        # Bucketed in UTC it would have fallen into the preceding week.
-        self.assertNotIn('2024-02-26', [r['period'] for r in table])
+        # Both week keys exist either way now that the series is zero-filled, so
+        # the discriminator is WHICH ONE HOLDS THE ORDER — under a UTC truncation
+        # the counts would be reversed. (Same technique as the dashboard sibling,
+        # tests_dashboard_report.test_the_week_boundary_is_eat_not_utc.)
+        counts = {r['period']: r['count'] for r in table}
+        self.assertEqual(counts['2024-03-04'], 1)
+        self.assertEqual(counts['2024-02-26'], 0)
 
     def test_weekly_first_bucket_is_the_preceding_monday_for_a_midweek_start(self):
         # The documented partial-edge week: 2024-03-01 is a Friday, so its bucket
@@ -424,8 +437,12 @@ class SalesTrendsWeeklyTests(SalesReportBase):
             trend_category='weekly', trend_result='table',
         )['data']
 
-        self.assertEqual([r['period'] for r in table], ['2024-02-26'])
+        # The axis STARTS at that preceding Monday — it has to, or the order
+        # placed on 03-01 would have no bucket to land in.
+        self.assertEqual([r['period'] for r in table],
+                         ['2024-02-26', '2024-03-04'])
         self.assertEqual(table[0]['count'], 1)
+        self.assertEqual(table[1]['count'], 0)
 
     def test_weekly_371_day_cap(self):
         # 2024-01-01 -> 2025-01-08 is 373 days: over the 53-week cap.
@@ -460,11 +477,144 @@ class SalesTrendsWeeklyTests(SalesReportBase):
         )['data']
 
         self.assertEqual(data['xaxis']['title']['text'], 'Weeks')
+        # The graph axis inherits the dense table: five weeks, three untraded.
         self.assertEqual(data['xaxis']['categories'],
-                         ['2024-03-04', '2024-03-11'])
+                         ['2024-02-26', '2024-03-04', '2024-03-11',
+                          '2024-03-18', '2024-03-25'])
         series_by_name = {s['name']: s['data'] for s in data['series']}
         self.assertIn('Revenue', series_by_name)
-        self.assertEqual(series_by_name['Count'], [2, 1])
+        self.assertEqual(series_by_name['Count'], [0, 2, 1, 0, 0])
+
+
+class SalesTrendsZeroFillTests(SalesReportBase):
+    """Every period in the window is reported; empty ones are zeros, not gaps.
+
+    BUCKETS-ZEROFILL-00. A grouped query can only return groups that have rows, so
+    a period that traded nothing used to vanish from the series — a chart then
+    joined its neighbours into a straight line and implied trading that did not
+    happen. The Reports frontend compensated for this in the browser; the Dashboard
+    did not, which is why the fill belongs on the server.
+
+    ``trends`` uses each granularity's own window here, so the gap sits in the
+    MIDDLE of the seeded data rather than merely at a tail.
+    """
+
+    def trends(self, date_from, date_to, category):
+        result = generate_restaurant_sales_trends(
+            restaurant_id=self.restaurant.id,
+            date_from=date_from, date_to=date_to,
+            trend_category=category, trend_result='table',
+        )
+        self.assertEqual(result['status'], 200, result)
+        return result['data']
+
+    def test_daily_gap_is_a_zero_bucket(self):
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 1))
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 3, 4))
+
+        table = self.trends('2024-03-01', '2024-03-05', 'daily')
+
+        self.assertEqual([r['period'] for r in table],
+                         ['2024-03-01', '2024-03-02', '2024-03-03',
+                          '2024-03-04', '2024-03-05'])
+        self.assertEqual([r['count'] for r in table], [1, 0, 0, 1, 0])
+        self.assertEqual([r['revenue'] for r in table],
+                         [Decimal('750.00'), 0, 0, Decimal('750.00'), 0])
+        self.assertEqual([r['discount'] for r in table],
+                         [Decimal('200.00'), 0, 0, Decimal('200.00'), 0])
+
+    def test_weekly_gap_is_a_zero_bucket(self):
+        # 03-04 and 03-25 are Mondays; the two weeks between them traded nothing,
+        # as did the partial-edge week of 02-26.
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 4))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 25))
+
+        table = self.trends('2024-03-01', '2024-03-31', 'weekly')
+
+        self.assertEqual([r['period'] for r in table],
+                         ['2024-02-26', '2024-03-04', '2024-03-11',
+                          '2024-03-18', '2024-03-25'])
+        self.assertEqual([r['count'] for r in table], [0, 1, 0, 0, 1])
+
+    def test_monthly_gap_is_a_zero_bucket(self):
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 1, 15))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 4, 15))
+
+        table = self.trends('2024-01-01', '2024-05-31', 'monthly')
+
+        self.assertEqual([r['period'] for r in table],
+                         ['2024-01', '2024-02', '2024-03', '2024-04', '2024-05'])
+        self.assertEqual([r['count'] for r in table], [1, 0, 0, 1, 0])
+
+    def test_annual_gap_is_a_zero_bucket(self):
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 6, 15))
+        self.make_order(status=OrderStatus_Served, when=utc(2026, 6, 15))
+
+        table = self.trends('2024-01-01', '2026-12-31', 'annual')
+
+        self.assertEqual([r['period'] for r in table], ['2024', '2025', '2026'])
+        self.assertEqual([r['count'] for r in table], [1, 0, 1])
+
+    def test_a_wholly_empty_window_is_a_full_zero_axis_not_an_empty_list(self):
+        table = self.trends('2024-03-01', '2024-03-05', 'daily')
+
+        self.assertEqual(len(table), 5)
+        self.assertEqual([r['count'] for r in table], [0] * 5)
+        self.assertEqual([r['revenue'] for r in table], [0] * 5)
+
+    def test_an_empty_window_still_produces_a_graph_series(self):
+        # make_graph_series_data derives its series NAMES from the rows it is
+        # given, so an empty table used to yield a payload with no series at all.
+        # A dense axis means the graph always has a Revenue and a Count line, even
+        # when every point is zero — the shape the frontend can rely on.
+        data = generate_restaurant_sales_trends(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-03-01', date_to='2024-03-03',
+            trend_category='daily', trend_result='graph',
+        )['data']
+
+        self.assertEqual(data['xaxis']['categories'],
+                         ['2024-03-01', '2024-03-02', '2024-03-03'])
+        series_by_name = {s['name']: s['data'] for s in data['series']}
+        self.assertEqual(series_by_name['Count'], [0, 0, 0])
+        self.assertEqual(series_by_name['Revenue'], [0, 0, 0])
+
+    def test_the_fill_adds_zeros_and_moves_no_other_number(self):
+        # "Zeros add nothing" as an assertion rather than a claim: the populated
+        # rows carry exactly the figures the grouping produced, and the dense
+        # series still sums to the same totals over the same seeded data.
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 1))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 1))
+        self.make_order(status=OrderStatus_Paid, when=utc(2024, 3, 4))
+        # Not a sale — must stay excluded on both sides of the fill.
+        self.make_order(status=OrderStatus_Cancelled, when=utc(2024, 3, 2))
+
+        table = self.trends('2024-03-01', '2024-03-05', 'daily')
+        populated = [r for r in table if r['count']]
+
+        self.assertEqual(populated, [
+            {'period': '2024-03-01', 'count': 2,
+             'revenue': Decimal('1500.00'), 'discount': Decimal('400.00')},
+            {'period': '2024-03-04', 'count': 1,
+             'revenue': Decimal('750.00'), 'discount': Decimal('200.00')},
+        ])
+        self.assertEqual(sum(r['count'] for r in table), 3)
+        self.assertEqual(sum(r['revenue'] for r in table), Decimal('2250.00'))
+        self.assertEqual(sum(r['discount'] for r in table), Decimal('600.00'))
+
+    def test_the_hourly_axis_is_still_a_fixed_24_regardless_of_window(self):
+        # The hourly path fills onto range(24), not onto the window, and this
+        # change does not touch it: a five-day window with gaps is still 24 rows.
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 1))
+        self.make_order(status=OrderStatus_Served, when=utc(2024, 3, 4))
+
+        data = generate_restaurant_sales_hourly(
+            restaurant_id=self.restaurant.id,
+            date_from='2024-03-01', date_to='2024-03-05',
+        )['data']
+
+        self.assertEqual([row['hour'] for row in data], list(range(24)))
+        self.assertEqual(data[12]['count'], 2)
 
 
 class SalesHourlyTests(SalesReportBase):

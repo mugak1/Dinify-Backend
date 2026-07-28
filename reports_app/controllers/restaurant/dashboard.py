@@ -12,6 +12,7 @@ from django.utils import timezone
 from orders_app.models import Order, OrderItem
 from restaurants_app.models import Table
 from finance_app.models import DinifyTransaction
+from reports_app.controllers.common.bucketing import period_boundaries
 from dinify_backend.configss.string_definitions import (
     PaymentStatus_Paid, OrderStatus_Cancelled,
     OrderStatus_Refunded,
@@ -184,6 +185,12 @@ def summarize_revenue(restaurant_id: str):
 # needs it" rather than an oversight. The asymmetry IS the boundary between them.
 # No 'quarter' entry here for exactly the reason 'week' had none until now — the
 # dashboard ladder does not emit one.
+#
+# Both endpoints DO now share `common.bucketing.period_boundaries` to enumerate the
+# zero-fill axis, and that is not the unification disclaimed above: it maps nothing
+# to a truncation function and carries no endpoint's vocabulary opinion, so it spans
+# both ('hour' AND 'quarter') without either map gaining an entry. This map is still
+# the sole authority on what `bucket` values this endpoint accepts.
 BUCKET_TRUNC = {
     'hour': TruncHour,
     'day': TruncDay,
@@ -209,9 +216,16 @@ def _bucket_error(lead):
 def _resolve_bucket_trunc(bucket):
     """Resolve the chart truncation from the ``bucket`` granularity.
 
-    :returns: ``(trunc_fn, None)`` on success, or ``(None, error)`` where ``error``
-        is the ``{'status': 400, 'message': ...}`` envelope the endpoint turns into
-        an HTTP 400.
+    :returns: ``(trunc_fn, key, None)`` on success, or ``(None, None, error)`` where
+        ``error`` is the ``{'status': 400, 'message': ...}`` envelope the endpoint
+        turns into an HTTP 400.
+
+    The NORMALISED key is returned alongside the truncation because the series is
+    zero-filled: the builders need the granularity itself to enumerate the bucket
+    axis (``period_boundaries``), not just the function that truncates to it. It is
+    returned from here rather than re-derived at the call site so the strip below
+    happens in exactly one place — a caller stripping its own copy could disagree
+    with the value that was actually validated.
 
     ``bucket`` is REQUIRED. There is no default granularity to fall back to and no
     defensible one to invent: this endpoint caps neither the date range nor the bucket
@@ -222,11 +236,11 @@ def _resolve_bucket_trunc(bucket):
     """
     key = (bucket or '').strip()
     if not key:
-        return None, _bucket_error('Missing bucket')
+        return None, None, _bucket_error('Missing bucket')
     try:
-        return BUCKET_TRUNC[key], None
+        return BUCKET_TRUNC[key], key, None
     except KeyError:
-        return None, _bucket_error(f"Unsupported bucket '{key}'")
+        return None, None, _bucket_error(f"Unsupported bucket '{key}'")
 
 
 PAYMENT_LABEL_MAP = {
@@ -247,7 +261,7 @@ def _dec(value):
     return str(Decimal(value).quantize(Decimal('0.01')))
 
 
-def _build_revenue(restaurant_id, date_from, date_to, trunc_fn):
+def _build_revenue(restaurant_id, date_from, date_to, trunc_fn, bucket):
     base = Order.objects.filter(
         restaurant=restaurant_id,
         is_test=False,
@@ -270,15 +284,27 @@ def _build_revenue(restaurant_id, date_from, date_to, trunc_fn):
         .order_by('bucket')
     )
     refund_map = {r['bucket']: r['refunds'] or _ZERO for r in refund_buckets}
+    paid_map = {r['bucket']: r for r in paid_buckets}
 
+    # Zero-fill onto the complete window axis so a bucket that traded nothing is
+    # reported as a zero rather than omitted — otherwise the chart joins its
+    # neighbours into a straight line and implies revenue that did not happen.
+    #
+    # WATCH THE BASIS. This series is driven by PAID orders, with refunds joined
+    # in; the fill INSERTS only where that basis has no bucket and never
+    # overwrites a real row. It also does not widen the axis to paid ∪ refunded:
+    # the axis is the window. Refunds keep exactly the lookup they always had, so
+    # a bucket holding a refund but no paid order — previously absent entirely —
+    # now surfaces its real refund instead of a 0.00 that would contradict
+    # totals.refunds below.
     series = []
-    for row in paid_buckets:
-        at = row['bucket'].isoformat() if row['bucket'] else None
+    for boundary in period_boundaries(date_from, date_to, bucket):
+        row = paid_map.get(boundary)
         series.append({
-            'at': at,
-            'gross': _dec(row['gross']),
-            'discounts': _dec(row['discounts']),
-            'refunds': _dec(refund_map.get(row['bucket'], _ZERO)),
+            'at': boundary.isoformat(),
+            'gross': _dec(row['gross'] if row else None),
+            'discounts': _dec(row['discounts'] if row else None),
+            'refunds': _dec(refund_map.get(boundary, _ZERO)),
         })
 
     gross_total = paid.aggregate(v=Sum('total_cost'))['v'] or _ZERO
@@ -322,7 +348,7 @@ def _build_payment_methods(restaurant_id, date_from, date_to):
     ]
 
 
-def _build_orders(restaurant_id, date_from, date_to, trunc_fn):
+def _build_orders(restaurant_id, date_from, date_to, trunc_fn, bucket):
     base = Order.objects.filter(
         restaurant=restaurant_id,
         is_test=False,
@@ -335,9 +361,15 @@ def _build_orders(restaurant_id, date_from, date_to, trunc_fn):
         .annotate(count=Count('id'))
         .order_by('bucket')
     )
+    # Zero-filled onto the same window axis as the revenue series above, so the
+    # two cards stay key-for-key aligned and a bucket with no orders reports 0.
+    by_bucket = {r['bucket']: r for r in buckets}
     series = [
-        {'at': r['bucket'].isoformat() if r['bucket'] else None, 'count': r['count']}
-        for r in buckets
+        {
+            'at': boundary.isoformat(),
+            'count': (by_bucket.get(boundary) or {}).get('count', 0),
+        }
+        for boundary in period_boundaries(date_from, date_to, bucket)
     ]
 
     breakdown = [
@@ -559,6 +591,14 @@ def generate_restaurant_dashboard_v2(
         nor the bucket count and so has no defensible one. A ``week`` bucket is keyed
         on the MONDAY of its week in EAT.
 
+    The ``revenue`` and ``orders`` series are DENSE: one row per bucket in the
+    requested window, empty ones zeroed, both cards on the same axis. A period that
+    traded nothing is a reportable zero, not an absence — omitted, it would make the
+    chart join its neighbours into a straight line and imply trading that did not
+    happen, and nothing downstream fills the gap. Note this interacts with the
+    uncapped bucket count above: the fill makes the bucket count a floor rather than
+    a worst case (see REPORTS_CONTRACT_AUDIT.md §9).
+
     The payload carries ONE window. The preceding-equal-length comparison this used to
     compute server-side (``previous_totals`` / ``previous_total`` / ``previous_series``)
     was removed in DASH-REMOVE-LEGACY-00: the frontend now issues a second call for the
@@ -570,7 +610,7 @@ def generate_restaurant_dashboard_v2(
     date_from = dates.get('date_from')
     date_to = dates.get('date_to')
 
-    trunc_fn, bucket_error = _resolve_bucket_trunc(bucket)
+    trunc_fn, bucket_key, bucket_error = _resolve_bucket_trunc(bucket)
     if bucket_error is not None:
         return bucket_error
 
@@ -578,13 +618,13 @@ def generate_restaurant_dashboard_v2(
         'status': 200,
         'data': {
             'revenue': _build_revenue(
-                restaurant_id, date_from, date_to, trunc_fn,
+                restaurant_id, date_from, date_to, trunc_fn, bucket_key,
             ),
             'payment_methods': _build_payment_methods(
                 restaurant_id, date_from, date_to,
             ),
             'orders': _build_orders(
-                restaurant_id, date_from, date_to, trunc_fn,
+                restaurant_id, date_from, date_to, trunc_fn, bucket_key,
             ),
             'popular_items': _build_popular_items(
                 restaurant_id, date_from, date_to,
