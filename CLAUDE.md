@@ -1278,6 +1278,18 @@ the catch-all `<str:config_detail>/` route.
   `non_fk_tenant_inventory.py` for tenant refs outside DRF relations
 - Then runs the full Django test suite — a missing migration or a model
   change without a generated migration will fail CI
+- **`test_settings.py` sets `PASSWORD_HASHERS` to `MD5PasswordHasher`, and that is
+  DELIBERATE — do not "fix" it.** Django 5.2's default `pbkdf2_sha256` runs 1,000,000
+  iterations (~258ms per hash) and the suite builds fixtures per test method (159 `setUp`
+  vs 2 `setUpTestData` across ~1,817 tests), so the default cost was paid hundreds of times
+  over for no test value: nothing in the repo asserts on the hash algorithm, prefix or
+  iteration count, and there are no pre-hashed fixtures. Measured on `users_app` alone
+  (146 tests): 344.7s → 5.6s. **TEST SETTINGS ONLY — `settings.py` declares no
+  `PASSWORD_HASHERS` and keeps the Django default; never add this there.** It will look
+  like a finding to a security sweep, which is exactly why it is written down here
+- Both `django test` invocations (the tenant-isolation gate and the full suite) pass
+  `--timing`, in `ci.yml` and `verify.sh` alike, so the remaining runtime stays
+  attributable. The two files mirror each other exactly — change them together
 - `scripts/verify.sh` is the committed source of truth that runs the same
   checks locally in the same order; the `/dinify-check` command defers to it.
   Run it and paste the output before raising a PR
