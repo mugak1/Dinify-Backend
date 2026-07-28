@@ -9,7 +9,7 @@ from rest_framework.test import APIClient
 
 from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
 from orders_app.controllers.con_orders import (
-    ConOrder, handle_add_order_items, NOT_ON_MENU_MESSAGE,
+    ConOrder, NOT_ON_MENU_MESSAGE,
 )
 from orders_app.controllers.services.create_order import _create_order
 from orders_app.controllers.orders.serializers import serialize_order_item_details
@@ -250,30 +250,20 @@ class TestOrderFunctions(TestCase):
         self.assertEqual(saved_option_item.options[0]['name'], 'Size')
         self.assertEqual(saved_option_item.options[0]['choices'], 'Small')
 
-    def test_handle_add_order_items(self):
-        order_record = Order.objects.get(
-            table=Table.objects.get(number=TEST_TABLE_NUMBER3)
-        )
-        old_total_cost = order_record.total_cost
+    def test_handle_add_order_items_is_deleted(self):
+        """`handle_add_order_items` is gone and must not come back.
 
-        menu_item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
-        menu_item2 = MenuItem.objects.get(name=TEST_MENU_ITEM2_NAME)
-        options_item = MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME)
+        It had no production caller — the `add-items` route was retired, and
+        nothing (including the action-string dispatch in V2OrdersEndpoint) reached
+        it. Re-mounting it as written would be worse than dead code: it locked
+        `OrderItem` and only then touched `Order`, the INVERSE of the live create
+        path's `Order -> OrderItem`, so the two together are a deadlock cycle. It
+        also took no admission advisory lock and did no lifecycle re-check, so it
+        would append items to an order at a suspended restaurant.
+        """
+        import orders_app.controllers.con_orders as con_orders
 
-        items = [
-            {'item': str(menu_item1.pk), 'quantity': 2},
-            {
-                'item': str(options_item.pk),
-                'quantity': 1,
-                'selected_modifiers': {TEST_OPTION_GROUP_ID: [TEST_OPTION_CHOICE_SMALL_ID]},
-                'extras': [str(menu_item1.pk), str(menu_item2.pk)],
-            },
-        ]
-        response = handle_add_order_items(order_id=str(order_record.pk), items=items)
-        self.assertEqual(response['status'], 200)
-
-        order_record.refresh_from_db()
-        self.assertGreater(order_record.total_cost, old_total_cost)
+        self.assertFalse(hasattr(con_orders, 'handle_add_order_items'))
 
     def test_add_order_item_merges_when_same_item_has_two_lines(self):
         # BUG-P2-5 regression: the same menu item can legitimately sit on an order

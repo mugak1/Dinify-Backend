@@ -1,7 +1,6 @@
 import logging
 
 from decimal import Decimal
-from django.db import transaction
 from django.utils import timezone
 from django.db.models import Sum
 from typing import Optional, Union
@@ -886,45 +885,3 @@ class ConOrder:
             }
         }
 
-
-def handle_add_order_items(order_id: str, items: list) -> dict:
-    try:
-        order = Order.objects.get(pk=order_id)
-    except ObjectDoesNotExist:
-        return {
-            'status': 400,
-            'message': "Invalid order selected"
-        }
-    except Exception as error:
-        logger.error("AddOrderItems-Error: %s", error)
-        return {
-            'status': 400,
-            'message': MESSAGES.get('GENERAL_ERROR')
-        }
-
-    if items is None or len(items) < 1:
-        return {
-            'status': 400,
-            'message': MESSAGES.get('NO_ORDER_ITEMS')
-        }
-
-    with transaction.atomic():
-        for item in items:
-            ConOrder.add_order_item(item=item, order_id=order_id)
-        ConOrder.update_order_amounts(order=order)
-
-    order.refresh_from_db()
-    order_details = serialize_order_details(order=order)
-    return {
-        'status': 200,
-        'message': 'The order item(s) have been added successfully.',
-        'data': {
-            'order_details': order_details.get('order'),
-            'order_items': order_details.get('order_items'),
-            'available_items': order_details.get('available_items'),
-            'unavailable_items': order_details.get('unavailable_items'),
-            'extras': order_details.get('extras'),
-            'available_extras': order_details.get('available_extras'),
-            'unavailable_extras': order_details.get('unavailable_extras')
-        }
-    }
