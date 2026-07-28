@@ -33,7 +33,9 @@ from dinify_backend.configss.string_definitions import (
 from reports_app.controllers.common.sale_filters import (
     SALE_STATUSES, revenue_sum, discount_sum, sale_orders,
 )
-from reports_app.controllers.common.bucketing import bucket_sales, LOCAL_TZ
+from reports_app.controllers.common.bucketing import (
+    bucket_sales, period_boundaries, BOUNDARY_PERIODS, PERIOD_TRUNC, LOCAL_TZ,
+)
 
 
 def make_user(phone):
@@ -266,3 +268,157 @@ class BucketingTests(ReportsFoundationsBase):
         qs = Order.objects.filter(restaurant=self.restaurant)
         with self.assertRaises(ValueError):
             bucket_sales(qs, 'fortnight')
+
+
+class PeriodBoundariesTests(TestCase):
+    """The zero-fill axis (BUCKETS-ZEROFILL-00).
+
+    ``bucket_sales`` returns only the periods that HAVE orders; this is the
+    complete set of periods that SHOULD appear, so a caller can join the two and
+    emit the empty ones as zeros. Pure calendar arithmetic — no fixtures, no DB.
+
+    Calendar facts these rely on: 2024-03-04, 2024-03-11 and 2024-02-26 are
+    Mondays; 2024-03-01 is a Friday and 2024-03-03 a Sunday, both in the week of
+    2024-02-26; 2024 is a leap year.
+    """
+
+    def dates(self, date_from, date_to, period):
+        """Boundaries as EAT calendar dates, which is what the labels key on."""
+        return [b.astimezone(LOCAL_TZ).date()
+                for b in period_boundaries(date_from, date_to, period)]
+
+    def test_daily_axis_is_every_day_inclusive_of_both_ends(self):
+        self.assertEqual(
+            self.dates(date(2024, 3, 1), date(2024, 3, 4), 'day'),
+            [date(2024, 3, 1), date(2024, 3, 2),
+             date(2024, 3, 3), date(2024, 3, 4)],
+        )
+
+    def test_a_single_day_window_is_one_bucket(self):
+        self.assertEqual(self.dates(date(2024, 3, 1), date(2024, 3, 1), 'day'),
+                         [date(2024, 3, 1)])
+
+    def test_weekly_axis_opens_on_the_monday_of_the_window_s_first_week(self):
+        # THE case this whole helper turns on. 2024-03-01 is a Friday, so the
+        # window's first days belong to the week of Monday 2024-02-26 — a key that
+        # falls BEFORE date_from. Clip it and those days have nowhere to land, and
+        # a frontend enumerating from that Monday finds no row for its first key.
+        self.assertEqual(
+            self.dates(date(2024, 3, 1), date(2024, 3, 14), 'week'),
+            [date(2024, 2, 26), date(2024, 3, 4), date(2024, 3, 11)],
+        )
+
+    def test_weekly_axis_from_a_monday_opens_on_that_monday(self):
+        self.assertEqual(
+            self.dates(date(2024, 3, 4), date(2024, 3, 12), 'week'),
+            [date(2024, 3, 4), date(2024, 3, 11)],
+        )
+
+    def test_weekly_axis_from_a_sunday_opens_on_the_preceding_monday(self):
+        # A Sunday is the LAST day of its ISO week, so this is the widest the
+        # partial edge ever gets: six days before date_from.
+        self.assertEqual(
+            self.dates(date(2024, 3, 3), date(2024, 3, 10), 'week'),
+            [date(2024, 2, 26), date(2024, 3, 4)],
+        )
+
+    def test_monthly_axis_covers_partial_months_at_both_ends(self):
+        self.assertEqual(
+            self.dates(date(2024, 1, 15), date(2024, 4, 3), 'month'),
+            [date(2024, 1, 1), date(2024, 2, 1),
+             date(2024, 3, 1), date(2024, 4, 1)],
+        )
+
+    def test_monthly_axis_crosses_a_year_boundary(self):
+        self.assertEqual(
+            self.dates(date(2024, 11, 15), date(2025, 2, 3), 'month'),
+            [date(2024, 11, 1), date(2024, 12, 1),
+             date(2025, 1, 1), date(2025, 2, 1)],
+        )
+
+    def test_quarterly_axis_snaps_to_quarter_starts(self):
+        self.assertEqual(
+            self.dates(date(2024, 2, 15), date(2024, 12, 31), 'quarter'),
+            [date(2024, 1, 1), date(2024, 4, 1),
+             date(2024, 7, 1), date(2024, 10, 1)],
+        )
+
+    def test_annual_axis_snaps_to_january(self):
+        self.assertEqual(
+            self.dates(date(2024, 6, 15), date(2026, 2, 1), 'year'),
+            [date(2024, 1, 1), date(2025, 1, 1), date(2026, 1, 1)],
+        )
+
+    def test_hourly_axis_covers_the_whole_local_day(self):
+        # The window is inclusive of date_to's LAST instant, not its midnight, so
+        # a one-day hourly window is 24 buckets rather than 1.
+        boundaries = period_boundaries(date(2024, 3, 1), date(2024, 3, 1), 'hour')
+        self.assertEqual(len(boundaries), 24)
+        self.assertEqual([b.astimezone(LOCAL_TZ).hour for b in boundaries],
+                         list(range(24)))
+
+    def test_boundaries_are_aware_and_on_the_eat_offset(self):
+        for boundary in period_boundaries(date(2024, 3, 1), date(2024, 3, 3), 'day'):
+            self.assertIsNotNone(boundary.tzinfo)
+            self.assertEqual(boundary.utcoffset().total_seconds(), 3 * 3600)
+            # Midnight LOCAL, which is 21:00 UTC the previous day.
+            self.assertEqual(boundary.astimezone(LOCAL_TZ).hour, 0)
+
+    def test_boundaries_equal_the_keys_the_grouped_query_emits(self):
+        # The join is by EQUALITY on aware datetimes, so an axis that merely
+        # LOOKED right but carried a different instant would silently fill over
+        # every real bucket. Proven against the truncation itself.
+        owner = make_user('256700000390')
+        restaurant = Restaurant.objects.create(
+            name='Axis Restaurant', location='loc-axis',
+            status=RestaurantStatus_Live, owner=owner,
+        )
+        table = Table.objects.create(number=1, restaurant=restaurant)
+        order = Order.objects.create(
+            restaurant=restaurant, table=table,
+            order_status=OrderStatus_Served,
+            total_cost=Decimal('1000.00'), discounted_cost=Decimal('800.00'),
+            savings=Decimal('200.00'), actual_cost=Decimal('750.00'),
+        )
+        Order.objects.filter(id=order.id).update(
+            time_created=datetime(2024, 3, 6, 9, 0, tzinfo=dt_timezone.utc),
+        )
+        qs = sale_orders(restaurant.id, date(2024, 3, 1), date(2024, 3, 31))
+
+        for period in PERIOD_TRUNC:
+            with self.subTest(period=period):
+                # Exactly the lookup both controllers perform: index the grouped
+                # rows by their period, then read them back by axis boundary. It
+                # depends on HASH equality, not just ==, which is the part an
+                # axis built from the wrong tzinfo would quietly get wrong.
+                by_period = {r['period']: r for r in bucket_sales(qs, period)}
+                axis = period_boundaries(
+                    date(2024, 3, 1), date(2024, 3, 31), period,
+                )
+                hits = [b for b in axis if b in by_period]
+                self.assertEqual(len(hits), 1, f'{period}: {axis}')
+                self.assertEqual(by_period[hits[0]]['count'], 1)
+
+    def test_an_inverted_window_is_empty_rather_than_unbounded(self):
+        self.assertEqual(
+            period_boundaries(date(2024, 3, 5), date(2024, 3, 1), 'day'), [],
+        )
+
+    def test_every_supported_period_is_enumerable(self):
+        # BOUNDARY_PERIODS spans BOTH bucketing vocabularies, so neither endpoint
+        # can request a granularity the axis cannot produce.
+        for period in BOUNDARY_PERIODS:
+            with self.subTest(period=period):
+                self.assertTrue(
+                    period_boundaries(date(2024, 3, 1), date(2024, 3, 31), period),
+                )
+
+    def test_an_unsupported_period_raises_valueerror(self):
+        with self.assertRaises(ValueError):
+            period_boundaries(date(2024, 3, 1), date(2024, 3, 31), 'fortnight')
+
+    def test_adding_hour_to_the_axis_did_not_add_it_to_period_trunc(self):
+        # The axis spans both vocabularies precisely so the two TRUNCATION maps do
+        # not have to be merged. sales-trends must still reject 'hour'.
+        self.assertIn('hour', BOUNDARY_PERIODS)
+        self.assertNotIn('hour', PERIOD_TRUNC)

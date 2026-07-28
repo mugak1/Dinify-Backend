@@ -5,7 +5,9 @@ Built on the PR3 reporting foundations so the two panes agree:
   * the "sale" set is ``SALE_STATUSES`` ({served, paid}) via ``sale_orders``,
   * revenue is ``Sum('actual_cost')`` and discount is ``Sum('savings')`` — never
     ``total_cost`` (gross) or ``discounted_cost`` (post-discount total),
-  * trends are ONE grouped query via ``bucket_sales`` (no per-period loop).
+  * trends are ONE grouped query via ``bucket_sales`` (no per-period loop),
+    zero-filled onto ``period_boundaries`` so every period in the window is
+    reported — the same policy the hourly pane applies with ``range(24)``.
 
 The public entrypoints are ``generate_restaurant_sales_listing`` / ``_trends``
 (plus the hour-of-day ``generate_restaurant_sales_hourly``), each returning the
@@ -29,7 +31,7 @@ from reports_app.controllers.common.sale_filters import (
     sale_orders, SALE_STATUSES,
 )
 from reports_app.controllers.common.bucketing import (
-    bucket_sales, bucket_sales_by_hour, LOCAL_TZ,
+    bucket_sales, bucket_sales_by_hour, period_boundaries, LOCAL_TZ,
 )
 from reports_app.serializers import SerializerOrderListingReport
 
@@ -154,14 +156,20 @@ def generate_restaurant_sales_trends(
     buckets = bucket_sales(
         sale_orders(restaurant_id, date_from, date_to), period,
     )
+    by_period = {row['period']: row for row in buckets}
+
+    # Zero-fill onto the complete window axis, the same policy the hourly pane
+    # applies with range(24). A period that traded nothing is a reportable zero,
+    # not an absence: dropping it makes the chart join its neighbours into a
+    # straight line and imply trading that did not happen.
     table = [
         {
-            'period': _period_label(row['period'], period),
-            'count': row['count'],
-            'revenue': row['revenue'] if row['revenue'] is not None else 0,
-            'discount': row['discount'] if row['discount'] is not None else 0,
+            'period': _period_label(boundary, period),
+            'count': (by_period.get(boundary) or {}).get('count', 0),
+            'revenue': (by_period.get(boundary) or {}).get('revenue') or 0,
+            'discount': (by_period.get(boundary) or {}).get('discount') or 0,
         }
-        for row in buckets
+        for boundary in period_boundaries(date_from, date_to, period)
     ]
 
     if trend_result == 'graph':
@@ -258,7 +266,10 @@ def _period_label(period_dt, period: str) -> str:
     first bucket labelled with the PRECEDING Monday — a key that can fall before
     the requested ``date_from`` — while containing only the in-range days. That
     is correct and intended (the bucket is named by its week, not clipped to the
-    window), but it is an easy thing to misread as an off-by-one.
+    window), but it is an easy thing to misread as an off-by-one. Since the
+    series is zero-filled onto ``period_boundaries``, that bucket is now emitted
+    whether or not it traded — the axis has to start where the data can, or the
+    window's first days would have nowhere to land.
     """
     local_date = period_dt.astimezone(LOCAL_TZ).date()
     if period in ('day', 'week'):

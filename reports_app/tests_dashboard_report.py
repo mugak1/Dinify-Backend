@@ -48,6 +48,7 @@ from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Live, RESTAURANT_OWNER,
     OrderStatus_Paid, PaymentStatus_Paid,
+    OrderStatus_Refunded, PaymentStatus_Pending,
 )
 from reports_app.controllers.restaurant.dashboard import (
     generate_restaurant_dashboard_v2,
@@ -115,12 +116,13 @@ class DashboardV2Base(TestCase):
         # non-trivial; it earns its place on the primary window too.)
         self.make_order(when=utc(2023, 6, 15, 9))
 
-    def make_order(self, when):
+    def make_order(self, when, order_status=OrderStatus_Paid,
+                   payment_status=PaymentStatus_Paid):
         order = Order.objects.create(
             restaurant=self.restaurant,
             table=self.table,
-            order_status=OrderStatus_Paid,
-            payment_status=PaymentStatus_Paid,
+            order_status=order_status,
+            payment_status=payment_status,
             total_cost=Decimal('1000.00'),
             discounted_cost=Decimal('800.00'),
             savings=Decimal('200.00'),
@@ -162,12 +164,38 @@ class DashboardV2Base(TestCase):
         self.assertEqual(result['status'], 200, result)
         return [row['at'] for row in result['data']['revenue']['series']]
 
+    # --- populated-only probes (BUCKETS-ZEROFILL-00) ---------------------
+    #
+    # Both series are now DENSE: every bucket in the window is emitted, zeroed if
+    # it did not trade. So the FULL key list is a property of the window, and only
+    # the POPULATED subset still probes the truncation — it is the set of distinct
+    # boundaries the seeded orders fell on, which is what the granularity cases
+    # were always really asserting. The dense axis itself is covered by
+    # DashboardV2ZeroFillTests below.
+    def populated_order_buckets(self, **kwargs):
+        return [at for at, count in self.order_bucket_counts(**kwargs) if count]
+
+    def populated_order_bucket_counts(self, **kwargs):
+        return [(at, count)
+                for at, count in self.order_bucket_counts(**kwargs) if count]
+
+    def populated_revenue_buckets(self, **kwargs):
+        result = self.dashboard(**kwargs)
+        self.assertEqual(result['status'], 200, result)
+        return [row['at'] for row in result['data']['revenue']['series']
+                if row['gross'] != '0.00']
+
 
 class DashboardV2BucketVocabularyTests(DashboardV2Base):
-    """Each ``bucket`` value truncates to its own, honest granularity."""
+    """Each ``bucket`` value truncates to its own, honest granularity.
+
+    Read through the POPULATED buckets: since BUCKETS-ZEROFILL-00 the series spans
+    the whole window regardless of granularity, so the distinct boundaries the
+    seeded orders landed on are what still distinguish one truncation from another.
+    """
 
     def test_hour_bucket_gives_one_bucket_per_distinct_eat_hour(self):
-        buckets = self.order_buckets(bucket='hour')
+        buckets = self.populated_order_buckets(bucket='hour')
         self.assertEqual(len(buckets), 5)
         # 09:00 UTC == 12:00 EAT on the same calendar day.
         self.assertEqual(datetime.fromisoformat(buckets[0]), eat(2024, 3, 4, 12))
@@ -176,7 +204,7 @@ class DashboardV2BucketVocabularyTests(DashboardV2Base):
         self.assertEqual(datetime.fromisoformat(buckets[-1]), eat(2024, 6, 10, 12))
 
     def test_day_bucket_collapses_the_three_hours_into_one_day(self):
-        buckets = self.order_buckets(bucket='day')
+        buckets = self.populated_order_buckets(bucket='day')
         self.assertEqual(
             [datetime.fromisoformat(b) for b in buckets],
             [eat(2024, 3, 4), eat(2024, 3, 5), eat(2024, 6, 10)],
@@ -186,25 +214,25 @@ class DashboardV2BucketVocabularyTests(DashboardV2Base):
         # 2024-03-04 is a Monday and 03-05 the Tuesday of the same week, so the four
         # March orders share ONE bucket; 2024-06-10 is a Monday of its own.
         #
-        # Asserted by BOUNDARY, not by count, deliberately: weekly gives 2 buckets on
-        # this fixture and so does monthly, so a length assertion would pass under a
-        # TruncMonth wiring. The Monday keys are what distinguish them.
-        buckets = self.order_buckets(bucket='week')
+        # Asserted by BOUNDARY, not by count, deliberately: weekly gives 2 populated
+        # buckets on this fixture and so does monthly, so a length assertion would
+        # pass under a TruncMonth wiring. The Monday keys are what distinguish them.
+        buckets = self.populated_order_buckets(bucket='week')
         self.assertEqual(
             [datetime.fromisoformat(b) for b in buckets],
             [eat(2024, 3, 4), eat(2024, 6, 10)],
         )
-        self.assertNotEqual(buckets, self.order_buckets(bucket='month'))
+        self.assertNotEqual(buckets, self.populated_order_buckets(bucket='month'))
 
     def test_month_bucket_collapses_to_month_boundaries(self):
-        buckets = self.order_buckets(bucket='month')
+        buckets = self.populated_order_buckets(bucket='month')
         self.assertEqual(
             [datetime.fromisoformat(b) for b in buckets],
             [eat(2024, 3, 1), eat(2024, 6, 1)],
         )
 
     def test_year_bucket_collapses_to_a_single_year_boundary(self):
-        buckets = self.order_buckets(bucket='year')
+        buckets = self.populated_order_buckets(bucket='year')
         self.assertEqual(
             [datetime.fromisoformat(b) for b in buckets], [eat(2024, 1, 1)],
         )
@@ -212,7 +240,7 @@ class DashboardV2BucketVocabularyTests(DashboardV2Base):
     def test_the_revenue_series_buckets_identically(self):
         # revenue and orders share ONE trunc_fn — the ladder must hold on both.
         self.assertEqual(
-            [len(self.revenue_buckets(bucket=b))
+            [len(self.populated_revenue_buckets(bucket=b))
              for b in ('hour', 'day', 'month', 'year')],
             [5, 3, 2, 1],
         )
@@ -223,12 +251,139 @@ class DashboardV2BucketVocabularyTests(DashboardV2Base):
         # the same "one trunc_fn drives both series" guarantee without that
         # ambiguity — and would fail if only one of the two series were rewired.
         self.assertEqual(
-            self.revenue_buckets(bucket='week'), self.order_buckets(bucket='week'),
+            self.populated_revenue_buckets(bucket='week'),
+            self.populated_order_buckets(bucket='week'),
         )
         self.assertEqual(
-            [datetime.fromisoformat(b) for b in self.revenue_buckets(bucket='week')],
+            [datetime.fromisoformat(b)
+             for b in self.populated_revenue_buckets(bucket='week')],
             [eat(2024, 3, 4), eat(2024, 6, 10)],
         )
+
+    def test_both_series_share_one_dense_axis(self):
+        # The zero-fill must not drift the two cards apart: whatever the window
+        # yields, revenue and orders emit the SAME keys in the same order. The
+        # populated-key equality above cannot see an axis that differs only in its
+        # empty buckets, which is exactly what a per-card fill would produce.
+        for bucket in ('hour', 'day', 'week', 'month', 'year'):
+            with self.subTest(bucket=bucket):
+                self.assertEqual(self.revenue_buckets(bucket=bucket),
+                                 self.order_buckets(bucket=bucket))
+
+
+class DashboardV2ZeroFillTests(DashboardV2Base):
+    """Both series span the whole window; empty buckets are zeroed, not omitted.
+
+    BUCKETS-ZEROFILL-00. Before this, a bucket with no orders was simply absent, so
+    a chart joined the surrounding buckets into a straight line and implied trading
+    that did not happen — and unlike Reports, this endpoint has no client-side fill
+    behind it.
+    """
+
+    # 2024-03-04 .. 2024-03-08: the fixture's three 03-04 hours and one 03-05 order
+    # sit at the front, then 03-06 / 03-07 / 03-08 trade nothing. A deliberate gap
+    # in the MIDDLE of the seeded data, not merely a tail.
+    GAP_FROM = '2024-03-04'
+    GAP_TO = '2024-03-08'
+
+    def test_a_day_that_traded_nothing_is_emitted_as_zero(self):
+        series = self.dashboard(
+            date_from=self.GAP_FROM, date_to=self.GAP_TO, bucket='day',
+        )['data']['orders']['series']
+
+        self.assertEqual([row['at'] for row in series],
+                         [eat(2024, 3, d).isoformat() for d in range(4, 9)])
+        self.assertEqual([row['count'] for row in series], [3, 1, 0, 0, 0])
+
+    def test_the_revenue_series_zeroes_every_money_column(self):
+        series = self.dashboard(
+            date_from=self.GAP_FROM, date_to=self.GAP_TO, bucket='day',
+        )['data']['revenue']['series']
+
+        self.assertEqual(series[-1], {
+            'at': eat(2024, 3, 8).isoformat(),
+            'gross': '0.00', 'discounts': '0.00', 'refunds': '0.00',
+        })
+
+    def test_a_wholly_empty_window_is_a_full_zero_axis_not_an_empty_list(self):
+        # January 2024 has no fixture orders at all.
+        data = self.dashboard(
+            date_from='2024-01-01', date_to='2024-01-31', bucket='day',
+        )['data']
+
+        self.assertEqual(len(data['orders']['series']), 31)
+        self.assertEqual(len(data['revenue']['series']), 31)
+        self.assertEqual({row['count'] for row in data['orders']['series']}, {0})
+        self.assertEqual({row['gross'] for row in data['revenue']['series']},
+                         {'0.00'})
+        # Still reconciles: an all-zero series and zero totals, not a missing card.
+        self.assertEqual(data['revenue']['totals']['gross'], '0.00')
+        self.assertEqual(data['orders']['total'], 0)
+
+    def test_the_fill_does_not_zero_over_a_refund_only_bucket(self):
+        # WATCH THE BASIS. revenue.series is driven by PAID orders with refunds
+        # joined in, so a bucket holding ONLY a refund has no paid row to fill
+        # against. It was absent entirely before this change; the fill must insert
+        # it carrying the real refund, never a 0.00 that would contradict
+        # totals.refunds.
+        self.make_order(
+            when=utc(2024, 3, 7, 9),
+            order_status=OrderStatus_Refunded, payment_status=PaymentStatus_Pending,
+        )
+
+        data = self.dashboard(
+            date_from=self.GAP_FROM, date_to=self.GAP_TO, bucket='day',
+        )['data']
+        by_at = {row['at']: row for row in data['revenue']['series']}
+        refund_only = by_at[eat(2024, 3, 7).isoformat()]
+
+        self.assertEqual(refund_only['refunds'], '750.00')
+        # No paid order that day, so the paid-side columns are genuinely zero.
+        self.assertEqual(refund_only['gross'], '0.00')
+        self.assertEqual(refund_only['discounts'], '0.00')
+        # And the series still reconciles to the totals card.
+        self.assertEqual(data['revenue']['totals']['refunds'], '750.00')
+        self.assertEqual(
+            sum(Decimal(row['refunds']) for row in data['revenue']['series']),
+            Decimal(data['revenue']['totals']['refunds']),
+        )
+
+    def test_the_fill_never_overwrites_a_bucket_that_has_data(self):
+        # The populated rows must be untouched by the fill: same keys, same
+        # numbers, in the same order as the grouping alone produced. This is the
+        # "zeros add nothing" claim stated as an assertion.
+        series = self.dashboard(
+            date_from=self.GAP_FROM, date_to=self.GAP_TO, bucket='day',
+        )['data']['revenue']['series']
+        populated = [row for row in series if row['gross'] != '0.00']
+
+        self.assertEqual(populated, [
+            {'at': eat(2024, 3, 4).isoformat(), 'gross': '3000.00',
+             'discounts': '600.00', 'refunds': '0.00'},
+            {'at': eat(2024, 3, 5).isoformat(), 'gross': '1000.00',
+             'discounts': '200.00', 'refunds': '0.00'},
+        ])
+
+    def test_totals_are_unchanged_by_the_fill(self):
+        # Totals come from their own aggregates, not from the series, so the fill
+        # cannot move them — asserted across every granularity so a future fill
+        # that summed the series would fail loudly here.
+        baseline = self.dashboard(bucket='day')['data']
+        for bucket in ('hour', 'week', 'month', 'year'):
+            with self.subTest(bucket=bucket):
+                data = self.dashboard(bucket=bucket)['data']
+                self.assertEqual(data['revenue']['totals'],
+                                 baseline['revenue']['totals'])
+                self.assertEqual(data['orders']['total'],
+                                 baseline['orders']['total'])
+                self.assertEqual(data['orders']['breakdown'],
+                                 baseline['orders']['breakdown'])
+                # The dense series still sums to the gross total.
+                self.assertEqual(
+                    sum(Decimal(row['gross'])
+                        for row in data['revenue']['series']),
+                    Decimal(data['revenue']['totals']['gross']),
+                )
 
 
 class DashboardV2FailClosedTests(DashboardV2Base):
@@ -299,8 +454,11 @@ class DashboardV2RequiredBucketTests(DashboardV2Base):
         self.assertIn('Unsupported', self.dashboard(bucket='nope')['message'])
 
     def test_a_padded_but_real_bucket_still_resolves(self):
-        # Stripping is for padding, not for inventing a default.
-        self.assertEqual(len(self.order_buckets(bucket='  day  ')), 3)
+        # Stripping is for padding, not for inventing a default. The stripped key
+        # also has to reach the zero-fill, not just the truncation — a padded value
+        # that resolved the trunc_fn but not the axis would raise, not 400.
+        self.assertEqual(len(self.populated_order_buckets(bucket='  day  ')), 3)
+        self.assertEqual(len(self.order_buckets(bucket='  day  ')), 366)
 
 
 class DashboardV2WeekBucketTests(DashboardV2Base):
@@ -347,7 +505,7 @@ class DashboardV2WeekBucketTests(DashboardV2Base):
 
     def test_a_sunday_and_the_following_monday_are_different_buckets(self):
         buckets = [datetime.fromisoformat(b)
-                   for b in self.order_buckets(bucket='week')]
+                   for b in self.populated_order_buckets(bucket='week')]
         self.assertEqual(buckets, [eat(2024, 9, 2), eat(2024, 9, 9)])
 
     def test_a_monday_and_the_saturday_of_its_week_share_one_bucket(self):
@@ -355,7 +513,7 @@ class DashboardV2WeekBucketTests(DashboardV2Base):
         # bucket holds three of the four September orders and the Sunday one is
         # alone in its own.
         self.assertEqual(
-            self.order_bucket_counts(bucket='week'),
+            self.populated_order_bucket_counts(bucket='week'),
             [(eat(2024, 9, 2).isoformat(), 1),
              (eat(2024, 9, 9).isoformat(), 3)],
         )
@@ -380,10 +538,13 @@ class DashboardV2WeekBucketTests(DashboardV2Base):
         # the truncation changed rather than the window.
         self.assertEqual(
             [datetime.fromisoformat(b)
-             for b in self.order_buckets(bucket='day')],
+             for b in self.populated_order_buckets(bucket='day')],
             [eat(2024, 9, 8), eat(2024, 9, 9), eat(2024, 9, 14)],
         )
-        self.assertEqual(len(self.order_buckets(bucket='week')), 2)
+        self.assertEqual(len(self.populated_order_buckets(bucket='week')), 2)
+        # And the dense axes are coarser too — 30 September days, 6 weeks.
+        self.assertEqual(len(self.order_buckets(bucket='day')), 30)
+        self.assertEqual(len(self.order_buckets(bucket='week')), 6)
 
     def test_the_endpoint_serves_a_week_bucket(self):
         token = str(RefreshToken.for_user(self.owner).access_token)
@@ -395,10 +556,18 @@ class DashboardV2WeekBucketTests(DashboardV2Base):
         )
         self.assertEqual(resp.status_code, 200, resp.content)
         series = resp.json()['data']['orders']['series']
-        # The exact strings the frontend enumerator will parse.
+        # The exact strings the frontend enumerator will parse — now the WHOLE
+        # September axis, not just the two weeks that traded. It opens on Monday
+        # 08-26 because 09-01 is a Sunday: the window's first day has to have a
+        # bucket to land in.
         self.assertEqual([row['at'] for row in series],
-                         ['2024-09-02T00:00:00+03:00',
-                          '2024-09-09T00:00:00+03:00'])
+                         ['2024-08-26T00:00:00+03:00',
+                          '2024-09-02T00:00:00+03:00',
+                          '2024-09-09T00:00:00+03:00',
+                          '2024-09-16T00:00:00+03:00',
+                          '2024-09-23T00:00:00+03:00',
+                          '2024-09-30T00:00:00+03:00'])
+        self.assertEqual([row['count'] for row in series], [0, 1, 3, 0, 0, 0])
 
 
 class DashboardV2ResponseShapeTests(DashboardV2Base):
@@ -475,7 +644,7 @@ class DashboardV2QueryCountTests(DashboardV2Base):
 
         dates = clean_dates(date_from=RANGE_FROM, date_to=RANGE_TO)
         args = (str(self.restaurant.id), dates['date_from'], dates['date_to'],
-                d.BUCKET_TRUNC['day'])
+                d.BUCKET_TRUNC['day'], 'day')
 
         with CaptureQueriesContext(connection) as ctx:
             d._build_revenue(*args)
@@ -508,8 +677,8 @@ class DashboardV2EndpointTests(DashboardV2Base):
     def test_a_valid_bucket_reaches_the_controller(self):
         resp = self.client.get(self.url('bucket=year'), **self.auth())
         self.assertEqual(resp.status_code, 200, resp.content)
-        # Proof the parameter was threaded: yearly collapses the fixture to ONE
-        # bucket, where hourly would give five.
+        # Proof the parameter was threaded: the window is one calendar year, so
+        # yearly gives ONE bucket where daily would give 366.
         self.assertEqual(len(resp.json()['data']['orders']['series']), 1)
 
     def test_an_empty_bucket_query_parameter_is_http_400(self):
@@ -533,7 +702,8 @@ class DashboardV2EndpointTests(DashboardV2Base):
     def test_period_no_longer_selects_a_granularity(self):
         # The collision that forced `bucket` to be a NEW parameter rather than an
         # alias: 'day' meant hourly as a period and daily as a bucket. Only the
-        # bucket meaning survives, so this is daily (3) and never hourly (5).
+        # bucket meaning survives, so this is daily (366 buckets over the 2024
+        # window) and never hourly (8784).
         resp = self.client.get(self.url('period=day&bucket=day'), **self.auth())
         self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(len(resp.json()['data']['orders']['series']), 3)
+        self.assertEqual(len(resp.json()['data']['orders']['series']), 366)
