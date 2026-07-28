@@ -454,6 +454,75 @@ already migrated off `period` and off every previous-period field.
 
 ---
 
+## 11. Restaurant dashboard — `num_sales` means SALES now, and it will drop
+
+**Endpoints:** `GET api/v1/reports/restaurant/dashboard/` (v1) and
+`api/v1/reports/restaurant/dashboard-v2/` (the `orders` card).
+
+**Affected users:** every restaurant owner/manager who looks at the dashboard.
+
+**No field is renamed or removed.** Two keys change MEANING, three figures change
+VALUE, and two keys are added. A client that ignores the additions keeps working.
+
+### The headline number will fall, possibly sharply
+
+`num_sales` was `orders.count()` over a queryset filtered only by restaurant,
+`is_test` and date — so it counted abandoned `initiated` drafts, cancellations and
+refunds as sales. It now counts only revenue-bearing orders (`SALE_STATUSES` =
+served + paid), the same definition every other report already uses via
+`sale_orders()`.
+
+**This is the owner's headline figure and it drops on the day this deploys.** The
+smaller number is the true one; the old one was inflated. It deserves a release
+note rather than a silent change.
+
+### `sales_amount` goes the other way — from permanently `null` to a real figure
+
+It was `Sum('total_cost')` (pre-discount gross) over `payment_status = 'paid'`. No
+order ever reaches that status: creation seeds `'pending'` and nothing in the
+codebase writes `'paid'`, the order-payment write path having been deleted with
+the custodial teardown pending PSP integration. It is now `Sum('actual_cost')`
+over sales — `sale_filters`' canonical revenue basis.
+
+### The percentages now share one denominator
+
+Cancellation, refund and payment rates all divide by **orders placed**
+(`order_status != 'initiated'`) instead of by the inflated `num_sales`. That makes
+the cancellation and refund rates comparable to each other, and stops either from
+exceeding 100%.
+
+### New keys
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `orders_placed` | int | The denominator every percentage is taken over. |
+| `payment_tracking_enabled` | bool | `false` until PSP integration lands. |
+
+`payment_tracking_enabled` is the honest label on a card that cannot work yet:
+because nothing writes `payment_status = 'paid'`, `paid_orders` is **0 / 0.0% for
+every restaurant, always**. The card keeps its shape so nothing breaks; the flag
+lets the frontend caveat or hide it instead of rendering a zero that reads as a
+measurement. It flips to `true` in the same change that lands the PSP write path.
+
+### dashboard-v2
+
+`data.orders.total` and `data.orders.series[].count` excluded nothing and so
+counted abandoned drafts too. They now count orders placed, on the same definition
+as v1. A side effect worth having: `breakdown` can now sum to `total`, which was
+previously impossible — an `initiated` order is excluded from `open` and fails
+`paid`, so it was counted in the total while appearing in none of the four rows.
+`data.revenue` is unchanged (it was already payment-gated).
+
+**Frontend action required:** none to keep working. Optional: read
+`orders_placed` to label what the rates are over, and read
+`payment_tracking_enabled` to hide or caveat the payment card until PSP.
+
+**Not changed:** the diner, item and peak-hour figures still count drafts.
+Rebasing the diner counts is a separate question — they also collapse every
+anonymous QR guest into a single phantom customer — and belongs with that surface.
+
+---
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
@@ -475,6 +544,10 @@ already migrated off `period` and off every previous-period field.
    `lockout_cleared` from `verify/`. Admin control plane only.
 8. **Pre-launch ordering:** handle the new 400 on `api/v2/orders/initiate/` for a
    restaurant that has not gone live — surface the message verbatim.
+9. **Dashboard:** expect the "Sales" figure to fall (it now excludes drafts,
+   cancellations and refunds) and `sales_amount` to become non-null. Optionally
+   read the new `orders_placed` and `payment_tracking_enabled` keys. No field was
+   renamed or removed — see §11.
 
 ---
 

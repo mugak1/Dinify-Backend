@@ -276,6 +276,71 @@ one-click **"This year"** preset.
 
 ---
 
+### 10. dashboard  (GET · `api.get`) — the v1 dashboard, metric semantics
+
+Added by DASH-METRICS-00 (PR-H §1). This slug had **no section here** before: §1–§9
+pinned every other report while the oldest and most-looked-at one was unpinned,
+which is part of why its `num_sales` defect survived so long. Its fields are not
+declared in any frontend model file visible from this repo, so the BE column is
+authoritative and the FE column records what the payload now promises.
+
+| Dim | FE | BE | |
+|---|---|---|---|
+| Slug | `reports/restaurant/dashboard/` | `'dashboard'` (reports_app/endpoints/restaurant_reports.py:50) | ✓ |
+| Params | `restaurant, from, to` | `restaurant`, `from`(def today), `to`(def today) | ✓ |
+| Envelope | `res.data` | `{status, message, data:{…}}` | ✓ |
+| Window | — | raw `time_created__gte/lte` against `date` objects — **NOT** `sale_orders()`'s `__date` lookup | **✗ see D1** |
+| Serializer | — | none — hand-built dict, rendered directly | ✓ |
+
+**Metric definitions (the contract this section exists to pin).** Each is defined
+once in `controllers/restaurant/dashboard.py` and every figure derives from the
+definition; none restates a status list inline.
+
+| Key | Definition | Note |
+|---|---|---|
+| `orders_placed` | `order_status != 'initiated'` | **NEW.** The denominator for all three rates |
+| `num_sales` | orders placed ∩ `SALE_STATUSES` (served, paid) | **MEANING CHANGED** — was `orders.count()` |
+| `sales_amount` | `revenue_sum()` = `Sum('actual_cost')` over sales | **VALUE CHANGED** — was `Sum('total_cost')` over `payment_status='paid'`, i.e. permanently `null`. `null` when there are no sales |
+| `cancelled_orders` | `{number, percentage}` — cancelled ÷ orders placed | denominator changed |
+| `refunded_orders` | `{number, percentage}` — refunded ÷ orders placed | denominator changed |
+| `paid_orders` | `{number, percentage}` — `payment_status='paid'` ÷ orders placed | **always 0 / 0.0** — see D2 |
+| `payment_tracking_enabled` | module constant, `False` | **NEW.** The honest label on `paid_orders` |
+| `new_diners`, `repeat_diners`, `most_active_diner`, `most_ordered_item`, `least_ordered_item`, `peak_hour` | unchanged — still read the UNFILTERED queryset | deliberate scope; see D3 |
+| `most_liked_item`, `least_liked_item` | hard-coded `None` → `''` | never computed; predates this work |
+
+Sharing ONE denominator is the load-bearing part: it is what makes the cancellation
+and refund rates comparable to each other and what stops either from exceeding 100%.
+
+> **The headline number drops on deploy.** `num_sales` was inflated by abandoned
+> drafts, cancellations and refunds. Owners will see "Sales" fall, possibly sharply,
+> the day this ships. `BREAKING_CHANGES.md` §11 carries the release note.
+
+**Three seams this section opens, all recorded rather than fixed:**
+
+- **D1 — window semantics differ from `sale_orders()`.** This endpoint filters
+  `time_created__gte/lte` with `date` objects (Django warns: naive datetime,
+  midnight-anchored, so `to` is effectively exclusive of its own day), while
+  `sale_filters.sale_orders()` uses the inclusive local-day `__date` lookup its
+  own docstring tells callers to prefer. The two therefore agree on counts but can
+  disagree at the window edge. Pre-existing, shared with `dashboard-v2`, and pinned
+  by the v2 tests; changing it is a separate window-semantics change.
+- **D2 — the payment card cannot work until PSP.** Nothing in the codebase writes
+  `payment_status='paid'`; creation seeds `'pending'` and the order-payment write
+  path was deleted with the custodial teardown. `payment_tracking_enabled` states
+  this in the payload. Flip the constant in the PR that lands the PSP write path.
+- **D3 — the diner and item figures still count drafts.** `new_diners` also
+  collapses every anonymous QR guest into a single phantom customer (`customer` is
+  NULL for them), which is exactly what the Diners report was rebuilt to avoid.
+  Belongs with that surface, not with a metric-definition change.
+
+**`dashboard-v2` inherited the same draft-counting defect** in `_build_orders`'
+base — `orders.total` and `orders.series[].count` counted `initiated` drafts, and
+the four `breakdown` rows could never sum to `total` (an initiated order is
+excluded from `open` and fails `paid`). Fixed identically, so `orders.total` now
+equals v1's `orders_placed` and the breakdown reconciles. `revenue` unchanged.
+
+---
+
 ## Triaged seam list
 
 ### FLIP-BLOCKERS (break/garble at `USE_MOCK_DATA=false`)

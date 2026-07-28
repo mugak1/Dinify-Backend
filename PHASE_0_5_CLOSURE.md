@@ -308,13 +308,23 @@ Pre-existing looseness surfaced by the ladder's recon and deliberately left
 outside its scope. Recorded here so a later sweep treats it as known rather than
 new — and so nobody assumes the ladder blessed it.
 
-- **`reports_app/controllers/restaurant/dashboard.py:64`** — `num_sales =
+- ~~**`reports_app/controllers/restaurant/dashboard.py:64`** — `num_sales =
   orders.count()` counts every order, including cancelled and refunded ones, and
   is then used as the denominator for the paid / cancelled / refunded percentages.
   The name says "sales"; the value is "orders". Unrelated to `is_test` (PR-D added
   the `is_test=False` filter to this queryset, which does not touch the looseness),
   and unfixed because changing a live dashboard denominator is a contract change,
-  not a cleanup.
+  not a cleanup.~~ **CLOSED by PR-H §1.** Each metric is now defined once and
+  derived from its definition: orders placed (`order_status != initiated`) is the
+  shared denominator, `num_sales` consumes `SALE_STATUSES`, and revenue moved onto
+  `sale_filters`' `Sum('actual_cost')`. The contract change was taken deliberately
+  and is documented in `BREAKING_CHANGES.md` §11 — no field renamed or removed,
+  `orders_placed` and `payment_tracking_enabled` added. Two things the original
+  note did not capture: the looseness also admitted **`initiated` drafts**, which
+  is the sharper half of it; and `sales_amount` was gated on
+  `payment_status = 'paid'`, which nothing writes, so the revenue figure was
+  permanently `null`. dashboard-v2's `orders.total`/`series` shared the defect and
+  were fixed the same way.
 - **`order_source='server_assisted'`** (`orders_app/models.py:55`) is a live,
   migrated, never-written enum slot: the authenticated staff branch persists
   `diner_self_service`. A latent mislabelling — the staff rehearsal path is now
