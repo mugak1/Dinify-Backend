@@ -13,6 +13,7 @@ from orders_app.models import Order, OrderItem
 from restaurants_app.models import Table
 from finance_app.models import DinifyTransaction
 from reports_app.controllers.common.bucketing import period_boundaries
+from reports_app.controllers.common.sale_filters import SALE_STATUSES, revenue_sum
 from dinify_backend.configss.string_definitions import (
     PaymentStatus_Paid, OrderStatus_Cancelled,
     OrderStatus_Refunded,
@@ -35,6 +36,75 @@ from dinify_backend.configss.string_definitions import (
 # Least liked item i.e. based on the ratings
 # Most active diner
 # Peak hour
+
+
+# Whether ANY code path in this backend records a captured payment.
+#
+# It does not. Order creation seeds ``payment_status='pending'``
+# (orders_app/controllers/services/create_order.py) and nothing anywhere ever
+# writes ``'paid'`` — the order-payment write path was deleted with the
+# custodial teardown and will be rebuilt at PSP integration (REGULATORY_AUDIT.md);
+# ``payment_status`` is absent from EDIT_INFORMATION and read-only on every
+# serializer that names it. The payment rate below is therefore 0% for every
+# restaurant, always, and the figure is a placeholder rather than a measurement.
+#
+# It ships as a FLAG rather than a silently-zero card because the backend should
+# state what it knows and let the client decide whether to render, caveat or hide
+# it. FLIP THIS TO True in the same PR that lands the PSP write path — nothing
+# else in this module needs to change.
+PAYMENT_TRACKING_ENABLED = False
+
+
+# ---------------------------------------------------------------------------
+# Metric definitions
+#
+# Each metric is defined ONCE, here, as a named predicate over the window's
+# orders, and every figure in the payload is derived from that definition rather
+# than restating a status list inline. The sale vocabulary is IMPORTED from
+# reports_app.controllers.common.sale_filters — this module consumes that
+# vocabulary, it never redefines it.
+#
+# THE DENOMINATOR FOR EVERY RATE IS "ORDERS PLACED", not "every row in the
+# window". ``num_sales`` used to be a bare ``orders.count()``: it counted
+# abandoned ``initiated`` drafts, cancellations and refunds as sales, and then
+# divided the paid / cancelled / refunded percentages by that inflated figure.
+# The name said "sales"; the value said "orders" (PHASE_0_5_CLOSURE.md,
+# "Reported, not fixed"). Sharing one denominator is also what makes the
+# cancellation and refund rates comparable to each other and keeps either from
+# exceeding 100%.
+# ---------------------------------------------------------------------------
+
+
+def _orders_placed(orders):
+    """Orders that were actually submitted — abandoned ``initiated`` drafts excluded."""
+    return orders.exclude(order_status=OrderStatus_Initiated)
+
+
+def _sales(placed):
+    """Orders placed that are revenue-bearing — SALE_STATUSES ({served, paid})."""
+    return placed.filter(order_status__in=SALE_STATUSES)
+
+
+def _cancelled(placed):
+    """Orders placed that were cancelled."""
+    return placed.filter(order_status=OrderStatus_Cancelled)
+
+
+def _refunded(placed):
+    """Orders placed that were refunded."""
+    return placed.filter(order_status=OrderStatus_Refunded)
+
+
+def _payment_captured(placed):
+    """Orders placed whose payment was captured — see PAYMENT_TRACKING_ENABLED."""
+    return placed.filter(payment_status=PaymentStatus_Paid)
+
+
+def _rate(count, placed_count):
+    """A share of orders placed, as a percentage to 1dp — 0 when nothing was placed."""
+    if not placed_count:
+        return 0
+    return round((count / placed_count) * 100, 1)
 
 
 def generate_restaurant_dashboard_details(
@@ -64,24 +134,37 @@ def generate_restaurant_dashboard_details(
         order__time_created__lte=date_to
     )
 
-    num_sales = orders.count()
-    paid_orders = orders.filter(payment_status=PaymentStatus_Paid)
+    # Every rate below divides by orders PLACED — see the metric definitions above.
+    placed = _orders_placed(orders)
+    num_orders_placed = placed.count()
+
+    sales = _sales(placed)
+    num_sales = sales.count()
+
+    paid_orders = _payment_captured(placed)
     num_paid_orders = paid_orders.count()
-    perc_paid_orders = (num_paid_orders / num_sales) * 100 if num_sales else 0
-    perc_paid_orders = round(perc_paid_orders, 1)
+    perc_paid_orders = _rate(num_paid_orders, num_orders_placed)
 
-    cancelled_orders = orders.filter(order_status=OrderStatus_Cancelled)
+    cancelled_orders = _cancelled(placed)
     num_cancelled_orders = cancelled_orders.count()
-    perc_cancelled_orders = (num_cancelled_orders / num_sales) * 100 if num_sales else 0
-    perc_cancelled_orders = round(perc_cancelled_orders, 1)
+    perc_cancelled_orders = _rate(num_cancelled_orders, num_orders_placed)
 
-    refunded_orders = orders.filter(order_status=OrderStatus_Refunded)
+    refunded_orders = _refunded(placed)
     num_refunded_orders = refunded_orders.count()
-    perc_refunded_orders = (num_refunded_orders / num_sales) * 100 if num_sales else 0
-    perc_refunded_orders = round(perc_refunded_orders, 1)
+    perc_refunded_orders = _rate(num_refunded_orders, num_orders_placed)
 
-    sales_amount = paid_orders.aggregate(total_cost=Sum('total_cost'))['total_cost']
+    # Revenue over SALES, on sale_filters' canonical basis (Sum('actual_cost') —
+    # the amount actually payable, net of discounts). It used to be
+    # Sum('total_cost') (pre-discount gross) over payment_status=Paid, which no
+    # order ever reaches, so this figure was permanently null.
+    sales_amount = sales.aggregate(total=revenue_sum())['total']
 
+    # The diner / item / peak-hour figures below still read the unfiltered
+    # `orders` and `order_items`, so they continue to include abandoned drafts.
+    # That is DELIBERATE scope, not an oversight: this change defines the sale and
+    # rate metrics only. Rebasing the diner counts is a different question (they
+    # also collapse every anonymous QR guest into one phantom customer, which the
+    # Diners report handles separately) and belongs with that surface.
     new_diners = orders.values('customer').distinct().count()
     repeat_diners = orders.values('customer').annotate(order_count=Count('id')).filter(order_count__gt=1).count()  # noqa
     most_active_diner = orders.values('customer__first_name').annotate(order_count=Count('id')).order_by('-order_count').first()  # noqa
@@ -95,7 +178,15 @@ def generate_restaurant_dashboard_details(
     peak_hour = orders.annotate(hour=F('time_created__hour')).values('hour').annotate(order_count=Count('id')).order_by('-order_count').first()  # noqa
 
     stats = {
+        # Sales — revenue-bearing orders only. This key kept its name but CHANGED
+        # MEANING: it counted every row in the window, drafts included.
         "num_sales": num_sales,
+        # The denominator every percentage below is taken over. Added so the
+        # figure the rates are computed against is visible rather than implied.
+        "orders_placed": num_orders_placed,
+        # False until the PSP write path lands — see PAYMENT_TRACKING_ENABLED.
+        # `paid_orders` is a placeholder while this is False, not a measurement.
+        "payment_tracking_enabled": PAYMENT_TRACKING_ENABLED,
         "paid_orders": {
             "number": num_paid_orders,
             "percentage": perc_paid_orders,
@@ -349,12 +440,18 @@ def _build_payment_methods(restaurant_id, date_from, date_to):
 
 
 def _build_orders(restaurant_id, date_from, date_to, trunc_fn, bucket):
-    base = Order.objects.filter(
+    # ORDERS PLACED, on the same definition as the v1 dashboard: an abandoned
+    # `initiated` draft was never submitted and is not an order. This base used to
+    # include them, which inflated `total` and the chart series — and made the
+    # breakdown unable to sum to `total`, since an initiated order (payment_status
+    # 'pending') is excluded from 'open' below and fails 'paid', so it was counted
+    # in the total while appearing in none of the four rows.
+    base = _orders_placed(Order.objects.filter(
         restaurant=restaurant_id,
         is_test=False,
         time_created__gte=date_from,
         time_created__lte=date_to,
-    )
+    ))
     buckets = (
         base.annotate(bucket=trunc_fn('time_created'))
         .values('bucket')

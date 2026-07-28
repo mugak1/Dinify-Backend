@@ -1,7 +1,7 @@
 import logging
+import uuid
 
 from decimal import Decimal
-from django.db import transaction
 from django.utils import timezone
 from django.db.models import Sum
 from typing import Optional, Union
@@ -166,7 +166,14 @@ class ConOrder:
         Returns ``{'status': 200, 'items': [<normalized copies>]}`` or the first
         controlled ``{'status': 400, 'message': ...}`` rejection.
         """
-        normalized = []
+        # Shape-check and parse every id first, then resolve them in ONE
+        # restaurant-scoped query instead of a .get() per line. Same rows, same
+        # scoping, same opaque rejection — only the number of round trips changes.
+        # Ids are parsed to UUID and the map keyed by pk (a UUID) so lookup
+        # normalizes case and format exactly as `pk=` did; this mirrors
+        # menu_publication._parse_selection, which runs immediately before this on
+        # the same id set and already rejects in the same two-pass order.
+        wanted = []
         for item in order_items:
             if not isinstance(item, dict) or item.get('item') is None:
                 return {
@@ -174,10 +181,21 @@ class ConOrder:
                     'message': 'Each order item must include an item and a quantity.'
                 }
             try:
-                menu_item = MenuItem.objects.get(
-                    pk=item['item'], section__restaurant=restaurant
-                )
-            except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+                wanted.append(uuid.UUID(str(item['item'])))
+            except (ValueError, TypeError):
+                return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}
+
+        fetched = {
+            menu_item.pk: menu_item
+            for menu_item in MenuItem.objects.filter(
+                pk__in=set(wanted), section__restaurant=restaurant,
+            )
+        }
+
+        normalized = []
+        for item, item_id in zip(order_items, wanted):
+            menu_item = fetched.get(item_id)
+            if menu_item is None:
                 return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}
 
             result = ConOrder.normalize_selected_modifiers(
@@ -236,8 +254,13 @@ class ConOrder:
         return {'status': 200}
 
     @staticmethod
-    def construct_option_items(item: dict) -> list:
-        menu_item = MenuItem.objects.get(pk=item['item'])
+    def construct_option_items(item: dict, menu_item=None) -> list:
+        # `menu_item` comes from add_order_item's restaurant-scoped resolve; the
+        # fallback keeps any other caller working. This function only reads
+        # `.options`, so the passed instance and the row this used to re-fetch are
+        # the same read taken once instead of twice.
+        if menu_item is None:
+            menu_item = MenuItem.objects.get(pk=item['item'])
         selected_modifiers = item.get('selected_modifiers') or {}
         modifier_data = menu_item.options or {}
         if not modifier_data.get('hasModifiers') or not selected_modifiers:
@@ -297,7 +320,7 @@ class ConOrder:
         return {'present': False}
 
     @staticmethod
-    def find_existing_order_item(item: dict, order_id: str):
+    def find_existing_order_item(item: dict, order_id: str, menu_item=None):
         # Returns the matching OrderItem line (so the caller can bump it directly)
         # or None. Returning the resolved row — instead of a bare bool — is what
         # lets update_item_quantity avoid a non-unique re-lookup: the same menu
@@ -306,16 +329,32 @@ class ConOrder:
         # MultipleObjectsReturned. The `existing_item` binding stays on the parent
         # line throughout (the extras loops iterate a separate `extra` variable) so
         # every match path returns that parent line, never a child-extra row.
-        menu_item = MenuItem.objects.get(pk=item['item'])
-        existing_items = OrderItem.objects.filter(
+        #
+        # `menu_item` is passed in by add_order_item, which has already resolved it
+        # RESTAURANT-SCOPED one line earlier; re-fetching it here (unscoped, by pk)
+        # read the same row a second time to no purpose. The fallback keeps every
+        # other caller working unchanged.
+        if menu_item is None:
+            menu_item = MenuItem.objects.get(pk=item['item'])
+        # One read, not a COUNT followed by a fetch. `.first()` compiles to the same
+        # SQL as `[0]` here because OrderItem carries Meta.ordering, so Django does
+        # not inject an ordering of its own.
+        existing_item = OrderItem.objects.filter(
             order__id=order_id,
             item=menu_item,
             deleted=False
-        )
-        if existing_items.count() > 0:
-            existing_item = existing_items[0]
+        ).first()
+        if existing_item is not None:
             extras = item.get('extras')
-            existing_item_extras = OrderItem.objects.filter(parent_item=existing_item)
+            # Evaluated ONCE. The four `if` sites below each called .count() on this
+            # queryset — all four ran, since they are independent `if`s and the count
+            # sits left of the `and` — a fifth ran inside the branch, and the loops
+            # then issued a further SELECT. Up to six statements for one unchanging
+            # set of rows.
+            existing_item_extras = list(
+                OrderItem.objects.filter(parent_item=existing_item)
+            )
+            extras_count = len(existing_item_extras)
             incoming_modifiers = item.get('selected_modifiers') or {}
             existing_modifiers = existing_item.selected_modifiers or {}
             # Compare on the order- and duplicate-independent SEMANTIC key, not raw
@@ -329,29 +368,31 @@ class ConOrder:
             has_modifiers = bool(incoming_key)
 
             # no extras and no options
-            if existing_item_extras.count() == 0 and not has_modifiers:
+            if extras_count == 0 and not has_modifiers:
                 return existing_item
 
             # only extras but no item_options
-            if existing_item_extras.count() > 0 and not has_modifiers:
+            if extras_count > 0 and not has_modifiers:
                 logger.debug("checking only extras with no items")
-                if len(extras) == existing_item_extras.count():
+                if len(extras) == extras_count:
                     for extra in existing_item_extras:
-                        if str(extra.item.pk) not in extras:
+                        # item_id, not item.pk — the same value, off the row already
+                        # loaded, instead of a fresh SELECT per extra.
+                        if str(extra.item_id) not in extras:
                             return None
                     return existing_item
 
             # only options but no extras
-            if existing_item_extras.count() == 0 and has_modifiers:
+            if extras_count == 0 and has_modifiers:
                 if existing_key == incoming_key:
                     return existing_item
                 return None
 
             # both extras and options
-            if existing_item_extras.count() > 0 and has_modifiers:
-                if len(extras) == existing_item_extras.count():
+            if extras_count > 0 and has_modifiers:
+                if len(extras) == extras_count:
                     for extra in existing_item_extras:
-                        if str(extra.item.pk) not in extras:
+                        if str(extra.item_id) not in extras:
                             return None
                     if existing_key == incoming_key:
                         return existing_item
@@ -552,7 +593,7 @@ class ConOrder:
         }
 
     @staticmethod
-    def add_order_item(item: dict, order_id: str):
+    def add_order_item(item: dict, order_id: str, order: Order = None):
         # defense-in-depth: this chokepoint self-guards for every caller. A
         # malformed payload or an item that does not belong to the order's
         # restaurant returns a 400 dict instead of raising 500 downstream.
@@ -566,13 +607,20 @@ class ConOrder:
                 'message': 'Each order item must include an item and a quantity.'
             }
 
-        try:
-            order = Order.objects.get(pk=order_id)
-        except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
-            return {
-                'status': 400,
-                'message': 'Invalid order selected'
-            }
+        # `order` is supplied by _create_order, which is holding the very row it
+        # created moments earlier — with its `restaurant` FK already cached by
+        # Order.objects.create(restaurant=...), so `order.restaurant` below is free
+        # too. Re-fetching per line cost one SELECT for the order plus one lazy FK
+        # load for the restaurant, on every line of every order. The `order_id`
+        # path remains the default and keeps the self-guard for every other caller.
+        if order is None:
+            try:
+                order = Order.objects.get(pk=order_id)
+            except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+                return {
+                    'status': 400,
+                    'message': 'Invalid order selected'
+                }
 
         try:
             menu_item = MenuItem.objects.get(
@@ -587,13 +635,17 @@ class ConOrder:
         unit_price = menu_item.primary_price
 
         # check if the item already exists in the order so that we just update the quantity
-        existing_item = ConOrder.find_existing_order_item(item=item, order_id=order_id)
+        existing_item = ConOrder.find_existing_order_item(
+            item=item, order_id=order_id, menu_item=menu_item,
+        )
         if existing_item is not None:
             return ConOrder.update_item_quantity(order_item=existing_item, item=item)
 
         # handling modifiers
         selected_modifiers = item.get('selected_modifiers') or {}
-        selected_options = ConOrder.construct_option_items(item=item)
+        selected_options = ConOrder.construct_option_items(
+            item=item, menu_item=menu_item,
+        )
 
         price_selection = ConOrder.determine_effective_unit_price(
             menu_item=menu_item,
@@ -885,46 +937,3 @@ class ConOrder:
                 'unavailable_extras': order_details.get('unavailable_extras')
             }
         }
-
-
-def handle_add_order_items(order_id: str, items: list) -> dict:
-    try:
-        order = Order.objects.get(pk=order_id)
-    except ObjectDoesNotExist:
-        return {
-            'status': 400,
-            'message': "Invalid order selected"
-        }
-    except Exception as error:
-        logger.error("AddOrderItems-Error: %s", error)
-        return {
-            'status': 400,
-            'message': MESSAGES.get('GENERAL_ERROR')
-        }
-
-    if items is None or len(items) < 1:
-        return {
-            'status': 400,
-            'message': MESSAGES.get('NO_ORDER_ITEMS')
-        }
-
-    with transaction.atomic():
-        for item in items:
-            ConOrder.add_order_item(item=item, order_id=order_id)
-        ConOrder.update_order_amounts(order=order)
-
-    order.refresh_from_db()
-    order_details = serialize_order_details(order=order)
-    return {
-        'status': 200,
-        'message': 'The order item(s) have been added successfully.',
-        'data': {
-            'order_details': order_details.get('order'),
-            'order_items': order_details.get('order_items'),
-            'available_items': order_details.get('available_items'),
-            'unavailable_items': order_details.get('unavailable_items'),
-            'extras': order_details.get('extras'),
-            'available_extras': order_details.get('available_extras'),
-            'unavailable_extras': order_details.get('unavailable_extras')
-        }
-    }

@@ -17,7 +17,10 @@ with PostgreSQL on AWS RDS.
 - Menu item ordering: ✅ `listing_position` column + `reorder-section-items`
   endpoint (handled by `ConMenuItem`) + section reorder via `restaurant_setup`
 - Dashboard endpoint: ✅ Exists at `api/v1/reports/restaurant/dashboard/`
-  Do NOT create a new dashboard endpoint — it already exists
+  Do NOT create a new dashboard endpoint — it already exists. Its metrics are
+  DEFINED ONCE in `dashboard.py` (`_orders_placed` / `_sales` / `_cancelled` /
+  `_refunded` / `_payment_captured` / `_rate`) and every figure derives from a
+  definition — do not restate a status list inline. See the Reports section
 - Tables module: ✅ Backend complete — `reservations`, `waitlist`,
   `table_actions`, `dining_areas`, full QR/floor-plan fields wired through
   EDIT_INFORMATION
@@ -56,6 +59,26 @@ with PostgreSQL on AWS RDS.
   true DRAFT that neither occupies its table nor reaches the kitchen board — the
   table is claimed only at `submit` (BUG-P2-2), whose transition is transactional
   and race-safe. Preserve these invariants in any future order-create work
+- Order-path READ BUDGET: ✅ (PR-H §4) — the per-line cost inside `_create_order`'s
+  transaction is **4 queries** (the chokepoint's restaurant-scoped `MenuItem` guard,
+  the merge lookup, the allergen-tag read, the INSERT); a 4-line order runs 35
+  queries, a 1-line order 23. It was 9/line, 54 and 27. Pinned by
+  `orders_app/tests_order_path_queries.py` with EXACT counts plus a flatness case,
+  so a re-introduced N+1 fails CI. What made the difference: `add_order_item` takes
+  an optional `order=` (the instance `_create_order` already holds, restaurant FK
+  cached — it used to re-`SELECT` the row per line and lazily load its
+  `Restaurant`); `find_existing_order_item` and `construct_option_items` take an
+  optional `menu_item=` instead of re-fetching it unscoped;
+  `find_existing_order_item` evaluates the extras queryset ONCE (four independent
+  `if` sites each called `.count()` on it, all four running, plus a fifth and an
+  iteration) and uses `.first()` (identical SQL — `OrderItem` carries
+  `Meta.ordering`, so Django injects none) and `extra.item_id` rather than
+  `extra.item.pk`; and `normalize_order_items` batch-resolves the whole order in one
+  scoped query, keying on parsed UUIDs so lookup normalizes exactly as `pk=` did.
+  **The optional kwargs are an optimisation, never a trust boundary** — every
+  fallback path is preserved and `add_order_item` still self-guards for any caller
+  that passes only ids. Do NOT collapse a PREFLIGHT read into the transaction: the
+  preflight/authoritative split is deliberately re-read after the table lock
 - Order admission vs lifecycle transitions — ATOMIC (Closure PR 2): both stages of
   order creation now consult ONE admission primitive,
   `orders_app/controllers/services/order_admission.py` (THE RULE), synchronised with
@@ -601,6 +624,25 @@ with PostgreSQL on AWS RDS.
   canaries and shared-invariant tests re-point onto `sales-listing`). Do not
   reintroduce either — `dashboard` / `dashboard-v2` / `summarize_revenue` are
   the live ones.
+  **The `dashboard` slug now CONSUMES `sale_filters` (PR-H §1)** — it was the last
+  Order-based restaurant report that did not. `num_sales` was `orders.count()`
+  (every row: `initiated` drafts, cancellations, refunds) and was also the
+  denominator for all three percentages. Now: `orders_placed`
+  (`order_status != initiated`) is the SHARED denominator for the cancellation,
+  refund and payment rates — one denominator is what makes the first two
+  comparable and stops either exceeding 100% — `num_sales` filters
+  `SALE_STATUSES`, and `sales_amount` is `revenue_sum()` (`Sum('actual_cost')`)
+  over sales rather than `Sum('total_cost')` over `payment_status='paid'`, which
+  nothing writes and which therefore made it permanently `null`. Two ADDITIVE keys:
+  `orders_placed`, and `payment_tracking_enabled` — a module constant, `False`
+  until the PSP write path lands, flagging that `paid_orders` is a placeholder and
+  not a measurement (flip it in the same PR that lands PSP). dashboard-v2's
+  `_build_orders` base shared the draft-counting defect and was fixed identically,
+  so `orders.total` now equals v1's `orders_placed` and `breakdown` sums to
+  `total`. The diner / item / peak-hour figures DELIBERATELY still read the
+  unfiltered queryset — rebasing those belongs with the Diners surface. No field
+  was renamed or removed; see `BREAKING_CHANGES.md` §11 and note the headline
+  "Sales" figure DROPS on deploy.
   `dashboard-v2` takes `bucket` ∈ {hour, day, week, month, year} (`BUCKET_TRUNC`)
   and `bucket` is REQUIRED — absent/empty/whitespace-only is a 400 alongside
   unknown values, because the endpoint caps neither the date range nor the bucket
@@ -738,10 +780,11 @@ with PostgreSQL on AWS RDS.
   only `initiate` (POST) is live. `add-items` (POST/DELETE) was retired
   (PR #181) and the AllowAny, unscoped `details/` GET was retired (finding C1,
   PR #182) — both 404 via the hardened dispatch. Its controller
-  `ConOrder.handle_add_order_items` still EXISTS but has no production caller
-  (only `orders_app/tests.py`); do not re-mount it without rewriting it — it takes
-  no advisory lock, does no lifecycle re-check, and acquires `OrderItem → Order`,
-  the INVERSE of the create path's order, so it is a dormant deadlock cycle. An `initiate`d order is a true
+  `handle_add_order_items` was DELETED (PR-H §3) — it had no production caller and
+  was a dormant deadlock cycle: it acquired `OrderItem → Order`, the INVERSE of the
+  create path's order, took no advisory lock and did no lifecycle re-check. Do not
+  reintroduce it; a rebuilt add-items path must adopt the create path's lock order
+  and route through the admission primitive. An `initiate`d order is a true
   DRAFT (`order_status='initiated'`) that does NOT occupy its table or reach the
   kitchen board; the table is claimed only at `submit` (PR #210) — that
   transition locks the table row and re-checks draft status + occupancy on the
@@ -918,7 +961,13 @@ the catch-all `<str:config_detail>/` route.
   `advisory(restaurant) SHARED → Table → Order` (order submit),
   `advisory(restaurant) EXCLUSIVE → Restaurant → AdminAuditLog` (transition).
   Take it FIRST or not at all — a transaction that takes a row lock and then reaches
-  for the advisory lock reintroduces the cycle this ordering prevents
+  for the advisory lock reintroduces the cycle this ordering prevents.
+  A FOURTH participant joined in PR-H §2: `Restaurant → INSERT Table`
+  (table-number allocation, `restaurants_app/controllers/tables.py`). It takes NO
+  advisory lock and row-locks no existing `Table`, so it cannot cycle against
+  either order path (which row-lock `Table` but never `Restaurant`) or against the
+  transition (which holds the advisory lock and then waits for `Restaurant`; this
+  one never reaches for the advisory lock, so it can only block, never cycle)
 - The service enforces the matrix against the row read under `select_for_update`
   (so concurrent transitions serialize), requires a reason (≥10 chars, mirroring
   `platform_admin_app.delegation.MIN_REASON_LENGTH`), and writes an
