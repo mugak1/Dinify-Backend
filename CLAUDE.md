@@ -584,6 +584,17 @@ with PostgreSQL on AWS RDS.
   canaries and shared-invariant tests re-point onto `sales-listing`). Do not
   reintroduce either — `dashboard` / `dashboard-v2` / `summarize_revenue` are
   the live ones.
+  `dashboard-v2` takes `bucket` ∈ {hour, day, week, month, year} (`BUCKET_TRUNC`)
+  and `bucket` is REQUIRED — absent/empty/whitespace-only is a 400 alongside
+  unknown values, because the endpoint caps neither the date range nor the bucket
+  count and so has no defensible default granularity. Its legacy `period`
+  selector and the server-computed previous-period comparison
+  (`previous_totals` / `previous_total` / `previous_series` on the `revenue` and
+  `orders` cards) were REMOVED once the frontend stopped using them — the latter
+  was a second full aggregation over a second date window per card, so dropping
+  it removed 7 queries per dashboard load. The response carries ONE window; the
+  frontend issues its own second call for the comparison basis. Do not
+  reintroduce either — see `BREAKING_CHANGES.md` §10.
   Sales/Diners/Menu are Order-based and share `sale_filters`; Diners operates
   strictly on non-NULL-customer sale orders so anonymous-QR guests are never
   collapsed into a phantom repeat diner (guests are surfaced as a separate count,

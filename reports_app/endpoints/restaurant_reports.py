@@ -111,10 +111,9 @@ class RestaurantReportsEndpoint(APIView):
                 restaurant_id=request.GET.get('restaurant'),
                 date_from=request.GET.get('from', str(date_today)),
                 date_to=request.GET.get('to', str(date_today)),
-                period=request.GET.get('period', 'day'),
-                # No default: absence must stay distinguishable from an empty
-                # string, so the controller can treat `&bucket=` as "not supplied"
-                # (legacy `period` path) rather than as an unknown granularity.
+                # No default: `bucket` is required and the controller owns that
+                # refusal, so absence must reach it as None rather than being
+                # papered over with a granularity nobody asked for.
                 bucket=request.GET.get('bucket')
             )
         else:
