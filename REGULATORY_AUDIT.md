@@ -339,3 +339,170 @@ production code had been modified and no remediation, migrations, or refactors
 had been performed; no legal judgment was made — findings were mapped to the
 rubric only. The remediation the audit recommended has since landed (see the
 status banner at the top); this file is retained as the historical record.
+
+---
+
+## APPENDIX — Post-audit host findings (2026-07-29)
+
+**Scope note.** Everything above this line examined **the repository**, and the
+remediation it prescribed was verified **in the repository**. The production host
+was never in scope and was never examined. That gap is the subject of this
+appendix.
+
+The findings below were discovered during read-only reconnaissance ahead of a
+Python 3.12 runtime migration, and are recorded here so the audit record reflects
+the **host** as well as the code. They are appended, not merged into the
+inventory above — the original findings tables are a dated point-in-time record
+and are left intact.
+
+The recurring theme: **removing code from a repository does not remove what the
+host is still holding or still running.** Four of the five findings are artefacts
+the teardown never reached because the teardown's scope was the tree.
+
+### Summary
+
+| # | Finding | Relates to | Sev | State |
+|---|---|---|---|---|
+| H1 | Custodial scheduler survived the code teardown — root cron fired a deleted command every minute for ~5 months | K3 | LOW (as executed) | Stopped 2026-07-29 |
+| H2 | PSP credentials retained on the host in a world-readable backup `.env` | §5, P1–P9 | HIGH | File handled; **provider revocation outstanding** |
+| H3 | OTP broadcast to contractor mailboxes for ~12 months | — | **HIGHEST** | Code path closed; **impact assessment open** |
+| H4 | MongoDB Atlas access list open to the internet (`0.0.0.0/0`) | M6 | MED-HIGH | **Outstanding** |
+| H5 | `EMAIL_HOST` domain no longer exists — credential trap | — | MED-HIGH | Mitigated 2026-07-29; **provider outstanding** |
+
+### H1 — Custodial scheduler survived the code teardown (relates to K3)
+
+`process_transactions` **the command** was deleted in the teardown.
+`process_transactions.sh` **in the host's root crontab** was not, and continued
+firing **every minute until 2026-07-29** — roughly five months after the command
+it called ceased to exist.
+
+It executed **no payment logic** during that period, because there was nothing
+left to execute; every invocation failed (a missing path on one target, `Unknown
+command` on the other). The operational residue was 594 daily log files totalling
+739 MB.
+
+**Severity: LOW as executed.** Its significance is not what it did but what it
+demonstrates: it is the clearest illustration in this record of the scope gap
+between a repository audit and a production host. K3 was marked remediated on the
+strength of the command's deletion; the thing actually invoking it, on a
+one-minute schedule, was never in view. The scheduling side of this finding is
+recorded in [`BACKGROUND_TASKS.md`](BACKGROUND_TASKS.md).
+
+### H2 — PSP credentials retained on the production host
+
+| | |
+|---|---|
+| **Path** | `/home/ubuntu/dinify_backend_uat.env.backup` |
+| **Owner / mode** | `root:root`, `644` |
+| **Written** | 2026-03-17 — one day after the last custodial hardening commit (`fe971d3`), and three months before the teardown |
+| **Contents** | `DPO_COMPANY_TOKEN`, `DPO_SERVICE_TYPE`, `DPO_TEST_PRODUCT`, `FLUTTERWAVE_SECRET`, `YO_API_USERNAME`, `YO_API_PASSWORD`, `DEFAULT_PAYMENT_EMAIL` |
+| **Live `.env`** | Clean of all of these |
+
+Mode `644` made the file readable by **any local account that knew the path**,
+including `www-data` — the account the application itself runs as, and therefore
+the account an application-level file-read flaw would have been operating under.
+
+**Exposure checks performed, all negative:** `authorized_keys` held one entry
+(`github-actions-deploy`); no contractor accounts existed on the host; and a full
+git-history scan found no credential ever committed. **No evidence of external
+disclosure was found** in the checks performed. That is a statement about the
+checks performed, not a guarantee of non-disclosure.
+
+**Outstanding — record remediation here:** which provider accounts were closed or
+revoked, and on what date. The credentials in this file remain live until a
+provider-side revocation says otherwise; deleting the file does not revoke them.
+
+### H3 — OTP broadcast to contractor mailboxes (2025-02-04 → 2026-02-19)
+
+**The highest-severity finding in this record.**
+
+| Commit | Date | Effect |
+|---|---|---|
+| `908f179` "send OTP via email" | 2025-02-04 | Introduced the broadcast |
+| `f7c45ac` | — | Briefly removed it |
+| `3f03f45` | — | Re-enabled it |
+| `cee432a` "removing contact info" | 2026-02-19 | Removed it — recipients narrowed to `[user.email]` |
+
+During that window, **every OTP the restaurant portal generated was emailed to a
+fixed list of five mailboxes** — three at the contractor's domain, two personal
+accounts — rather than to the requesting user.
+
+The consequence follows directly from how the OTP is used. Because
+`reset_password(username, otp)` takes the OTP **as the password-reset
+mechanism**, anyone reading those mailboxes could reset the password on any
+account whose OTP was generated. The OTP was not a second factor in that flow; it
+was the credential.
+
+Mail was relayed via `notifications@greatoaksfinance.com` — **a third party's
+mail server** — widening the set of parties able to observe it in transit beyond
+the five named mailboxes.
+
+**Current state:** the code path is closed. No contractor address appears
+anywhere in the current tree, and the relay domain no longer resolves (see H5).
+
+**Deliberately left open:** the set of affected data subjects, pending the
+account-creation query and counsel review. **No legal determination is made in
+this document** — consistent with the original audit's method, findings here are
+recorded and mapped, not adjudicated.
+
+### H4 — MongoDB Atlas network access list open to the internet
+
+The Atlas project's IP Access List contains **`0.0.0.0/0`**, commented *"for
+development purposes,"* alongside the expected `35.177.46.58/32`. The cluster
+therefore accepts connections **from any address on the internet**, with the
+database password as the only control.
+
+**What bounds the impact:** the `archive_user` `post_save` signal — which had
+been shipping full `User` rows **including password hashes** into Atlas — was
+removed in PR-0B, and is now held out by the permanent regression guard
+`users_app/tests_no_user_archival.py`. The remaining writers are action logs
+only, and those have been failing anyway because the cluster is unreachable from
+the host.
+
+So the exposure is bounded by what is in the cluster, not by the access list.
+That is a fortunate position, not a designed one.
+
+**Outstanding:** remove `0.0.0.0/0`.
+
+### H5 — SMTP host domain no longer exists
+
+`EMAIL_HOST` pointed at `mail.greatoaksfinance.com`. Verified **NXDOMAIN at the
+apex** from two independent resolvers on 2026-07-29 — no NS, MX or A record.
+
+Two distinct problems:
+
+1. **Third-party sender identity.** Because `DEFAULT_FROM_EMAIL = EMAIL_HOST_USER`,
+   every transactional email Dinify sent carried **a third party's domain in the
+   `From` header**.
+2. **A credential trap.** An unregistered domain in `EMAIL_HOST` is worse than a
+   dead one. Whoever registers it can obtain a valid certificate for the name and
+   **receive the SMTP credentials on the next send** — TLS verification would
+   legitimately succeed, so nothing in the sending path would object. The failure
+   mode is silent credential disclosure to whoever buys a lapsed domain.
+
+**Mitigated 2026-07-29** by setting `EMAIL_HOST = localhost`, which removes the
+trap. `EMAIL_HOST` is environment-driven, so this was a host `.env` change with
+no repository counterpart.
+
+**Outstanding:** a real transactional email provider, on a Dinify-controlled
+domain, before launch.
+
+### Provenance and verification boundary
+
+Recorded honestly, in the spirit of the original audit's method section:
+
+- The **host-side observations** (file paths, modes, crontab contents, log
+  volumes, Atlas configuration, DNS results) come from the 2026-07-29
+  reconnaissance and are **not independently reproducible from this repository**.
+- The **commit SHAs** cited in H2 and H3 — `fe971d3`, `908f179`, `f7c45ac`,
+  `3f03f45`, `cee432a` — and the teardown commit `7e15e3f` were **not verified in
+  the working clone**, which is shallow. They are recorded as reported.
+  (`7e15e3f` is corroborated internally: this document's own status banner cites
+  it.)
+- Three claims **were** verified against the tree at time of writing: no
+  contractor or relay-domain string appears anywhere in it (H3);
+  `users_app/tests_no_user_archival.py` is present (H4); and
+  `DEFAULT_FROM_EMAIL = EMAIL_HOST_USER` at `dinify_backend/settings.py:300` (H5).
+
+Nothing in this appendix has been remediated by the change that added it. It is a
+record, not a resolution — H2, H4 and H5 each carry outstanding host-side work.

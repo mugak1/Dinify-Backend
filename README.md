@@ -13,9 +13,8 @@ Django REST API backend for the Dinify restaurant management and ordering platfo
 | Database (primary) | PostgreSQL via `psycopg` 3.1.18 |
 | Database (document store) | MongoDB via `pymongo` 4.6.3 |
 | HTTP client | `requests` 2.34.2 |
-| Image handling | `Pillow` 12.2.0 |
-| Data processing | `pandas` 2.2.3, `numpy` 2.0.2 |
-| CORS | `django-cors-headers` 4.3.1 |
+| Image handling | `Pillow` 12.3.0 |
+| CORS | `django-cors-headers` 4.9.0 |
 | Config | `python-decouple` 3.8 |
 
 Full dependency list: [`requirements.txt`](requirements.txt)
@@ -50,11 +49,11 @@ python manage.py createsuperuser
 python manage.py runserver
 ```
 
-**Note:** Some features (notifications, payment callback storage, action logs) require a running MongoDB instance. The connection is configured via `MONGO_HOST` and `MONGO_DATABASE` environment variables — see `dinify_backend/mongo_db.py`. The `.env.example` file does not currently include these variables; you will need to add them manually if you use MongoDB-dependent features.
+**Note:** Some features (notifications, action logs, record archiving) require a running MongoDB instance. The connection is configured via `MONGO_HOST` and `MONGO_DATABASE` environment variables — see `dinify_backend/mongo_db.py`. The `.env.example` file does not currently include these variables; you will need to add them manually if you use MongoDB-dependent features.
 
 ## Architecture Overview
 
-The project uses a single Django settings file (`dinify_backend/settings.py`) with one PostgreSQL database. MongoDB is used as a secondary document store for notifications, payment provider callbacks, and action logs.
+The project uses a single Django settings file (`dinify_backend/settings.py`) with one PostgreSQL database. MongoDB is used as a secondary document store for notifications, action logs, and record archiving.
 
 ### Installed Django Apps
 
@@ -63,11 +62,12 @@ The project uses a single Django settings file (`dinify_backend/settings.py`) wi
 | `users_app` | Custom user model (`AUTH_USER_MODEL`), authentication (login, OTP verification, password reset), user profile management, and role-based access. Defines the `BaseModel` abstract class used by most other models (with audit fields and soft-delete). |
 | `restaurants_app` | Restaurant CRUD, employee management, menu structure (sections, groups, items with options and extras), dining areas, and tables. Also handles restaurant subscription configuration. |
 | `orders_app` | Order creation, item-level status tracking, pricing/discount calculations, customer assignment, and order ratings/reviews. |
-| `finance_app` | Financial transaction processing, wallet/account management (`DinifyAccount` with multi-mode balances), bank account records, subscription and order payment logic, and disbursements. |
-| `payment_integrations_app` | Integrations with external payment providers: Flutterwave, DPO, Yo Uganda (mobile money), and Pesapal. Handles payment initiation, callback processing, and status verification. Has no Django models — uses MongoDB for callback storage. |
+| `finance_app` | Record-only transaction history: the `DinifyTransaction` model, its serializers, and the subscription writer (`tx_subscription.py`, reached via `TransactionsEndpoint`). Holds no balances and executes no payments — see [`REGULATORY_AUDIT.md`](REGULATORY_AUDIT.md). |
 | `notifications_app` | Email and SMS dispatch. Reads unsent notifications from MongoDB and sends them. Has no Django models. |
-| `reports_app` | End-of-day processing and report generation. Has no Django models currently — report logic operates on other apps' data. |
+| `reports_app` | Restaurant report generation (dashboard, sales, transactions, diners, menu). Has no Django models currently — report logic operates on other apps' data. |
 | `support_app` | Restaurant-facing support ticketing (`SupportIssue`, collision-safe `SUP-000123` references). Secretary-pattern endpoints at `api/v1/support/`. |
+| `reviews_app` | Visit-level diner reviews (one `Review` per `Order`) with dimension ratings, quick-chip tags, and owner/manager analytics. Endpoints at `api/v1/reviews/`. |
+| `platform_admin_app` | Platform-staff control plane — a separate Django plane with its own settings, urlconf, and WSGI entry, served on `admin.dinifyapp.com`. TOTP-backed admin auth, append-only audit log, and time-boxed delegated access to a single restaurant. |
 | `misc_app` | System-level configuration via `SysActivityConfig` model (boolean/integer/string/date settings). Also houses soft-delete vacuum utilities. |
 
 ### Third-Party Django Apps
@@ -131,17 +131,13 @@ There is no multi-database router configuration — all models use the `default`
 
 ## Management Commands
 
-### finance_app
+Full operations runbook — what each command touches, its idempotency and error
+handling, and where the operational gaps are: [`BACKGROUND_TASKS.md`](BACKGROUND_TASKS.md).
 
-| Command | Description |
-|---|---|
-| `check_dpo_transactions` | Queries pending/initiated DPO order-payment transactions and verifies their token status with the DPO gateway. |
-| `verify-dpo-tokens` | Similar to `check_dpo_transactions` — fetches pending DPO transactions and verifies each token with DPO (slightly different filtering). |
-| `check_transaction_statuses` | Accepts an aggregator argument (`yo` or `dpo`) and checks payment status of all pending transactions with that aggregator's API. |
-| `check_yo_transactions` | Queries pending/initiated Yo mobile-money transactions and checks their status via the Yo integration API. |
-| `process_transactions` | Finds transactions with confirmed or failed processing status that are still pending/initiated, and runs the appropriate payment or subscription processing logic. |
-| `createaccountswithyo` | Registers bank account records that lack a Yo reference as verified accounts with the Yo payments integration. |
-| `seed_dinify_account` | Creates the singleton Dinify revenue account if it does not already exist. |
+`finance_app` has no management commands. The seven it previously shipped
+(`check_dpo_transactions`, `verify-dpo-tokens`, `check_transaction_statuses`,
+`check_yo_transactions`, `process_transactions`, `createaccountswithyo`,
+`seed_dinify_account`) were removed in the custodial teardown.
 
 ### orders_app
 
@@ -154,12 +150,27 @@ There is no multi-database router configuration — all models use the `default`
 | Command | Description |
 |---|---|
 | `send_messages` | Reads unsent notifications from MongoDB and sends them as emails (and optionally SMS for credential notifications), then marks each as sent. |
+| `send_test_sms` | Sends ONE test SMS through the consolidated Yo sender and prints the raw gateway response. Bypasses the `ENV` gate on purpose, so gateway credentials can be checked without moving off `ENV=dev`. Target: `--to <msisdn>`, else `TEST_SMS_RECIPIENT`. |
 
-### payment_integrations_app
+### restaurants_app
 
 | Command | Description |
 |---|---|
-| `process_aggregator_responses` | Accepts an aggregator argument (`yo` or `dpo`), reads unprocessed payment callback responses from MongoDB, and processes each through the corresponding integration handler. |
+| `optimize_images` | Optimizes all existing menu item, restaurant, and section images. |
+| `reoptimise_menu_images` | Re-optimises existing `MenuItem` images, converting them to WebP at the current `optimize_image()` defaults. Safe to run repeatedly. `--dry-run`, `--limit N`. |
+| `check_item_data` | Debugging helper — inspects `MenuItem` fields (options, allergens, flags). `--name`, and `--clean-allergens` to strip empty/whitespace entries from the allergens list. |
+
+### platform_admin_app
+
+Operator commands, run by hand over SSH — not scheduled tasks. See
+[`BACKGROUND_TASKS.md`](BACKGROUND_TASKS.md) for the full runbook, including the
+break-glass sequence for a lost `ADMIN_SECRET_ENCRYPTION_KEY`.
+
+| Command | Description |
+|---|---|
+| `create_platform_admin` | Creates a `platform_staff` account for the admin control plane: prompts for the password interactively, enrols TOTP, and prints the `otpauth://` URI, an ASCII QR, and ten one-time recovery codes. Requires a TTY. |
+| `reset_platform_admin_totp` | Break-glass re-provisioning — fresh TOTP secret and recovery codes, lockout and replay counter cleared, all admin sessions revoked. Does not change the password. |
+| `unlock_platform_admin` | Clears `failed_attempts` / `locked_until` for a locked account and audits the change. The narrow tool — it leaves the password, TOTP secret and recovery codes intact. |
 
 ### misc_app
 
@@ -168,7 +179,7 @@ There is no multi-database router configuration — all models use the `default`
 | `vacuum_deleted_records` | Renames soft-deleted restaurant records with an `_autodel` suffix and marks them as vacuumed, cascading soft-deletes to child records. |
 | `vacuum_configuration` | Not a runnable command — defines configuration (model list and unique-field mappings) used by `vacuum_deleted_records`. |
 
-**Caution:** Many of these commands interact with live payment APIs or modify production data. Run with care outside development environments.
+**Caution:** Several of these commands modify production data, send real email or SMS, or re-provision admin credentials. Run with care outside development environments.
 
 ## CI / Testing
 
@@ -179,7 +190,10 @@ CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 2. `django check`
 3. `makemigrations --check --dry-run` — fails on un-generated migrations
 4. `python scripts/check_money_fields.py` — fails if a monetary model field is a `FloatField`
-5. the **full** test suite: `python -m django test --settings=dinify_backend.test_settings`
+5. `python scripts/check_ambient_authority.py` — fails if any customer-plane module reintroduces the retired role-based admin predicates
+6. `python scripts/check_tenant_relation_ratchet.py` — fails if the baseline of unclassified writable serializer relations grows
+7. the tenant-isolation closure gate
+8. the **full** test suite: `python -m django test --settings=dinify_backend.test_settings`
 
 **Test database:** PostgreSQL 15 in CI; `test_settings.py` falls back to SQLite in-memory locally when no `DATABASE_*` env vars are set. MongoDB is mocked with `unittest.mock.MagicMock`. `scripts/verify.sh` runs the same checks locally in the same order — run it before opening a PR.
 
@@ -189,13 +203,14 @@ CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 |---|---|---|---|
 | `users_app` | Yes | Yes | Auth flows, OTP, password reset, token security |
 | `orders_app` | Yes | Yes | Order initiation, item status, discounts, options |
-| `payment_integrations_app` | Yes | Yes | HTTP timeout safety, network/XML handling, credential protection |
 | `restaurants_app` | Yes | Yes | Largest suite; exercises PostgreSQL-specific `JSONField` lookups |
-| `finance_app` | Yes | Yes | Transactions, balances, payments |
+| `finance_app` | Yes | Yes | Transaction records |
 | `misc_app` | Yes | Yes | Config; PostgreSQL `JSONField` lookups |
 | `support_app` | Yes | Yes | Support-ticket lifecycle |
-| `notifications_app` | No | No | No tests written |
-| `reports_app` | No | No | No tests written |
+| `reviews_app` | Yes | Yes | Review submission, analytics, resolution |
+| `platform_admin_app` | Yes | Yes | Admin auth, second factor, delegation, audit log |
+| `reports_app` | Yes | Yes | Dashboard, sales, transactions, diners, menu; timezone bucketing |
+| `notifications_app` | Yes | Yes | SMS gateway contract |
 
 **To run the full suite locally** (SQLite in-memory, no Postgres needed):
 ```bash
@@ -227,10 +242,6 @@ These are issues acknowledged in the codebase as of the current state:
 
 **String definitions:** String literals (messages, error text) are scattered across modules rather than centralized.
 
-**Hardcoded payment URLs:** Yo Uganda sandbox (`sandbox.yo.co.ug`) and Pesapal sandbox (`cybqa.pesapal.com`) URLs are hardcoded. DPO redirect URL (`https://dinify-web`) is incomplete/placeholder. These need environment-based configuration before production use.
-
 **Permissions:** `MsisdnLookupEndpoint` uses `AllowAny` — intentional for its use case but warrants review for whether unauthenticated access is appropriate. (The former `AllowAny` `OrderPaymentsEndpoint` / `initiate-order-payment/` write path was retired — endpoint, route, and `OrderPaymentTransaction` controller deleted — to be rebuilt authenticated + ownership-gated at PSP integration.)
 
-**Test gaps:** Two apps have no tests at all (`notifications_app`, `reports_app`). The full suite now runs in CI against PostgreSQL 15, so every app that *does* have tests is exercised there.
-
-**Missing `.env.example` entries:** MongoDB connection variables and all payment integration credentials are required by the code but not listed in `.env.example`.
+**Missing `.env.example` entries:** The MongoDB connection variables (`MONGO_HOST`, `MONGO_DATABASE`) are required by the code but are not listed in `.env.example`.
