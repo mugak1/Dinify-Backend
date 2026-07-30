@@ -179,6 +179,36 @@ If a restaurant genuinely must go live before Phase 1 lands, that is a decision 
 
 There is no Celery, Celery Beat, crontab, Procfile, or any other scheduler in this repository. All management commands are presumably scheduled externally (system cron, Kubernetes CronJobs, etc.), but that configuration is not documented or version-controlled here. If the external scheduler breaks or is misconfigured, there is no way to tell from this repo alone what should be running and when.
 
+#### What the external scheduler actually was (discovered 2026-07-29)
+
+The warning above was borne out. Read-only reconnaissance of the production host,
+ahead of the Python 3.12 runtime migration, found what had been scheduling these
+commands — and that it had been broken for months.
+
+- The host ran **a single root `crontab` entry**, firing **every minute since
+  2024-12-12**, invoking `/home/scripts/process_transactions.sh`.
+- That wrapper called `manage.py process_transactions` against **two** paths: a
+  `dev` checkout deleted in May 2026, and the live UAT checkout.
+- `process_transactions` was deleted in the custodial teardown. **Both
+  invocations had been failing on every run** — one with a missing path, one with
+  `Unknown command` — accumulating **594 daily log files totalling 739 MB**.
+- `/home/scripts/` held **eleven wrapper scripts**. Nine correspond to management
+  commands that no longer exist. Two correspond to commands that do:
+  `determine-customers` and `send_messages` — **neither of which is scheduled**.
+
+The consequence, stated plainly: **no scheduled background work is currently
+running.** The only cron entry that existed called a command that no longer
+exists. If `send_messages` or `determine-customers` are meant to run on a
+schedule, nothing is running them — unsent notifications are not being dispatched
+and orders are not being matched to customers except when someone runs the
+commands by hand.
+
+This is **documented, not fixed.** Establishing what should be scheduled, and
+scheduling it somewhere version-controlled, remains outstanding. The host-side
+findings from the same reconnaissance are recorded in
+[`REGULATORY_AUDIT.md`](REGULATORY_AUDIT.md) under *APPENDIX — Post-audit host
+findings*.
+
 ### No retry behaviour
 
 No command implements retry logic. If an external call fails (SMTP or the SMS gateway), the command crashes immediately and all remaining items in the batch are skipped. There are no dead-letter queues, no exponential backoff, no retry counters. Recovery depends entirely on re-running the command on the next scheduled invocation.
