@@ -364,7 +364,7 @@ the teardown never reached because the teardown's scope was the tree.
 | # | Finding | Relates to | Sev | State |
 |---|---|---|---|---|
 | H1 | Custodial scheduler survived the code teardown — root cron fired a deleted command every minute for ~5 months | K3 | LOW (as executed) | Stopped 2026-07-29 |
-| H2 | PSP credentials retained on the host in a world-readable backup `.env` | §5, P1–P9 | HIGH | File handled; **provider revocation outstanding** |
+| H2 | PSP credentials retained on the host in a world-readable backup `.env` | §5, P1–P9 | HIGH | **Provider revocation outstanding** |
 | H3 | OTP broadcast to contractor mailboxes for ~12 months | — | **HIGHEST** | Code path closed; **impact assessment open** |
 | H4 | MongoDB Atlas access list open to the internet (`0.0.0.0/0`) | M6 | MED-HIGH | **Outstanding** |
 | H5 | `EMAIL_HOST` domain no longer exists — credential trap | — | MED-HIGH | Mitigated 2026-07-29; **provider outstanding** |
