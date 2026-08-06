@@ -245,3 +245,5 @@ These are issues acknowledged in the codebase as of the current state:
 **Permissions:** `MsisdnLookupEndpoint` uses `AllowAny` — intentional for its use case but warrants review for whether unauthenticated access is appropriate. (The former `AllowAny` `OrderPaymentsEndpoint` / `initiate-order-payment/` write path was retired — endpoint, route, and `OrderPaymentTransaction` controller deleted — to be rebuilt authenticated + ownership-gated at PSP integration.)
 
 **Missing `.env.example` entries:** The MongoDB connection variables (`MONGO_HOST`, `MONGO_DATABASE`) are required by the code but are not listed in `.env.example`.
+
+chore: verify deploy pipeline after host migration
