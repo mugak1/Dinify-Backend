@@ -14,104 +14,175 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 30
+    # OIDC (no inbound SSH, no stored credentials): the job mints a short-lived
+    # identity token GitHub signs per-run; AWS trusts it for one narrowly-scoped
+    # role. The legacy UAT_SSH_* secrets are deliberately NOT referenced — they
+    # remain in GitHub as rollback until the SSH path is decommissioned.
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      UAT_INSTANCE_ID: i-0eeb7c0c3a36d3667
     steps:
-      - name: Deploy to UAT server
-        uses: appleboy/ssh-action@v1
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ secrets.UAT_SSH_HOST }}
-          username: ${{ secrets.UAT_SSH_USER }}
-          key: ${{ secrets.UAT_SSH_PRIVATE_KEY }}
-          script: |
-            set -e
-            cd /home/ubuntu/dinify_backend_handover_uat
-            source /home/ubuntu/venv_uat_handover/bin/activate
-            python3 --version
-            git checkout -- .
-            git clean -fd
-            git pull origin main
-            # Install pinned deps so requirements.txt edits actually take effect on the
-            # box. With set -e, a failure here (e.g. PyPI unreachable) aborts the deploy
-            # BEFORE migrate/check/restart, leaving the running API up.
-            python3 -m pip install -r requirements.txt
-            # Confirm the bumped versions are live in the deploy log (|| true: never abort).
-            python3 -m pip freeze | grep -Ei '^(django|asgiref|django-cors-headers|certifi|idna|urllib3|requests|sqlparse|pymongo)==' || true
-            python3 manage.py migrate
-            python3 manage.py check --deploy
-            # ---- Runtime-parity gates (post-incident 2026-07-17) ----
-            # Apache/mod_wsgi runs as www-data, and python-decouple reads the project
-            # .env at settings import. A .env that ubuntu can read but www-data cannot
-            # (the incident: ubuntu:ubuntu mode 600) passes every CLI check above and
-            # then kills the app at import with PermissionError after the restart.
-            # Everything below runs BEFORE the restart so a bad config aborts the
-            # deploy with the old workers still serving. No secret values are ever
-            # printed — only ownership and mode.
-            VENV_PY="$(command -v python3)"
-            env_owner="$(stat -c '%U:%G' .env)"
-            env_mode="$(stat -c '%a' .env)"
-            echo ".env ownership/mode: ${env_owner} ${env_mode}"
-            if ! sudo -u www-data test -r .env; then
-              echo "DEPLOY BLOCKED: www-data cannot read $(pwd)/.env (${env_owner} ${env_mode})." >&2
-              echo "The mod_wsgi runtime would fail at settings import with PermissionError." >&2
-              echo "Fix on the box: chown ubuntu:www-data .env && chmod 640 .env" >&2
-              exit 1
+          role-to-assume: arn:aws:iam::767397669083:role/dinify-github-deploy-role
+          aws-region: eu-west-2
+
+      - name: Write deploy script
+        run: |
+          cat > deploy.sh <<'DEPLOY_SCRIPT'
+          #!/bin/bash
+          # The shebang is load-bearing: AWS-RunShellScript otherwise executes with
+          # /bin/sh (dash on Ubuntu), and the 0027 permission gate below uses
+          # bash-only arithmetic ($((8#..)) and (( ))).
+          set -e
+          cd /home/ubuntu/dinify_backend_handover_uat
+          source /home/ubuntu/venv_uat_handover/bin/activate
+          # SSM runs this script as root; the SSH deploy ran as ubuntu. Everything
+          # that touches the ubuntu-owned repo or venv must run AS ubuntu
+          # (sudo -u ubuntu): root git refuses the tree outright ("detected dubious
+          # ownership"), and the safe.directory override git suggests would be
+          # worse — root's git pull would write root-owned objects into the
+          # ubuntu-owned tree and root's pip would write root-owned packages into
+          # the venv, going green today and breaking the NEXT deploy. sudo resets
+          # PATH (secure_path), so sudo'd commands must use the venv interpreter
+          # by absolute path — hence "$VENV_PY" everywhere below.
+          VENV_PY="$(command -v python3)"
+          "$VENV_PY" --version
+          sudo -u ubuntu git checkout -- .
+          sudo -u ubuntu git clean -fd
+          sudo -u ubuntu git pull origin main
+          # Install pinned deps so requirements.txt edits actually take effect on the
+          # box. With set -e, a failure here (e.g. PyPI unreachable) aborts the deploy
+          # BEFORE migrate/check/restart, leaving the running API up.
+          # -q keeps the deploy log inside SSM's 24,000-char inline output cap —
+          # pip failures still print in full.
+          sudo -u ubuntu "$VENV_PY" -m pip install -q -r requirements.txt
+          # Confirm the bumped versions are live in the deploy log (|| true: never abort).
+          sudo -u ubuntu "$VENV_PY" -m pip freeze | grep -Ei '^(django|asgiref|django-cors-headers|certifi|idna|urllib3|requests|sqlparse|pymongo)==' || true
+          sudo -u ubuntu "$VENV_PY" manage.py migrate
+          sudo -u ubuntu "$VENV_PY" manage.py check --deploy
+          # ---- Runtime-parity gates (post-incident 2026-07-17) ----
+          # Apache/mod_wsgi runs as www-data, and python-decouple reads the project
+          # .env at settings import. A .env that ubuntu can read but www-data cannot
+          # (the incident: ubuntu:ubuntu mode 600) passes every CLI check above and
+          # then kills the app at import with PermissionError after the restart.
+          # Everything below runs BEFORE the restart so a bad config aborts the
+          # deploy with the old workers still serving. No secret values are ever
+          # printed — only ownership and mode.
+          env_owner="$(stat -c '%U:%G' .env)"
+          env_mode="$(stat -c '%a' .env)"
+          echo ".env ownership/mode: ${env_owner} ${env_mode}"
+          if ! sudo -u www-data test -r .env; then
+            echo "DEPLOY BLOCKED: www-data cannot read $(pwd)/.env (${env_owner} ${env_mode})." >&2
+            echo "The mod_wsgi runtime would fail at settings import with PermissionError." >&2
+            echo "Fix on the box: chown ubuntu:www-data .env && chmod 640 .env" >&2
+            exit 1
+          fi
+          # Secret-file mode policy: group-READ is how www-data is granted access,
+          # so allow it — but reject group-WRITE (www-data could rewrite the
+          # config) and every 'other' permission bit (bitmask 0027). 640 passes;
+          # 660, 644 and 642 fail. Readability itself (e.g. an unreadable 600
+          # file) is enforced by the sudo test above.
+          env_permissions=$((8#$env_mode))
+          if (( env_permissions & 0027 )); then
+            echo "DEPLOY BLOCKED: $(pwd)/.env (mode ${env_mode}) is too permissive for a secrets file:" >&2
+            echo "group-write and all 'other' permission bits are forbidden (expected e.g. 640)." >&2
+            echo "Fix on the box: chown ubuntu:www-data .env && chmod 640 .env" >&2
+            exit 1
+          fi
+          # Prove the runtime user can actually resolve the required settings from
+          # .env (presence only — values are never printed).
+          sudo -u www-data "$VENV_PY" - <<'PYCHECK'
+          from decouple import Config, RepositoryEnv
+          try:
+              cfg = Config(RepositoryEnv('.env'))
+          except OSError as exc:
+              raise SystemExit(f'DEPLOY BLOCKED: cannot read .env as the runtime user: {exc}')
+          missing = [k for k in ('SECRET_KEY', 'DINER_CAP_KEY')
+                     if not (cfg.get(k, default=None) or '').strip()]
+          if missing:
+              raise SystemExit('DEPLOY BLOCKED: .env is readable but missing/empty: '
+                               + ', '.join(missing))
+          print('www-data can read and resolve required settings from .env')
+          PYCHECK
+          # Re-run the deploy check AS the runtime user, from the project directory,
+          # with the venv interpreter. sudo's clean environment plus the www-data
+          # identity reproduce what mod_wsgi will see at import time.
+          sudo -u www-data "$VENV_PY" manage.py check --deploy
+          # Validate the Apache configuration itself before bouncing it.
+          sudo apachectl configtest
+          sudo systemctl restart apache2
+          # Health gate: the deploy is not a success unless the WSGI app boots and
+          # routes. Probe through the local Apache (--resolve pins the public vhost
+          # to 127.0.0.1 with correct SNI + certificate). A healthy app answers
+          # exactly 405 (Method Not Allowed) to a bare GET on the login route;
+          # anything else after the retries fails the deploy loudly instead of
+          # green-and-down.
+          status=000
+          for attempt in 1 2 3 4 5; do
+            sleep 3
+            status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+              --resolve api-test.dinifyapp.com:443:127.0.0.1 \
+              https://api-test.dinifyapp.com/uat/api/v1/users/auth/login/ || true)"
+            status="${status:-000}"
+            echo "Health probe attempt ${attempt}: HTTP ${status} (expect 405)"
+            if [ "$status" -eq 405 ]; then
+              break
             fi
-            # Secret-file mode policy: group-READ is how www-data is granted access,
-            # so allow it — but reject group-WRITE (www-data could rewrite the
-            # config) and every 'other' permission bit (bitmask 0027). 640 passes;
-            # 660, 644 and 642 fail. Readability itself (e.g. an unreadable 600
-            # file) is enforced by the sudo test above.
-            env_permissions=$((8#$env_mode))
-            if (( env_permissions & 0027 )); then
-              echo "DEPLOY BLOCKED: $(pwd)/.env (mode ${env_mode}) is too permissive for a secrets file:" >&2
-              echo "group-write and all 'other' permission bits are forbidden (expected e.g. 640)." >&2
-              echo "Fix on the box: chown ubuntu:www-data .env && chmod 640 .env" >&2
-              exit 1
-            fi
-            # Prove the runtime user can actually resolve the required settings from
-            # .env (presence only — values are never printed).
-            sudo -u www-data "$VENV_PY" - <<'PYCHECK'
-            from decouple import Config, RepositoryEnv
-            try:
-                cfg = Config(RepositoryEnv('.env'))
-            except OSError as exc:
-                raise SystemExit(f'DEPLOY BLOCKED: cannot read .env as the runtime user: {exc}')
-            missing = [k for k in ('SECRET_KEY', 'DINER_CAP_KEY')
-                       if not (cfg.get(k, default=None) or '').strip()]
-            if missing:
-                raise SystemExit('DEPLOY BLOCKED: .env is readable but missing/empty: '
-                                 + ', '.join(missing))
-            print('www-data can read and resolve required settings from .env')
-            PYCHECK
-            # Re-run the deploy check AS the runtime user, from the project directory,
-            # with the venv interpreter. sudo's clean environment plus the www-data
-            # identity reproduce what mod_wsgi will see at import time.
-            sudo -u www-data "$VENV_PY" manage.py check --deploy
-            # Validate the Apache configuration itself before bouncing it.
-            sudo apachectl configtest
-            sudo systemctl restart apache2
-            # Health gate: the deploy is not a success unless the WSGI app boots and
-            # routes. Probe through the local Apache (--resolve pins the public vhost
-            # to 127.0.0.1 with correct SNI + certificate). A healthy app answers
-            # exactly 405 (Method Not Allowed) to a bare GET on the login route;
-            # anything else after the retries fails the deploy loudly instead of
-            # green-and-down.
-            status=000
-            for attempt in 1 2 3 4 5; do
-              sleep 3
-              status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
-                --resolve api-test.dinifyapp.com:443:127.0.0.1 \
-                https://api-test.dinifyapp.com/uat/api/v1/users/auth/login/ || true)"
-              status="${status:-000}"
-              echo "Health probe attempt ${attempt}: HTTP ${status} (expect 405)"
-              if [ "$status" -eq 405 ]; then
-                break
-              fi
-            done
-            if [ "$status" -ne 405 ]; then
-              echo "UAT API failed its post-restart health probe (last HTTP status: ${status}; expected 405)." >&2
-              echo "The WSGI app is likely failing to boot or routing incorrectly. Verify the" >&2
-              echo "project .env is readable by www-data (e.g. ubuntu:www-data, mode 640) and" >&2
-              echo "carries every required setting (e.g. DINER_CAP_KEY), then re-run this" >&2
-              echo "workflow." >&2
-              exit 1
-            fi
+          done
+          if [ "$status" -ne 405 ]; then
+            echo "UAT API failed its post-restart health probe (last HTTP status: ${status}; expected 405)." >&2
+            echo "The WSGI app is likely failing to boot or routing incorrectly. Verify the" >&2
+            echo "project .env is readable by www-data (e.g. ubuntu:www-data, mode 640) and" >&2
+            echo "carries every required setting (e.g. DINER_CAP_KEY), then re-run this" >&2
+            echo "workflow." >&2
+            exit 1
+          fi
+          DEPLOY_SCRIPT
+
+      - name: Deploy to UAT server via SSM
+        run: |
+          # jq --rawfile embeds the script as one JSON string, sidestepping every
+          # quoting hazard (the PYCHECK heredoc, single quotes, $-expansions).
+          jq -n --rawfile script deploy.sh \
+            '{commands: [$script], executionTimeout: ["1500"]}' > params.json
+          CMD_ID="$(aws ssm send-command \
+            --instance-ids "$UAT_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy UAT backend (run ${GITHUB_RUN_ID})" \
+            --parameters file://params.json \
+            --query 'Command.CommandId' --output text)"
+          echo "SSM command dispatched: ${CMD_ID}"
+          # send-command returns at DISPATCH, not completion — the remote set -e
+          # cannot fail this job on its own. Poll until the invocation leaves the
+          # transitional states, then gate the job on Status == Success. The
+          # `|| echo Pending` absorbs the InvocationDoesNotExist race right after
+          # dispatch; the job-level timeout-minutes bounds the loop.
+          STATUS="Pending"
+          while :; do
+            STATUS="$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$UAT_INSTANCE_ID" \
+              --query 'Status' --output text 2>/dev/null || echo Pending)"
+            case "$STATUS" in
+              Pending|InProgress|Delayed|Cancelling) sleep 10 ;;
+              *) break ;;
+            esac
+          done
+          echo "SSM invocation finished: ${STATUS}"
+          echo "---- remote stdout (SSM truncates beyond 24,000 chars) ----"
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" --instance-id "$UAT_INSTANCE_ID" \
+            --query 'StandardOutputContent' --output text
+          echo "---- remote stderr ----"
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" --instance-id "$UAT_INSTANCE_ID" \
+            --query 'StandardErrorContent' --output text >&2
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::UAT deploy failed on the box (SSM status: ${STATUS}). See remote output above." >&2
+            exit 1
+          fi
