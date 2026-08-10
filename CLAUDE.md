@@ -4,6 +4,9 @@
 Dinify is a QR-code-based digital ordering and restaurant management platform
 built for Uganda and mobile-money-first markets. Django/DRF backend on AWS EC2
 with PostgreSQL on AWS RDS.
+A parallel `AGENTS.md` at the repo root carries Codex/other-agent instructions
+that defer to this file — `CLAUDE.md` remains the authoritative project guide,
+so keep it current when conventions change.
 
 ## Tech Stack
 - Django 5.2 LTS / Django REST Framework
@@ -573,7 +576,15 @@ with PostgreSQL on AWS RDS.
   `test_settings.py`. The subscription flow is record-only —
   `tx_subscription.initiate()` writes a Pending `DinifyTransaction` and stops (no
   provider call). The PSP adapter will be designed FRESH per the non-custodial
-  Pattern A when the counsel and PSP integration gates clear
+  Pattern A when the counsel and PSP integration gates clear.
+  REPO-CLEAN IS NOT HOST-CLEAN: the 2026-07-29 host reconnaissance
+  (`REGULATORY_AUDIT.md` APPENDIX, finding H2) found the DPO / Flutterwave / Yo
+  payment credentials sitting in a `root:root` mode-644 backup `.env` on the
+  production box — written 2026-03-17 and still there at the recon, having
+  survived the teardown that removed them from the tree. Mode 644 made it readable
+  by any local account including `www-data`, the account the app itself runs as.
+  Deleting a file does not revoke a credential — provider-side revocation is
+  recorded there as OUTSTANDING
 - Reports module — rebuilt on the clean contract: ✅ Complete. All four
   restaurant reports (`api/v1/reports/restaurant/<name>/` →
   `RestaurantReportsEndpoint`, `{status, message, data}` envelope) are rebuilt on
@@ -678,12 +689,38 @@ with PostgreSQL on AWS RDS.
   the authz closures in URL Structure). Read it before deleting a surface that
   merely looks unreferenced, and refresh it when the deliberate keeps change.
   Sibling records: `dinify_backend/tenancy/ASSURANCE.md` +
-  `TENANT_ISOLATION_CLOSURE.md` (tenant boundary), `REGULATORY_AUDIT.md`
-  (non-custodial posture), `REPORTS_CONTRACT_AUDIT.md` (cross-repo Reports
+  `dinify_backend/tenancy/TENANT_ISOLATION_CLOSURE.md` (tenant boundary — BOTH
+  live under `dinify_backend/tenancy/`, not the repo root),
+  `REGULATORY_AUDIT.md` (non-custodial posture — and see its APPENDIX below),
+  `REPORTS_CONTRACT_AUDIT.md` (cross-repo Reports
   contract), `PHASE_0_5_CLOSURE.md` (the four-PR Phase 0.5 pre-launch remediation
   ladder — what it closed, what it deliberately left open, and the seams Phase 1
-  inherits) and `BACKGROUND_TASKS.md` (management-command runbook — note there is
-  NO scheduler configuration in this repo; every command is invoked externally)
+  inherits) and `BACKGROUND_TASKS.md` (management-command runbook)
+- The audit record now covers the HOST, not just the tree: `REGULATORY_AUDIT.md`
+  carries an APPENDIX of post-audit host findings (H1–H5, 2026-07-29). Everything
+  above that appendix examined the REPOSITORY and was verified in the repository;
+  the production host was never in scope. Its theme is that removing code does not
+  remove what the host is still holding or still running. Three items are recorded
+  as OUTSTANDING and are host-side, so nothing in this repo closes them: H2 (PSP
+  credentials in a backup `.env` — provider revocation), H4 (MongoDB Atlas IP
+  access list open to `0.0.0.0/0`), H5 (a real transactional-email provider on a
+  Dinify-controlled domain; `EMAIL_HOST` was pointed at a domain that had lapsed
+  to NXDOMAIN, a credential trap, mitigated on the box by `EMAIL_HOST=localhost`
+  — an env change with no repository counterpart). H3 (OTP broadcast to
+  contractor mailboxes, 2025-02 → 2026-02) has its code path closed but its
+  impact assessment open. Do not restate any of these as remediated
+- NOTHING SCHEDULED IS CURRENTLY RUNNING (discovered 2026-07-29, recorded in
+  `BACKGROUND_TASKS.md`). This repo has no scheduler configuration — no Celery,
+  no Beat, no crontab, no Procfile — and every management command is invoked
+  externally, which was already documented. What the recon added is what that
+  external scheduler actually WAS: a single root cron entry firing every minute
+  since 2024-12-12, calling `process_transactions` — a command deleted in the
+  custodial teardown — and failing on every run for ~5 months (594 log files,
+  739 MB). Of the eleven wrapper scripts in `/home/scripts/`, nine call commands
+  that no longer exist and the two that survive (`determine-customers`,
+  `send_messages`) are NOT scheduled. So unsent notifications are not being
+  dispatched and orders are not being matched to customers except by hand.
+  Documented, not fixed — do not assume any background work runs on a schedule
 - Login 500 regression: ✅ Resolved — not reproducible after the auth-stack work;
   login → refresh → logout verified working on UAT (closed June 2026)
 - Django 5.2 LTS upgrade: ✅ Complete — Django 4.2.30 → 5.2.15 (PRs #123–#125).
@@ -692,14 +729,52 @@ with PostgreSQL on AWS RDS.
   deprecation surface was clean — no removed-in-5.x APIs in use, no new
   migrations generated, `USE_TZ` already explicit. App timezone code now uses
   stdlib `zoneinfo`; `pytz`/`numpy`/`pandas`/`tzdata` were removed from
-  requirements entirely (no app imports remain — do not reintroduce `import pytz`)
+  requirements entirely (no app imports remain — do not reintroduce `import pytz`).
+  PATCH PINS MOVE WITHOUT A CONTEXT UPDATE — Dependabot has since carried
+  `requirements.txt` to Django 5.2.16, `cryptography` 50.0.0 and
+  `typing_extensions` 4.13.2. Read `requirements.txt` for the current pins rather
+  than quoting the version in this bullet, which records the UPGRADE, not the pin
 
 ## Deployment Rules — CRITICAL
-- Merging a PR to main automatically triggers GitHub Actions to pull code,
-  install dependencies (`pip install -r requirements.txt`), run migrations,
-  and restart Apache
+- Merging a PR to main deploys automatically, but NOT off the merge event: the
+  deploy runs on `workflow_run` when **Backend CI** completes successfully on
+  `main`, so a red CI never reaches the box. One concurrency group
+  (`deploy-uat-backend`, `cancel-in-progress: false`) serialises runs
+- TRANSPORT IS SSM, NOT SSH (PR #281). The job assumes a repo-scoped IAM role via
+  **GitHub OIDC** and dispatches the deploy script through **SSM Send-Command** to
+  `i-0eeb7c0c3a36d3667` — no inbound port 22, no stored credentials. The UAT box
+  moved to an instance whose security group does not admit GitHub-hosted runners,
+  which is why the old `appleboy/ssh-action` path died at connect timeout. Three
+  consequences that bite when editing the script: it needs its `#!/bin/bash`
+  shebang (AWS-RunShellScript otherwise runs dash, which cannot parse the `0027`
+  gate's arithmetic); SSM executes as ROOT, so every touch of the ubuntu-owned
+  tree or venv runs `sudo -u ubuntu` with the venv interpreter by absolute path
+  (`$VENV_PY` — sudo resets PATH via secure_path, and root-owned files written
+  into that tree break the NEXT deploy); and SSM keeps only the FIRST 24,000
+  characters of output, so the `DEPLOY-SKIP:` / `DEPLOYED-HEAD:` markers must stay
+  ABOVE the pip/migrate output and pip runs `-q`. The legacy `UAT_SSH_*` secrets
+  are deliberately retained as rollback until the SSH path is decommissioned
+- THE DEPLOY IS PINNED TO ONE EXACT COMMIT (PR #283, post-incident 2026-08-08,
+  when a deploy run reported success while the box stayed 39 hours behind on an
+  older commit — a green deploy that did not deploy). The workflow injects the
+  triggering CI run's head SHA into the script by placeholder substitution behind
+  a quoted heredoc; the box fetches, `git checkout --detach`es exactly that SHA,
+  ASSERTS `HEAD` equals the target, and prints `DEPLOYED-HEAD:` which the workflow
+  reads back into the step summary — so the retained record is the box's own
+  assertion, never the workflow's intent. The automatic path is FORWARD-ONLY: a
+  queued older run prints `DEPLOY-SKIP:` and exits 0 rather than downgrading the
+  box under a newer schema. Never reintroduce `git pull origin main` here — "pull
+  whatever main is at execution time" is the defect this closed
+- ROLLBACK / MANUAL REDEPLOY is `workflow_dispatch` with a full 40-hex `sha`
+  input, and it is the ONE path allowed to move backwards. Its pre-flight refuses
+  any SHA without a successful **Backend CI run on `main`** (branch-green is not
+  enough), and it warns loudly that migrations already applied by newer code are
+  NOT reversed — confirm schema compatibility (expand/contract) before using it.
+  Event-derived values reach shell only through `env:` indirection and are
+  re-validated (40-hex; literal `true`/`false`) immediately before substitution,
+  because this script ultimately executes as root on the box
 - The deploy DOES reinstall dependencies, so a `requirements.txt` change takes
-  effect on the next deploy. The install runs after `git pull`, before
+  effect on the next deploy. The install runs after the checkout, before
   `migrate`; with `set -e` a failed install aborts before the Apache restart,
   leaving the live API up on the old workers
 - The deploy is HEALTH-GATED (post-incident 2026-07-17, when a `.env` of mode
@@ -711,9 +786,17 @@ with PostgreSQL on AWS RDS.
   resolve required settings from `.env` (values never printed), re-runs
   `check --deploy` AS `www-data` from the project dir with the venv Python,
   and runs `apachectl configtest` — any failure aborts with the old workers
-  still serving. AFTER the restart an HTTP probe of the login route through
-  local Apache must return exactly 405, so a boot-dead app turns the deploy
-  red instead of green-and-down. Deployed runtime secrets (e.g.
+  still serving. AFTER the restart there are TWO probes, and neither substitutes
+  for the other: an HTTP probe of the login route through local Apache must
+  return exactly 405 (proves TLS/Apache/WSGI ROUTING — a boot-dead app turns the
+  deploy red instead of green-and-down), and a probe of `/uat/api/v1/health/`
+  must return 200 with `database == "connected"` (proves the RESTARTED daemon
+  processes can reach PostgreSQL; `migrate` and `check --deploy` earlier prove
+  only PRE-restart connectivity). The health body is parsed as JSON, never
+  substring-matched, because that endpoint answers **200 with
+  `status: degraded`** when the database is down — status code alone would pass
+  a DB-less app. Both probes retry five times with `--resolve` pinning the public
+  vhost to 127.0.0.1. Deployed runtime secrets (e.g.
   `DINER_CAP_KEY`) must be stored in the project `.env` — the contract the
   gates validate directly (`RepositoryEnv('.env')` as `www-data`) — readable
   by `www-data` through group-read, with no group-write and no permissions
@@ -771,6 +854,14 @@ with PostgreSQL on AWS RDS.
   force-logs-out the client (DC-BE-011). DELETE on `upsell-config/items/reorder/`
   now returns 405 instead of silently deleting an item (DC-BE-004)
 - `api/v1/reports/restaurant/<report_name>/` → RestaurantReportsEndpoint
+- `api/v1/health/` → `misc_app/urls.py` → `HealthCheckView`
+  (`misc_app/endpoints/health.py`) — `AllowAny` with `authentication_classes = []`,
+  answering `{status, database, timestamp}` after a `SELECT 1`. It is DEPLOY-
+  LOAD-BEARING (the UAT DB-connectivity gate parses it), so keep the three keys
+  and their values stable. It deliberately answers **HTTP 200 even when the
+  database is unreachable** (`status: degraded`, `database: unreachable`) — a
+  consumer must read the body, never the status code. Distinct from the admin
+  plane's own `admin/v1/` health route
 - `api/v1/orders/` → v1 orders (urls.py) — only `submit` (PUT) is live; the
   orphaned, unscoped `prepare`/`cancel`/`update-item` write actions were
   RETIRED (finding H3, PR #181) and any retired/unknown action now 404s
@@ -1367,9 +1458,13 @@ the catch-all `<str:config_detail>/` route.
 - `scripts/verify.sh` is the committed source of truth that runs the same
   checks locally in the same order; the `/dinify-check` command defers to it.
   Run it and paste the output before raising a PR
-- A separate `.github/workflows/deploy-uat.yml` deploys to the UAT host on
-  push to `main` (pull, migrate, restart Apache) — reinforces the deployment
-  rule above: never pull/migrate/restart manually
+- A separate `.github/workflows/deploy-uat.yml` deploys to the UAT host — NOT on
+  push, but on `workflow_run` when this "Backend CI" workflow completes
+  successfully on `main`, dispatched over SSM/OIDC and pinned to the exact SHA
+  that CI certified (see Deployment Rules above; never pull/migrate/restart
+  manually). Two coupling notes: renaming the `Backend CI` workflow silently
+  breaks the deploy trigger, which matches on that literal name, and the
+  `workflow_dispatch` rollback pre-flight queries `ci.yml`'s runs by path
 - A scheduled `.github/workflows/audit.yml` runs a weekly `pip-audit` sweep
   (Mondays 06:30 UTC) + manual `workflow_dispatch` — NOT triggered on
   PRs/pushes, so it never becomes a blocking PR check; a failure (advisories
