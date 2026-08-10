@@ -5,6 +5,17 @@ on:
     workflows: ["Backend CI"]
     types: [completed]
     branches: [main]
+  # Manual redeploy / rollback path (post-incident 2026-08-08). The input is an
+  # exact commit, never a branch: a manual trigger that deployed "whatever main
+  # is right now" would reproduce defect (a). The SHA is format-validated and
+  # must have a successful Backend CI run ON MAIN — verified below, before AWS
+  # auth — or the job refuses to deploy it.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-char commit SHA on main that has passed Backend CI"
+        required: true
+        type: string
 
 concurrency:
   group: deploy-uat-backend
@@ -13,7 +24,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     timeout-minutes: 30
     # OIDC (no inbound SSH, no stored credentials): the job mints a short-lived
     # identity token GitHub signs per-run; AWS trusts it for one narrowly-scoped
@@ -22,11 +33,65 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      # actions: read lets the dispatch pre-flight list Backend CI runs to
+      # prove the requested SHA passed CI on main before it can reach the box.
+      actions: read
     env:
       UAT_INSTANCE_ID: i-0eeb7c0c3a36d3667
     steps:
+      # Injection hygiene: event-derived values are never interpolated inline
+      # into run: — inputs.sha is operator-typed free text, and this deploy
+      # script ultimately executes as root on the UAT box, so a raw ${{ }}
+      # inside run: would be a script-injection surface. Everything from the
+      # event is mapped through env: and read only as "$SHELL_VARS";
+      # TARGET_SHA / ALLOW_BACKWARD leave this step only after validation.
+      - name: Resolve and validate deploy target
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_SHA: ${{ inputs.sha }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TARGET_SHA="$DISPATCH_SHA"
+            # Rollback is the manual trigger's one legitimate backwards move —
+            # see the forward-only guard in the deploy script.
+            ALLOW_BACKWARD="true"
+          else
+            TARGET_SHA="$WORKFLOW_RUN_SHA"
+            ALLOW_BACKWARD="false"
+          fi
+          if ! printf '%s' "$TARGET_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Deploy target rejected: expected a full 40-character lowercase hex commit SHA." >&2
+            exit 1
+          fi
+          case "$ALLOW_BACKWARD" in
+            true|false) ;;
+            *) echo "::error::ALLOW_BACKWARD must be literal true or false." >&2; exit 1 ;;
+          esac
+          echo "TARGET_SHA=${TARGET_SHA}" >> "$GITHUB_ENV"
+          echo "ALLOW_BACKWARD=${ALLOW_BACKWARD}" >> "$GITHUB_ENV"
+          echo "Deploy target: ${TARGET_SHA} (event: ${EVENT_NAME}, allow_backward: ${ALLOW_BACKWARD})"
+
+      # Dispatch pre-flight (defect (e)): the manual path must not be able to
+      # reproduce defect (a). The requested SHA must have a successful
+      # "Backend CI" run ON MAIN — Backend CI also runs on PR branches, and a
+      # branch-green SHA must not be deployable.
+      - name: Verify dispatched SHA passed Backend CI on main
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          MAIN_GREEN_RUNS="$(gh api \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${TARGET_SHA}&status=success&per_page=10" \
+            --jq '[.workflow_runs[] | select(.head_branch == "main")] | length')"
+          if [ "${MAIN_GREEN_RUNS:-0}" -lt 1 ]; then
+            echo "::error::Refusing to deploy ${TARGET_SHA}: no successful 'Backend CI' run on branch main exists for it. Only a commit that has passed Backend CI on main may be deployed." >&2
+            exit 1
+          fi
+          echo "CI verification: ${MAIN_GREEN_RUNS} successful Backend CI run(s) on main for ${TARGET_SHA}"
+
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: arn:aws:iam::767397669083:role/dinify-github-deploy-role
           aws-region: eu-west-2
@@ -39,22 +104,63 @@ jobs:
           # /bin/sh (dash on Ubuntu), and the 0027 permission gate below uses
           # bash-only arithmetic ($((8#..)) and (( ))).
           set -e
+          # __TARGET_SHA__ / __ALLOW_BACKWARD__ are placeholders the workflow
+          # substitutes with sed AFTER validating both values (40-hex; literal
+          # true/false) — the quoted heredoc keeps everything else free of
+          # workflow-time expansion.
+          TARGET_SHA="__TARGET_SHA__"
+          ALLOW_BACKWARD="__ALLOW_BACKWARD__"
           cd /home/ubuntu/dinify_backend_handover_uat
           source /home/ubuntu/venv_uat_handover/bin/activate
           # SSM runs this script as root; the SSH deploy ran as ubuntu. Everything
           # that touches the ubuntu-owned repo or venv must run AS ubuntu
           # (sudo -u ubuntu): root git refuses the tree outright ("detected dubious
           # ownership"), and the safe.directory override git suggests would be
-          # worse — root's git pull would write root-owned objects into the
+          # worse — root's git fetch would write root-owned objects into the
           # ubuntu-owned tree and root's pip would write root-owned packages into
           # the venv, going green today and breaking the NEXT deploy. sudo resets
           # PATH (secure_path), so sudo'd commands must use the venv interpreter
           # by absolute path — hence "$VENV_PY" everywhere below.
           VENV_PY="$(command -v python3)"
           "$VENV_PY" --version
+          # ---- Deploy-target pinning (post-incident 2026-08-08) ----
+          # On 2026-08-08 the deploy run for 7b0e815 reported success while this
+          # box stayed on 4ccae37 — for 39 hours, until a manual re-run. A green
+          # deploy that did not deploy. The script used to pull whatever main
+          # happened to be at execution time, and nothing verified what actually
+          # landed. That class is closed here: the workflow injects the ONE
+          # commit its triggering CI run certified (TARGET_SHA), the box fetches
+          # and checks out exactly that SHA, refuses to move backwards on the
+          # automatic path (a queued older run must not downgrade the box under
+          # possibly newer schema), and asserts HEAD equals the target. If the
+          # box's HEAD does not equal the intended commit, the deploy fails
+          # loudly instead of green-and-stale.
+          sudo -u ubuntu git fetch origin
+          sudo -u ubuntu git rev-parse --verify "${TARGET_SHA}^{commit}" >/dev/null \
+            || { echo "Target ${TARGET_SHA} not present after fetch" >&2; exit 1; }
+          # Forward-only guard: ALLOW_BACKWARD is true only for workflow_dispatch
+          # (rollback is its legitimate use), false for the automatic path.
+          # The DEPLOY-SKIP:/DEPLOYED-HEAD: markers are grepped from SSM stdout by the workflow — keep them above the pip/migrate output (SSM keeps only the FIRST 24,000 chars).
+          if sudo -u ubuntu git merge-base --is-ancestor HEAD "${TARGET_SHA}"; then
+            : # target is equal to or ahead of deployed HEAD — proceed (equal = idempotent redeploy)
+          elif [ "${ALLOW_BACKWARD}" = "true" ]; then
+            echo "WARNING: deliberately moving BACKWARDS from $(sudo -u ubuntu git rev-parse HEAD) to ${TARGET_SHA}."
+            echo "WARNING: migrations already applied by newer code are NOT reversed. Confirm schema compatibility (expand/contract)."
+          else
+            echo "DEPLOY-SKIP: target ${TARGET_SHA} is behind deployed HEAD $(sudo -u ubuntu git rev-parse HEAD); a newer deploy already landed."
+            exit 0
+          fi
           sudo -u ubuntu git checkout -- .
           sudo -u ubuntu git clean -fd
-          sudo -u ubuntu git pull origin main
+          # --detach is deterministic from any starting state — never assume
+          # whether the box is currently on a branch or already detached.
+          sudo -u ubuntu git checkout --detach "${TARGET_SHA}"
+          DEPLOYED="$(sudo -u ubuntu git rev-parse HEAD)"
+          if [ "${DEPLOYED}" != "${TARGET_SHA}" ]; then
+            echo "FATAL: HEAD is ${DEPLOYED}, expected ${TARGET_SHA} — refusing to continue" >&2
+            exit 1
+          fi
+          echo "DEPLOYED-HEAD: ${DEPLOYED}"
           # Install pinned deps so requirements.txt edits actually take effect on the
           # box. With set -e, a failure here (e.g. PyPI unreachable) aborts the deploy
           # BEFORE migrate/check/restart, leaving the running API up.
@@ -142,7 +248,56 @@ jobs:
             echo "workflow." >&2
             exit 1
           fi
+          # DB-connectivity gate: the 405 probe above proves TLS/Apache/WSGI
+          # routing, NOT that the restarted processes can reach PostgreSQL.
+          # migrate and check --deploy earlier in this script prove PRE-restart
+          # connectivity under set -e; this gate proves the RESTARTED daemon
+          # processes' connectivity. Both are required; neither substitutes for
+          # the other. The health endpoint answers HTTP 200 even when the
+          # database is down (status: degraded), so the body is parsed as JSON
+          # — never substring-matched — and only database == "connected" passes.
+          db_status=000
+          db_state="unprobed"
+          for attempt in 1 2 3 4 5; do
+            sleep 3
+            db_response="$(curl -sS --max-time 15 \
+              --resolve api-test.dinifyapp.com:443:127.0.0.1 \
+              -w '\n%{http_code}' \
+              https://api-test.dinifyapp.com/uat/api/v1/health/ || true)"
+            db_status="$(printf '%s' "$db_response" | tail -n 1)"
+            db_status="${db_status:-000}"
+            db_body="$(printf '%s' "$db_response" | sed '$d')"
+            db_state="$(printf '%s' "$db_body" | "$VENV_PY" -c 'import json,sys; print(json.load(sys.stdin).get("database", "absent"))' 2>/dev/null || echo unparseable)"
+            echo "DB health probe attempt ${attempt}: HTTP ${db_status}, database=${db_state} (expect 200, connected)"
+            if [ "$db_status" -eq 200 ] && [ "$db_state" = "connected" ]; then
+              break
+            fi
+          done
+          if [ "$db_status" -ne 200 ] || [ "$db_state" != "connected" ]; then
+            echo "UAT API failed its post-restart DATABASE health probe (last: HTTP ${db_status}, database=${db_state})." >&2
+            echo "This is not the routing failure the 405 gate above catches: Apache and the" >&2
+            echo "WSGI processes restarted and are answering, but the restarted daemons cannot" >&2
+            echo "reach PostgreSQL. Check the RDS endpoint, security groups and the DB" >&2
+            echo "credentials in the project .env, then re-run this workflow." >&2
+            exit 1
+          fi
           DEPLOY_SCRIPT
+          # Substitution happens AFTER the quoted heredoc is written (nothing
+          # expands at write time) and only with re-validated values — the
+          # injection control lives beside the injection site.
+          if ! printf '%s' "$TARGET_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::TARGET_SHA failed re-validation before substitution." >&2
+            exit 1
+          fi
+          if ! printf '%s' "$ALLOW_BACKWARD" | grep -Eq '^(true|false)$'; then
+            echo "::error::ALLOW_BACKWARD failed re-validation before substitution." >&2
+            exit 1
+          fi
+          sed -i -e "s/__TARGET_SHA__/${TARGET_SHA}/" -e "s/__ALLOW_BACKWARD__/${ALLOW_BACKWARD}/" deploy.sh
+          if grep -Eq '__TARGET_SHA__|__ALLOW_BACKWARD__' deploy.sh; then
+            echo "::error::deploy.sh still carries an unsubstituted placeholder." >&2
+            exit 1
+          fi
 
       - name: Deploy to UAT server via SSM
         run: |
@@ -174,10 +329,15 @@ jobs:
             esac
           done
           echo "SSM invocation finished: ${STATUS}"
-          echo "---- remote stdout (SSM truncates beyond 24,000 chars) ----"
-          aws ssm get-command-invocation \
+          # stdout is CAPTURED (then echoed) rather than only streamed: the
+          # DEPLOYED-HEAD:/DEPLOY-SKIP: markers are read back out of it below,
+          # because the retained record must reflect the BOX's own assertion of
+          # what landed, never this workflow's intent.
+          REMOTE_STDOUT="$(aws ssm get-command-invocation \
             --command-id "$CMD_ID" --instance-id "$UAT_INSTANCE_ID" \
-            --query 'StandardOutputContent' --output text
+            --query 'StandardOutputContent' --output text)"
+          echo "---- remote stdout (SSM truncates beyond 24,000 chars) ----"
+          printf '%s\n' "$REMOTE_STDOUT"
           echo "---- remote stderr ----"
           aws ssm get-command-invocation \
             --command-id "$CMD_ID" --instance-id "$UAT_INSTANCE_ID" \
@@ -186,3 +346,33 @@ jobs:
             echo "::error::UAT deploy failed on the box (SSM status: ${STATUS}). See remote output above." >&2
             exit 1
           fi
+          FINISHED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          # Forward-only skip is green but never quiet — a quiet green is the
+          # exact smell the 2026-08-08 pinning exists to eliminate.
+          if printf '%s\n' "$REMOTE_STDOUT" | grep -q '^DEPLOY-SKIP:'; then
+            SKIP_LINE="$(printf '%s\n' "$REMOTE_STDOUT" | grep -m1 '^DEPLOY-SKIP:' || true)"
+            BOX_HEAD="$(printf '%s' "$SKIP_LINE" | grep -oE 'deployed HEAD [0-9a-f]{40}' | grep -oE '[0-9a-f]{40}' || true)"
+            echo "::notice::UAT deploy SKIPPED (already ahead): target ${TARGET_SHA} is behind box HEAD ${BOX_HEAD:-unknown}; a newer deploy already landed."
+            {
+              echo "## UAT deploy: SKIPPED (already ahead)"
+              echo "- Trigger: \`${GITHUB_EVENT_NAME}\` — finished ${FINISHED_AT}"
+              echo "- Requested target: \`${TARGET_SHA}\`"
+              echo "- Box HEAD (unchanged): \`${BOX_HEAD:-unknown}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          DEPLOYED_HEAD="$(printf '%s\n' "$REMOTE_STDOUT" | grep -m1 -oE '^DEPLOYED-HEAD: [0-9a-f]{40}' | grep -oE '[0-9a-f]{40}' || true)"
+          if [ -z "${DEPLOYED_HEAD}" ]; then
+            echo "::error::SSM reported Success but the remote output carries no DEPLOYED-HEAD: (or DEPLOY-SKIP:) marker — refusing to report an unproven deploy as green." >&2
+            exit 1
+          fi
+          if [ "${DEPLOYED_HEAD}" != "${TARGET_SHA}" ]; then
+            echo "::error::Box-asserted HEAD ${DEPLOYED_HEAD} does not match the intended target ${TARGET_SHA}." >&2
+            exit 1
+          fi
+          {
+            echo "## UAT deploy: SUCCESS"
+            echo "- Trigger: \`${GITHUB_EVENT_NAME}\` — finished ${FINISHED_AT}"
+            echo "- Target SHA: \`${TARGET_SHA}\`"
+            echo "- Box-asserted HEAD (\`DEPLOYED-HEAD:\`): \`${DEPLOYED_HEAD}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
