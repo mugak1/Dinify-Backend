@@ -9,6 +9,8 @@ that defer to this file — `CLAUDE.md` remains the authoritative project guide,
 so keep it current when conventions change.
 
 ## Tech Stack
+- Python 3.12.3 on Ubuntu 24.04 (the live EC2 runtime, cut over 2026-08 from
+  Ubuntu 22.04 / Python 3.10.12). CI pins this exact patch — see the CI section
 - Django 5.2 LTS / Django REST Framework
 - PostgreSQL on AWS RDS (primary database)
 - MongoDB Atlas (action logs and archiving only — currently unreachable from EC2)
@@ -802,6 +804,13 @@ so keep it current when conventions change.
   by `www-data` through group-read, with no group-write and no permissions
   for other users (currently `ubuntu:www-data` mode 640); never in a shell
   profile
+- HOST RUNTIME NOTE — the AWS CLI on the box is **v2, installed from AWS's
+  official installer at `/usr/local/bin/aws`**, NOT from apt. Ubuntu 24.04 has no
+  installation candidate for the `awscli` package even though `command-not-found`
+  still advertises one, so `apt install awscli` fails and the suggestion is a dead
+  end. Consequence: it is a hand-managed binary outside the package manager —
+  `apt upgrade` never touches it, and it needs periodic MANUAL update
+  (re-run AWS's installer). Do not "fix" its absence from apt
 - NEVER suggest manual `git pull`, `migrate`, or Apache restart — the
   pipeline handles everything
 - Each feature must be on its own branch → PR → merge
@@ -1368,6 +1377,26 @@ the catch-all `<str:config_detail>/` route.
 ## Database
 - `CONN_MAX_AGE: 600` for persistent DB connections — do not remove
 - All migrations must be generated and included in PRs when models change
+- MIGRATIONS MUST BE EXPAND-ONLY — CRITICAL. Rollback moves CODE backwards, never
+  SCHEMA: the `workflow_dispatch` path re-deploys an older commit, but the deploy
+  script has no `migrate --backwards` step at all (it runs a bare forward
+  `manage.py migrate`), and its backward branch prints
+  `WARNING: migrations already applied by newer code are NOT reversed` precisely
+  because nothing reverses them. So a rollback lands OLD CODE ON NEW SCHEMA, and
+  the schema is what has to tolerate it:
+  - Every schema change must be backward-compatible with the immediately
+    preceding deployed commit. If it isn't, application rollback cannot save you
+    — the only remaining recovery is a hand-written forward fix under incident
+    conditions
+  - EXPAND FIRST, CONTRACT LATER, in separate PRs: add nullable columns, add new
+    tables, dual-write — deploy — backfill — and only then drop, rename or add
+    `NOT NULL`, once the expanded state is live and proven
+  - NEVER rename or drop a column in the same PR that stops reading it. The old
+    code is still one rollback away from selecting it
+  - This is not theoretical: the 2026-08-10 deliberate backwards deploy from
+    `f8acc50` to `010fd8dd` succeeded *because no migration sat between them*.
+    That property is what this rule preserves — see the ROLLBACK / MANUAL
+    REDEPLOY bullet under "Deployment Rules — CRITICAL"
 - Latest migration: `restaurants_app/migrations/0056_restaurant_lifecycle_states.py`
   (0054 adds `Table.qr_version`; 0055 data-repairs MenuItem extras — see the
   "Write-time menu relationship integrity" bullet; 0056 constrains
@@ -1393,36 +1422,41 @@ the catch-all `<str:config_detail>/` route.
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main` and on PRs to `main`
-- Runs a TWO-LEG Python matrix in `ci.yml` (`fail-fast: false`, so one red leg
-  still reports the other) — a TEMPORARY state while the interpreter migrates,
-  Python 3.10 reaching EOL 2026-10-31:
-  - **`3.10.12`** mirrors the prod EC2 runtime (the UAT venv is `python3.10`) and
-    stays AUTHORITATIVE while the box is on 3.10 — CI must keep reproducing
-    prod's interpreter so a 3.10-only issue can't pass CI and then fail at the
-    live WSGI import; any dependency bump must still satisfy
-    `requires-python <= 3.10`
-  - **`3.12`** is the migration proving-ground, deliberately UNPINNED at patch
-    level (there is no prod 3.12 to mirror yet, and we want the newest patch
-    under test)
-  - On cutover — a new EC2 venv with `mod_wsgi` rebuilt against 3.12, which the
-    deploy pipeline CANNOT do — DELETE the `3.10.12` leg and pin `3.12` to the
-    box's exact patch. Never delete the `3.12` leg
-  - The matrix job is keyed `suite`, so its legs report as `suite (3.10.12)` /
-    `suite (3.12)`. Branch protection on `main` requires a check literally named
-    `test`, which a matrix job can NEVER produce (it always suffixes the leg
-    value) — so the `test` job is an AGGREGATOR: `needs: [suite]`, `if:
-    always()`, failing unless every leg succeeded. It is the single required
-    check, and that is what lets the matrix change — add, remove or re-pin a leg,
-    including deleting `3.10.12` at cutover — with NO repo-settings change. Do
-    NOT rename the `test` job, drop the aggregator, or give it
-    `continue-on-error`; `if: always()` is load-bearing, because a SKIPPED
-    required check never reports a failure and would block merges on a pending
-    check instead of failing loudly
-  - Note: Django 5.2.x is the LAST series supporting Python 3.10/3.11 — a future
-    Django 6.0 upgrade requires bumping the prod interpreter first, which is the
-    second reason this migration matters
-  - `.github/workflows/audit.yml` still pins `3.10.12` on its own; it moves with
-    the box, not with this matrix
+- Runs a SINGLE-LEG Python matrix in `ci.yml`, pinned to **`3.12.3`** — the live
+  EC2 interpreter. The interpreter migration is DONE: the box was rebuilt on
+  Ubuntu 24.04 / Python 3.12.3 and cut over 2026-08, and the temporary `3.10.12`
+  leg was deleted once it no longer matched anything (PR-B), as the dual-leg
+  comment it carried had instructed:
+  - The pin exists to REPRODUCE PROD, so a version-specific issue can't pass CI
+    and then fail at the live WSGI import. That is a feature-and-behaviour
+    mirror, not a byte-identical one: `actions/setup-python` installs an upstream
+    CPython while the box runs Ubuntu's package with security patches backported
+    under the same version string. The old `3.10.12` pin had exactly the same
+    property — this is not a new gap
+  - THE PIN AND THE BOX MOVE TOGETHER, in the same PR as the venv rebuild.
+    Bumping the pin alone means CI tests an interpreter that serves no traffic;
+    rebuilding the venv alone means prod runs an interpreter nothing tested.
+    Note the deploy pipeline CANNOT rebuild the venv or `mod_wsgi` — that is
+    hands-on host work, which is why the two can drift if nobody couples them
+  - `.github/workflows/audit.yml` pins the SAME value independently. Both files
+    must be changed together; they are the only two places the interpreter
+    version is asserted (no `setup.py` / `pyproject.toml` / `tox.ini` exists, and
+    `requirements.txt` declares no `requires-python`). Dependency bumps must
+    satisfy `requires-python <= 3.12`
+  - The matrix job is keyed `suite`, so its leg reports as `suite (3.12.3)`.
+    Branch protection on `main` requires a check literally named `test`, which a
+    matrix job can NEVER produce (it always suffixes the leg value — collapsing
+    to one leg did not change that, since the suffix comes from HAVING a matrix,
+    not from having several) — so the `test` job is an AGGREGATOR: `needs:
+    [suite]`, `if: always()`, failing unless every leg succeeded. It is the
+    single required check, and that is what lets the matrix change — add, remove
+    or re-pin a leg, as deleting `3.10.12` at cutover did — with NO repo-settings
+    change. Do NOT rename the `test` job, drop the aggregator, give it
+    `continue-on-error`, or flatten `suite` out of the matrix construct; `if:
+    always()` is load-bearing, because a SKIPPED required check never reports a
+    failure and would block merges on a pending check instead of failing loudly
+  - Note: Django 5.2.x is the LAST series supporting Python 3.10/3.11, so the
+    3.12 move is also what unblocks a future Django 6.0 upgrade
 - Spins up a real Postgres 15, runs `django check`,
   `makemigrations --check --dry-run`, then the money-field guard
   (`scripts/check_money_fields.py`) against `dinify_backend.test_settings`
@@ -1473,9 +1507,11 @@ the catch-all `<str:config_detail>/` route.
 ## Verification
 Before raising any PR, run `./scripts/verify.sh` (mirrors CI) and confirm:
 1. Confirm migrations are generated for any model changes (CI enforces this)
-2. Confirm new editable fields are added to EDIT_INFORMATION
-3. Confirm no synchronous SMS calls introduced (except where return value needed)
-4. Confirm no new hard MongoDB dependencies
-5. Confirm monetary fields use DecimalField
-6. If adding a new endpoint, confirm it's registered in urls.py above the catch-all
-7. Confirm no reintroduction of `clear_<field>` sentinels in PUT payloads
+2. If this PR adds a migration, confirm it is expand-only and backward-compatible
+   with the deployed commit (see ## Database)
+3. Confirm new editable fields are added to EDIT_INFORMATION
+4. Confirm no synchronous SMS calls introduced (except where return value needed)
+5. Confirm no new hard MongoDB dependencies
+6. Confirm monetary fields use DecimalField
+7. If adding a new endpoint, confirm it's registered in urls.py above the catch-all
+8. Confirm no reintroduction of `clear_<field>` sentinels in PUT payloads

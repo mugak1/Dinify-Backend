@@ -19,8 +19,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          # Match the prod/CI interpreter pin (UAT venv runs Python 3.10.12).
-          python-version: '3.10.12'
+          # Mirrors the live UAT interpreter (Ubuntu 24.04, Python 3.12.3) and
+          # moves with ci.yml — the two pins are the same value and must be
+          # changed in the same PR as the box's venv rebuild.
+          python-version: '3.12.3'
 
       - name: Install pip-audit
         run: |
