@@ -6,7 +6,7 @@ Django REST API backend for the Dinify restaurant management and ordering platfo
 
 | Component | Version / Package |
 |---|---|
-| Python | CI runs a two-leg matrix: **3.10.12** (pinned to match the prod EC2 runtime) and **3.12** (migration target — 3.10 reaches EOL 2026-10-31) — 3.10+ locally |
+| Python | **3.12.3** — CI pins the exact patch the prod EC2 runtime serves (Ubuntu 24.04); 3.12+ locally |
 | Django | 5.2.15 (LTS) |
 | Django REST Framework | 3.17.1 |
 | Auth | `djangorestframework-simplejwt` 5.5.1 (JWT Bearer tokens) |
@@ -185,7 +185,7 @@ break-glass sequence for a lost `ADMIN_SECRET_ENCRYPTION_KEY`.
 
 CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-**What CI runs** (a two-leg Python matrix — **3.10.12** and **3.12** — on Ubuntu, against a **PostgreSQL 15** service, using `dinify_backend.test_settings`):
+**What CI runs** (a single-leg Python matrix pinned to **3.12.3**, matching the prod interpreter — on Ubuntu, against a **PostgreSQL 15** service, using `dinify_backend.test_settings`):
 1. `pip install -r requirements.txt`
 2. `django check`
 3. `makemigrations --check --dry-run` — fails on un-generated migrations

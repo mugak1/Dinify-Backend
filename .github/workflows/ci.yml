@@ -13,16 +13,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # TEMPORARY DUAL-LEG STATE (Python 3.10 EOL 2026-10-31).
-        # 3.10.12 mirrors the live UAT/prod EC2 venv and remains AUTHORITATIVE:
-        # CI must keep reproducing prod's interpreter so a 3.10-only issue can't
-        # pass CI and then fail at the live WSGI import.
-        # 3.12 is the migration target, running here to prove the suite green
-        # BEFORE the box is touched. Unpinned at patch level on purpose — there
-        # is no prod 3.12 to mirror yet.
-        # When the EC2 venv + mod_wsgi are rebuilt on 3.12: DELETE the 3.10.12
-        # leg and pin 3.12 to the box's exact patch. Never delete the 3.12 leg.
-        python-version: ['3.10.12', '3.12']
+        # SINGLE PINNED LEG, matching the live UAT/prod EC2 venv (Ubuntu 24.04,
+        # Python 3.12.3). CI must keep reproducing prod's interpreter so a
+        # version-specific issue can't pass CI and then fail at the live WSGI
+        # import. Same version string, so same language features and stdlib
+        # behaviour — not a byte-identical build: setup-python installs an
+        # upstream CPython while the box runs Ubuntu's package with security
+        # patches backported under that version. That was equally true of the
+        # 3.10.12 pin this replaces.
+        # THE PIN AND THE BOX MOVE TOGETHER. Changing it here without rebuilding
+        # the venv (and mod_wsgi against it) — or the reverse — silently ends the
+        # mirror, and audit.yml pins the same value and must move in the same PR.
+        # The 3.10 leg was deleted here on cutover completion (2026-08), as the
+        # dual-leg comment it carried instructed.
+        python-version: ['3.12.3']
 
     services:
       postgres:
@@ -129,14 +133,17 @@ jobs:
           python -m django test --settings=dinify_backend.test_settings --verbosity=2 --timing
 
   # Branch protection on `main` requires a status check literally named `test`.
-  # A matrix job can never produce one: its legs report as `suite (3.10.12)` and
-  # `suite (3.12)`, so the bare name would sit "Expected — waiting for status to
-  # be reported" forever and no PR could merge.
+  # A matrix job can never produce one: it always suffixes the leg value, so the
+  # single leg above reports as `suite (3.12.3)` and the bare name would sit
+  # "Expected — waiting for status to be reported" forever and no PR could merge.
+  # Collapsing to one leg did NOT change that — the suffix comes from having a
+  # matrix at all, not from having several — which is why the matrix construct
+  # stays and this job is still needed.
   #
   # This aggregator owns that name and is the ONE required check. It goes green
   # only when EVERY leg succeeded, which is what decouples the required-check
-  # list from the matrix: legs can be added, removed or re-pinned — including
-  # deleting 3.10.12 at cutover — with no repo-settings change.
+  # list from the matrix: legs can be added, removed or re-pinned — as deleting
+  # 3.10.12 at cutover was — with no repo-settings change.
   #
   # `if: always()` is load-bearing. Without it a failed leg would SKIP this job,
   # and a skipped required check never reports a failure — the merge would block
