@@ -754,8 +754,9 @@ so keep it current when conventions change.
   (`$VENV_PY` — sudo resets PATH via secure_path, and root-owned files written
   into that tree break the NEXT deploy); and SSM keeps only the FIRST 24,000
   characters of output, so the `DEPLOY-SKIP:` / `DEPLOYED-HEAD:` markers must stay
-  ABOVE the pip/migrate output and pip runs `-q`. The legacy `UAT_SSH_*` secrets
-  are deliberately retained as rollback until the SSH path is decommissioned
+   ABOVE the pip/migrate output and pip runs `-q`. The legacy `UAT_SSH_*` secrets
+  were DELETED 2026-08-18 with the old-host teardown; no workflow references
+  `secrets.` at all — OIDC needs no stored credential
 - THE DEPLOY IS PINNED TO ONE EXACT COMMIT (PR #283, post-incident 2026-08-08,
   when a deploy run reported success while the box stayed 39 hours behind on an
   older commit — a green deploy that did not deploy). The workflow injects the
