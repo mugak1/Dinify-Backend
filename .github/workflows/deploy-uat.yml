@@ -28,8 +28,9 @@ jobs:
     timeout-minutes: 30
     # OIDC (no inbound SSH, no stored credentials): the job mints a short-lived
     # identity token GitHub signs per-run; AWS trusts it for one narrowly-scoped
-    # role. The legacy UAT_SSH_* secrets are deliberately NOT referenced — they
-    # remain in GitHub as rollback until the SSH path is decommissioned.
+    # role. No workflow in this repo references `secrets.` at all: OIDC needs no
+    # stored credential. The legacy UAT_SSH_* secrets were deleted 2026-08-18
+    # with the old-host teardown.
     permissions:
       id-token: write
       contents: read
