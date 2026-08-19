@@ -42,11 +42,37 @@ password check: with a correct password it issues a ``recovery_only`` challenge,
 success. An attacker who has locked the account cannot ride that path — it needs a
 secret they do not hold. ``manage.py unlock_platform_admin`` is the shell equivalent.
 
-CSRF. ``logout/`` aside, the authenticated endpoints route through
-``AdminSessionAuthentication``, whose ``enforce_csrf`` already covers unsafe methods.
-``login/`` and ``verify/`` are necessarily unauthenticated, so they rely on
-``SameSite=Strict`` + the ``__Host-`` prefix: a cross-site POST carries neither the
-challenge nor the session cookie, so it cannot drive either step.
+CSRF — ENFORCEMENT AND ISSUANCE. ``logout/`` aside, the authenticated endpoints
+route through ``AdminSessionAuthentication``, whose ``enforce_csrf`` covers unsafe
+methods. ``login/`` and ``verify/`` are necessarily unauthenticated, so they rely on
+``SameSite=Strict`` + the ``__Host-`` prefix instead: a cross-site POST carries
+neither the challenge nor the session cookie, so it cannot drive either step.
+
+Enforcement alone is not a working scheme. Django's double-submit check needs a CSRF
+cookie to compare the header against, and NOTHING ELSE in this codebase issues one —
+so until this module did, every session-authenticated unsafe route on the plane
+answered ``403 CSRF Failed: CSRF cookie not set.``: ``auth/elevate/``,
+``delegations/``, ``delegations/<id>/revoke/`` and ``restaurants/<id>/transition/``,
+which is every write the control plane has. This module is therefore the issuer, at
+the two points that bracket a session's life:
+
+* ``verify/`` ROTATES (``rotate_token``) on the success path. Rotating rather than
+  ensuring ties the CSRF secret's lifetime to the ``AdminSession`` just minted —
+  what ``django.contrib.auth.login()`` does, and which this plane skips only because
+  its session is an ``AdminSession`` row rather than a Django login. ``get_token``
+  would instead carry one secret across logout and re-login for ``CSRF_COOKIE_AGE``
+  (a year).
+* ``session/`` ENSURES (``get_token``) on the SPA's bootstrap read. Ensure, not
+  rotate: ``get_token`` reuses an existing secret, so refreshing one tab does not
+  invalidate the token every other tab is holding.
+
+Both are safe to hand DRF's ``Request`` wrapper — the CSRF helpers mutate
+``request.META`` in place, and DRF proxies ``META`` to the SAME dict object on the
+underlying ``HttpRequest``, which is where ``CsrfViewMiddleware.process_response``
+reads the flag. (Attribute WRITES do not proxy; these are dict mutations, not
+rebinds.) Neither call touches the database, so neither is inside a transaction, and
+neither is audited: ``session/`` is a safe GET, and ``verify/`` already emits exactly
+one entry per request.
 
 AUDIT. Exactly one entry per request, on every path including denial — the
 convention ``AdminAPIView`` documents. A failure that crosses the lockout threshold
@@ -61,6 +87,7 @@ block instead, the house pattern from ``restaurants_app.controllers.lifecycle`` 
 """
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.middleware.csrf import get_token, rotate_token
 from django.utils import timezone
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -357,6 +384,13 @@ class AdminVerifyView(APIView):
             return clear_challenge_cookie(response) if denial[3] else response
 
         raw_session, session, used_recovery, cleared_lock = minted
+
+        # Issue the CSRF cookie for the session just minted. Without it every unsafe
+        # admin route fails enforce_csrf — nothing else in the codebase issues one.
+        # ROTATE, not ensure: a fresh secret per session, mirroring
+        # django.contrib.auth.login(). See the module docstring.
+        rotate_token(request)
+
         response = Response(
             {
                 'status': 200,
@@ -434,6 +468,15 @@ class AdminSessionView(APIView):
 
     def get(self, request):
         session = request.auth
+
+        # The SPA's bootstrap read, so it is also where the SPA is handed its CSRF
+        # cookie — a client that has a session but no token (new tab, cleared jar,
+        # cookie expired ahead of the session) can recover here rather than having to
+        # sign in again. ENSURE, not rotate: get_token reuses an existing secret, so
+        # one tab refreshing does not invalidate the token the others hold. Safe
+        # method, so enforce_csrf exempts it — this only issues, never checks.
+        get_token(request)
+
         return Response(
             {
                 'status': 200,

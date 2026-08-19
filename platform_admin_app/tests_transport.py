@@ -20,6 +20,7 @@ These run under the base ``test_settings``; endpoint-level cases add the admin
 ROOT_URLCONF / MIDDLEWARE / REST_FRAMEWORK via ``@override_settings`` and a local
 ``urlpatterns`` (below), so no second settings module is needed.
 """
+import importlib
 from datetime import timedelta
 
 from django.conf import settings as dj_settings
@@ -43,6 +44,7 @@ from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER,
 )
 from platform_admin_app import sessions
+from platform_admin_app.endpoints.auth import AdminSessionView
 from platform_admin_app.authentication import AdminSessionAuthentication
 from platform_admin_app.cookies import (
     clear_session_cookie, cookie_name, set_session_cookie,
@@ -51,6 +53,9 @@ from platform_admin_app.middleware import ClientIPMiddleware, RequestIDMiddlewar
 from platform_admin_app.models import AdminSession
 from platform_admin_app.views import AdminAPIView, AdminHealthView
 from restaurants_app.models import Restaurant, RestaurantEmployee
+from platform_admin_app.tests_auth import (
+    _ADMIN_OVERRIDES as _AUTH_ADMIN_OVERRIDES,
+)
 from users_app.models import User
 
 # Distinct phone range from platform_admin_app/tests.py to avoid any collision.
@@ -82,6 +87,9 @@ class _EchoAdminView(AdminAPIView):
 urlpatterns = [
     path('admin/v1/health/', AdminHealthView.as_view(), name='t-admin-health'),
     path('admin/v1/echo/', _EchoAdminView.as_view(), name='t-admin-echo'),
+    # The REAL session-bootstrap view, not a stub: the CSRF test below has to obtain
+    # its token from the code that actually issues one in production.
+    path('admin/v1/auth/session/', AdminSessionView.as_view(), name='t-admin-session'),
 ]
 
 _ADMIN_MIDDLEWARE = [
@@ -100,6 +108,10 @@ _ADMIN_OVERRIDES = dict(
     ROOT_URLCONF=__name__,
     MIDDLEWARE=_ADMIN_MIDDLEWARE,
     REST_FRAMEWORK=_ADMIN_REST_FRAMEWORK,
+    # Mirrors the settings_admin CSRF block. Kept in step by
+    # tests_transport.CsrfSettingsMirrorTests, which compares every CSRF_* key
+    # here against the real dinify_backend.settings_admin module.
+    CSRF_COOKIE_NAME='__Host-dinify_admin_csrftoken',
     CSRF_COOKIE_SAMESITE='Strict',
     CSRF_COOKIE_SECURE=True,
     CSRF_COOKIE_HTTPONLY=False,
@@ -280,6 +292,61 @@ class CookieHelperTests(TestCase):
         self.assertEqual(morsel['max-age'], 0)
 
 
+# --- CSRF settings mirror ----------------------------------------------------------
+
+class CsrfSettingsMirrorTests(TestCase):
+    """
+    The two test override dicts must not drift from the real admin CSRF block.
+
+    ``tests_auth._ADMIN_OVERRIDES`` and ``tests_transport._ADMIN_OVERRIDES`` are
+    hand-copied mirrors of the CSRF block in ``dinify_backend.settings_admin`` — they
+    do not import it, because a test cannot simply switch settings modules mid-run.
+    That copying is a real hazard: when ``CSRF_COOKIE_NAME`` was added to
+    ``settings_admin`` alone, every CSRF test kept passing against Django's default
+    ``csrftoken`` while production served ``__Host-dinify_admin_csrftoken`` — green
+    for the wrong reason. This test fails on the next such divergence.
+
+    Importing ``settings_admin`` here is safe: its ``from dinify_backend.settings
+    import *`` resolves from ``sys.modules`` (already imported by the test settings),
+    so nothing is re-executed and the live ``django.conf.settings`` is untouched.
+    """
+
+    @staticmethod
+    def _csrf_keys(mapping):
+        return {k: v for k, v in mapping.items() if k.startswith('CSRF_')}
+
+    def test_override_dicts_mirror_the_real_admin_csrf_block(self):
+        admin_settings = importlib.import_module('dinify_backend.settings_admin')
+        real = self._csrf_keys(vars(admin_settings))
+
+        # Sanity: if this is empty the test would pass vacuously against anything.
+        self.assertIn('CSRF_COOKIE_NAME', real)
+
+        for label, overrides in (
+            ('platform_admin_app.tests_transport._ADMIN_OVERRIDES', _ADMIN_OVERRIDES),
+            ('platform_admin_app.tests_auth._ADMIN_OVERRIDES', _AUTH_ADMIN_OVERRIDES),
+        ):
+            with self.subTest(override_dict=label):
+                self.assertEqual(
+                    self._csrf_keys(overrides), real,
+                    f'{label} has drifted from the CSRF block in '
+                    f'dinify_backend/settings_admin.py. Copy the change across, so '
+                    f'the tests exercise what production serves. '
+                    f'(CSRF_TRUSTED_ORIGINS is env-driven via '
+                    f'ADMIN_CSRF_TRUSTED_ORIGINS — if that is set in your shell, '
+                    f'unset it rather than editing the dicts.)',
+                )
+
+    def test_live_admin_csrf_posture_is_not_silently_weakened(self):
+        """The three flags the __Host- prefix and the SPA both depend on."""
+        admin_settings = importlib.import_module('dinify_backend.settings_admin')
+        self.assertTrue(admin_settings.CSRF_COOKIE_NAME.startswith('__Host-'))
+        self.assertTrue(admin_settings.CSRF_COOKIE_SECURE)
+        self.assertEqual(admin_settings.CSRF_COOKIE_SAMESITE, 'Strict')
+        # False on purpose: the SPA reads this cookie to echo X-CSRFToken.
+        self.assertFalse(admin_settings.CSRF_COOKIE_HTTPONLY)
+
+
 # --- Middleware --------------------------------------------------------------------
 
 class MiddlewareUnitTests(TestCase):
@@ -384,12 +451,24 @@ class TransportEndpointTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_unsafe_method_with_csrf_accepted(self):
+        """
+        The token must come FROM THE SERVER, and the name from settings.
+
+        This test used to fabricate a secret (``token = 'a' * 32``) and plant it under
+        a hardcoded ``csrftoken`` key. That passed against a token no endpoint had
+        ever issued, so it proved the double-submit check works while saying nothing
+        about whether a real client could ever obtain one — which is exactly how the
+        missing-issuance defect survived a green suite. Bootstrap for real instead.
+        """
         user = _make_user('ep_csrf2@t.com', account_type=ACCOUNT_TYPE_PLATFORM_STAFF)
         raw, _ = sessions.create_session(user)
         client = Client(enforce_csrf_checks=True)
         client.cookies[cookie_name()] = raw
-        token = 'a' * 32  # a valid unmasked CSRF secret (double-submit)
-        client.cookies['csrftoken'] = token
+
+        bootstrap = client.get('/admin/v1/auth/session/')
+        self.assertEqual(bootstrap.status_code, 200)
+        token = bootstrap.cookies[dj_settings.CSRF_COOKIE_NAME].value
+
         response = client.post(
             '/admin/v1/echo/', data='{}', content_type='application/json',
             HTTP_X_CSRFTOKEN=token,
