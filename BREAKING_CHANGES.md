@@ -523,6 +523,57 @@ anonymous QR guest into a single phantom customer — and belongs with that surf
 
 ---
 
+## 12. The admin plane issues its own CSRF cookie
+
+**This breaks no existing consumer, because no client can currently perform any
+admin write.** Every session-authenticated unsafe route on the control plane answers
+`403 CSRF Failed: CSRF cookie not set.` today — the double-submit check was enforced
+but the cookie it compares against was never issued. There is nothing deployed that
+could regress; this entry records the contract the `Dinify-Admin` SPA must be built
+against.
+
+**Endpoints:** issuance at `POST /admin/v1/auth/verify/` and
+`GET /admin/v1/auth/session/`. Enforcement (unchanged) on every unsafe admin route:
+`POST /admin/v1/auth/elevate/`, `POST /admin/v1/delegations/`,
+`POST /admin/v1/delegations/<id>/revoke/`,
+`POST /admin/v1/restaurants/<id>/transition/`.
+
+**Affected users:** Platform staff on the admin control plane
+(`admin.dinifyapp.com`). Still no deployed consumer, per §7 and §8.
+
+**Before:** the server issued no CSRF cookie at all. `AdminSessionAuthentication.
+enforce_csrf` ran Django's double-submit check on every unsafe method, and it could
+only ever fail — so the plane was, in a real browser, read-only.
+
+**After:** the server issues the cookie, under its own name.
+
+| | |
+|---|---|
+| Cookie name | `__Host-dinify_admin_csrftoken` |
+| Header to echo | `X-CSRFToken` — **unchanged**, and unchanged from Django's default |
+| `HttpOnly` | `false` — the SPA is meant to read this one |
+| `Secure` / `Path` / `Domain` | `true` / `/` / none — required by the `__Host-` prefix |
+| `SameSite` | `Strict` |
+
+The name is deliberately **not** Django's default `csrftoken`: the customer plane
+uses that, and the `__Host-` prefix makes the admin cookie host-only, so no sibling
+or parent domain can plant one the admin plane would read back as its own.
+
+**Frontend action required:**
+
+1. Read the `__Host-` prefixed cookie by name; do not assume `csrftoken`.
+2. Echo it in the `X-CSRFToken` header on every unsafe method (`POST`, `PUT`,
+   `PATCH`, `DELETE`). Safe methods need nothing.
+3. **The token ROTATES on each successful `verify/`.** It is bound to the
+   `AdminSession`, the way `django.contrib.auth.login()` binds it. A tab still
+   holding a token from a previous sign-in will get `403 CSRF Failed`; it must
+   re-bootstrap with `GET /admin/v1/auth/session/` and retry. Treat a CSRF `403` as
+   "re-bootstrap and retry once", not as "session expired, sign in again".
+4. `GET /admin/v1/auth/session/` ensures rather than rotates, so it is safe to call
+   from any tab at any time — it will not invalidate the token other tabs hold.
+
+---
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

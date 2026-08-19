@@ -83,6 +83,10 @@ _ADMIN_OVERRIDES = dict(
         ),
         'DEFAULT_RENDERER_CLASSES': ('rest_framework.renderers.JSONRenderer',),
     },
+    # Mirrors the settings_admin CSRF block. Kept in step by
+    # tests_transport.CsrfSettingsMirrorTests, which compares every CSRF_* key
+    # here against the real dinify_backend.settings_admin module.
+    CSRF_COOKIE_NAME='__Host-dinify_admin_csrftoken',
     CSRF_COOKIE_SAMESITE='Strict',
     CSRF_COOKIE_SECURE=True,
     CSRF_COOKIE_HTTPONLY=False,
@@ -490,6 +494,184 @@ class InvariantFailClosedTests(ThrottleIsolationMixin, AuditAssertionsMixin, Tes
         self.assertEqual(AdminLoginChallenge.objects.count(), 0)
         entry = self.assertAudited(ADMIN_AUTH_LOGIN_FAILURE, result=RESULT_DENIED)
         self.assertEqual(entry.error_code, 'active_membership')
+
+
+# --- CSRF cookie issuance ----------------------------------------------------------
+
+@override_settings(**_ADMIN_OVERRIDES)
+class CsrfCookieIssuanceTests(ThrottleIsolationMixin, TestCase):
+    """
+    The server must ISSUE the CSRF cookie, not merely enforce it.
+
+    ``AdminSessionAuthentication.enforce_csrf`` runs Django's double-submit check on
+    every unsafe admin request, and that check cannot pass without a CSRF cookie the
+    server put there. Nothing in the codebase issued one, so every authenticated
+    write on this plane answered ``403 CSRF Failed: CSRF cookie not set.`` — and the
+    suite missed it entirely, because Django's default ``Client()`` sets
+    ``_dont_enforce_csrf_checks``, which short-circuits the check before it looks for
+    a cookie. Every test here therefore uses ``Client(enforce_csrf_checks=True)`` and
+    reads the token out of a SERVER response; none puts one in the jar by hand, and
+    none hardcodes the cookie name.
+    """
+
+    def _csrf_name(self):
+        return dj_settings.CSRF_COOKIE_NAME
+
+    def _login(self, client, user, secret, offset=0):
+        """Drive login -> verify. Returns the verify response."""
+        client.post(
+            '/admin/v1/auth/login/',
+            data={'username': user.username, 'password': PASSWORD},
+            content_type='application/json',
+        )
+        return client.post(
+            '/admin/v1/auth/verify/',
+            data={'method': METHOD_TOTP, 'code': _code(secret, offset=offset)},
+            content_type='application/json',
+        )
+
+    def test_verify_issues_csrf_cookie(self):
+        """A successful verify/ emits the cookie ITSELF — nothing preloads the jar."""
+        user, _auth, secret, _codes = _make_admin(
+            email='csrf_v@t.com', username='csrf-verify',
+        )
+        client = Client(enforce_csrf_checks=True)
+        self.assertNotIn(self._csrf_name(), client.cookies)
+
+        response = self._login(client, user, secret)
+
+        self.assertEqual(response.status_code, 200)
+        # Present in the RESPONSE, i.e. the server set it on this very request.
+        self.assertIn(self._csrf_name(), response.cookies)
+        self.assertTrue(response.cookies[self._csrf_name()].value)
+
+    def test_verify_issued_cookie_carries_the_admin_attributes(self):
+        """__Host- is only honoured with Secure + Path=/ + no Domain; SPA needs read."""
+        user, _auth, secret, _codes = _make_admin(
+            email='csrf_attr@t.com', username='csrf-attrs',
+        )
+        client = Client(enforce_csrf_checks=True)
+        morsel = self._login(client, user, secret).cookies[self._csrf_name()]
+
+        self.assertTrue(self._csrf_name().startswith('__Host-'))
+        self.assertTrue(morsel['secure'])
+        self.assertEqual(morsel['path'], '/')
+        self.assertFalse(morsel['domain'])
+        # The SPA has to read this one to echo it back in X-CSRFToken.
+        self.assertFalse(morsel['httponly'])
+
+    def test_session_bootstrap_issues_csrf_cookie(self):
+        """GET session/ hands a token to a client that has a session but no token."""
+        user, _auth, _secret, _codes = _make_admin(
+            email='csrf_s@t.com', username='csrf-session',
+        )
+        raw, _session = sessions.create_session(user)
+        client = Client(enforce_csrf_checks=True)
+        client.cookies[cookie_name()] = raw
+        self.assertNotIn(self._csrf_name(), client.cookies)
+
+        response = client.get('/admin/v1/auth/session/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self._csrf_name(), response.cookies)
+        self.assertTrue(response.cookies[self._csrf_name()].value)
+
+    def test_secret_rotates_across_two_successive_logins(self):
+        """
+        verify/ ROTATES: a second sign-in must not inherit the first one's secret.
+
+        This is what ties the CSRF secret's lifetime to the AdminSession, the way
+        django.contrib.auth.login() does. get_token() here would reuse one secret
+        across logout and re-login for CSRF_COOKIE_AGE (a year).
+        """
+        user, _auth, secret, _codes = _make_admin(
+            email='csrf_rot@t.com', username='csrf-rotate',
+        )
+        client = Client(enforce_csrf_checks=True)
+
+        first = self._login(client, user, secret, offset=0)
+        first_token = first.cookies[self._csrf_name()].value
+
+        client.post('/admin/v1/auth/logout/', data='{}',
+                    content_type='application/json')
+
+        # offset=+1: inside the TOTP window but a strictly later counter, so it is
+        # not a replay of the code the first verify consumed.
+        second = self._login(client, user, secret, offset=1)
+        second_token = second.cookies[self._csrf_name()].value
+
+        self.assertTrue(first_token)
+        self.assertTrue(second_token)
+        self.assertNotEqual(first_token, second_token)
+
+    def test_secret_does_not_change_across_two_session_gets(self):
+        """
+        session/ ENSURES: a bootstrap must not invalidate the token other tabs hold.
+
+        The masked token differs per response (Django re-masks every time), so the
+        assertion is on the underlying SECRET, which is what enforce_csrf compares.
+        """
+        user, _auth, _secret, _codes = _make_admin(
+            email='csrf_ens@t.com', username='csrf-ensure',
+        )
+        raw, _session = sessions.create_session(user)
+        client = Client(enforce_csrf_checks=True)
+        client.cookies[cookie_name()] = raw
+
+        first = client.get('/admin/v1/auth/session/')
+        first_secret = first.cookies[self._csrf_name()].value
+
+        second = client.get('/admin/v1/auth/session/')
+
+        self.assertEqual(second.status_code, 200)
+        if self._csrf_name() in second.cookies:
+            # Re-sent to renew the expiry timer, but it must be the SAME secret.
+            self.assertEqual(second.cookies[self._csrf_name()].value, first_secret)
+        self.assertEqual(client.cookies[self._csrf_name()].value, first_secret)
+
+    def test_unsafe_write_succeeds_with_a_server_issued_token(self):
+        """
+        The end-to-end case whose absence let the defect through.
+
+        elevate/ stands in for all four session-authenticated writes — they share one
+        authenticator path (AdminSessionAuthentication.enforce_csrf), so a second and
+        third near-identical fixture would prove nothing extra.
+        """
+        user, _auth, secret, _codes = _make_admin(
+            email='csrf_e2e@t.com', username='csrf-e2e',
+        )
+        client = Client(enforce_csrf_checks=True)
+        verify = self._login(client, user, secret, offset=0)
+        self.assertEqual(verify.status_code, 200)
+
+        token = verify.cookies[self._csrf_name()].value   # from the SERVER response
+
+        response = client.post(
+            '/admin/v1/auth/elevate/',
+            data={'method': METHOD_TOTP, 'code': _code(secret, offset=1)},
+            content_type='application/json',
+            HTTP_X_CSRFTOKEN=token,
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['message'], 'Elevated.')
+
+    def test_unsafe_write_without_the_token_is_still_refused(self):
+        """Issuance must not have loosened enforcement: no header, no write."""
+        user, _auth, secret, _codes = _make_admin(
+            email='csrf_neg@t.com', username='csrf-negative',
+        )
+        client = Client(enforce_csrf_checks=True)
+        self._login(client, user, secret, offset=0)
+
+        response = client.post(
+            '/admin/v1/auth/elevate/',
+            data={'method': METHOD_TOTP, 'code': _code(secret, offset=1)},
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn('CSRF', response.json()['detail'])
 
 
 # --- Elevation helper --------------------------------------------------------------

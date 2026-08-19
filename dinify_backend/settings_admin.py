@@ -103,6 +103,25 @@ ADMIN_DELEGATION_SESSION_TTL_MAX = 3600        # 1 hour — a hard ceiling, not 
 ADMIN_DELEGATION_MAX_LIVE_GRANTS = 5
 
 # --- CSRF (cookie auth is CSRF-susceptible; the SPA echoes X-CSRFToken) -----------
+# The admin plane carries its OWN CSRF cookie name, for two reasons.
+#
+# 1. Visibility: the customer plane runs on Django's default `csrftoken` (settings.py
+#    declares no CSRF_* at all), and the two planes' CSRF state must be tellable
+#    apart — in a browser jar, in a HAR, and in a bug report.
+# 2. Security, which is the real reason the name is `__Host-` prefixed rather than
+#    merely distinct. The prefix is a browser-enforced contract requiring Secure,
+#    Path=/ and no Domain — all three already satisfied by the settings below and by
+#    Django's CSRF_COOKIE_PATH / CSRF_COOKIE_DOMAIN defaults ('/' and None). What it
+#    BUYS is host-only scope: a `__Host-` cookie cannot be set by a sibling or parent
+#    domain, so no other *.dinifyapp.com host — compromised, or merely careless —
+#    can plant a CSRF cookie the admin plane would then read back as its own. That
+#    closes subdomain cookie-tossing as a route to token fixation, which a bare
+#    `csrftoken` on a shared parent domain would leave open.
+#
+# Issuance lives in platform_admin_app/endpoints/auth.py (verify/ rotates, session/
+# ensures). Nothing else in the codebase issues this cookie, and without it the
+# enforce_csrf check in platform_admin_app/authentication.py can only ever fail.
+CSRF_COOKIE_NAME = '__Host-dinify_admin_csrftoken'
 CSRF_COOKIE_SAMESITE = 'Strict'
 CSRF_COOKIE_SECURE = True
 CSRF_COOKIE_HTTPONLY = False  # the SPA must read it to echo the header
