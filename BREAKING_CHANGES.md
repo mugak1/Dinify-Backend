@@ -532,11 +532,14 @@ but the cookie it compares against was never issued. There is nothing deployed t
 could regress; this entry records the contract the `Dinify-Admin` SPA must be built
 against.
 
-**Endpoints:** issuance at `POST /admin/v1/auth/verify/` and
-`GET /admin/v1/auth/session/`. Enforcement (unchanged) on every unsafe admin route:
-`POST /admin/v1/auth/elevate/`, `POST /admin/v1/delegations/`,
-`POST /admin/v1/delegations/<id>/revoke/`,
-`POST /admin/v1/restaurants/<id>/transition/`.
+**Endpoints** (browser paths — Apache mounts the admin WSGI app at `/api` and
+strips that prefix, so the `admin/v1/...` routes registered in
+`platform_admin_app/urls.py` are reached as `/api/admin/v1/...`): issuance at
+`POST /api/admin/v1/auth/verify/` and `GET /api/admin/v1/auth/session/`.
+Enforcement (unchanged) on every unsafe admin route:
+`POST /api/admin/v1/auth/elevate/`, `POST /api/admin/v1/delegations/`,
+`POST /api/admin/v1/delegations/<id>/revoke/`,
+`POST /api/admin/v1/restaurants/<id>/transition/`.
 
 **Affected users:** Platform staff on the admin control plane
 (`admin.dinifyapp.com`). Still no deployed consumer, per §7 and §8.
@@ -567,10 +570,10 @@ or parent domain can plant one the admin plane would read back as its own.
 3. **The token ROTATES on each successful `verify/`.** It is bound to the
    `AdminSession`, the way `django.contrib.auth.login()` binds it. A tab still
    holding a token from a previous sign-in will get `403 CSRF Failed`; it must
-   re-bootstrap with `GET /admin/v1/auth/session/` and retry. Treat a CSRF `403` as
-   "re-bootstrap and retry once", not as "session expired, sign in again".
-4. `GET /admin/v1/auth/session/` ensures rather than rotates, so it is safe to call
-   from any tab at any time — it will not invalidate the token other tabs hold.
+   re-bootstrap with `GET /api/admin/v1/auth/session/` and retry. Treat a CSRF `403`
+   as "re-bootstrap and retry once", not as "session expired, sign in again".
+4. `GET /api/admin/v1/auth/session/` ensures rather than rotates, so it is safe to
+   call from any tab at any time — it will not invalidate the token other tabs hold.
 
 ---
 
