@@ -1230,6 +1230,17 @@ asked returns a plausible page answering a different question. Ordering is
 `('name', 'id')` — the `id` tiebreak is what makes pagination deterministic when two
 restaurants share a name.
 
+**The query string is deny-by-default too.** `KNOWN_PARAMS` is the complete accepted
+set and an unrecognised key is a 400 under `errors['__all__']` — `?stats=live` (a typo
+for `status`) must never return a cheerful unfiltered 200, which is the worst version
+of the silent-default failure because the operator believes they filtered. Adding a
+filter means adding it to `KNOWN_PARAMS` as well as parsing it; a test asserts the two
+stay in step, so a new parameter cannot ship silently rejected. **`page` is bounded by
+`MAX_PAGE` (1,000,000)** for a mechanical reason, not a product one: `page` multiplies
+with `page_size` into a SQL `OFFSET`, and an unbounded page number overflowed
+PostgreSQL's `bigint` and raised `DataError` — a 500 from the one endpoint whose whole
+contract is that a bad parameter is a 400.
+
 ### No N+1
 `directory_queryset()` carries `select_related('owner')`, an aggregate
 `open_issue_count`, and a correlated `Subquery` for `last_activity_at` (correlated

@@ -220,6 +220,53 @@ class DirectoryFilterTests(_AdminReadTestCase):
             set(response.json()['errors']), {'status', 'attention', 'page'},
         )
 
+    # --- unknown parameters (review finding: a typo must not silently widen) ---
+
+    def test_a_mistyped_filter_name_is_400_not_an_unfiltered_page(self):
+        """
+        `?stats=live` is a typo for `status`, and silently ignoring it is the worst
+        failure this endpoint has: the operator believes they filtered, and the
+        unfiltered page they get back looks exactly like a real answer.
+        """
+        response = self.get(LIST_URL, stats='live')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('__all__', response.json()['errors'])
+        self.assertIn('stats', response.json()['errors']['__all__'][0])
+
+    def test_unknown_parameters_are_reported_alongside_other_errors(self):
+        response = self.get(LIST_URL, stats='live', attention='maybe')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            set(response.json()['errors']), {'__all__', 'attention'},
+        )
+
+    def test_all_unknown_parameters_are_named_in_one_message(self):
+        response = self.get(LIST_URL, stats='live', pge='2')
+        self.assertEqual(response.status_code, 400)
+        message = response.json()['errors']['__all__'][0]
+        self.assertIn('stats', message)
+        self.assertIn('pge', message)
+
+    def test_every_known_parameter_is_accepted(self):
+        """
+        THE RATCHET for the allowlist: each supported parameter must round-trip.
+
+        Adding a filter means adding it to `KNOWN_PARAMS` too; without this a new
+        parameter would ship silently rejected by the very guard meant to catch typos.
+        """
+        for name, value in (
+            ('search', 'Java'), ('status', RestaurantStatus_Live),
+            ('attention', 'true'), ('page', '1'), ('page_size', '10'),
+        ):
+            with self.subTest(parameter=name):
+                self.assertEqual(self.get(LIST_URL, **{name: value}).status_code, 200)
+
+    def test_the_allowlist_matches_what_the_parser_reads(self):
+        self.assertEqual(
+            restaurant_reads.KNOWN_PARAMS,
+            frozenset({'search', 'status', 'attention', 'page', 'page_size'}),
+        )
+
 
 @override_settings(**_ADMIN_OVERRIDES)
 class DirectoryPaginationTests(_AdminReadTestCase):
@@ -283,6 +330,42 @@ class DirectoryPaginationTests(_AdminReadTestCase):
                 self.assertEqual(
                     self.get(LIST_URL, page_size=value).status_code, 400,
                 )
+
+    # --- page bound (review finding: an offset must stay representable) ---
+
+    def test_an_enormous_page_is_400_not_a_500(self):
+        """
+        `page` multiplies with `page_size` into a SQL OFFSET.
+
+        `page_size` was always capped; `page` was not, so a page number just past
+        `bigint` produced `DataError: bigint out of range` on PostgreSQL — a 500 from
+        the one endpoint whose contract is that a bad parameter is a 400. Values here
+        straddle the `bigint` ceiling and go well beyond it.
+        """
+        for value in ('9223372036854775809', '1' + '0' * 30):
+            with self.subTest(page=value):
+                response = self.get(LIST_URL, page=value)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('page', response.json()['errors'])
+
+    def test_the_page_cap_is_the_boundary(self):
+        self.assertEqual(
+            self.get(LIST_URL, page=restaurant_reads.MAX_PAGE).status_code, 200,
+        )
+        self.assertEqual(
+            self.get(LIST_URL, page=restaurant_reads.MAX_PAGE + 1).status_code, 400,
+        )
+
+    def test_the_largest_reachable_offset_stays_inside_bigint(self):
+        """The cap has to actually bound the product, not just the page number."""
+        largest = (restaurant_reads.MAX_PAGE - 1) * restaurant_reads.MAX_PAGE_SIZE
+        self.assertLess(largest, 2 ** 63 - 1)
+
+    def test_the_capped_page_really_reaches_the_database(self):
+        """A 200 at the cap must mean the query RAN, not that it was short-circuited."""
+        data = self.get(LIST_URL, page=restaurant_reads.MAX_PAGE).json()['data']
+        self.assertEqual(data['results'], [])
+        self.assertEqual(data['pagination']['count'], 5)
 
 
 @override_settings(**_ADMIN_OVERRIDES)

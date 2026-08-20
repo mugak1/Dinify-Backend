@@ -475,6 +475,31 @@ MAX_PAGE_SIZE = 100
 _TRUE_VALUES = frozenset({'true', '1', 'yes'})
 _FALSE_VALUES = frozenset({'false', '0', 'no'})
 
+# The complete set of parameters this endpoint understands. Anything else is a 400.
+#
+# Without this an unrecognised key is simply never read: `?stats=live` (a typo for
+# `status`) returns a cheerful unfiltered 200, which is precisely the "plausible page
+# answering a different question" the strict validation above exists to prevent — and
+# the worst version of it, because the operator believes they filtered. Deny-by-default
+# on the query string matches the deny-by-default posture of every route on this plane.
+#
+# Adding a parameter means adding it HERE as well as parsing it; a test asserts the two
+# stay in step, so a new filter cannot ship silently rejected.
+KNOWN_PARAMS = frozenset({'search', 'status', 'attention', 'page', 'page_size'})
+
+# An upper bound on `page`, so a page number cannot become an unrepresentable OFFSET.
+#
+# `page_size` was always bounded; `page` was not, and the two multiply. On PostgreSQL
+# `(page - 1) * page_size` is emitted as an OFFSET literal, so a page number just
+# past `bigint` overflowed it and raised `DataError` — a 500 from the one path whose
+# contract is that a bad parameter is a 400. The cap is the fix rather than catching the
+# DataError, because a page number that large is a malformed request, not a deep read.
+#
+# 1,000,000 pages is beyond any real portfolio by several orders of magnitude (even at
+# `page_size=1`), and keeps the largest reachable offset at 10^8 — comfortably inside
+# `bigint` on every backend.
+MAX_PAGE = 1_000_000
+
 
 class QueryParamError(Exception):
     """Invalid query parameters. ``errors`` is field-keyed for the 400 body."""
@@ -514,6 +539,17 @@ def parse_directory_params(query):
     """
     errors = {}
 
+    # Checked FIRST so a typo is reported even when nothing else is wrong, and
+    # collected like every other problem rather than short-circuiting: an operator
+    # fixing a bookmarked URL should be told about the bad key AND the bad value in
+    # one response. Sorted so the message is deterministic across dict orderings.
+    unknown = sorted(set(query.keys()) - KNOWN_PARAMS)
+    if unknown:
+        errors['__all__'] = [
+            'Unknown query parameter(s): ' + ', '.join(unknown)
+            + '. Supported: ' + ', '.join(sorted(KNOWN_PARAMS)) + '.'
+        ]
+
     search = (query.get('search') or '').strip()
 
     status = (query.get('status') or '').strip()
@@ -533,7 +569,9 @@ def parse_directory_params(query):
         else:
             errors['attention'] = ['Must be a boolean (true or false).']
 
-    page = _positive_int(query.get('page'), 'page', errors, default=1)
+    page = _positive_int(
+        query.get('page'), 'page', errors, default=1, maximum=MAX_PAGE,
+    )
     page_size = _positive_int(
         query.get('page_size'), 'page_size', errors,
         default=DEFAULT_PAGE_SIZE, maximum=MAX_PAGE_SIZE,
