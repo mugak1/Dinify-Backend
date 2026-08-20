@@ -302,5 +302,21 @@ class Migration0055ExecutorTests(TransactionTestCase):
         self.assertEqual(NMenuItem.objects.count(), 0)
 
     def tearDown(self):
-        # leave the schema fully migrated for the rest of the suite
-        self._migrate([('restaurants_app', '0055_sanitize_menu_item_extras')])
+        # Leave the schema fully migrated for the rest of the suite.
+        #
+        # Restores to the app's CURRENT graph leaf, not a hardcoded name. This used
+        # to name `0055_sanitize_menu_item_extras` — the head when it was written —
+        # which silently went stale on every later migration and left the rest of the
+        # suite running against a rolled-back schema. It stayed invisible only
+        # because `0056` adds a constraint rather than a column, so nothing failed;
+        # `0057` adds `Restaurant.is_test`, and the drop took out every
+        # `TransactionTestCase` ordered after this class with "column is_test does
+        # not exist". The same trap the `migrate_from`/`migrate_to` comment above
+        # describes for `users_app`, on the app this class actually rewinds.
+        #
+        # `leaf_nodes` cannot go stale: a new migration moves the leaf, and this
+        # follows it. There is exactly one leaf per app unless the graph has been
+        # forked, which `makemigrations --check` in CI already refuses.
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        self._migrate(executor.loader.graph.leaf_nodes('restaurants_app'))

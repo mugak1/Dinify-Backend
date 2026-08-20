@@ -37,7 +37,7 @@ concern. That module carries the rationale for choosing an advisory lock over a
 table. This module owns only the RULE and the moment it is applied.
 """
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 from django.core.exceptions import ValidationError
@@ -68,11 +68,24 @@ class AdmissionVerdict:
     anything else from lifecycle state — ``Order.is_test`` above all — must use
     THIS value rather than re-reading or reusing an earlier instance, or they
     reintroduce the drift the lock was taken to prevent.
+
+    ``restaurant_is_test`` is the tenant-level test flag, read in the SAME locked
+    query as ``status`` and carried here for exactly the same reason. It is not an
+    admission input — a test restaurant admits orders on precisely the rules a real
+    one does — but it IS an input to the classification that follows, and taking it
+    from ``restaurant.is_test`` on an instance loaded before the transaction would
+    reintroduce the stale-read bug this module exists to close, on a different
+    field. One protected moment, both values.
+
+    It defaults to ``False`` so a verdict built by ``evaluate`` alone — the pure
+    preflight, which has no database and therefore no authority over this — cannot
+    be mistaken for a statement about the tenant. Only ``admit`` sets it.
     """
     allowed: bool
     status: Optional[str]
     message: str = ''
     code: str = ''
+    restaurant_is_test: bool = False
 
 
 def evaluate(status, created_by, stage: str) -> AdmissionVerdict:
@@ -152,9 +165,12 @@ def admit(*, restaurant_id, created_by, stage: str) -> AdmissionVerdict:
     lock_admission_shared(restaurant_id)
 
     try:
-        status = (
+        # ONE query, so both values describe the same protected instant. Splitting
+        # them into two reads would put a window between them that the lock does not
+        # close, which is the whole failure this function exists to prevent.
+        status, restaurant_is_test = (
             Restaurant.objects
-            .values_list('status', flat=True)
+            .values_list('status', 'is_test')
             .get(pk=restaurant_id)
         )
     except (Restaurant.DoesNotExist, ValidationError, ValueError, TypeError):
@@ -168,4 +184,8 @@ def admit(*, restaurant_id, created_by, stage: str) -> AdmissionVerdict:
             code=f'{stage}_restaurant_not_found',
         )
 
-    return evaluate(status, created_by, stage)
+    verdict = evaluate(status, created_by, stage)
+    # `evaluate` is pure and knows nothing about the tenant flag; the authoritative
+    # read attaches it. Rebuilt rather than mutated — the dataclass is frozen, which
+    # is what stops a later caller from "correcting" a verdict after the fact.
+    return replace(verdict, restaurant_is_test=bool(restaurant_is_test))

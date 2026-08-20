@@ -107,8 +107,12 @@ so keep it current when conventions change.
   `validate_order_selections` already uses, and both call the SAME function so the
   two can never disagree about the rule. `_create_order` is therefore now
   SELF-GUARDING for lifecycle as it already was for menu publication.
-  **`Order.is_test` is derived from `verdict.status`** — the value read under the
-  lock — never from the caller's instance. `_submit_order` passes the ORDER's
+  **`Order.is_test` is derived from the VERDICT** — `verdict.status` plus
+  `verdict.restaurant_is_test`, both read in ONE query under the lock — never from the
+  caller's instance. `AdmissionVerdict` carries the tenant flag alongside the status
+  for exactly that reason; it defaults False so a bare `evaluate()` verdict (which has
+  no database access) can never be mistaken for an authoritative statement about the
+  tenant. `_submit_order` passes the ORDER's
   `created_by_id`, not the submitting user, so a diner's draft stays judged by the
   diner rule whoever taps submit. `_xact_` (transaction-scoped) is MANDATORY given
   `CONN_MAX_AGE=600`; the helpers no-op off PostgreSQL. Advisory locks were chosen
@@ -493,6 +497,18 @@ so keep it current when conventions change.
     `restaurants_app/configs/role_defaults.py` and must stay import-light — it is
     imported by the customer-plane permission resolver. Credentials ride the
     `X-Delegation-Session` / `X-Delegation-Code` headers
+- Admin restaurant directory + detail READS: ✅ (Phase 1, Step 1 — backend slice)
+  `GET admin/v1/restaurants/` and `GET admin/v1/restaurants/<uuid:id>/`, projected by
+  `platform_admin_app/restaurant_reads.py` (the views are thin). Session-gated, NOT
+  elevation-gated and NOT audited — both deliberate; see the "Admin Restaurant Reads"
+  section. Ships with the platform-owned `Restaurant.is_test` flag (migration
+  `restaurants_app/0057`, no backfill), which also became a second, independent source
+  for `Order.is_test` alongside the existing launch-boundary rule. Readiness delegates
+  to the `check_go_live_readiness` seam (still failing closed); payment mode and
+  subscription are reported as UNCONFIGURED / LEGACY rather than inferred. The
+  readiness ENGINE, owner invitation, subscription models, receivables, QR generation,
+  restaurant creation, support triage writes and the Activity screen are **NOT built**
+  — those are later Phase-1 steps
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -906,9 +922,12 @@ so keep it current when conventions change.
   a real route, so renaming one cannot silently strand it
 - `admin/v1/` → platform_admin_app control plane (`platform_admin_app/urls.py`,
   mounted by `dinify_backend/urls_admin.py`; Apache strips the `/api` prefix).
-  Explicit deny-by-default routes only — health, `auth/*`, `delegations/*`, and
+  Explicit deny-by-default routes only — health, `auth/*`, `delegations/*`,
+  `restaurants/` + `restaurants/<uuid:id>/` (the Phase-1 Step-1 directory and
+  detail READS — see "Admin Restaurant Reads" below), and
   `restaurants/<uuid:id>/transition/` (the ONLY writer of `Restaurant.status`,
-  elevation-gated)
+  elevation-gated). The two reads are session-gated but NOT elevation-gated, and
+  are NOT audited — see that section for why both are deliberate
 
 ## Endpoint Pattern — CRITICAL
 New resource types get their own dedicated endpoint file in
@@ -960,6 +979,10 @@ the catch-all `<str:config_detail>/` route.
   `table-actions/update-status/` verb validates against `TABLE_STATUS_CHOICES` and
   keeps `is_active` in step with `out_of_service`, which the generic path did not.
   No `EDIT_INFORMATION` section exposes a `status` key any more
+- `is_test` on a restaurant follows the SAME two-wall pattern as `status` and for the
+  same reason: it is absent from `EDIT_INFORMATION['restaurants']` and absent from
+  `SerializerPutRestaurant`'s field list, so no principal on the customer plane can
+  set it. Do NOT add it to a generic tenant edit surface — see "Canonical Data Shapes"
 - Check this file before adding any editable field — it may already be there
 
 ## Tenant Isolation / Role-Permission ENFORCEMENT — CRITICAL
@@ -1148,6 +1171,77 @@ the catch-all `<str:config_detail>/` route.
   post-commit and best-effort. There is no `restaurant-rejected` counterpart —
   `rejected` is not a state in the new vocabulary
 
+## Admin Restaurant Reads — Phase 1, Step 1
+
+The admin portal's restaurant DIRECTORY and DETAIL reads. Two routes, both on the
+admin plane, both `AdminAPIView` + `IsAuthenticated`:
+
+```
+GET admin/v1/restaurants/                  -> AdminRestaurantListView
+GET admin/v1/restaurants/<uuid:id>/        -> AdminRestaurantDetailView
+```
+
+- THE VIEWS ARE THIN. Every projection lives in `platform_admin_app/restaurant_reads.py`,
+  mirroring how the transition endpoint delegates to `restaurants_app.controllers.lifecycle`.
+  Add a field there, not in the view
+- NOT ELEVATION-GATED, deliberately. `IsRecentlyElevated` gates ACTIONS that change a
+  tenant's world; requiring a second factor to LOOK at the directory would train the
+  operator to elevate reflexively, which is exactly what devalues the step-up on the
+  transition route. A valid admin session is the bar for reading
+- NOT AUDITED, deliberately. `AdminAuditLog` is an append-only record of privileged
+  DECISIONS, not an access log. Auditing ordinary GETs would bury the transition and
+  delegation entries under directory page-views and manufacture "activity" that is
+  really just someone scrolling. `AdminAPIView`'s "exactly one entry per unsafe
+  request" convention is unchanged — these are safe requests
+- Soft-deleted restaurants are EXCLUDED from the list and 404 on detail, matching the
+  transition endpoint's existing treatment
+
+### Three fields that are reported as unconfigured rather than inferred
+Step 1 exposes truth that exists TODAY. Each of these was easy to fake and is not:
+
+- **Readiness** delegates to `lifecycle.check_go_live_readiness` — the ONE seam. It
+  fails closed today with `readiness_not_configured`, so that is what the portal is
+  told. Do NOT build a second checklist here; Step 3 fills the seam. Readiness is
+  reported as `not_applicable` outside `onboarding`: "is it ready to go live" has no
+  answer for a live or offboarded tenant, and zero blockers there would read as ready
+- **Payment mode** has NO authoritative persisted field. `require_order_prepayments`
+  is a diner-checkout toggle, NOT the spec's commercial `cash_only`/PSP mode — do not
+  infer one from the other. Emitted as `payment_mode: null` +
+  `payment_mode_configured: false`
+- **Subscription** reports the LEGACY `Restaurant` columns under names that say so
+  (`source: 'legacy_restaurant_fields'`, `legacy_validity_flag`, `legacy_expiry_at`).
+  `RestaurantSubscription` / `SubscriptionInvoice` / `SubscriptionPayment` do not
+  exist. **`has_outstanding_receivables` is NOT consulted** — it returns a cheerful
+  `False` that means only "invoices do not exist", and wiring it belongs in the same
+  change that makes an invoice capable of becoming overdue
+
+### ONE definition of attention
+`needs_attention(restaurant)` (the per-row predicate) and `attention_filter()` (its
+SQL mirror for `?attention=`) are both in `restaurant_reads.py`, and a ratchet test
+asserts they agree across EVERY lifecycle state. A filter that disagrees with the
+badge is how an operator's inbox silently drops work — do not add a second opinion.
+
+### Query parameters and pagination
+`?search=` (name/location, trimmed), `?status=` (a lifecycle state), `?attention=`
+(strict boolean — `true/1/yes` / `false/0/no`), `?page=`, `?page_size=` (default 25,
+max 100). Invalid values are a **400 with a field-keyed `errors` map reporting ALL
+problems at once**, never a silent default: a filter that quietly ignores what it was
+asked returns a plausible page answering a different question. Ordering is
+`('name', 'id')` — the `id` tiebreak is what makes pagination deterministic when two
+restaurants share a name.
+
+### No N+1
+`directory_queryset()` carries `select_related('owner')`, an aggregate
+`open_issue_count`, and a correlated `Subquery` for `last_activity_at` (correlated
+because `AdminAuditLog.restaurant_id` is a plain `UUIDField`, not an FK). A query-count
+test asserts a large page costs the SAME number of queries as a small one — add a
+per-row read and it fails.
+
+### There is no human-readable restaurant reference
+No `REST-0018`. The backend has no such column, and minting a sequential business key
+inside a read endpoint would create a persistent identifier nothing else writes. The
+`Restaurant` UUID is the identity.
+
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns
   a human-readable reason, or `None` if deletable), NOT in the generic
@@ -1279,11 +1373,33 @@ the catch-all `<str:config_detail>/` route.
 - `MenuItem.listing_position` and `MenuSection.listing_position` are
   authoritative for ordering; reorder writes go through `ConMenuItem`
   / the section-reorder path, never ad-hoc updates
-- `Order.is_test` (migration `orders_app/0035`, indexed) marks a PRE-GO-LIVE
-  REHEARSAL order — one created while the restaurant was still `onboarding`. It is
-  SERVER-DERIVED in `_create_order` from
-  `lifecycle_policy.orders_are_commercial(restaurant.status)`; there is no request
-  field for it and it must never gain one. The governing rule: **a test order is
+- `Restaurant.is_test` (migration `restaurants_app/0057`, indexed, default False) is
+  PLATFORM-OWNED metadata marking a tenant that is not a real commercial customer —
+  a demo, a fixture, an internal rehearsal account. It is **deliberately absent from
+  `EDIT_INFORMATION['restaurants']` AND from `SerializerPutRestaurant`'s field list**,
+  exactly like `status`: two independent walls, so no restaurant user can set it and
+  no generic tenant edit surface exposes it. There is NO customer-supplied request
+  field for it and it must never gain one. Migration 0057 is additive with **NO
+  backfill** — in particular no name-based heuristic; whether an existing restaurant
+  is a test tenant is an explicit operator decision, not something inferred from its
+  name. Two consequences: it surfaces on the admin directory/detail reads, and it
+  feeds `Order.is_test` below
+- `Order.is_test` (migration `orders_app/0035`, indexed) marks an order that is
+  operationally real but commercially invisible. It is **SERVER-DERIVED, NEVER
+  CLIENT-SUPPLIED**, in `_create_order`, and it is now TRUE under either of two
+  independent conditions:
+  1. **TENANT** — `verdict.restaurant_is_test`: the restaurant is flagged a test
+     tenant, so it never produces commerce in any lifecycle state
+  2. **LIFECYCLE** — `not orders_are_commercial(verdict.status)`: the classic
+     PRE-GO-LIVE REHEARSAL case, an order placed while still `onboarding`
+  BOTH values come from the `AdmissionVerdict`, which reads `status` and `is_test` in
+  ONE query under the shared advisory lock (`order_admission.admit`) — never from the
+  caller's possibly-stale `Restaurant` instance. That is the same authoritative-moment
+  rule the lifecycle half already followed, extended to the tenant flag; reading the
+  flag off an earlier instance would reintroduce exactly the drift the lock was taken
+  to prevent. **No extra `Restaurant` row lock was added** — the flag rides the
+  existing `values_list`, so the order path's pinned query counts are unchanged.
+  There is no request field for either input and there must never be one. The governing rule: **a test order is
   operationally real and commercially invisible** — it occupies its table, reaches
   the kitchen board and is served/cancelled normally, but is excluded from
   `sale_filters.sale_orders()` (the chokepoint that sales/diners/menu inherit), both
@@ -1398,11 +1514,12 @@ the catch-all `<str:config_detail>/` route.
     `f8acc50` to `010fd8dd` succeeded *because no migration sat between them*.
     That property is what this rule preserves — see the ROLLBACK / MANUAL
     REDEPLOY bullet under "Deployment Rules — CRITICAL"
-- Latest migration: `restaurants_app/migrations/0056_restaurant_lifecycle_states.py`
+- Latest migration: `restaurants_app/migrations/0057_restaurant_is_test.py`
   (0054 adds `Table.qr_version`; 0055 data-repairs MenuItem extras — see the
   "Write-time menu relationship integrity" bullet; 0056 constrains
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
-  "Restaurant Lifecycle"),
+  "Restaurant Lifecycle"; 0057 adds the platform-owned `Restaurant.is_test` flag,
+  additive with NO backfill — see "Canonical Data Shapes"),
   `orders_app/migrations/0035_order_is_test.py` (0034 removed the inline review
   fields; 0035 adds the launch-boundary `Order.is_test` flag),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,

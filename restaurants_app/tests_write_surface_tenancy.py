@@ -342,3 +342,66 @@ class ServerOwnedReadOnlyContractTests(TestCase):
         from support_app.serializers import SupportIssueWriteSerializer
         self._assert_read_only(ReviewWriteSerializer, ('order',))
         self._assert_read_only(SupportIssueWriteSerializer, ('restaurant', 'created_by'))
+
+
+class RestaurantIsTestPlatformOwnedTests(TestCase):
+    """
+    ``Restaurant.is_test`` is PLATFORM metadata: no tenant surface may write it.
+
+    It carries the same protection as ``status`` and for a stronger reason than
+    tidiness. The flag decides whether a restaurant's orders count as commerce
+    (``Order.is_test``), so a tenant able to set it could either erase its own
+    trading from every revenue figure or promote a sandbox into the real ones —
+    silently, because nothing about the orders themselves would look wrong.
+
+    Two independent walls, asserted separately because either alone would be enough
+    to break if the other were quietly removed:
+
+      1. absent from ``EDIT_INFORMATION['restaurants']`` — Secretary builds its
+         update payload solely from those keys, so an unlisted field is invisible
+         to every generic PUT;
+      2. absent from ``SerializerPutRestaurant`` — DRF drops what the serializer
+         does not name, even for a caller that constructs it by hand.
+
+    Note this is ABSENCE, not ``read_only``: the field is not in the serializer's
+    output either, because a tenant has no business being told which tenants Dinify
+    treats as test tenants.
+    """
+
+    def test_is_test_is_not_in_edit_information(self):
+        from dinify_backend.configss.edit_information import EDIT_INFORMATION
+
+        keys = {entry['key'] for entry in EDIT_INFORMATION['restaurants']}
+        self.assertNotIn(
+            'is_test', keys,
+            'is_test must never be Secretary-editable — it is platform metadata '
+            'that decides whether a tenant\'s orders count as commerce.',
+        )
+
+    def test_is_test_is_absent_from_the_restaurant_write_serializer(self):
+        self.assertNotIn('is_test', SerializerPutRestaurant().fields)
+
+    def test_a_client_supplied_is_test_is_dropped(self):
+        owner = User.objects.create_user(
+            first_name='Own', last_name='Er', email='is-test-owner@t.com',
+            phone_number='256771000901', username='256771000901',
+            country='Uganda', password='password', roles=[],
+        )
+        restaurant = Restaurant.objects.create(
+            name='Flag Test Ltd', location='loc', owner=owner,
+            status=RestaurantStatus_Live,
+        )
+        self.assertFalse(restaurant.is_test)
+
+        serializer = SerializerPutRestaurant(
+            instance=restaurant,
+            data={'name': 'Flag Test Renamed', 'is_test': True},
+            partial=True,
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertNotIn('is_test', serializer.validated_data)
+        serializer.save()
+
+        restaurant.refresh_from_db()
+        self.assertFalse(restaurant.is_test)          # unchanged
+        self.assertEqual(restaurant.name, 'Flag Test Renamed')  # real edit applied

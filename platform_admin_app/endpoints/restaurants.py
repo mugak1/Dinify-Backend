@@ -1,5 +1,24 @@
 """
-Restaurant lifecycle endpoint — the admin-plane door onto the transition service.
+Restaurant admin-plane endpoints — the directory/detail reads, and the transition.
+
+READS ARE NOT ELEVATION-GATED, AND THAT IS DELIBERATE. ``IsRecentlyElevated`` exists
+for actions whose blast radius justifies re-proving a second factor mid-session —
+stopping a tenant trading, minting a delegation. Reading the operator's own portfolio
+is the ordinary work of the control plane: it is what the operator does on arriving,
+and demanding a TOTP code to look at a list would train them to re-elevate reflexively,
+which is precisely the habit step-up authentication depends on them NOT having. A
+valid session is the right bar for a read.
+
+ORDINARY GETS ARE NOT AUDITED. ``AdminAuditLog`` is the record of administrative
+ACTION, not an access log; the "exactly one entry per unsafe request" convention on
+``AdminAuditLog`` covers POST/PUT/PATCH/DELETE. Auditing directory views would bury
+the transitions and delegations the log exists to make findable under a drift of page
+loads — and would then feed itself, since ``last_activity_at`` reads that same log.
+
+THE VIEWS ARE THIN. The read model lives in ``platform_admin_app.restaurant_reads``
+and every lifecycle rule in ``restaurants_app.controllers.lifecycle``, for the same
+reason the transition view delegates: a second caller should inherit behaviour rather
+than re-implement it.
 
 ELEVATION. Changing a tenant's operational state stops their diners ordering, their
 kitchen working and their staff signing in, so the whole endpoint is step-up gated:
@@ -17,12 +36,92 @@ behaviour rather than a re-implementation.
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from platform_admin_app import restaurant_reads
 from platform_admin_app.audit_actions import ADMIN_RESTAURANT_TRANSITION_DENIED
 from platform_admin_app.models import RESULT_DENIED
 from platform_admin_app.permissions import IsRecentlyElevated
 from platform_admin_app.views import AdminAPIView
 from restaurants_app.controllers import lifecycle
 from restaurants_app.models import Restaurant
+
+
+def _not_found():
+    """404 for a missing OR soft-deleted restaurant — the plane never distinguishes."""
+    return Response({'status': 404, 'message': 'Restaurant not found.'}, status=404)
+
+
+class AdminRestaurantListView(AdminAPIView):
+    """
+    ``GET`` the restaurant directory: filtered, paginated, one query for the page.
+
+    Query parameters: ``search``, ``status``, ``attention``, ``page``, ``page_size``.
+    A malformed one is a 400 with field-keyed errors, never an empty 200 — an empty
+    page means "nothing matches", and returning it for a typo would let the operator
+    conclude something false about the portfolio.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            params = restaurant_reads.parse_directory_params(request.query_params)
+        except restaurant_reads.QueryParamError as exc:
+            return Response(
+                {'status': 400, 'message': 'Invalid query parameters.',
+                 'errors': exc.errors},
+                status=400,
+            )
+
+        queryset = restaurant_reads.apply_directory_filters(
+            restaurant_reads.directory_queryset(), params,
+        )
+
+        page, page_size = params['page'], params['page_size']
+        count = queryset.count()
+        # Ceiling division. `pages` is 1 for an empty result rather than 0, so the
+        # portal always has a page to render and never divides by it.
+        pages = max(1, -(-count // page_size))
+        offset = (page - 1) * page_size
+        # A page beyond the end returns an empty `results` with honest metadata
+        # rather than a 404: the page number is well-formed, the portfolio simply
+        # does not extend that far, and the client can see that from `pages`.
+        rows = list(queryset[offset:offset + page_size])
+
+        return Response(
+            {
+                'status': 200,
+                'data': {
+                    'results': [restaurant_reads.serialize_row(r) for r in rows],
+                    'pagination': {
+                        'page': page,
+                        'page_size': page_size,
+                        'count': count,
+                        'pages': pages,
+                    },
+                },
+            },
+            status=200,
+        )
+
+
+class AdminRestaurantDetailView(AdminAPIView):
+    """``GET`` one restaurant: the workspace header and Overview tab."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, restaurant_id):
+        restaurant = (
+            restaurant_reads.directory_queryset()
+            .filter(id=restaurant_id)
+            .first()
+        )
+        if restaurant is None:
+            return _not_found()
+
+        return Response(
+            {'status': 200, 'data': restaurant_reads.serialize_detail(restaurant)},
+            status=200,
+        )
 
 
 def _serialize(restaurant):
@@ -73,9 +172,7 @@ class AdminRestaurantTransitionView(AdminAPIView):
         if restaurant is None:
             # No audit entry: nothing was denied and no resource was touched. The
             # request never reached a decision about a real tenant.
-            return Response(
-                {'status': 404, 'message': 'Restaurant not found.'}, status=404,
-            )
+            return _not_found()
 
         try:
             updated = lifecycle.transition_restaurant(

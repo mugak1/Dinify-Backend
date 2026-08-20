@@ -9,7 +9,9 @@ in order:
      or creating,
   2. ADMISSION — the shared advisory lock on the restaurant, then the lifecycle
      decision taken from status re-read under it (and the `is_test`
-     classification that follows from the same value),
+     classification, which follows from that same locked read: the lifecycle
+     status AND the tenant-level `Restaurant.is_test` flag, both fetched in one
+     query at that one protected moment),
   3. table-gating (only for genuinely new submissions),
   4. daily order-number allocation (race-safe counter),
   5. order-row creation with the kitchen fulfilment axis initialised,
@@ -264,20 +266,35 @@ def _create_order(*, restaurant, table, items,
                         fulfilment_status='new',
                         fulfilment_status_updated_at=timezone.now(),
 
-                        # The launch boundary, decided from the restaurant's lifecycle
-                        # state and nothing the caller sent. An order created before
-                        # go-live is a rehearsal; one created after is commerce.
+                        # An order is test if EITHER of two independent things is
+                        # true, and neither of them is anything the caller sent:
                         #
-                        # Derived from `verdict.status` — the value the ADMISSION read
-                        # under the advisory lock at step 1a — and not from
-                        # `restaurant.status`, which came from an instance loaded in
-                        # autocommit before this transaction opened. Those two agreed
-                        # right up until they didn't: a go-live committing while this
-                        # request waited on the table lock left the instance saying
-                        # `onboarding`, and a real commercial order was written
-                        # `is_test=True` and vanished from every revenue report. The
-                        # lock is what makes this value still true at the INSERT.
-                        is_test=not orders_are_commercial(verdict.status),
+                        #   TENANT   — the restaurant itself exists for testing
+                        #              (`Restaurant.is_test`). Such a tenant never
+                        #              produces commerce, whatever its lifecycle
+                        #              state, so a test restaurant that has gone
+                        #              `live` still writes test orders.
+                        #   LIFECYCLE — the order predates go-live, so it is a
+                        #              rehearsal: operationally real, commercially
+                        #              invisible.
+                        #
+                        # BOTH values come from `verdict` — the single query the
+                        # ADMISSION ran under the advisory lock at step 1a — and not
+                        # from `restaurant`, which was loaded in autocommit before
+                        # this transaction opened. Those two agreed right up until
+                        # they didn't: a go-live committing while this request waited
+                        # on the table lock left the instance saying `onboarding`,
+                        # and a real commercial order was written `is_test=True` and
+                        # vanished from every revenue report. The tenant flag is
+                        # read from the same protected moment for exactly the same
+                        # reason — an admin could flip it concurrently, and reading
+                        # it off the stale instance would reproduce that bug on a
+                        # different field. The lock is what makes both values still
+                        # true at the INSERT.
+                        is_test=(
+                            verdict.restaurant_is_test
+                            or not orders_are_commercial(verdict.status)
+                        ),
                     )
             except IntegrityError:
                 # concurrent double-tap: a racing request with the same
