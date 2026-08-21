@@ -80,3 +80,13 @@ ADMIN_RESTAURANT_LIFECYCLE_TRANSITION = 'admin.restaurant.lifecycle_transition'
 # receivables). Recorded rather than silently 400'd: an attempt to suspend or
 # offboard a tenant is worth knowing about even when it did not take effect.
 ADMIN_RESTAURANT_TRANSITION_DENIED = 'admin.restaurant.transition_denied'
+
+# --- admin.restaurant: platform-owned classification ------------------------
+# A restaurant's platform-owned TEST CLASSIFICATION (``Restaurant.is_test``) was
+# changed. Its own action rather than a flavour of an edit, because the flag decides
+# whether that tenant's orders count as commerce at all: flipping it silently moves a
+# restaurant into or out of every revenue figure. before_state / after_state carry the
+# old and new booleans and nothing else; the reason is mandatory at the writer.
+ADMIN_RESTAURANT_TEST_CLASSIFICATION_CHANGED = (
+    'admin.restaurant.test_classification_changed'
+)
