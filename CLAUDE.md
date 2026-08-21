@@ -510,19 +510,44 @@ so keep it current when conventions change.
   delivers or redeems a token), subscription models, receivables, QR generation,
   restaurant creation, support triage writes and the Activity screen are **NOT built**
   — those are later Phase-1 steps
-- Admin onboarding domain: ✅ FOUNDATION ONLY (Phase 1, Step 2A) — `RestaurantOnboarding`
+- Admin onboarding domain: ✅ SCHEMA (Phase 1, Step 2A) — `RestaurantOnboarding`
   + `OwnerInvitation` in `platform_admin_app/models.py` (migration
   `platform_admin_app/0009`, purely additive, NO backfill) and the read-only
   owner-FK / owner-membership invariant `assert_owner_consistency`
-  (`platform_admin_app/onboarding.py`). **No endpoint, no service, no command, no
-  audit action, no row.** Provenance is `admin_created | legacy_adopted` with no
+  (`platform_admin_app/onboarding.py`). Provenance is `admin_created |
+  legacy_adopted` with no
   default; claim state and "expired" are DERIVED, never stored; one unresolved
   invitation per onboarding is a partial unique index that deliberately ignores the
   clock; only a token HASH is persisted; there is no delivery model. Nothing creates
   these rows automatically, so absence means "not yet represented in the Admin
-  onboarding domain" — **Baba House is NOT adopted and was not mutated**, and the
-  admin read contract still reports `claim_tracked: False`. Owner go-live approval
+  onboarding domain". Owner go-live approval
   remains Step 3. See the "Admin Onboarding Domain" section
+- Legacy restaurant adoption WRITER: ✅ (Phase 1, Step 2B) — the first and only thing
+  that writes the onboarding domain. `platform_admin_app/onboarding_adoption.py`
+  (`adopt_existing_restaurant`) plus the thin operator adapter
+  `manage.py adopt_restaurant_onboarding`. NO MIGRATION — the Step 2A schema was
+  sufficient. It targets ONE canonical `Restaurant` by immutable UUID (never a name,
+  no bulk mode, lifecycle state is not a blocker), requires a platform-staff actor
+  and a ≥10-char reason, and creates exactly one `RestaurantOnboarding`
+  (`source=legacy_adopted`, `adopted_at`, `adopted_by`; `created_by` NULL) plus one
+  `admin.restaurant.onboarding_adopted` audit row in ONE transaction — a failed
+  audit rolls the adoption back. A NEW adoption requires `assert_owner_consistency`
+  to pass under the lock and **NEVER REPAIRS** an inconsistency (it refuses with the
+  canonical `OwnerConsistencyError` code and leaves the drift for a human). It
+  creates NO `OwnerInvitation`, leaves the owner-control attestation triple NULL
+  (attestation is a separate, still-unimplemented decision), sends no email/SMS, and
+  never calls `restaurant.save()` — no lifecycle, `is_test`, owner, employee, menu,
+  table, QR or order row is touched. LOCKING: `select_for_update()` on the target
+  `Restaurant` FIRST — that row is the serialization point — then
+  `RestaurantOnboarding`, then `AdminAuditLog`; deliberately NO admission advisory
+  lock (adoption changes nothing an order path reads). Rerun is an idempotent no-op
+  that preserves the ORIGINAL `adopted_at`/`adopted_by` and writes no second audit
+  row, and does NOT re-check owner consistency — historical provenance is not
+  invalidated by later drift. `admin_created` provenance is NEVER converted:
+  `onboarding_source_conflict`, no mutation, no audit. The Admin read projection is
+  UNCHANGED (still `claim_tracked: False`) — Step 2C exposes it. **NO RESTAURANT IS
+  ADOPTED AUTOMATICALLY and Baba House is NOT adopted**; running the command against
+  a tenant is a separate explicit operational action
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -1274,16 +1299,18 @@ No `REST-0018`. The backend has no such column, and minting a sequential busines
 inside a read endpoint would create a persistent identifier nothing else writes. The
 `Restaurant` UUID is the identity.
 
-## Admin Onboarding Domain — Phase 1, Step 2A
+## Admin Onboarding Domain — Phase 1, Steps 2A + 2B
 
-SCHEMA AND AN INVARIANT ONLY. Two models in `platform_admin_app/models.py` plus one
-validator in `platform_admin_app/onboarding.py` (migration
-`platform_admin_app/0009`). **There is NO endpoint, NO service, NO management
-command and NO audit action** — nothing creates, adopts, invites or claims anything
-yet, and `audit_actions.py` deliberately gained no constants (it holds only actions
-with a real call site). The admin read contract is UNCHANGED: `serialize_owner`
-still reports `claim_tracked: False` / `claim_status: None`, because empty tables
-existing is not the same as a restaurant having been adopted into them.
+Two models in `platform_admin_app/models.py` and the validator in
+`platform_admin_app/onboarding.py` (Step 2A, migration `platform_admin_app/0009`),
+plus ONE writer — `platform_admin_app/onboarding_adoption.py` and its management
+command (Step 2B, NO migration). **There is still NO endpoint, NO invitation
+service and NO attestation writer.** The admin read contract is UNCHANGED:
+`serialize_owner` still reports `claim_tracked: False` / `claim_status: None`,
+because a row existing is not the same as the read projection having been taught to
+surface it — Step 2C does that. **No restaurant is adopted automatically**: there is
+no backfill, no signal and no `get_or_create`, so absence still means "not yet
+represented in the Admin onboarding domain".
 
 ### RestaurantOnboarding — provenance, not a second restaurant
 The durable record of HOW one canonical `Restaurant` entered the Admin onboarding
@@ -1374,6 +1401,53 @@ acquisition inside something that reads like a harmless assertion is how
 lock-ordering cycles arrive by accident. Its answer is a snapshot, so a MUTATING
 caller must establish its own transaction and locking discipline first and call this
 inside it.
+
+### adopt_existing_restaurant — the legacy adoption writer (Step 2B)
+`platform_admin_app/onboarding_adoption.py`. The domain service; the future Admin
+HTTP endpoint calls it unchanged, and `manage.py adopt_restaurant_onboarding` is a
+thin operator adapter that adds NO policy of its own.
+
+    adopt_existing_restaurant(*, restaurant_id, actor, reason) -> AdoptionResult
+
+- ADOPTION MEANS ONE THING: *this pre-existing canonical Restaurant is now
+  represented in the Admin onboarding domain*. It does NOT mean Dinify created the
+  tenant, does NOT mean anyone vouched for the owner's control, and does NOT mean the
+  owner was ever invited. The attestation triple stays NULL and no `OwnerInvitation`
+  is created — both would be fabricated evidence indistinguishable from the real
+  thing afterwards, which is the exact failure `legacy_adopted` provenance exists to
+  avoid
+- TARGETING is ONE immutable UUID: no name, no fuzzy match, no `.first()`, no bulk
+  mode. Lifecycle state is NOT a blocker (a legacy tenant may be `onboarding`,
+  `live`, `suspended` or `offboarded`) and adoption never changes it
+- THE SERVICE RE-VALIDATES THE ACTOR against the database row even though the command
+  already resolved it — the service writes the audit row, so the service is where the
+  attribution has to be true. Reason bar is `lifecycle.MIN_REASON_LENGTH` (10),
+  imported, never re-spelled
+- LOCK ORDER: `Restaurant (select_for_update) → RestaurantOnboarding →
+  AdminAuditLog`, all in ONE `transaction.atomic()`. The `Restaurant` row is the
+  SERIALIZATION POINT — the onboarding row does not exist yet, so it is the only
+  thing two concurrent adopters share; the loser reads the winner's committed row and
+  reports an idempotent no-op instead of surfacing the OneToOne `IntegrityError`.
+  It takes **NO admission advisory lock**, no table-allocation lock and no QR lock,
+  deliberately: adoption writes nothing an order path reads, and enrolling it in
+  those lock domains would only add cycles for a future transaction to hit
+- IDEMPOTENCY IS ABOUT HISTORY. A rerun returns `already_adopted` with the ORIGINAL
+  `adopted_at` / `adopted_by` and NO second audit row. It also does NOT re-check
+  owner consistency for an already-adopted restaurant — ownership drifting later does
+  not make the past adoption untrue; current consistency is Step 2C/3's question
+- IT NEVER REPAIRS OWNERSHIP. A NEW adoption calls `assert_owner_consistency` under
+  the lock and, on any of the three codes, refuses and leaves the drift in place
+- `admin_created` IS NEVER CONVERTED to `legacy_adopted`:
+  `AdoptionError('onboarding_source_conflict')`, no mutation, no audit row
+- Domain errors: `invalid_restaurant_id`, `restaurant_not_found`, `invalid_actor`,
+  `invalid_reason`, `onboarding_source_conflict`. `OwnerConsistencyError` keeps its
+  own type and codes rather than being flattened into `AdoptionError`
+- Audit: `admin.restaurant.onboarding_adopted`, `RESULT_SUCCESS`,
+  `resource_type='Restaurant'`, resource/restaurant id = the tenant UUID, the trimmed
+  reason, and state blobs carrying ONLY `{'admin_onboarding_source': None}` →
+  `{'admin_onboarding_source': 'legacy_adopted'}`. No owner name, phone or email, no
+  tenant detail, no token material. Refusals are NOT audited (matching
+  `mark_restaurant_test`: the commonest refusal has no resolvable actor to attribute)
 
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns
@@ -1626,6 +1700,20 @@ inside it.
   `Order.is_test` rows are untouched, since classification governs what FUTURE orders
   derive at admission. There is still NO admin-plane write endpoint and no Admin UI
   for the flag, and no restaurant has been classified with the command yet
+- `adopt_restaurant_onboarding` in `platform_admin_app/management/commands/` — the
+  ONLY writer of the Admin onboarding domain. Represents exactly ONE pre-existing
+  restaurant named by UUID as `RestaurantOnboarding(source='legacy_adopted')`,
+  attributed to an active `platform_staff` `--actor` and a `--reason` (the same
+  10-char bar as a lifecycle transition), with the row and its
+  `admin.restaurant.onboarding_adopted` audit entry in ONE transaction that takes
+  `select_for_update()` on the `Restaurant` FIRST — the serialization point — and NO
+  admission advisory lock. A thin adapter: every rule lives in
+  `platform_admin_app/onboarding_adoption.py`, which the future Admin endpoint calls
+  unchanged. Idempotent (a rerun preserves the original `adopted_at`/`adopted_by` and
+  writes no second audit row) and refuses an `admin_created` conflict. It creates no
+  `OwnerInvitation`, attests no owner control, sends no email/SMS and never modifies
+  the restaurant. There is no admin-plane endpoint and no Admin UI for adoption, and
+  no restaurant has been adopted with the command yet
 - `unlock_platform_admin` in `platform_admin_app/management/commands/` — clears
   `failed_attempts`/`locked_until` for a platform-staff account under a row lock and
   audits `ADMIN_AUTH_LOCKOUT_CLEARED`. Does NOT touch the password, TOTP secret or
