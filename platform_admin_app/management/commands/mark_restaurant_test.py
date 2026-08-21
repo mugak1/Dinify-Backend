@@ -29,9 +29,13 @@ THREE PROPERTIES IT EXISTS TO GUARANTEE:
   ``AdminAuditLog`` row, and it is validated (exists, ``platform_staff``, active) so
   the row cannot name somebody who could not have made the decision.
 
-  ATOMICITY. The write and its audit entry share one transaction, under a row lock,
-  per the no-audit-no-action half of the contract in ``platform_admin_app.audit``: a
-  classification that cannot be attributed must not be allowed to stand.
+  ATOMICITY, AND THE ADMISSION BARRIER. The write and its audit entry share one
+  transaction, per the no-audit-no-action half of the contract in
+  ``platform_admin_app.audit``: a classification that cannot be attributed must not
+  be allowed to stand. That transaction takes the EXCLUSIVE admission advisory lock
+  first and the ``Restaurant`` row lock second — the same order
+  ``lifecycle.transition_restaurant`` uses — so an order cannot be admitted against
+  one classification and then written under the other.
 
 IT IS BIDIRECTIONAL AND IDEMPOTENT. ``--test false`` is a first-class operation, not
 an afterthought — a mistaken classification has to be correctable by the same audited
@@ -70,6 +74,7 @@ from platform_admin_app.audit_actions import (
     ADMIN_RESTAURANT_TEST_CLASSIFICATION_CHANGED,
 )
 from platform_admin_app.models import RESULT_SUCCESS
+from restaurants_app.controllers.admission_lock import lock_admission_exclusive
 from restaurants_app.controllers.lifecycle import MIN_REASON_LENGTH
 from restaurants_app.models import Restaurant
 from users_app.models import User
@@ -238,6 +243,26 @@ class Command(BaseCommand):
         actor = _resolve_actor(options['actor'])
 
         with transaction.atomic():
+            # THE ADMISSION BARRIER, taken FIRST — before the row lock below, and
+            # for the same reason `lifecycle.transition_restaurant` takes it first:
+            # the advisory lock is the single TOP level of the documented order
+            # (advisory -> Restaurant -> AdminAuditLog), and the order paths take
+            # the shared side of it first too.
+            #
+            # THE ROW LOCK ALONE WOULD NOT DO THIS JOB, which is easy to get wrong
+            # because it looks like it should. `order_admission.admit` reads
+            # `is_test` with a PLAIN `values_list().get()` under the shared advisory
+            # lock — it never row-locks the restaurant — and under PostgreSQL's MVCC
+            # a plain SELECT does not block on a row somebody else holds FOR UPDATE.
+            # So without this line an admission could read the old flag, this
+            # transaction could commit the new one, and the order could then be
+            # INSERTed with the obsolete classification: a rehearsal counted as
+            # revenue, or a real sale erased from it, with no error anywhere.
+            # `_create_order` states that "the lock is what makes both values still
+            # true at the INSERT" — that guarantee was vacuous only while nothing
+            # wrote the flag, and this command is the first writer.
+            lock_admission_exclusive(restaurant_id)
+
             restaurant = (
                 Restaurant.objects
                 .select_for_update()

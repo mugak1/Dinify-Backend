@@ -1083,10 +1083,17 @@ the catch-all `<str:config_detail>/` route.
   is a single new TOP level in all three:**
   `advisory(restaurant) SHARED → Table → Counter → Order → OrderItem` (order create),
   `advisory(restaurant) SHARED → Table → Order` (order submit),
-  `advisory(restaurant) EXCLUSIVE → Restaurant → AdminAuditLog` (transition).
+  `advisory(restaurant) EXCLUSIVE → Restaurant → AdminAuditLog` (transition), and
+  the SAME pair again for `manage.py mark_restaurant_test` (the `Restaurant.is_test`
+  writer) — it repeats the transition's order exactly, so it joins an ordering
+  already proven acyclic rather than adding a level. It needs the advisory lock
+  because a `Restaurant` row lock does NOT exclude an admission — `admit` reads
+  `status`/`is_test` with a plain `values_list().get()`, never a `select_for_update`,
+  and under MVCC that read does not block on a row held FOR UPDATE. The advisory lock is the only thing the two transactions share — so ANY
+  future writer of a restaurant field an admission reads must take it too.
   Take it FIRST or not at all — a transaction that takes a row lock and then reaches
   for the advisory lock reintroduces the cycle this ordering prevents.
-  A FOURTH participant joined in PR-H §2: `Restaurant → INSERT Table`
+  A further participant joined in PR-H §2: `Restaurant → INSERT Table`
   (table-number allocation, `restaurants_app/controllers/tables.py`). It takes NO
   advisory lock and row-locks no existing `Table`, so it cannot cycle against
   either order path (which row-lock `Table` but never `Restaurant`) or against the
@@ -1497,7 +1504,9 @@ inside a read endpoint would create a persistent identifier nothing else writes.
   by UUID (never a name, no bulk mode), attributed to an active `platform_staff`
   `--actor` and a `--reason` (same 10-char bar as a lifecycle transition), with the
   write and its `admin.restaurant.test_classification_changed` audit row in ONE
-  transaction under `select_for_update`. Bidirectional and idempotent — a same-value
+  transaction that takes `lock_admission_exclusive` FIRST and then the `Restaurant`
+  row lock — the transition's exact lock order, and load-bearing: the row lock alone
+  does not exclude an in-flight order admission, which reads `is_test` unlocked. Bidirectional and idempotent — a same-value
   rerun writes nothing and audits nothing. It does NOT rewrite history: existing
   `Order.is_test` rows are untouched, since classification governs what FUTURE orders
   derive at admission. There is still NO admin-plane write endpoint and no Admin UI
