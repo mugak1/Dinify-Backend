@@ -9,6 +9,13 @@ mints or verifies a secret here.
 `AdminSession` is the opaque server-side session; `AdminAuditLog` is the
 append-only record of what the admin plane did. None of them inherit
 ``users_app.BaseModel`` — its soft-delete / archival semantics are wrong here.
+
+`RestaurantOnboarding` and `OwnerInvitation` (bottom of the file) are the
+onboarding domain: control-plane PROVENANCE for how a canonical `Restaurant`
+entered Admin, and the credential record for asking its owner to confirm control.
+They live here rather than in `restaurants_app` for the same reason as the rest of
+this module — they must not be tenant-editable, and `BaseModel`'s soft-delete /
+vacuum semantics are wrong for evidence. Nothing creates either automatically.
 """
 import uuid
 from datetime import timedelta
@@ -521,3 +528,373 @@ class AdminAuditLog(models.Model):
         raise AppendOnlyViolation(
             'AdminAuditLog is append-only: entries cannot be deleted.'
         )
+
+
+# --- the onboarding domain ---------------------------------------------------
+#
+# ``RestaurantOnboarding.source`` — HOW a canonical Restaurant entered the Admin
+# onboarding domain. A closed vocabulary with NO default: a row that cannot say
+# how the restaurant arrived is not a provenance record, so the absence of an
+# explicit choice must fail rather than quietly become one of the two.
+ONBOARDING_SOURCE_ADMIN_CREATED = 'admin_created'
+ONBOARDING_SOURCE_LEGACY_ADOPTED = 'legacy_adopted'
+ONBOARDING_SOURCE_CHOICES = [
+    (ONBOARDING_SOURCE_ADMIN_CREATED, ONBOARDING_SOURCE_ADMIN_CREATED),
+    (ONBOARDING_SOURCE_LEGACY_ADOPTED, ONBOARDING_SOURCE_LEGACY_ADOPTED),
+]
+ONBOARDING_SOURCE_VALUES = [value for value, _label in ONBOARDING_SOURCE_CHOICES]
+
+
+class RestaurantOnboarding(models.Model):
+    """
+    The durable platform record of HOW one canonical ``Restaurant`` entered the
+    Admin onboarding domain.
+
+    IT IS NOT A SECOND RESTAURANT. Baba House already exists with a real owner,
+    membership, menu, tables, QR state, orders and lifecycle; a shadow copy of any
+    of that would immediately be a second value able to drift from the first. This
+    row holds ONLY facts that have no canonical home elsewhere — provenance, and
+    the administrative attestation described below. Admin manages the canonical
+    Restaurant regardless of how it entered Dinify.
+
+    Nor is it a readiness checklist, a billing record, an invitation, a lifecycle
+    state (``Restaurant.status`` owns that) or an owner identity (``Restaurant.owner``
+    plus the owner-role ``RestaurantEmployee`` own that, jointly — see
+    ``platform_admin_app.onboarding``).
+
+    ABSENCE IS MEANINGFUL. Nothing creates these rows automatically: no signal, no
+    ``get_or_create``, no migration backfill. A restaurant with no row here has
+    simply not been brought into the Admin onboarding model yet, which is the
+    truthful statement about every restaurant that exists today.
+
+    CLAIM STATE IS NOT STORED HERE. There is deliberately no ``claimed`` /
+    ``claim_status`` / ``owner_claimed_at`` column, because claim is DERIVED from
+    evidence: a consumed ``OwnerInvitation`` (observed claim), or the attestation
+    pair below (an administrator vouching for a legacy relationship). A restaurant
+    with neither has not established control in this domain, and that is a third
+    honest answer rather than a missing value.
+
+    Owner go-live APPROVAL is deliberately absent too — it is a readiness input and
+    its reset semantics are not frozen. Step 3 owns it.
+
+    No ``users_app.BaseModel``: ``deleted`` / ``archived`` / ``vacuumed`` assert that
+    rows get hidden or reaped, which is wrong for provenance evidence.
+    """
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    # The canonical tenant. OneToOne because a restaurant enters the onboarding
+    # domain exactly once — expressed as a database uniqueness fact rather than a
+    # convention a future service is trusted to keep. PROTECT because restaurants
+    # are normally SOFT-deleted: a hard delete is not a routine operation here, and
+    # it must not silently erase how a tenant entered Dinify.
+    restaurant = models.OneToOneField(
+        'restaurants_app.Restaurant',
+        on_delete=models.PROTECT,
+        related_name='admin_onboarding',
+    )
+
+    # No default — see ONBOARDING_SOURCE_CHOICES above. `choices=` is a form/admin
+    # nicety, NOT an integrity boundary, so the vocabulary is also a CheckConstraint.
+    source = models.CharField(max_length=32, choices=ONBOARDING_SOURCE_CHOICES)
+
+    # --- source=admin_created ------------------------------------------------
+    # The platform-staff actor who created the restaurant through the (future)
+    # Admin creation workflow. NOT ``Restaurant.owner`` and never a substitute for
+    # it: this names who at Dinify pressed the button, not who owns the business.
+    # PROTECT so deleting the actor cannot erase the attribution.
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='restaurant_onboardings_created',
+    )
+
+    # --- source=legacy_adopted -----------------------------------------------
+    # WHEN an administrator reconciled a pre-existing Restaurant into this domain,
+    # and WHO did it. This is a real future event with a real timestamp. It says
+    # nothing about when the restaurant was created or when its owner gained
+    # control — neither of which this platform knows for a legacy tenant.
+    adopted_at = models.DateTimeField(null=True, blank=True)
+    adopted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='restaurant_onboardings_adopted',
+    )
+
+    # --- administrative owner-control attestation (legacy only) --------------
+    # Reads exactly: "at THIS time, THIS administrator explicitly attested that the
+    # current canonical owner relationship is genuinely controlled by that owner."
+    #
+    # It is emphatically NOT "the owner claimed the account at this historical
+    # timestamp" — we do not know that for a legacy restaurant, and a fabricated
+    # claim timestamp would be indistinguishable from an observed one for every
+    # future reader. The attesting administrator and the moment of attestation are
+    # the facts we actually have, so they are the facts stored.
+    #
+    # Nothing here may be inferred from ``User.last_login``, ``prompt_password_change``,
+    # an OTP row, ``User.is_active``, ``Restaurant.owner`` existing, or an owner
+    # ``RestaurantEmployee`` existing. None of those is proof of claim.
+    #
+    # BOTH NULL is a legitimate, honest state: the ownership relationship exists
+    # technically but nobody has vouched for it. The pair moves together
+    # (`restaurant_onboarding_attestation_pair`), and only ``legacy_adopted``
+    # provenance may carry it — an admin-created restaurant's owner is established
+    # by an invitation that was actually consumed, never by attestation.
+    owner_control_attested_at = models.DateTimeField(null=True, blank=True)
+    owner_control_attested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='restaurant_onboardings_attested',
+    )
+
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'restaurant_onboarding'
+        ordering = ['-created_at']
+        constraints = [
+            # The vocabulary as a database fact. Stated separately from the shape
+            # constraints below so a violation names WHICH invariant failed, and so
+            # that an unknown source (including the empty string a caller who simply
+            # forgot ``source`` would insert) is refused on its own terms.
+            models.CheckConstraint(
+                condition=models.Q(source__in=ONBOARDING_SOURCE_VALUES),
+                name='restaurant_onboarding_source_vocabulary',
+            ),
+            # An admin-created restaurant: Dinify pressed the button, so there is a
+            # creating actor and there is nothing to adopt. Attestation is refused
+            # here because control over an admin-created tenant is established by a
+            # consumed invitation, not by an administrator vouching for it.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(source=ONBOARDING_SOURCE_ADMIN_CREATED)
+                    | models.Q(
+                        created_by__isnull=False,
+                        adopted_at__isnull=True,
+                        adopted_by__isnull=True,
+                        owner_control_attested_at__isnull=True,
+                        owner_control_attested_by__isnull=True,
+                    )
+                ),
+                name='restaurant_onboarding_admin_created_shape',
+            ),
+            # A legacy-adopted restaurant: Dinify did not create it, so there is no
+            # creating actor — but somebody reconciled it, at a knowable moment.
+            # The attestation pair is optional here and governed by its own rule.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(source=ONBOARDING_SOURCE_LEGACY_ADOPTED)
+                    | models.Q(
+                        created_by__isnull=True,
+                        adopted_at__isnull=False,
+                        adopted_by__isnull=False,
+                    )
+                ),
+                name='restaurant_onboarding_legacy_adopted_shape',
+            ),
+            # Both or neither. A timestamp with nobody behind it is an unattributable
+            # assertion; an attestor with no timestamp is an assertion about no
+            # particular moment. Either half alone is worse than silence.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        owner_control_attested_at__isnull=True,
+                        owner_control_attested_by__isnull=True,
+                    )
+                    | models.Q(
+                        owner_control_attested_at__isnull=False,
+                        owner_control_attested_by__isnull=False,
+                    )
+                ),
+                name='restaurant_onboarding_attestation_pair',
+            ),
+        ]
+
+    def __str__(self):
+        return f'RestaurantOnboarding<{self.restaurant_id}:{self.source}>'
+
+
+class OwnerInvitation(models.Model):
+    """
+    One persisted, single-use attempt to have ONE specific ``User`` confirm control
+    of the owner relationship for ONE ``RestaurantOnboarding``.
+
+    A CREDENTIAL LIFECYCLE RECORD — nothing more. It is not the owner identity (the
+    canonical ``Restaurant.owner`` plus the owner-role membership is), not a second
+    owner field, not an email delivery log, not a password and not an OTP row.
+
+    THIS PR PERSISTS THE SHAPE ONLY. No minting, no redemption, no cancellation, no
+    resend — and deliberately no delivery columns (``delivery_channel`` /
+    ``delivered_at`` / provider ids). The recon found today's transactional delivery
+    infrastructure too unreliable to freeze a contract around; the first
+    implementation can hand a claim link over operator-mediated, and delivery can be
+    added additively once its architecture is chosen and proven. Baking the current
+    notification system into this schema would be the expensive mistake.
+
+    THE RESTAURANT IS DERIVED, never stored: invitation -> onboarding -> restaurant.
+    A second FK would be a second value able to drift from the first.
+
+    IDENTITY IS NOT SNAPSHOTTED. No email / phone / name copied onto the row —
+    ``invited_user`` is the canonical identity, and a snapshot would go stale the
+    moment the user edits their profile. (A future delivery-attempt record may
+    legitimately snapshot the destination it actually sent to; that is a different
+    fact, and a different table.)
+    """
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    # PROTECT: the onboarding row is the context this credential is meaningful in.
+    onboarding = models.ForeignKey(
+        RestaurantOnboarding,
+        on_delete=models.PROTECT,
+        related_name='owner_invitations',
+    )
+
+    # The exact Dinify identity being asked to confirm ownership. PROTECT because
+    # this row is evidence of who was invited.
+    invited_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='owner_invitations',
+    )
+    # The platform-staff account that issued it. Whether an issuer is ELIGIBLE
+    # (account_type, session, elevation) is a service-layer question; the model
+    # records who it was, and nothing here encodes account_type logic.
+    issued_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='owner_invitations_issued',
+    )
+
+    # SHA-256 hex of the raw claim token (64 chars). The RAW token is NEVER stored —
+    # the same convention as AdminSession, AdminLoginChallenge and DelegationGrant.
+    # unique=True is also the lookup index redemption will hit.
+    token_hash = models.CharField(max_length=64, unique=True)
+
+    issued_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+
+    # The three TERMINAL stamps, mutually exclusive (see the constraints below).
+    # EXPIRY IS NOT AMONG THEM: "expired" is `expires_at <= now`, derived on read.
+    # Persisting `status='expired'` would need a sweeper to maintain it, and this
+    # repository has no scheduler running at all — a status column nothing updates
+    # is a lie with a timestamp on it.
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='owner_invitations_cancelled',
+    )
+    superseded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'owner_invitation'
+        ordering = ['-issued_at']
+        indexes = [
+            # "What has been tried for this tenant?" — the per-onboarding history.
+            models.Index(fields=['onboarding', 'issued_at']),
+        ]
+        constraints = [
+            # AT MOST ONE UNRESOLVED INVITATION PER ONBOARDING.
+            #
+            # NOTE what the predicate does NOT say: there is no `expires_at > now()`
+            # term, because a PostgreSQL partial-index predicate must be IMMUTABLE
+            # and a clock comparison is not. An expired-but-unsuperseded invitation
+            # therefore keeps occupying the slot — deliberately. That is what makes
+            # the future reissue service's supersede step load-bearing: it must
+            # atomically stamp the old row before inserting its replacement, exactly
+            # as `challenges.create_challenge` consumes before it inserts under
+            # `one_live_admin_challenge_per_user`.
+            models.UniqueConstraint(
+                fields=['onboarding'],
+                condition=models.Q(
+                    consumed_at__isnull=True,
+                    cancelled_at__isnull=True,
+                    superseded_at__isnull=True,
+                ),
+                name='one_unresolved_owner_invitation_per_onboarding',
+            ),
+            # Terminal-state exclusivity, as three small named rules rather than one
+            # clever expression — a violation should name the pair that collided.
+            # An invitation resolves exactly once and in exactly one way; a row that
+            # was both consumed and cancelled cannot be reported honestly.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(consumed_at__isnull=True)
+                    | models.Q(cancelled_at__isnull=True)
+                ),
+                name='owner_invitation_not_consumed_and_cancelled',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(consumed_at__isnull=True)
+                    | models.Q(superseded_at__isnull=True)
+                ),
+                name='owner_invitation_not_consumed_and_superseded',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(cancelled_at__isnull=True)
+                    | models.Q(superseded_at__isnull=True)
+                ),
+                name='owner_invitation_not_cancelled_and_superseded',
+            ),
+            # Both or neither, for the same reason as the attestation pair: a
+            # cancellation nobody is attached to is unattributable.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(cancelled_at__isnull=True, cancelled_by__isnull=True)
+                    | models.Q(cancelled_at__isnull=False, cancelled_by__isnull=False)
+                ),
+                name='owner_invitation_cancellation_pair',
+            ),
+            # A credential whose expiry precedes its issue is born dead and would
+            # read as "expired" forever while still holding the unresolved slot.
+            models.CheckConstraint(
+                condition=models.Q(expires_at__gt=models.F('issued_at')),
+                name='owner_invitation_expires_after_issue',
+            ),
+        ]
+
+    def __str__(self):
+        return f'OwnerInvitation<{self.onboarding_id}:{self.invited_user_id}>'
+
+    @property
+    def is_resolved(self):
+        """A terminal stamp is set. Pure — no clock, no database, no side effects."""
+        return (
+            self.consumed_at is not None
+            or self.cancelled_at is not None
+            or self.superseded_at is not None
+        )
+
+    @property
+    def is_expired(self):
+        """
+        Derived, never stored: the issue window has passed.
+
+        An expired invitation is still UNRESOLVED — it holds the per-onboarding
+        slot until something supersedes, cancels or consumes it.
+        """
+        return self.expires_at <= timezone.now()
+
+    @property
+    def is_claimable(self):
+        """Unresolved AND unexpired — the only state a token may be redeemed in."""
+        return not self.is_resolved and not self.is_expired

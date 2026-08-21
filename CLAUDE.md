@@ -506,9 +506,23 @@ so keep it current when conventions change.
   for `Order.is_test` alongside the existing launch-boundary rule. Readiness delegates
   to the `check_go_live_readiness` seam (still failing closed); payment mode and
   subscription are reported as UNCONFIGURED / LEGACY rather than inferred. The
-  readiness ENGINE, owner invitation, subscription models, receivables, QR generation,
+  readiness ENGINE, the owner-invitation FLOW (Step 2A adds the model; nothing mints,
+  delivers or redeems a token), subscription models, receivables, QR generation,
   restaurant creation, support triage writes and the Activity screen are **NOT built**
   — those are later Phase-1 steps
+- Admin onboarding domain: ✅ FOUNDATION ONLY (Phase 1, Step 2A) — `RestaurantOnboarding`
+  + `OwnerInvitation` in `platform_admin_app/models.py` (migration
+  `platform_admin_app/0009`, purely additive, NO backfill) and the read-only
+  owner-FK / owner-membership invariant `assert_owner_consistency`
+  (`platform_admin_app/onboarding.py`). **No endpoint, no service, no command, no
+  audit action, no row.** Provenance is `admin_created | legacy_adopted` with no
+  default; claim state and "expired" are DERIVED, never stored; one unresolved
+  invitation per onboarding is a partial unique index that deliberately ignores the
+  clock; only a token HASH is persisted; there is no delivery model. Nothing creates
+  these rows automatically, so absence means "not yet represented in the Admin
+  onboarding domain" — **Baba House is NOT adopted and was not mutated**, and the
+  admin read contract still reports `claim_tracked: False`. Owner go-live approval
+  remains Step 3. See the "Admin Onboarding Domain" section
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -1260,6 +1274,96 @@ No `REST-0018`. The backend has no such column, and minting a sequential busines
 inside a read endpoint would create a persistent identifier nothing else writes. The
 `Restaurant` UUID is the identity.
 
+## Admin Onboarding Domain — Phase 1, Step 2A
+
+SCHEMA AND AN INVARIANT ONLY. Two models in `platform_admin_app/models.py` plus one
+validator in `platform_admin_app/onboarding.py` (migration
+`platform_admin_app/0009`). **There is NO endpoint, NO service, NO management
+command and NO audit action** — nothing creates, adopts, invites or claims anything
+yet, and `audit_actions.py` deliberately gained no constants (it holds only actions
+with a real call site). The admin read contract is UNCHANGED: `serialize_owner`
+still reports `claim_tracked: False` / `claim_status: None`, because empty tables
+existing is not the same as a restaurant having been adopted into them.
+
+### RestaurantOnboarding — provenance, not a second restaurant
+The durable record of HOW one canonical `Restaurant` entered the Admin onboarding
+domain. Baba House already owns its owner, membership, menu, tables, QR state,
+orders and lifecycle; this row holds ONLY facts with no canonical home. Admin
+manages the canonical `Restaurant` regardless of how it entered Dinify.
+
+- `source` ∈ {`admin_created`, `legacy_adopted`}, **no default** and a
+  `CheckConstraint`, not merely `choices=` — a row that cannot say how the tenant
+  arrived must fail, never silently become one provenance or the other
+- `admin_created` requires `created_by` (the platform-staff actor who created it —
+  NOT `Restaurant.owner`) and forbids the adoption and attestation fields;
+  `legacy_adopted` requires `adopted_at` + `adopted_by` and forbids `created_by`.
+  Both shapes are named database constraints
+- `owner_control_attested_at` / `_by` (legacy only, both-or-neither) mean exactly
+  *"at this time this administrator attested that the current owner relationship is
+  genuinely controlled by that owner"* — **NOT** "the owner claimed the account at
+  this historical timestamp". We do not know that for a legacy tenant, and a
+  fabricated claim timestamp is indistinguishable from an observed one afterwards.
+  Never infer it from `last_login` / `prompt_password_change` / an OTP row /
+  `is_active` / the owner FK or membership existing. BOTH NULL is a legitimate state
+- **CLAIM STATE IS DERIVED, never stored** — a consumed `OwnerInvitation`, or the
+  attestation pair, or neither. No `claimed` / `claim_status` / `owner_claimed_at`
+- **Owner go-live approval is NOT here and is Step 3's** — its reset semantics are
+  not frozen. Do not add `go_live_approved_*` or a `GoLiveApproval` model
+- **ABSENCE IS MEANINGFUL, and there was NO backfill.** No signal, no
+  `get_or_create`, no `RunPython`: creating a `Restaurant` through any existing path
+  still yields zero onboarding rows. Absence means "not yet represented in the Admin
+  onboarding domain", which is the truthful state of every restaurant today —
+  **Baba House was NOT adopted and was not mutated**; it is the next PR's first
+  explicit legacy-adoption case
+
+### OwnerInvitation — a credential record
+One single-use attempt to have ONE `User` confirm control of the owner relationship
+for ONE `RestaurantOnboarding`. Only `token_hash` (SHA-256 hex) is stored — the raw
+token is never persisted, matching `AdminSession` / `AdminLoginChallenge` /
+`DelegationGrant`. The restaurant is DERIVED (invitation → onboarding → restaurant);
+a second FK would be a second value able to drift. No identity snapshot.
+
+- **AT MOST ONE UNRESOLVED INVITATION PER ONBOARDING**, a partial `UniqueConstraint`
+  over `onboarding` where `consumed_at`/`cancelled_at`/`superseded_at` are all NULL.
+  The predicate deliberately does NOT consult the clock (a partial-index predicate
+  must be immutable), so an **expired-but-unsuperseded row still occupies the slot**
+  — which is what makes the future reissue path's supersede step load-bearing,
+  exactly as `challenges.create_challenge` consumes before it inserts
+- **Expired is DERIVED** (`expires_at <= now`, the `is_expired` property), never a
+  stored `status='expired'`: nothing in this repo runs on a schedule to maintain one
+- The three terminal stamps are mutually exclusive (three named constraints);
+  `cancelled_at`/`cancelled_by` move together; `expires_at > issued_at`
+- **NO DELIVERY MODEL** — no channel / state / `delivered_at` / provider ids and no
+  `OwnerInvitationDelivery`. Today's transactional delivery is not reliable enough
+  to freeze a contract around; the first implementation can hand the claim link over
+  operator-mediated, and delivery lands additively later
+
+### The owner-FK / owner-membership invariant
+`platform_admin_app/onboarding.py::assert_owner_consistency(restaurant)`. Dinify
+answers "who owns this?" twice — `Restaurant.owner` (owner of record) and an active
+owner-role `RestaurantEmployee` (owner authority, which is what the customer plane
+resolves permissions from) — and nothing keeps them in step. CONSISTENT means
+exactly ONE `active=True`, `deleted=False` membership at that exact restaurant
+carries `RESTAURANT_OWNER`, **and** its user is `restaurant.owner`. It returns that
+membership; otherwise it raises `OwnerConsistencyError` with
+`missing_owner_membership` / `multiple_owner_memberships` (checked BEFORE the
+identity match — ambiguity is not agreement) / `owner_membership_mismatch`. Details
+carry UUIDs only, never an owner's email or phone.
+
+Inactive and soft-deleted rows do not count; `manager` is not `owner`; `User.roles`
+can never satisfy it (that is the ambient authority Phase 0.5 removed). Account
+ELIGIBILITY is a separate question — a deactivated owner account is still
+structurally consistent, and later services decide eligibility.
+
+**IT IS VALIDATION-ONLY AND REPAIRS NOTHING** — it never reassigns the owner,
+deactivates a duplicate membership, creates a missing one or seeds a
+`RestaurantRolePermission`. It also opens **no transaction, takes no
+`select_for_update` and acquires no advisory lock**, deliberately: hiding lock
+acquisition inside something that reads like a harmless assertion is how
+lock-ordering cycles arrive by accident. Its answer is a snapshot, so a MUTATING
+caller must establish its own transaction and locking discipline first and call this
+inside it.
+
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns
   a human-readable reason, or `None` if deletable), NOT in the generic
@@ -1563,12 +1667,14 @@ inside a read endpoint would create a persistent identifier nothing else writes.
   identity layer" bullet; 0013 blacklists outstanding platform-staff refresh
   tokens and strips platform-only roles from `restaurant_user` rows, data-only and
   idempotent — see "Tenant Isolation / Role-Permission ENFORCEMENT"),
-  `platform_admin_app/migrations/0008_adminloginchallenge_one_live_admin_challenge_per_user.py`
+  `platform_admin_app/migrations/0009_restaurantonboarding_ownerinvitation_and_more.py`
   (0001 identity, 0002 `AdminSession`, 0003 `AdminAuditLog`, 0004 TOTP replay counter,
   0005 `DelegationGrant`, 0006 `DelegatedSession`, 0007 the break-glass
   `recovery_only` challenge flag, 0008 the one-live-challenge partial unique index
   preceded by an idempotent duplicate-consuming data repair — see "Platform-admin
-  control plane"),
+  control plane"; 0009 creates the onboarding domain, two new tables with their
+  constraints and NOTHING else — no `RunPython`, no backfill, no existing table
+  touched — see "Admin Onboarding Domain"),
   `misc_app/migrations/0004_drop_service_tickets.py`
 
 ## CI — `.github/workflows/ci.yml`
