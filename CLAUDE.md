@@ -1393,7 +1393,10 @@ inside a read endpoint would create a persistent identifier nothing else writes.
   field for it and it must never gain one. Migration 0057 is additive with **NO
   backfill** — in particular no name-based heuristic; whether an existing restaurant
   is a test tenant is an explicit operator decision, not something inferred from its
-  name. Two consequences: it surfaces on the admin directory/detail reads, and it
+  name. That operator decision is made through the audited
+  `manage.py mark_restaurant_test` command — the ONLY writer of the flag (see
+  Existing Management Commands); there is still no admin-plane write endpoint and no
+  Admin UI. Two consequences: it surfaces on the admin directory/detail reads, and it
   feeds `Order.is_test` below
 - `Order.is_test` (migration `orders_app/0035`, indexed) marks an order that is
   operationally real but commercially invisible. It is **SERVER-DERIVED, NEVER
@@ -1489,6 +1492,16 @@ inside a read endpoint would create a persistent identifier nothing else writes.
   key-loss sequence (recovery-code sign-in → install a new key → re-provision →
   re-enrol) is in `BACKGROUND_TASKS.md` and is covered end to end by
   `platform_admin_app/tests_second_factor.py::BreakGlassSequenceTests`
+- `mark_restaurant_test` in `platform_admin_app/management/commands/` — the ONLY
+  writer of `Restaurant.is_test`. Sets or clears it for exactly ONE restaurant named
+  by UUID (never a name, no bulk mode), attributed to an active `platform_staff`
+  `--actor` and a `--reason` (same 10-char bar as a lifecycle transition), with the
+  write and its `admin.restaurant.test_classification_changed` audit row in ONE
+  transaction under `select_for_update`. Bidirectional and idempotent — a same-value
+  rerun writes nothing and audits nothing. It does NOT rewrite history: existing
+  `Order.is_test` rows are untouched, since classification governs what FUTURE orders
+  derive at admission. There is still NO admin-plane write endpoint and no Admin UI
+  for the flag, and no restaurant has been classified with the command yet
 - `unlock_platform_admin` in `platform_admin_app/management/commands/` — clears
   `failed_attempts`/`locked_until` for a platform-staff account under a row lock and
   audits `ADMIN_AUTH_LOCKOUT_CLEARED`. Does NOT touch the password, TOTP secret or

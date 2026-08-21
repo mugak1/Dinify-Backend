@@ -94,9 +94,13 @@ class Restaurant(BaseModel):
     # SERVER-WRITTEN ONLY. Deliberately absent from EDIT_INFORMATION['restaurants']
     # and from SerializerPutRestaurant's field list, exactly like `status`: Secretary
     # builds its payload solely from EDIT_INFORMATION keys and DRF drops what the
-    # serializer does not name, so no tenant-facing path can set it. There is no
-    # admin write endpoint for it yet either — Step 2's creation flow decides how it
-    # is assigned. Indexed because portfolio and financial figures will exclude it.
+    # serializer does not name, so no tenant-facing path can set it. There is still no
+    # admin write ENDPOINT — the one writer is the audited operator command
+    # `manage.py mark_restaurant_test` (platform_admin_app), which targets a single
+    # UUID, requires a platform-staff actor and a reason, and writes the flag and its
+    # audit row in one transaction. Step 2's creation flow decides how the flag is
+    # assigned at onboarding. Indexed because portfolio and financial figures will
+    # exclude it.
     is_test = models.BooleanField(default=False, db_index=True)
 
     # dynamic configurations

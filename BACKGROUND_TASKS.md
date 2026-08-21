@@ -69,7 +69,9 @@ This is **not a runnable command**. It is a configuration module that defines `V
 
 ### platform_admin_app
 
-These two are **operator commands, not scheduled tasks** — they are run by hand, over SSH, on the box. Both are interactive by design and both refuse to run without a valid `ADMIN_SECRET_ENCRYPTION_KEY`, because provisioning that half-completes would leave an administrator who can never sign in.
+These are **operator commands, not scheduled tasks** — they are run by hand, over SSH, on the box. Nothing here is on a timer, and nothing here should be put on one.
+
+The two provisioning commands (`create_platform_admin`, `reset_platform_admin_totp`) are interactive by design and both refuse to run without a valid `ADMIN_SECRET_ENCRYPTION_KEY`, because provisioning that half-completes would leave an administrator who can never sign in. The other two (`unlock_platform_admin`, `mark_restaurant_test`) need nothing beyond database access.
 
 #### `create_platform_admin`
 
@@ -144,6 +146,29 @@ This sequence is covered end to end by `platform_admin_app/tests_second_factor.p
 
 **Future item, not implemented:** key rotation via `MultiFernet` (decrypt under an old key, re-encrypt under a new one) would let a *planned* key change avoid re-enrolment entirely. Today there is one key and no rotation path, so a lost key always means re-provisioning.
 
+#### `mark_restaurant_test`
+
+| | |
+|---|---|
+| **Run** | `python manage.py mark_restaurant_test --restaurant <UUID> --test true\|false --actor <platform-staff-username> --reason "<why>"` |
+| **Arguments** | All four are **required**. `--restaurant` is the restaurant's UUID. `--test` is exactly `true` or `false` (case-folded; nothing else — no `1`, `yes`, `on`). `--actor` is the username of the platform-staff human making the decision. `--reason` is a free-text justification of at least 10 characters after trimming (the same bar as a lifecycle transition and a delegation grant). |
+| **What it does** | Sets or clears `Restaurant.is_test` for **exactly one** restaurant and writes one `admin.restaurant.test_classification_changed` audit row carrying the actor, the reason and the before/after booleans. The write and the audit row share one `transaction.atomic()` under `select_for_update`, so a failed audit rolls the classification back. |
+| **Why it exists** | `Restaurant.is_test` is platform-owned metadata: it decides whether a tenant's orders count as commerce (`Order.is_test` derives from it at admission). Migration 0057 added it with no backfill and deliberately no name heuristic, and there is no Admin UI for it yet. This is the audited alternative to somebody running a `.update()` in a shell with no actor, no reason and no record. |
+| **Targeting** | **UUID only.** There is no `--restaurant-name`, no fuzzy match, no `.first()`, and no bulk mode. A malformed UUID, an unknown UUID and a soft-deleted restaurant are all refused, the last two with the same message so the command never confirms a soft-deleted tenant exists. |
+| **Actor** | Must exist, be `account_type = platform_staff`, and be active — otherwise the command fails before touching anything. This is **attribution, not authentication**: anyone who can run `manage.py` on the box already has more authority than this command grants. It asks for no password, no TOTP code and no recovery code, and prints no secrets. |
+| **Changes ONLY** | `Restaurant.is_test` (plus the row's `auto_now` `time_last_updated` stamp). Not `status` — that is `restaurants_app.controllers.lifecycle`'s sole privilege — and not the owner, the soft-delete flag, tables, menus, QR state, employees or users. |
+| **Does NOT rewrite history** | Existing `Order.is_test` rows are left exactly as they are. Classification governs how **future** orders are derived at admission time; retro-labelling past orders would silently restate historical revenue and is a separate decision needing its own migration. |
+| **Not reachable by tenants** | There is no customer-plane path to this flag at all: it is absent from both `EDIT_INFORMATION['restaurants']` and `SerializerPutRestaurant`, so no restaurant user can set it through the API, and this command is shell-only. |
+| **External services** | PostgreSQL only. No SMS, no email, no MongoDB, no encryption key. |
+| **Idempotency** | **Good.** Re-running the same classification changes nothing, writes no second audit row, prints `Restaurant already has is_test=<value>; no changes made.` and exits successfully. The audit log records decisions that changed platform state, not how many times a runbook was pasted. |
+| **Error handling** | Fail-closed. Every validation — `--test` vocabulary, reason length, UUID form, actor eligibility, restaurant existence — refuses with a `CommandError` before any write, and no audit row is produced for a refusal. |
+
+Refusals are deliberately **not** audited, unlike the HTTP transition endpoint. There, a refusal is an authenticated administrator being told no. Here the commonest refusal is an actor that could not be resolved, so there is nobody to attribute the row to — and writing denial rows from an unauthenticated shell would let anyone with box access fill the audit log with attribution nobody stood behind.
+
+To reverse a classification, run the command again with the opposite `--test` value and a reason saying why. Both directions are first-class and both are audited; the correction must not happen in a shell.
+
+**No restaurant has been classified with this command yet.** It ships as a mechanism; running it against a specific tenant is a separate, explicit operational action taken after review and deploy.
+
 ---
 
 ## Command Summary Table
@@ -156,6 +181,7 @@ This sequence is covered end to end by `platform_admin_app/tests_second_factor.p
 | `create_platform_admin` | platform_admin | PG | N/A (refuses duplicates) | Fail-closed | — |
 | `reset_platform_admin_totp` | platform_admin | PG | Good (re-runnable) | Fail-closed | — |
 | `unlock_platform_admin` | platform_admin | PG | Good | Fail-closed | — |
+| `mark_restaurant_test` | platform_admin | PG | Good | Fail-closed | — |
 
 ---
 
@@ -227,10 +253,12 @@ When a command fails, no email, Slack message, or other notification is sent. Op
 
 ### Logging
 
-All commands use `print()` instead of Python's `logging` module or Django's `self.stdout.write()`. This means:
+The `orders_app` / `notifications_app` / `misc_app` commands use `print()` instead of Python's `logging` module or Django's `self.stdout.write()`. This means:
 - Output does not include timestamps, log levels, or structured fields
 - Output cannot be routed to log aggregation systems without additional tooling
 - There is no way to distinguish informational messages from errors in the output
+
+The four `platform_admin_app` commands are the exception: they write through `self.stdout` and raise `CommandError` for failures, so a caller can separate the two streams and read the exit code. Their durable record is the `AdminAuditLog` row, not the terminal output.
 
 ### Idempotency gaps
 
