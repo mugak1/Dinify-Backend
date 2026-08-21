@@ -34,8 +34,18 @@ class FlipAccountTypeMigrationTests(TransactionTestCase):
         return User.objects.create(**{k: v for k, v in kw.items() if k in names})
 
     def tearDown(self):
-        # Leave the schema/state fully migrated forward for the rest of the suite.
-        self._migrate([('users_app', '0011_flip_admin_account_type')])
+        # Leave the schema/state fully migrated forward for the rest of the suite —
+        # to the HEAD of users_app, not merely to `migrate_to`. This is a
+        # TransactionTestCase, so its DDL is not rolled back for the tests that
+        # follow: stopping at 0011 left `phone_number` at its pre-0012 definition
+        # (NOT NULL), and the next TransactionTestCase to create a platform-staff
+        # account — which legitimately has no phone number — died on the constraint.
+        # The target is RESOLVED from the graph rather than named, so it cannot drift
+        # again when a 0014 lands. (`None` would migrate correctly but `_migrate`
+        # also builds a project_state, which needs a real node.)
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        self._migrate(executor.loader.graph.leaf_nodes('users_app'))
 
     def test_forward_flips_only_role_holders(self):
         old_apps = self._migrate(self.migrate_from)   # 0010: account_type exists, all default

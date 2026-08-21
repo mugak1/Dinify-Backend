@@ -26,6 +26,7 @@ which is the ratchet that owns that guarantee. Copying its two assertions here w
 add a second place to update without adding a second guarantee; this command adds an
 OPERATOR path, not an API one, and does not weaken that wall.
 """
+import threading
 import uuid
 from decimal import Decimal
 from io import StringIO
@@ -33,7 +34,9 @@ from unittest.mock import patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.test import TestCase
+from django.db import connection, transaction
+from django.test import TestCase, TransactionTestCase, tag
+from django.test.utils import CaptureQueriesContext
 
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
@@ -50,6 +53,10 @@ from platform_admin_app.management.commands.mark_restaurant_test import (
 )
 from platform_admin_app.models import RESULT_SUCCESS, AdminAuditLog
 from platform_admin_app.testing import AuditAssertionsMixin
+from restaurants_app.controllers.admission_lock import (
+    advisory_key,
+    lock_admission_shared,
+)
 from restaurants_app.controllers.lifecycle import MIN_REASON_LENGTH
 from restaurants_app.models import DiningArea, Restaurant, Table
 from users_app.models import User
@@ -574,4 +581,165 @@ class HistoricalOrdersUntouchedTests(_CommandFixture):
                 .values_list('id', 'time_last_updated')
             ),
             stamps,
+        )
+
+
+# --- The admission barrier: the reason a row lock alone is not enough ----------------
+
+class AdmissionBarrierOrderTests(_CommandFixture):
+    """
+    The command takes the EXCLUSIVE admission advisory lock, and takes it FIRST.
+
+    Both halves matter and a blocking test would only prove the first. The documented
+    order in ``restaurants_app.controllers.admission_lock`` is
+    ``advisory -> Restaurant -> AdminAuditLog``, and "take it FIRST or not at all" —
+    a transaction that row-locks and only then reaches for the advisory lock
+    reintroduces the cycle the ordering exists to prevent. So the assertion is on the
+    SEQUENCE of statements, not merely on their presence.
+    """
+
+    def setUp(self):
+        super().setUp()
+        if connection.vendor != 'postgresql':
+            self.skipTest('advisory locking requires PostgreSQL')
+
+    def _statements(self, **kwargs):
+        with CaptureQueriesContext(connection) as captured:
+            self.run_command(**kwargs)
+        return [entry['sql'] for entry in captured.captured_queries]
+
+    def _index_of(self, statements, needle):
+        for index, sql in enumerate(statements):
+            if needle in sql:
+                return index
+        raise AssertionError(
+            f'no statement containing {needle!r}; saw: {statements!r}'
+        )
+
+    def test_the_exclusive_barrier_is_taken_before_the_row_lock(self):
+        statements = self._statements(test='true')
+
+        barrier = self._index_of(statements, 'pg_advisory_xact_lock(')
+        row_lock = self._index_of(statements, 'FOR UPDATE')
+        self.assertLess(
+            barrier, row_lock,
+            'the advisory lock must be the top level, taken before the row lock',
+        )
+
+    def test_the_barrier_is_exclusive_not_shared(self):
+        """
+        Shared would be silently useless here.
+
+        The order paths hold the SHARED side for the whole of order creation. A
+        classification taking the shared side too would not exclude them, and every
+        test that merely looked for "a lock" would still pass.
+        """
+        statements = self._statements(test='true')
+        joined = ' '.join(statements)
+        # Both halves, or the test passes vacuously on code that takes no lock at all.
+        self.assertIn('pg_advisory_xact_lock(', joined)
+        self.assertNotIn('pg_advisory_xact_lock_shared(', joined)
+
+    def test_the_barrier_is_taken_on_the_no_op_path_too(self):
+        """
+        The lock cannot wait until we know a write is needed.
+
+        Whether this is a no-op is only knowable by READING the flag, and that read
+        is the thing the barrier protects. Deciding afterwards would be a
+        check-then-act with the window in exactly the wrong place.
+        """
+        statements = self._statements(test='false')  # already false: a no-op
+
+        self._index_of(statements, 'pg_advisory_xact_lock(')
+        self.assertEqual(self.classification_entries().count(), 0)
+
+    def test_the_barrier_key_is_the_target_restaurant(self):
+        """A lock on the wrong key serialises nothing and looks identical."""
+        statements = self._statements(test='true')
+
+        index = self._index_of(statements, 'pg_advisory_xact_lock(')
+        self.assertIn(str(advisory_key(self.restaurant.id)), statements[index])
+
+
+@tag('concurrency')
+class AdmissionBarrierExclusionTests(TransactionTestCase):
+    """
+    The behavioural half: classification WAITS for an admission already in flight.
+
+    This is what the row lock could not deliver, and the reason is easy to miss.
+    ``order_admission.admit`` reads ``Restaurant.is_test`` with a plain
+    ``values_list().get()`` under the SHARED advisory lock — it never row-locks the
+    restaurant — and under PostgreSQL's MVCC a plain SELECT does not block on a row
+    another transaction holds FOR UPDATE. So a ``select_for_update`` here would have
+    excluded nothing: an admission could read the old flag, this command could commit
+    the new one, and the order could then be INSERTed with the obsolete
+    classification, counting a rehearsal as revenue with no error anywhere.
+
+    The holder below stands in for that admission, taking the same lock and making
+    the same read. Proving that something BLOCKS needs a bounded wait, so unlike the
+    rest of this file the assertion is timed; it is written so the timing can only
+    cause a missed regression, never a spurious failure.
+    """
+
+    def setUp(self):
+        super().setUp()
+        if connection.vendor != 'postgresql':
+            self.skipTest('advisory locking requires PostgreSQL')
+        self.actor = _make_staff(username='barrier-admin', email='barrier@t.com')
+        self.restaurant = _make_restaurant('Barrier Ltd')
+
+    def test_classification_waits_for_an_in_flight_admission(self):
+        holder_ready = threading.Event()
+        classify_done = threading.Event()
+        observed = {}
+
+        def hold_admission():
+            """An admission mid-transaction: shared lock taken, flag read, working."""
+            try:
+                with transaction.atomic():
+                    lock_admission_shared(self.restaurant.pk)
+                    observed['read'] = Restaurant.objects.values_list(
+                        'is_test', flat=True,
+                    ).get(pk=self.restaurant.pk)
+                    holder_ready.set()
+                    # If nothing excluded it, the classifier's single narrow UPDATE
+                    # commits far inside this window. A timeout here is the barrier
+                    # working; only an over-loaded machine could mask a regression,
+                    # and that direction costs a missed failure, not a false one.
+                    observed['finished_while_held'] = classify_done.wait(3)
+            finally:
+                connection.close()
+
+        def classify():
+            try:
+                holder_ready.wait(10)
+                call_command(
+                    COMMAND, restaurant=str(self.restaurant.id), test='true',
+                    actor=self.actor.username, reason=REASON, stdout=StringIO(),
+                )
+                classify_done.set()
+            finally:
+                connection.close()
+
+        threads = [threading.Thread(target=hold_admission),
+                   threading.Thread(target=classify)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        for index, thread in enumerate(threads):
+            self.assertFalse(thread.is_alive(), f'worker {index} hung')
+
+        self.assertFalse(observed['read'], 'the admission read the pre-change flag')
+        self.assertFalse(
+            observed['finished_while_held'],
+            'the classification committed while an admission was in flight — the '
+            'order would be written with the flag the admission never saw',
+        )
+        # Once the admission commits the barrier is released and the change lands.
+        self.assertTrue(classify_done.wait(10))
+        self.assertTrue(
+            Restaurant.objects.values_list('is_test', flat=True).get(
+                pk=self.restaurant.pk,
+            ),
         )

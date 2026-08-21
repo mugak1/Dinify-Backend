@@ -36,24 +36,35 @@ by the COMMIT or ROLLBACK that ends the caller's transaction, with nothing to
 remember to unlock.
 
 LOCK ORDER — this lock is a single TOP level, taken before any row lock, so the
-ordering across the three transactions that take it stays acyclic by construction:
+ordering across the four transactions that take it stays acyclic by construction:
 
-    order create         SHARED    -> Table -> Counter -> Order -> OrderItem
-    order submit         SHARED    -> Table -> Order
-    lifecycle transition EXCLUSIVE -> Restaurant -> AdminAuditLog
+    order create           SHARED    -> Table -> Counter -> Order -> OrderItem
+    order submit           SHARED    -> Table -> Order
+    lifecycle transition   EXCLUSIVE -> Restaurant -> AdminAuditLog
+    test classification    EXCLUSIVE -> Restaurant -> AdminAuditLog
 
 Take it FIRST or not at all. A transaction that takes a row lock and then reaches
 for this one reintroduces the cycle this ordering exists to prevent.
 
-THAT TABLE IS NOW EXHAUSTIVE, which it was not when it was written. Delegation
-redemption used to take an undeclared EXCLUSIVE lock on a ``Restaurant`` row — and on
-a ``User`` row — because ``select_for_update()`` was chained with a multi-table
-``select_related()`` and PostgreSQL locks the whole join when no ``OF`` clause is
-given. It was a fourth transaction the table did not list, and it closed a real cycle
-against the lifecycle transition. PR-E scoped that lock with ``of=('self',)``, so the
-lifecycle service is once again the only transaction that takes a ``Restaurant`` row
-EXCLUSIVELY. Before adding a row lock anywhere, check what your ``select_related`` is
-quietly locking.
+The fourth entry is ``manage.py mark_restaurant_test``, the operator command that
+writes ``Restaurant.is_test``. It takes the same locks in the same order as the
+transition, so it joins an ordering already proven acyclic rather than adding a
+level. It needs the lock for the same reason the transition does and for a reason
+worth stating plainly, because the row lock beside it looks sufficient and is not:
+``order_admission.admit`` reads ``is_test`` with a PLAIN ``values_list().get()``,
+never a ``select_for_update``, so under MVCC that read does not block on a row held
+FOR UPDATE. The advisory lock is the only thing the two transactions share.
+
+KEEP THAT TABLE EXHAUSTIVE — it has been wrong before. Delegation redemption used to
+take an undeclared EXCLUSIVE lock on a ``Restaurant`` row — and on a ``User`` row —
+because ``select_for_update()`` was chained with a multi-table ``select_related()``
+and PostgreSQL locks the whole join when no ``OF`` clause is given. It was a
+transaction the table did not list, and it closed a real cycle against the lifecycle
+transition. PR-E scoped that lock with ``of=('self',)``. The transactions that take a
+``Restaurant`` row lock EXCLUSIVELY are therefore exactly the two listed above, both
+of them behind this lock. Before adding a row lock anywhere, check what your
+``select_related`` is quietly locking — and if the row you are locking is a
+restaurant whose state an order reads, take this lock first as well.
 """
 import uuid as uuid_module
 
