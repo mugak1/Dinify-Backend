@@ -629,25 +629,55 @@ class RestaurantOnboarding(models.Model):
     )
 
     # --- administrative owner-control attestation (legacy only) --------------
-    # Reads exactly: "at THIS time, THIS administrator explicitly attested that the
-    # current canonical owner relationship is genuinely controlled by that owner."
+    # A THREE-PART FACT, and it needs all three parts to stay true. It reads:
+    #
+    #   "at THIS time (`_at`), THIS administrator (`_by`) explicitly attested that
+    #    THIS user (`_user`) genuinely controls this restaurant."
     #
     # It is emphatically NOT "the owner claimed the account at this historical
     # timestamp" — we do not know that for a legacy restaurant, and a fabricated
     # claim timestamp would be indistinguishable from an observed one for every
-    # future reader. The attesting administrator and the moment of attestation are
-    # the facts we actually have, so they are the facts stored.
+    # future reader. The attesting administrator, the moment of attestation and the
+    # SUBJECT of the attestation are the facts we actually have, so those are the
+    # facts stored.
+    #
+    # WHY THE SUBJECT IS STORED RATHER THAN READ OFF ``Restaurant.owner``. An
+    # attestation certifies ONE person's control. If the subject were implicit —
+    # "whoever the owner FK points at" — then reassigning the owner would silently
+    # re-point the evidence, and the replacement would inherit control evidence
+    # nobody ever gave them. That is precisely the fabricated-evidence failure this
+    # whole design exists to avoid, arriving through the back door. Making
+    # invalidation the job of every future owner-write path is not enforceable (a
+    # cross-table rule cannot be a CheckConstraint, and this domain adds no
+    # signals), so the binding is stored instead: a reader compares
+    # ``owner_control_attested_user_id`` with the CURRENT ``restaurant.owner_id``
+    # and a stale attestation stops counting on its own.
+    #
+    # THIS IS NOT A SECOND OWNER OF RECORD. ``Restaurant.owner`` remains the only
+    # answer to "who owns this restaurant"; this column is a historical snapshot of
+    # who was VOUCHED FOR, and it must NEVER be kept in step with the FK — drifting
+    # apart is the signal, not a defect.
     #
     # Nothing here may be inferred from ``User.last_login``, ``prompt_password_change``,
     # an OTP row, ``User.is_active``, ``Restaurant.owner`` existing, or an owner
     # ``RestaurantEmployee`` existing. None of those is proof of claim.
     #
-    # BOTH NULL is a legitimate, honest state: the ownership relationship exists
-    # technically but nobody has vouched for it. The pair moves together
-    # (`restaurant_onboarding_attestation_pair`), and only ``legacy_adopted``
-    # provenance may carry it — an admin-created restaurant's owner is established
+    # ALL THREE NULL is a legitimate, honest state: the ownership relationship
+    # exists technically but nobody has vouched for it. The three move together
+    # (`restaurant_onboarding_attestation_triple`), and only ``legacy_adopted``
+    # provenance may carry them — an admin-created restaurant's owner is established
     # by an invitation that was actually consumed, never by attestation.
     owner_control_attested_at = models.DateTimeField(null=True, blank=True)
+    # The SUBJECT — the owner whose control was certified. Distinct from `_by`
+    # below, which is the ADMINISTRATOR who certified it; the two are different
+    # people playing different roles in the same sentence.
+    owner_control_attested_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='restaurant_onboardings_attested_as_owner',
+    )
     owner_control_attested_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -683,6 +713,7 @@ class RestaurantOnboarding(models.Model):
                         adopted_at__isnull=True,
                         adopted_by__isnull=True,
                         owner_control_attested_at__isnull=True,
+                        owner_control_attested_user__isnull=True,
                         owner_control_attested_by__isnull=True,
                     )
                 ),
@@ -702,21 +733,26 @@ class RestaurantOnboarding(models.Model):
                 ),
                 name='restaurant_onboarding_legacy_adopted_shape',
             ),
-            # Both or neither. A timestamp with nobody behind it is an unattributable
-            # assertion; an attestor with no timestamp is an assertion about no
-            # particular moment. Either half alone is worse than silence.
+            # All three or none. Each missing part breaks the sentence a different
+            # way: a timestamp with nobody behind it is an unattributable assertion;
+            # an attestor with no timestamp is an assertion about no particular
+            # moment; and an attestation with no SUBJECT is the dangerous one — it
+            # would silently certify whoever `Restaurant.owner` points at next. Any
+            # partial triple is worse than silence.
             models.CheckConstraint(
                 condition=(
                     models.Q(
                         owner_control_attested_at__isnull=True,
+                        owner_control_attested_user__isnull=True,
                         owner_control_attested_by__isnull=True,
                     )
                     | models.Q(
                         owner_control_attested_at__isnull=False,
+                        owner_control_attested_user__isnull=False,
                         owner_control_attested_by__isnull=False,
                     )
                 ),
-                name='restaurant_onboarding_attestation_pair',
+                name='restaurant_onboarding_attestation_triple',
             ),
         ]
 

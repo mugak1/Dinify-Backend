@@ -1298,15 +1298,26 @@ manages the canonical `Restaurant` regardless of how it entered Dinify.
   NOT `Restaurant.owner`) and forbids the adoption and attestation fields;
   `legacy_adopted` requires `adopted_at` + `adopted_by` and forbids `created_by`.
   Both shapes are named database constraints
-- `owner_control_attested_at` / `_by` (legacy only, both-or-neither) mean exactly
-  *"at this time this administrator attested that the current owner relationship is
-  genuinely controlled by that owner"* — **NOT** "the owner claimed the account at
-  this historical timestamp". We do not know that for a legacy tenant, and a
-  fabricated claim timestamp is indistinguishable from an observed one afterwards.
-  Never infer it from `last_login` / `prompt_password_change` / an OTP row /
-  `is_active` / the owner FK or membership existing. BOTH NULL is a legitimate state
+- `owner_control_attested_at` / `_user` / `_by` (legacy only) are a **TRIPLE that
+  moves together** — *"at this time (`_at`) this administrator (`_by`) attested that
+  this user (`_user`) genuinely controls this restaurant"* — **NOT** "the owner
+  claimed the account at this historical timestamp". We do not know that for a
+  legacy tenant, and a fabricated claim timestamp is indistinguishable from an
+  observed one afterwards. Never infer it from `last_login` /
+  `prompt_password_change` / an OTP row / `is_active` / the owner FK or membership
+  existing. ALL THREE NULL is a legitimate state
+- **The attestation NAMES ITS SUBJECT (`_user`) rather than reading it off
+  `Restaurant.owner`.** An attestation certifies ONE person's control; leaving the
+  subject implicit would mean reassigning the owner silently re-points the evidence
+  and the replacement inherits control nobody vouched for. Making invalidation the
+  duty of every future owner-write path is not enforceable (a cross-table rule
+  cannot be a `CheckConstraint`, and this domain adds no signals), so the binding is
+  stored: a reader compares `owner_control_attested_user_id` against the CURRENT
+  `restaurant.owner_id` and a stale attestation stops counting on its own. It is
+  **NOT a second owner of record** — it is a historical snapshot that must NEVER be
+  kept in step with the FK; drifting apart is the signal
 - **CLAIM STATE IS DERIVED, never stored** — a consumed `OwnerInvitation`, or the
-  attestation pair, or neither. No `claimed` / `claim_status` / `owner_claimed_at`
+  attestation triple, or neither. No `claimed` / `claim_status` / `owner_claimed_at`
 - **Owner go-live approval is NOT here and is Step 3's** — its reset semantics are
   not frozen. Do not add `go_live_approved_*` or a `GoLiveApproval` model
 - **ABSENCE IS MEANINGFUL, and there was NO backfill.** No signal, no

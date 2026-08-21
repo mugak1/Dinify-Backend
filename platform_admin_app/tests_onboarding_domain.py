@@ -13,9 +13,11 @@ could otherwise quietly violate:
   vocabulary and both shapes are CHECK constraints, so a buggy future writer fails
   loudly at the integrity boundary rather than persisting a plausible fiction.
 
-  ATTESTATION IS NOT A HISTORICAL CLAIM. The pair moves together and only legacy
-  provenance may carry it. Half a pair would be either an unattributable assertion
-  or an assertion about no particular moment.
+  ATTESTATION IS NOT A HISTORICAL CLAIM, AND IT NAMES ITS SUBJECT. The triple —
+  when, by whom, about whom — moves together, and only legacy provenance may carry
+  it. A partial triple is either an unattributable assertion, an assertion about no
+  particular moment, or (worst) an assertion about no particular PERSON, which
+  would silently re-point at whoever `Restaurant.owner` becomes next.
 
   A CREDENTIAL RESOLVES ONCE. An invitation that is both consumed and cancelled
   cannot be reported honestly, and two live invitations for one onboarding means
@@ -163,6 +165,16 @@ class _OnboardingFixture(_IntegrityAssertions, TestCase):
         payload.update(overrides)
         return RestaurantOnboarding.objects.create(**payload)
 
+    def attestation(self, **overrides):
+        """A COMPLETE attestation triple, so a case must opt in to breaking it."""
+        payload = dict(
+            owner_control_attested_at=timezone.now(),
+            owner_control_attested_user=self.restaurant.owner,
+            owner_control_attested_by=self.attestor,
+        )
+        payload.update(overrides)
+        return payload
+
 
 # --- A: admin-created provenance -----------------------------------------------------
 
@@ -175,6 +187,7 @@ class AdminCreatedProvenanceTests(_OnboardingFixture):
         self.assertIsNone(row.adopted_at)
         self.assertIsNone(row.adopted_by_id)
         self.assertIsNone(row.owner_control_attested_at)
+        self.assertIsNone(row.owner_control_attested_user_id)
         self.assertIsNone(row.owner_control_attested_by_id)
 
     def test_admin_created_without_a_creator_is_refused(self):
@@ -225,41 +238,136 @@ class LegacyAdoptedProvenanceTests(_OnboardingFixture):
         row = self.legacy_adopted()
 
         self.assertIsNone(row.owner_control_attested_at)
+        self.assertIsNone(row.owner_control_attested_user_id)
         self.assertIsNone(row.owner_control_attested_by_id)
 
     def test_legacy_with_owner_control_attestation_is_a_valid_row(self):
         attested_at = timezone.now()
         row = self.legacy_adopted(
-            owner_control_attested_at=attested_at,
-            owner_control_attested_by=self.attestor,
+            **self.attestation(owner_control_attested_at=attested_at)
         )
 
-        # Reads as "at THIS time THIS administrator attested control", never as
-        # "the owner claimed the account at this historical timestamp".
+        # The whole sentence is stored: at THIS time, THIS administrator attested
+        # that THIS user controls the restaurant. Never "the owner claimed the
+        # account at this historical timestamp", and never a subject left implicit.
         self.assertEqual(row.owner_control_attested_at, attested_at)
         self.assertEqual(row.owner_control_attested_by_id, self.attestor.pk)
+        self.assertEqual(
+            row.owner_control_attested_user_id, self.restaurant.owner_id,
+        )
 
 
-# --- E + F: the attestation pair -----------------------------------------------------
+# --- E + F: the attestation triple --------------------------------------------------
 
-class OwnerControlAttestationPairTests(_OnboardingFixture):
-    def test_attestation_timestamp_without_an_attestor_is_refused(self):
-        with self.assertViolates('restaurant_onboarding_attestation_pair'):
+class OwnerControlAttestationTripleTests(_OnboardingFixture):
+    """
+    An attestation is one sentence — WHEN, BY WHOM, ABOUT WHOM — and a partial
+    triple is a sentence missing a word. Each omission below fails differently, and
+    the missing SUBJECT is the dangerous one: without it the evidence would attach
+    to whatever ``Restaurant.owner`` points at next.
+    """
+
+    def test_attestation_timestamp_alone_is_refused(self):
+        with self.assertViolates('restaurant_onboarding_attestation_triple'):
             self.legacy_adopted(owner_control_attested_at=timezone.now())
 
-    def test_attestor_without_an_attestation_timestamp_is_refused(self):
-        with self.assertViolates('restaurant_onboarding_attestation_pair'):
+    def test_attestor_alone_is_refused(self):
+        with self.assertViolates('restaurant_onboarding_attestation_triple'):
             self.legacy_adopted(owner_control_attested_by=self.attestor)
+
+    def test_attested_subject_alone_is_refused(self):
+        with self.assertViolates('restaurant_onboarding_attestation_triple'):
+            self.legacy_adopted(owner_control_attested_user=self.restaurant.owner)
+
+    def test_attestation_without_a_subject_is_refused(self):
+        # THE ONE THAT MATTERS. A timestamp and an attestor with no named subject
+        # would certify "the current owner, whoever that turns out to be" — so
+        # reassigning the owner would hand the replacement control evidence nobody
+        # ever gave them, and no reader could tell the difference.
+        with self.assertViolates('restaurant_onboarding_attestation_triple'):
+            self.legacy_adopted(
+                **self.attestation(owner_control_attested_user=None)
+            )
+
+    def test_attestation_without_an_attestor_is_refused(self):
+        with self.assertViolates('restaurant_onboarding_attestation_triple'):
+            self.legacy_adopted(**self.attestation(owner_control_attested_by=None))
+
+    def test_attestation_without_a_timestamp_is_refused(self):
+        with self.assertViolates('restaurant_onboarding_attestation_triple'):
+            self.legacy_adopted(**self.attestation(owner_control_attested_at=None))
 
     def test_attestation_cannot_attach_to_admin_created_provenance(self):
         # Control over a restaurant Dinify created is established by an invitation
         # that was actually consumed. Attestation exists to represent legacy data
         # honestly, not to shortcut a claim the platform could have observed.
         with self.assertViolates('restaurant_onboarding_admin_created_shape'):
-            self.admin_created(
-                owner_control_attested_at=timezone.now(),
-                owner_control_attested_by=self.attestor,
-            )
+            self.admin_created(**self.attestation())
+
+    def test_the_subject_alone_cannot_be_smuggled_onto_admin_created(self):
+        with self.assertViolates('restaurant_onboarding_admin_created_shape'):
+            self.admin_created(owner_control_attested_user=self.restaurant.owner)
+
+
+class AttestationIsBoundToTheOwnerItCertifiesTests(_OnboardingFixture):
+    """
+    The attestation names its subject, so it cannot silently transfer.
+
+    `Restaurant.owner` has no write path today — it is absent from
+    `EDIT_INFORMATION['restaurants']` and `read_only` on `SerializerPutRestaurant`
+    — but owner reassignment is a Step 2/3 feature, and this schema is being frozen
+    now. These tests pin the property that makes a later reassignment safe WITHOUT
+    every future owner-write path having to remember to clear anything: the stored
+    subject and the current FK simply stop matching, and a reader can see it.
+    """
+
+    def test_the_attested_subject_does_not_follow_a_reassigned_owner(self):
+        row = self.legacy_adopted(**self.attestation())
+        original_owner_id = self.restaurant.owner_id
+
+        replacement = _make_user('replacement-owner@t.com')
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(owner=replacement)
+
+        row.refresh_from_db()
+        self.restaurant.refresh_from_db()
+
+        # The evidence still names the person it was actually given about...
+        self.assertEqual(row.owner_control_attested_user_id, original_owner_id)
+        # ...so it no longer matches the current owner of record, which is exactly
+        # the comparison a claim-state reader makes. Had the subject been implicit,
+        # the replacement would have inherited this attestation in silence.
+        self.assertEqual(self.restaurant.owner_id, replacement.pk)
+        self.assertNotEqual(
+            row.owner_control_attested_user_id, self.restaurant.owner_id,
+        )
+
+    def test_a_current_attestation_matches_the_owner_of_record(self):
+        row = self.legacy_adopted(**self.attestation())
+
+        self.restaurant.refresh_from_db()
+        self.assertEqual(
+            row.owner_control_attested_user_id, self.restaurant.owner_id,
+        )
+
+    def test_the_subject_need_not_equal_the_attestor(self):
+        # Two different people in two different roles: the administrator who
+        # vouched, and the owner vouched for. Nothing conflates them.
+        row = self.legacy_adopted(**self.attestation())
+
+        self.assertNotEqual(
+            row.owner_control_attested_user_id, row.owner_control_attested_by_id,
+        )
+
+    def test_deleting_the_attested_owner_is_refused(self):
+        subject = _make_user('attested-subject@t.com')
+        self.legacy_adopted(
+            **self.attestation(owner_control_attested_user=subject)
+        )
+
+        # The subject IS the evidence — an attestation about a user who no longer
+        # exists certifies nobody.
+        with self.assertRaises(ProtectedError):
+            subject.delete()
 
 
 # --- G: one onboarding per restaurant ------------------------------------------------
@@ -362,10 +470,7 @@ class OnboardingIsProtectedEvidenceTests(_OnboardingFixture):
             self.creator.delete()
 
     def test_deleting_the_attesting_administrator_is_refused(self):
-        self.legacy_adopted(
-            owner_control_attested_at=timezone.now(),
-            owner_control_attested_by=self.attestor,
-        )
+        self.legacy_adopted(**self.attestation())
 
         # An attestation whose attestor vanished is an assertion nobody made.
         with self.assertRaises(ProtectedError):
@@ -380,7 +485,7 @@ class OnboardingHasNoDerivableStateTests(TestCase):
     asserted rather than left to be noticed.
 
     Claim is derived from evidence — a consumed ``OwnerInvitation``, or the
-    attestation pair, or neither — and a stored ``claimed`` flag would be a fourth
+    attestation triple, or neither — and a stored ``claimed`` flag would be a fourth
     answer able to contradict all three. Go-live approval is a readiness input whose
     reset semantics (after a material setup change? after suspension? per lifecycle
     episode?) are not frozen; adding the column now would freeze them by accident.

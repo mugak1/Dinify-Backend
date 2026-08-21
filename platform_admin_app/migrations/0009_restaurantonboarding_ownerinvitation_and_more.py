@@ -104,6 +104,16 @@ class Migration(migrations.Migration):
                     ),
                 ),
                 (
+                    "owner_control_attested_user",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.PROTECT,
+                        related_name="restaurant_onboardings_attested_as_owner",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
                     "restaurant",
                     models.OneToOneField(
                         on_delete=django.db.models.deletion.PROTECT,
@@ -193,6 +203,7 @@ class Migration(migrations.Migration):
                         ("created_by__isnull", False),
                         ("owner_control_attested_at__isnull", True),
                         ("owner_control_attested_by__isnull", True),
+                        ("owner_control_attested_user__isnull", True),
                     ),
                     _connector="OR",
                 ),
@@ -221,14 +232,16 @@ class Migration(migrations.Migration):
                     models.Q(
                         ("owner_control_attested_at__isnull", True),
                         ("owner_control_attested_by__isnull", True),
+                        ("owner_control_attested_user__isnull", True),
                     ),
                     models.Q(
                         ("owner_control_attested_at__isnull", False),
                         ("owner_control_attested_by__isnull", False),
+                        ("owner_control_attested_user__isnull", False),
                     ),
                     _connector="OR",
                 ),
-                name="restaurant_onboarding_attestation_pair",
+                name="restaurant_onboarding_attestation_triple",
             ),
         ),
         migrations.AddIndex(
