@@ -19,6 +19,8 @@ from platform_admin_app.endpoints.delegation import (
     AdminDelegationsView,
 )
 from platform_admin_app.endpoints.restaurants import (
+    AdminRestaurantDetailView,
+    AdminRestaurantListView,
     AdminRestaurantTransitionView,
 )
 from platform_admin_app.views import AdminHealthView
@@ -44,6 +46,21 @@ urlpatterns = [
         'delegations/<uuid:grant_id>/revoke/',
         AdminDelegationRevokeView.as_view(),
         name='admin-delegation-revoke',
+    ),
+
+    # Restaurant directory + detail (Phase 1, Step 1). READ-ONLY and NOT
+    # elevation-gated: reading the portfolio is ordinary authenticated work, not a
+    # step-up operation. Listed before the transition route for readability only —
+    # the paths are distinct, so ordering carries no routing meaning here.
+    path(
+        'restaurants/',
+        AdminRestaurantListView.as_view(),
+        name='admin-restaurant-list',
+    ),
+    path(
+        'restaurants/<uuid:restaurant_id>/',
+        AdminRestaurantDetailView.as_view(),
+        name='admin-restaurant-detail',
     ),
 
     # Restaurant lifecycle. The ONLY route that writes Restaurant.status;

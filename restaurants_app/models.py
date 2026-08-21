@@ -79,6 +79,26 @@ class Restaurant(BaseModel):
         db_index=True,
     )
 
+    # PLATFORM-OWNED METADATA. Marks a tenant that exists for Dinify's own testing
+    # or demonstration rather than to trade. Two consequences, and the second is why
+    # it is a persisted column rather than a naming convention:
+    #
+    #   1. Admin surfaces must make it UNMISTAKABLE (spec §16) — a test restaurant
+    #      that reads as real is how an operator acts on the wrong tenant.
+    #   2. Its orders are never commerce. `Order.is_test` is derived from this flag
+    #      OR the pre-go-live rehearsal rule, so a test restaurant that happens to be
+    #      `live` still produces orders excluded from every revenue figure. That
+    #      derivation reads this column under the order-admission advisory lock —
+    #      see orders_app.controllers.services.order_admission.
+    #
+    # SERVER-WRITTEN ONLY. Deliberately absent from EDIT_INFORMATION['restaurants']
+    # and from SerializerPutRestaurant's field list, exactly like `status`: Secretary
+    # builds its payload solely from EDIT_INFORMATION keys and DRF drops what the
+    # serializer does not name, so no tenant-facing path can set it. There is no
+    # admin write endpoint for it yet either — Step 2's creation flow decides how it
+    # is assigned. Indexed because portfolio and financial figures will exclude it.
+    is_test = models.BooleanField(default=False, db_index=True)
+
     # dynamic configurations
     # if the orders should be prepaid before submission
     require_order_prepayments = models.BooleanField(default=False)
