@@ -71,7 +71,7 @@ This is **not a runnable command**. It is a configuration module that defines `V
 
 These are **operator commands, not scheduled tasks** — they are run by hand, over SSH, on the box. Nothing here is on a timer, and nothing here should be put on one.
 
-The two provisioning commands (`create_platform_admin`, `reset_platform_admin_totp`) are interactive by design and both refuse to run without a valid `ADMIN_SECRET_ENCRYPTION_KEY`, because provisioning that half-completes would leave an administrator who can never sign in. The other two (`unlock_platform_admin`, `mark_restaurant_test`) need nothing beyond database access.
+The two provisioning commands (`create_platform_admin`, `reset_platform_admin_totp`) are interactive by design and both refuse to run without a valid `ADMIN_SECRET_ENCRYPTION_KEY`, because provisioning that half-completes would leave an administrator who can never sign in. The other three (`unlock_platform_admin`, `mark_restaurant_test`, `adopt_restaurant_onboarding`) need nothing beyond database access.
 
 #### `create_platform_admin`
 
@@ -169,6 +169,32 @@ To reverse a classification, run the command again with the opposite `--test` va
 
 **No restaurant has been classified with this command yet.** It ships as a mechanism; running it against a specific tenant is a separate, explicit operational action taken after review and deploy.
 
+#### `adopt_restaurant_onboarding`
+
+| | |
+|---|---|
+| **Run** | `python manage.py adopt_restaurant_onboarding --restaurant <UUID> --actor <platform-staff-username> --reason "<why>"` |
+| **Arguments** | All three are **required**. `--restaurant` is the restaurant's UUID. `--actor` is the username of the platform-staff human making the decision. `--reason` is a free-text justification of at least 10 characters after trimming (the same bar as a lifecycle transition, a delegation grant and `mark_restaurant_test`). |
+| **What it does** | Represents **exactly one** pre-existing canonical `Restaurant` in the Admin onboarding domain by creating one `RestaurantOnboarding` row with `source = legacy_adopted`, `adopted_at` = the moment of the operation and `adopted_by` = the actor, and writing one `admin.restaurant.onboarding_adopted` audit row. Both share one `transaction.atomic()`, so a failed audit rolls the adoption back. |
+| **Why it exists** | Step 2A created the onboarding domain with **no backfill** and nothing that writes to it, so absence of a row truthfully means "not yet represented in Admin". This is the first writer, and the one provenance a pre-existing tenant can honestly carry. Adoption means only *this restaurant is now represented in the Admin onboarding domain* — not that Dinify created it, not that anyone has vouched for its owner, and not that its owner was ever invited. |
+| **Thin adapter** | The command adds no policy of its own. Every rule lives in `platform_admin_app.onboarding_adoption.adopt_existing_restaurant`, which the future Admin HTTP endpoint will call unchanged — so the shell and the portal can never adopt on different terms. |
+| **Targeting** | **UUID only.** There is no `--restaurant-name`, no fuzzy match, no `.first()`, and no bulk mode. A malformed UUID, an unknown UUID and a soft-deleted restaurant are all refused, the last two with the same message so the command never confirms a soft-deleted tenant exists. Lifecycle state is **not** a blocker: a legacy restaurant may be `onboarding`, `live`, `suspended` or `offboarded` and still need truthful provenance. |
+| **Actor** | Must exist, be `account_type = platform_staff`, and be active. Validated by the command *and* re-validated against the database row by the service, because the service is what writes the audit row. This is **attribution, not authentication**: anyone who can run `manage.py` on the box already has more authority than this command grants. No password, TOTP code or recovery code is asked for, and none is printed. |
+| **Owner-consistency prerequisite** | A **NEW** adoption requires `platform_admin_app.onboarding.assert_owner_consistency` to pass under the lock: exactly one active, non-deleted owner-role `RestaurantEmployee`, and its user is `Restaurant.owner`. `missing_owner_membership`, `multiple_owner_memberships` and `owner_membership_mismatch` each refuse the adoption with that code and a next step. |
+| **No automatic repair** | It never creates a missing owner membership, picks between two live owners, reassigns `Restaurant.owner`, deactivates a membership or rewrites roles. Ambiguous ownership is a decision about who runs a business; a human resolves it separately. |
+| **Creates ONLY** | One `RestaurantOnboarding` row. **No** `OwnerInvitation` — a legacy tenant did not enter Dinify through the invitation system, and fabricating one would claim an invitation was issued, delivered and accepted. **No** owner-control attestation: all three of `owner_control_attested_at` / `_user` / `_by` are left NULL, because adoption is not a personal verification that the owner controls the account. That is a separate audited decision and is **not implemented**. No User, Restaurant, RestaurantEmployee, RestaurantRolePermission, subscription, payment config, readiness or approval row. |
+| **Does NOT modify the Restaurant** | Not lifecycle state, not `is_test`, not the owner, not employees, menus, tables, QR state or historical orders. The service never calls `restaurant.save()`, so even the `auto_now` `time_last_updated` stamp is unchanged — a test asserts the whole row is byte-identical afterwards. |
+| **Locking** | One `transaction.atomic()`; the first statement takes `select_for_update()` on the target `Restaurant`. That row is the serialization point, so two concurrent operators adopting the same tenant queue instead of racing to insert the one-to-one row. It takes **no** admission advisory lock, no table-allocation lock and no QR lock — adoption changes nothing an order path reads, and every extra lock is one a future transaction can deadlock against. Order: `Restaurant → RestaurantOnboarding → AdminAuditLog`. |
+| **Source conflict** | If the restaurant already carries `admin_created` provenance the command **refuses** with `onboarding_source_conflict`, changes nothing and writes no audit row. `admin_created` names the staff member who created the tenant; converting it would delete that attribution and replace it with a contradictory claim. Two records disagreeing is something a human has to look at. |
+| **External services** | PostgreSQL only. No SMS, no email, no MongoDB, no encryption key, no scheduled execution. |
+| **Scheduling** | **None.** Like every command here it is invoked by hand; nothing in this repo runs it. |
+| **Idempotency** | **Good, and specifically about history.** A restaurant already adopted as `legacy_adopted` gets a successful no-op with its **original** `adopted_at` and `adopted_by` intact and no second audit row — a different operator with a different reason a year later cannot rewrite who made the call or when. It also does **not** re-check owner consistency for an already-adopted restaurant: ownership can drift long afterwards, and that does not make the historical adoption untrue. Current consistency is a current-state question and is surfaced separately. |
+| **Error handling** | Fail-closed. Reason length, UUID form, actor eligibility, restaurant existence, the provenance conflict and the owner-consistency precondition all refuse with a `CommandError` before any write. Narrow domain errors (`invalid_restaurant_id`, `restaurant_not_found`, `invalid_actor`, `invalid_reason`, `onboarding_source_conflict`) rather than a leaked `IntegrityError` / `DoesNotExist`. |
+
+Refusals are deliberately **not** audited, for the same reason as `mark_restaurant_test`: the commonest refusal is an actor that could not be resolved, so there is nobody to attribute a row to.
+
+**Baba House is NOT adopted merely because this command exists.** Nothing runs automatically, there is no backfill and no signal, and running it against a specific tenant is a separate, explicit operational action taken after review and deploy. Until then, the Admin read contract continues to report `claim_tracked: False` for every restaurant.
+
 ---
 
 ## Command Summary Table
@@ -182,6 +208,7 @@ To reverse a classification, run the command again with the opposite `--test` va
 | `reset_platform_admin_totp` | platform_admin | PG | Good (re-runnable) | Fail-closed | — |
 | `unlock_platform_admin` | platform_admin | PG | Good | Fail-closed | — |
 | `mark_restaurant_test` | platform_admin | PG | Good | Fail-closed | — |
+| `adopt_restaurant_onboarding` | platform_admin | PG | Good | Fail-closed | — |
 
 ---
 

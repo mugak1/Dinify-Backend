@@ -90,3 +90,12 @@ ADMIN_RESTAURANT_TRANSITION_DENIED = 'admin.restaurant.transition_denied'
 ADMIN_RESTAURANT_TEST_CLASSIFICATION_CHANGED = (
     'admin.restaurant.test_classification_changed'
 )
+
+# --- admin.restaurant: the onboarding domain --------------------------------
+# A pre-existing canonical Restaurant was brought into the Admin onboarding domain
+# as ``legacy_adopted`` provenance. Emitted only for a NEW adoption: a re-run of the
+# runbook against an already-adopted restaurant is a no-op and writes nothing here,
+# because the log records decisions that changed platform state, not how many times
+# a command was pasted. before_state / after_state carry the onboarding source
+# before and after, and nothing else — the tenant itself is not modified.
+ADMIN_RESTAURANT_ONBOARDING_ADOPTED = 'admin.restaurant.onboarding_adopted'
