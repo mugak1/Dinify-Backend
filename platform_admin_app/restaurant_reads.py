@@ -45,6 +45,7 @@ from dinify_backend.configss.string_definitions import (
     RESTAURANT_LIFECYCLE_STATES,
     RestaurantStatus_Onboarding,
 )
+from platform_admin_app import onboarding_reads
 from platform_admin_app.models import AdminAuditLog
 from restaurants_app.controllers import lifecycle
 from restaurants_app.models import Restaurant
@@ -301,30 +302,43 @@ def serialize_row(restaurant):
     }
 
 
-def serialize_owner(owner):
+def serialize_owner(owner, onboarding=None):
     """
-    The owner identity an operator needs to make contact. Existing User fields only.
+    The owner identity an operator needs to make contact, plus the two claim fields.
 
-    NO owner-claim status. There is no owner-invitation or claim model yet, so the
-    portal is told ``claim_status: None`` and ``claim_tracked: False`` rather than
-    being handed a guess. An account existing is not the same as an owner having
-    claimed it, and Step 2 builds the difference.
+    ``claim_tracked`` / ``claim_status`` ARE A COMPATIBILITY PROJECTION (Step 2C), not
+    a second source of truth. The canonical contract is the top-level ``onboarding``
+    object; these two are kept, and kept in step with it, because the Admin frontend
+    already knows their shape and a read-only backend PR should not break a client it
+    is not shipping alongside. They are derived here and nowhere else:
+
+        claim_tracked = onboarding.tracked
+        claim_status  = None when untracked, else owner_control.status
+
+    Before Step 2 they were hardcoded ``False`` / ``None``, which was truthful only
+    while nothing could be tracked. ``onboarding`` is the already-computed summary
+    from ``onboarding_reads.onboarding_summary``; it defaults to ``None`` so the
+    untracked projection is what a caller without one gets — the same answer this
+    function has always given.
+
+    NO ADDITIONAL OWNER PII. The identity fields are exactly those Step 1 approved.
     """
     if owner is None:
         return None
     full_name = ' '.join(
         part for part in (owner.first_name, owner.last_name) if part
     ).strip()
+    tracked = bool(onboarding and onboarding.get('tracked'))
     return {
         'id': str(owner.id),
         'name': full_name or None,
         'email': owner.email,
         'phone_number': owner.phone_number,
         'is_active': owner.is_active,
-        # Explicitly unavailable rather than absent — the portal renders "not
-        # tracked yet" instead of inferring that an unclaimed owner is claimed.
-        'claim_tracked': False,
-        'claim_status': None,
+        'claim_tracked': tracked,
+        # Null while untracked — "not represented in Admin onboarding yet" rather
+        # than a claim verdict the domain has not been asked for.
+        'claim_status': onboarding['owner_control']['status'] if tracked else None,
     }
 
 
@@ -441,7 +455,15 @@ def serialize_detail(restaurant):
     with the directory rather than restating them — the header and the row must never
     disagree about whether a restaurant is ready. Expects a row from
     ``directory_queryset()`` so the shared annotations are present.
+
+    ``onboarding`` is DETAIL-ONLY (Step 2C). The directory row deliberately does not
+    carry it: the onboarding record belongs in the restaurant workspace, and putting
+    it in a list row would add per-row joins to every page before any screen asks for
+    them. Computed ONCE here and handed to ``serialize_owner``, so the compatibility
+    aliases and the canonical object are the same answer rather than two lookups that
+    could drift.
     """
+    onboarding = onboarding_reads.onboarding_summary(restaurant)
     return {
         'id': str(restaurant.id),
         'name': restaurant.name,
@@ -452,7 +474,8 @@ def serialize_detail(restaurant):
         # source the transition endpoint answers with.
         'allowed_transitions': lifecycle.allowed_targets(restaurant.status),
         'created_at': _iso(restaurant.time_created),
-        'owner': serialize_owner(restaurant.owner),
+        'owner': serialize_owner(restaurant.owner, onboarding),
+        'onboarding': onboarding,
         'readiness': readiness_summary(restaurant),
         **payment_mode_summary(restaurant),
         'subscription': subscription_summary(restaurant),

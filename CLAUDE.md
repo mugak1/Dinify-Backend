@@ -544,10 +544,42 @@ so keep it current when conventions change.
   that preserves the ORIGINAL `adopted_at`/`adopted_by` and writes no second audit
   row, and does NOT re-check owner consistency — historical provenance is not
   invalidated by later drift. `admin_created` provenance is NEVER converted:
-  `onboarding_source_conflict`, no mutation, no audit. The Admin read projection is
-  UNCHANGED (still `claim_tracked: False`) — Step 2C exposes it. **NO RESTAURANT IS
+  `onboarding_source_conflict`, no mutation, no audit. Step 2C exposes the resulting
+  provenance on the DETAIL read (see the next bullet). **NO RESTAURANT IS
   ADOPTED AUTOMATICALLY and Baba House is NOT adopted**; running the command against
   a tenant is a separate explicit operational action
+- Admin onboarding READ projection: ✅ (Phase 1, Step 2C) —
+  `platform_admin_app/onboarding_reads.py` (`onboarding_summary`), surfaced as a
+  top-level `onboarding` object on the restaurant **DETAIL** read only. NO MIGRATION,
+  no writer, no new endpoint. The **directory/list row is deliberately UNCHANGED** —
+  the onboarding record belongs in the restaurant workspace, and a list column would
+  add per-row joins to every page before a screen asks for them (pinned by a
+  directory query-count test). Three INDEPENDENT axes, never flattened into one word:
+  `owner_relationship` (delegates to `assert_owner_consistency`, rendering its three
+  canonical codes as DATA at 200 — a drifted tenant must not 500), `owner_control`
+  (`unavailable` / `not_established` / `attested` / `invitation_redeemed` /
+  `stale_attestation`, each with `evidence` + `evidence_at`), and `invitation`
+  (`unavailable` / `not_applicable` for legacy / `not_issued` / `pending` /
+  `expired` / `consumed` / `cancelled` / `superseded`). **OWNER CONTROL IS EVIDENCE,
+  NEVER INFERENCE** — derived only from a legacy attestation triple or a consumed
+  `OwnerInvitation`, and never from `last_login`, `is_active`,
+  `prompt_password_change`, an OTP row, the owner FK, an owner membership, prior
+  orders or portal activity. A legacy attestation counts only when
+  `owner_control_attested_user_id == restaurant.owner_id`; otherwise it is
+  `stale_attestation` (the payoff of Step 2A storing the attested SUBJECT — a
+  replacement owner never inherits evidence), and the read NEVER clears or rewrites
+  it. Admin-created control requires an invitation consumed BY THE CURRENT OWNER;
+  a consumed invitation for a previous owner still reports `invitation: consumed`
+  while `owner_control` stays `not_established` — two axes, not a contradiction.
+  `recorded_at` means WHEN THE RESTAURANT ENTERED THE ADMIN DOMAIN (`adopted_at` for
+  legacy, the onboarding row's `created_at` for admin-created) — never the tenant's
+  own creation and never a claim moment. `owner.claim_tracked` / `owner.claim_status`
+  survive as COMPATIBILITY ALIASES derived from the same summary (`tracked`, and
+  `owner_control.status` or null) — the `onboarding` object is canonical. Reads are
+  pure: no write, no lock, no transaction, no audit row, no repair, no stamping of an
+  expired invitation, and no onboarding row created on read. Invitation CREDENTIALS
+  are never projected — no `token_hash`, no raw token, no claim URL; an invitation is
+  a state word plus, where it is evidence, a timestamp
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -1229,7 +1261,10 @@ GET admin/v1/restaurants/<uuid:id>/        -> AdminRestaurantDetailView
 
 - THE VIEWS ARE THIN. Every projection lives in `platform_admin_app/restaurant_reads.py`,
   mirroring how the transition endpoint delegates to `restaurants_app.controllers.lifecycle`.
-  Add a field there, not in the view
+  Add a field there, not in the view. One projection is delegated onwards the same
+  way: the DETAIL-only `onboarding` object comes from
+  `platform_admin_app/onboarding_reads.py` (Step 2C) — see the Admin Onboarding
+  Domain section
 - NOT ELEVATION-GATED, deliberately. `IsRecentlyElevated` gates ACTIONS that change a
   tenant's world; requiring a second factor to LOOK at the directory would train the
   operator to elevate reflexively, which is exactly what devalues the step-up on the
@@ -1299,18 +1334,16 @@ No `REST-0018`. The backend has no such column, and minting a sequential busines
 inside a read endpoint would create a persistent identifier nothing else writes. The
 `Restaurant` UUID is the identity.
 
-## Admin Onboarding Domain — Phase 1, Steps 2A + 2B
+## Admin Onboarding Domain — Phase 1, Steps 2A + 2B + 2C
 
-Two models in `platform_admin_app/models.py` and the validator in
-`platform_admin_app/onboarding.py` (Step 2A, migration `platform_admin_app/0009`),
-plus ONE writer — `platform_admin_app/onboarding_adoption.py` and its management
-command (Step 2B, NO migration). **There is still NO endpoint, NO invitation
-service and NO attestation writer.** The admin read contract is UNCHANGED:
-`serialize_owner` still reports `claim_tracked: False` / `claim_status: None`,
-because a row existing is not the same as the read projection having been taught to
-surface it — Step 2C does that. **No restaurant is adopted automatically**: there is
-no backfill, no signal and no `get_or_create`, so absence still means "not yet
-represented in the Admin onboarding domain".
+Three faces of one domain, all in `platform_admin_app/`: the SCHEMA and its validator
+(Step 2A — two models in `models.py` plus `onboarding.py`, migration
+`platform_admin_app/0009`), ONE writer (Step 2B — `onboarding_adoption.py` and its
+management command, no migration), and the READ projection (Step 2C —
+`onboarding_reads.py`, no migration). **There is still NO endpoint that writes, NO
+invitation service and NO attestation writer.** **No restaurant is adopted
+automatically**: there is no backfill, no signal and no `get_or_create`, so absence
+still means "not yet represented in the Admin onboarding domain".
 
 ### RestaurantOnboarding — provenance, not a second restaurant
 The durable record of HOW one canonical `Restaurant` entered the Admin onboarding
@@ -1448,6 +1481,51 @@ thin operator adapter that adds NO policy of its own.
   `{'admin_onboarding_source': 'legacy_adopted'}`. No owner name, phone or email, no
   tenant detail, no token material. Refusals are NOT audited (matching
   `mark_restaurant_test`: the commonest refusal has no resolvable actor to attribute)
+
+### onboarding_summary — the read projection (Step 2C)
+`platform_admin_app/onboarding_reads.py`. Called by
+`restaurant_reads.serialize_detail` exactly as it calls
+`lifecycle.check_go_live_readiness` — a thin delegation to whoever owns the question.
+It lives beside the domain's other two faces because what it computes is ONBOARDING
+semantics (what counts as evidence of owner control), not directory presentation.
+
+```
+"onboarding": {
+    "tracked": bool,
+    "source": "legacy_adopted" | "admin_created" | null,
+    "recorded_at": ISO8601 | null,
+    "owner_relationship": {"status": "unavailable" | "consistent" |
+                                     "missing_owner_membership" |
+                                     "multiple_owner_memberships" |
+                                     "owner_membership_mismatch"},
+    "owner_control":      {"status": "unavailable" | "not_established" | "attested" |
+                                     "invitation_redeemed" | "stale_attestation",
+                           "evidence": "legacy_attestation" |
+                                       "invitation_redeemed" | null,
+                           "evidence_at": ISO8601 | null},
+    "invitation":         {"status": "unavailable" | "not_applicable" |
+                                     "not_issued" | "pending" | "expired" |
+                                     "consumed" | "cancelled" | "superseded"}
+}
+```
+
+- UNTRACKED IS NOT A NEGATIVE VERDICT. Every axis reads `unavailable` — an untracked
+  restaurant is not "inconsistent" and its owner control is not "not established";
+  those questions have simply not been asked of it
+- `source` is the PERSISTED CANONICAL value, never translated into display prose. The
+  portal renders `legacy_adopted` as "Pre-existing restaurant"; the API carries the
+  vocabulary the writer, the audit log and the `CheckConstraint` all already use. An
+  unrecognised source (unreachable behind
+  `restaurant_onboarding_source_vocabulary`) fails CLOSED — the raw value passes
+  through so the anomaly is visible, and NO provenance-specific evidence rule is
+  applied, so it can never be silently treated as legacy
+- QUERY COST: ONE query for an untracked restaurant (the lookup that decides it); a
+  tracked one adds exactly the owner-consistency read; `admin_created` adds at most
+  three `LIMIT 1` invitation lookups, short-circuiting on the first hit. All constant
+  in the size of the tenant's history, pinned by query-count tests
+- Baba House is NOT hard-coded anywhere — no UUID or name special case. After deploy
+  it will read `tracked: true` / `legacy_adopted` / `consistent` /
+  `not_established` / `not_applicable` purely from its data
 
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns
