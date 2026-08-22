@@ -672,7 +672,14 @@ class DetailContentTests(_AdminReadTestCase):
             lifecycle.allowed_targets(RestaurantStatus_Onboarding),
         )
 
-    def test_owner_block_uses_existing_fields_and_claims_no_claim_status(self):
+    def test_owner_block_uses_existing_fields_and_is_untracked_by_default(self):
+        """
+        The owner identity fields, plus the untracked claim projection.
+
+        This restaurant has no ``RestaurantOnboarding`` row, so Step 2C's compatibility
+        aliases read exactly as they did before it existed. What they mean for a
+        TRACKED restaurant is owned by ``tests_onboarding_read``.
+        """
         owner = self._data()['owner']
         self.assertEqual(owner['id'], str(self.owner.id))
         self.assertEqual(owner['email'], self.owner.email)
