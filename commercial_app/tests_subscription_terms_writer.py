@@ -38,7 +38,12 @@ LEGACY_FIELDS = (
 )
 
 
-class SubscriptionTermsWriterTests(TestCase):
+class _TermsWriterBase(TestCase):
+    """Fixture and helpers shared by the writer matrix and the regression suite.
+
+    Carries no tests of its own: subclassing a class that HAS tests would re-run
+    the whole matrix under every subclass name.
+    """
 
     def setUp(self):
         self.owner = User.objects.create_user(
@@ -110,6 +115,10 @@ class SubscriptionTermsWriterTests(TestCase):
         return RestaurantSubscriptionTerms.objects.filter(
             restaurant=self.restaurant, ended_at__isnull=True,
         ).count()
+
+
+class SubscriptionTermsWriterTests(_TermsWriterBase):
+    """record / replace / end, and the things none of them may do."""
 
     # =====================================================================
     # RECORD
@@ -577,3 +586,138 @@ class SubscriptionTermsWriterTests(TestCase):
             self._record(actor=User(email='ghost@test.com'))
         self.assertEqual(ctx.exception.code, errors.INVALID_ACTOR)
         self.assertFalse(RestaurantSubscriptionTerms.objects.exists())
+
+
+class SubscriptionTermsReviewRegressionTests(_TermsWriterBase):
+    """
+    Four defects found by review on PR #298, each pinned so it cannot return.
+
+    All four share a shape worth naming: input that is *syntactically* plausible
+    escaping the domain-error contract — either as a raw Python/database exception
+    (a 500 through a future adapter) or as a success whose stated postcondition is
+    no longer true.
+    """
+
+    # --- an oversized amount must not escape as decimal.InvalidOperation ------
+
+    def test_an_oversized_amount_is_a_domain_error_not_a_decimal_exception(self):
+        """
+        `Decimal('1e100').quantize(Decimal('0.01'))` raises `InvalidOperation` — the
+        result exceeds the context precision. Testing the SCALE before the MAGNITUDE
+        let that escape uncaught; the bound now runs first.
+        """
+        for oversized in ('1e100', '1E30', Decimal('1e100'), '99999999999999999999'):
+            with self.subTest(amount=oversized):
+                with self.assertRaises(CommercialMutationError) as ctx:
+                    self._record(recurring_amount=oversized)
+                self.assertEqual(
+                    ctx.exception.code, errors.INVALID_SUBSCRIPTION_TERMS,
+                )
+        self.assertFalse(RestaurantSubscriptionTerms.objects.exists())
+
+    def test_the_largest_storable_amount_is_still_accepted(self):
+        """The bound must refuse only what the column cannot hold."""
+        result = self._record(recurring_amount=Decimal('9999999999.99'))
+        self.assertEqual(result.terms.recurring_amount, Decimal('9999999999.99'))
+
+    # --- an out-of-range interval count must not escape as DataError ---------
+
+    def test_an_interval_count_beyond_the_column_range_is_a_domain_error(self):
+        """
+        `PositiveIntegerField` is a 32-bit `integer` on PostgreSQL, so a larger count
+        reached the INSERT and raised `DataError: integer out of range`.
+        """
+        for oversized in (2 ** 31, 2 ** 40):
+            with self.subTest(count=oversized):
+                with self.assertRaises(CommercialMutationError) as ctx:
+                    self._record(billing_interval_count=oversized)
+                self.assertEqual(
+                    ctx.exception.code, errors.INVALID_SUBSCRIPTION_TERMS,
+                )
+        self.assertFalse(RestaurantSubscriptionTerms.objects.exists())
+
+    def test_the_largest_storable_interval_count_is_still_accepted(self):
+        result = self._record(billing_interval_count=2 ** 31 - 1)
+        self.assertEqual(result.terms.billing_interval_count, 2 ** 31 - 1)
+
+    # --- recording after an end must not overlap the closed window -----------
+
+    def test_new_terms_may_not_begin_before_the_previous_terms_ended(self):
+        """
+        Terms effective 1 July, ended 1 August, then new terms effective 15 July
+        would leave two sets in force from 15 July to 1 August — "which terms applied
+        on 20 July?" would have two answers.
+        """
+        first = self._record()
+        end_at = self.effective + timedelta(days=20)
+        self._end(first.terms.pk, ended_at=end_at)
+
+        with self.assertRaises(CommercialMutationError) as ctx:
+            self._record(effective_from=self.effective + timedelta(days=10))
+
+        self.assertEqual(ctx.exception.code, errors.INVALID_SUBSCRIPTION_TERMS)
+        self.assertEqual(RestaurantSubscriptionTerms.objects.count(), 1)
+
+    def test_new_terms_may_begin_exactly_when_the_previous_terms_ended(self):
+        """The boundary is continuous, not exclusive: back-to-back is legitimate."""
+        first = self._record()
+        end_at = self.effective + timedelta(days=20)
+        self._end(first.terms.pk, ended_at=end_at)
+
+        second = self._record(effective_from=end_at)
+
+        self.assertTrue(second.changed)
+        self.assertEqual(second.terms.effective_from, end_at)
+        self.assertEqual(self._open_count(), 1)
+
+    def test_the_overlap_rule_uses_the_latest_end_across_all_history(self):
+        first = self._record()
+        second = self._replace(first.terms.pk,
+                               effective_from=self.effective + timedelta(days=5))
+        last_end = self.effective + timedelta(days=20)
+        self._end(second.terms.pk, ended_at=last_end)
+
+        # Between the first end (day 5) and the last (day 20) is still an overlap.
+        with self.assertRaises(CommercialMutationError) as ctx:
+            self._record(effective_from=self.effective + timedelta(days=12))
+        self.assertEqual(ctx.exception.code, errors.INVALID_SUBSCRIPTION_TERMS)
+
+        fresh = self._record(effective_from=last_end)
+        self.assertTrue(fresh.changed)
+
+    # --- an end retry must not mask newly-opened terms -----------------------
+
+    def test_an_end_retry_is_refused_once_new_terms_have_opened(self):
+        """
+        Ending is documented to leave the restaurant with NO open terms. Once another
+        operator has recorded fresh terms, replying "already done" would report
+        success for a postcondition that no longer holds — and would slip past the
+        `expected_terms_id` guard entirely.
+        """
+        first = self._record()
+        end_at = self.effective + timedelta(days=20)
+        self._end(first.terms.pk, ended_at=end_at)
+        reopened = self._record(effective_from=end_at)
+
+        with self.assertRaises(CommercialMutationError) as ctx:
+            self._end(first.terms.pk, ended_at=end_at)
+
+        self.assertEqual(ctx.exception.code, errors.STALE_SUBSCRIPTION_TERMS)
+        self.assertEqual(ctx.exception.details['open_terms_id'],
+                         str(reopened.terms.pk))
+        # The newly-opened terms are untouched by the refused retry.
+        reopened.terms.refresh_from_db()
+        self.assertIsNone(reopened.terms.ended_at)
+        self.assertEqual(self._open_count(), 1)
+
+    def test_an_end_retry_still_no_ops_while_nothing_is_open(self):
+        """The legitimate retry — the case the conditional must not break."""
+        first = self._record()
+        end_at = self.effective + timedelta(days=20)
+        self._end(first.terms.pk, ended_at=end_at)
+
+        retry = self._end(first.terms.pk, ended_at=end_at)
+
+        self.assertFalse(retry.changed)
+        self.assertEqual(retry.terms.pk, first.terms.pk)
+        self.assertEqual(self._open_count(), 0)

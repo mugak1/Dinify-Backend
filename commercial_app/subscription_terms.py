@@ -69,6 +69,12 @@ from commercial_app.mutation_context import (
 _AMOUNT_EXPONENT = Decimal('0.01')
 _AMOUNT_CEILING = Decimal(10) ** 10          # 12 digits, two of them decimal
 _CURRENCY_PATTERN = re.compile(r'^[A-Z]{3}$')
+# PositiveIntegerField is a 32-bit `integer` on PostgreSQL. Without this bound a
+# larger count reaches the INSERT and raises `DataError: integer out of range`,
+# which would surface through a future adapter as a 500 rather than as a named
+# refusal. The same reasoning as `restaurant_reads.MAX_PAGE`, which exists because
+# an unbounded page number overflowed a bigint OFFSET.
+_MAX_INTERVAL_COUNT = 2 ** 31 - 1
 
 
 @dataclass(frozen=True)
@@ -138,22 +144,36 @@ def _normalise_amount(raw):
             'recurring_amount must not be negative.',
             {'field': 'recurring_amount'},
         )
-    if amount != amount.quantize(_AMOUNT_EXPONENT):
-        raise CommercialMutationError(
-            errors.INVALID_SUBSCRIPTION_TERMS,
-            'recurring_amount carries more precision than the stored scale of two '
-            'decimal places; state the exact amount to be stored.',
-            {'field': 'recurring_amount'},
-        )
+    # THE MAGNITUDE CHECK MUST COME FIRST. `Decimal('1e100').quantize(...)` raises
+    # `InvalidOperation` — the result would exceed the context precision — so testing
+    # the scale before the bound let a syntactically valid but oversized value escape
+    # as a decimal exception instead of a domain refusal.
     if amount >= _AMOUNT_CEILING:
         raise CommercialMutationError(
             errors.INVALID_SUBSCRIPTION_TERMS,
             'recurring_amount exceeds the stored precision.',
             {'field': 'recurring_amount'},
         )
+    try:
+        quantized = amount.quantize(_AMOUNT_EXPONENT)
+    except InvalidOperation:
+        # Defensive: the bound above already excludes every value that can reach
+        # this, but a future edit to the ceiling must not be able to reopen the hole.
+        raise CommercialMutationError(
+            errors.INVALID_SUBSCRIPTION_TERMS,
+            'recurring_amount cannot be represented at the stored scale.',
+            {'field': 'recurring_amount'},
+        )
+    if amount != quantized:
+        raise CommercialMutationError(
+            errors.INVALID_SUBSCRIPTION_TERMS,
+            'recurring_amount carries more precision than the stored scale of two '
+            'decimal places; state the exact amount to be stored.',
+            {'field': 'recurring_amount'},
+        )
     # Quantized so a stored value and a freshly-normalised one compare identically at
     # the same scale, which is what the no-op and retry proofs below depend on.
-    return amount.quantize(_AMOUNT_EXPONENT)
+    return quantized
 
 
 def _normalise_currency(raw):
@@ -208,6 +228,12 @@ def _normalise_interval(unit, count):
         raise CommercialMutationError(
             errors.INVALID_SUBSCRIPTION_TERMS,
             'billing_interval_count must be a whole number of at least 1.',
+            {'field': 'billing_interval_count'},
+        )
+    if count > _MAX_INTERVAL_COUNT:
+        raise CommercialMutationError(
+            errors.INVALID_SUBSCRIPTION_TERMS,
+            'billing_interval_count exceeds the largest storable value.',
             {'field': 'billing_interval_count'},
         )
     return unit, count
@@ -290,6 +316,25 @@ def _open_terms(restaurant):
     )
 
 
+def _latest_end(restaurant):
+    """
+    The most recent ``ended_at`` across this restaurant's history, or ``None``.
+
+    Used to keep the timeline MONOTONIC: terms recorded after an earlier set was
+    closed may not begin before that closure. Without it, terms effective 1 July and
+    ended 1 August could be followed by new terms effective 15 July, and "which terms
+    were in force on 20 July?" would have two answers — the exact ambiguity the
+    continuous boundary in ``replace_subscription_terms`` exists to prevent.
+    """
+    return (
+        RestaurantSubscriptionTerms.objects
+        .filter(restaurant=restaurant, ended_at__isnull=False)
+        .order_by('-ended_at')
+        .values_list('ended_at', flat=True)
+        .first()
+    )
+
+
 def _refuse_future(moment, now, *, field):
     if moment > now:
         raise CommercialMutationError(
@@ -349,6 +394,19 @@ def record_subscription_terms(*, restaurant_id, recurring_amount, currency,
                 'deliberately rather than recording new ones.',
                 {'restaurant_id': str(restaurant.pk),
                  'open_terms_id': str(open_terms.pk)},
+            )
+
+        # NOTHING IS OPEN — but history may not be empty (a previous set was ended),
+        # and a new set must not begin before that closure or the two windows
+        # overlap. Checked here rather than left to the caller: the writer is the
+        # only thing that sees the whole timeline.
+        latest_end = _latest_end(restaurant)
+        if latest_end is not None and fields['effective_from'] < latest_end:
+            raise CommercialMutationError(
+                errors.INVALID_SUBSCRIPTION_TERMS,
+                'These terms would begin before the previous terms ended, leaving '
+                'two overlapping sets in force.',
+                {'field': 'effective_from'},
             )
 
         terms = RestaurantSubscriptionTerms.objects.create(
@@ -515,13 +573,30 @@ def end_subscription_terms(*, restaurant_id, expected_terms_id, ended_at):
                  'expected_terms_id': str(expected_uuid)},
             )
 
-        # THE RETRY CHECK COMES FIRST, and must: after a successful end there is no
-        # open row at all, so asking "is this the open row?" would refuse a resend of
-        # the request that just succeeded.
-        if expected.ended_at is not None and expected.ended_at == ended_at:
-            return SubscriptionTermsResult(terms=expected, changed=False)
-
         open_terms = _open_terms(restaurant)
+
+        # THE RETRY CHECK COMES BEFORE THE OPEN-ROW REQUIREMENT, and must: after a
+        # successful end there is no open row at all, so asking "is this the open
+        # row?" would refuse a resend of the request that just succeeded.
+        #
+        # BUT IT IS CONDITIONAL ON NOTHING HAVING OPENED SINCE. If another operator
+        # recorded fresh terms after the end, replying "already done" would report
+        # success for an operation whose stated postcondition — this restaurant now
+        # has no open terms — is no longer true, and would slip past the
+        # `expected_terms_id` guard entirely. That is a stale view of the world, so
+        # it is reported as one.
+        if expected.ended_at is not None and expected.ended_at == ended_at:
+            if open_terms is None:
+                return SubscriptionTermsResult(terms=expected, changed=False)
+            raise CommercialMutationError(
+                errors.STALE_SUBSCRIPTION_TERMS,
+                'These terms were already ended and new terms have since been '
+                'opened. Reload and try again.',
+                {'restaurant_id': str(restaurant.pk),
+                 'expected_terms_id': str(expected.pk),
+                 'open_terms_id': str(open_terms.pk)},
+            )
+
         if open_terms is None:
             raise CommercialMutationError(
                 errors.NO_OPEN_SUBSCRIPTION_TERMS,

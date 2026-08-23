@@ -1731,7 +1731,11 @@ with `errors.py` (one `CommercialMutationError` carrying a stable `.code`) and
   `end_subscription_terms` have the same property; `replace_subscription_terms`
   no-ops only on a PROOF that identifies the exact completed replacement (named row
   ended precisely at the requested instant, open row carrying exactly the requested
-  facts from that instant) — never on "some open row has this amount"
+  facts from that instant) — never on "some open row has this amount". An END retry
+  additionally requires that NOTHING HAS OPENED SINCE: if fresh terms were recorded
+  after the end, replying "already done" would report success for a postcondition
+  (no open terms) that no longer holds and would slip past the `expected_terms_id`
+  guard, so it is a `stale_subscription_terms` conflict instead
 - **TERMS ARE NEVER EDITED IN PLACE.** History is create / close+insert / close;
   `ended_at` is the only intended terminal mutation. A future invoice is raised UNDER
   a specific row and a future approval is given FOR one, both by `id` — if the numbers
@@ -1743,6 +1747,20 @@ with `errors.py` (one `CommercialMutationError` carrying a stable `.code`) and
   nothing in this repo runs on a schedule. Backdating is fully supported. A
   replacement's boundary is CONTINUOUS: the outgoing row's `ended_at` is set to
   exactly the successor's `effective_from`, so there is no gap and no overlap
+- **THE TIMELINE IS MONOTONIC.** `record_subscription_terms` after an earlier set was
+  ended refuses an `effective_from` before that closure — otherwise terms effective
+  1 July and ended 1 August could be followed by terms effective 15 July, and "which
+  terms were in force on 20 July?" would have two answers. The check reads the LATEST
+  `ended_at` across the whole history, not just the most recent row. Back-to-back
+  (`effective_from == latest ended_at`) is legitimate and accepted
+- **MALFORMED INPUT NEVER ESCAPES AS A PYTHON OR DATABASE EXCEPTION.** Two bounds
+  exist for that reason alone and both were found by review: `recurring_amount` is
+  magnitude-checked BEFORE it is quantized (`Decimal('1e100').quantize(...)` raises
+  `InvalidOperation`), and `billing_interval_count` is capped at 2^31-1 because
+  `PositiveIntegerField` is a 32-bit `integer` on PostgreSQL and a larger value
+  raised `DataError` at the INSERT. Both would have surfaced through a future
+  adapter as a 500 instead of a named refusal — the same class of defect
+  `restaurant_reads.MAX_PAGE` exists to prevent
 - **NO CLEAR/UNCONFIGURE OPERATION YET**, and `set_*(value=None)` is refused rather
   than overloaded. NULL is legitimate BEFORE a decision; deliberately removing a
   recorded consequential decision raises readiness and owner-approval semantics that
