@@ -181,3 +181,74 @@ class CommercialModelsAreOutsideDelegatedReachTests(TestCase):
             self.assertNotIn('commercial', record)
             self.assertNotIn('subscription', record)
             self.assertNotIn('serviceconfiguration', record)
+
+
+class CommercialAppDependencyDirectionTests(TestCase):
+    """
+    ``commercial_app`` must not depend on the control plane (Step 3C).
+
+    The business domain owns what a valid state transition IS — locking, atomicity,
+    idempotency, conflict detection. The CONTROL PLANE owns who may ask for one and
+    how it is recorded: platform-staff authorization, an ``AdminSession``, CSRF,
+    recent elevation, a reason, and the ``AdminAuditLog`` entry.
+
+    WHY THE DIRECTION MATTERS ENOUGH TO GATE. If these services imported
+    ``platform_admin_app``, they would become usable from exactly one caller, and the
+    audit row would be written INSIDE the domain transaction — which sounds safer and
+    is not: the Admin adapter needs to wrap `domain mutation + audit` in ONE OUTER
+    transaction so a failed audit rolls the mutation back, and it can only do that if
+    the domain does not already own the audit write. The internal
+    ``transaction.atomic()`` blocks here nest as savepoints inside that outer
+    transaction, which is exactly what makes the arrangement work.
+
+    Scanned by AST rather than by importing, so a lazily-imported module inside a
+    function body is caught too.
+    """
+
+    def test_no_commercial_module_imports_the_admin_control_plane(self):
+        import ast
+        from pathlib import Path
+
+        package = Path(__file__).resolve().parent
+        offenders = []
+        for source_file in sorted(package.glob('*.py')):
+            if source_file.name.startswith('tests_'):
+                # A test may name the admin app to assert nothing was written there.
+                continue
+            tree = ast.parse(source_file.read_text(encoding='utf-8'))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [node.module or '']
+                else:
+                    continue
+                for name in names:
+                    if name.split('.')[0] == 'platform_admin_app':
+                        offenders.append(f'{source_file.name}: {name}')
+
+        self.assertEqual(
+            offenders, [],
+            'commercial_app must not import the admin control plane — authorization '
+            'and audit belong to the adapter that wraps these services.',
+        )
+
+    def test_the_writers_add_no_url_or_serializer_surface(self):
+        """
+        Step 3C adds internal Python APIs only: no URLConf, no view, no serializer,
+        no management command. The writers are reachable from a future adapter and
+        from nowhere else.
+        """
+        from pathlib import Path
+
+        package = Path(__file__).resolve().parent
+        for forbidden in ('urls.py', 'views.py', 'serializers.py', 'endpoints'):
+            with self.subTest(path=forbidden):
+                self.assertFalse(
+                    (package / forbidden).exists(),
+                    f'commercial_app/{forbidden} would be a new API surface.',
+                )
+        self.assertFalse(
+            (package / 'management').exists(),
+            'commercial_app has no management command in Step 3C.',
+        )

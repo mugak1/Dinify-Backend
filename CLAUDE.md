@@ -586,10 +586,15 @@ so keep it current when conventions change.
   both nullable with NO default, each with its own attribution triple) and
   `RestaurantSubscriptionTerms` (the recurring restaurant→Dinify software fee, 0..N
   with at most one OPEN row). Migration `commercial_app/0001_initial` is purely
-  additive with NO backfill and creates zero rows. **No writer, no service, no
-  serializer, no endpoint, no command** — and no PSP model, no tax-obligation field,
-  no owner-approval model. See the "Commercial & Service Configuration Domain"
-  section for the four concepts these models keep apart
+  additive with NO backfill and creates zero rows — and no PSP model, no
+  tax-obligation field, no owner-approval model. Step 3C then added the INTERNAL
+  domain writers (`service_configuration.py`, `subscription_terms.py`, `errors.py`,
+  `mutation_context.py`): five named mutations, every one serializing on the
+  `Restaurant` row, with optimistic concurrency and same-state no-ops. **Still NO
+  HTTP surface, no serializer, no management command, no Admin authorization and no
+  audit** — those belong to the control-plane adapter. See the "Commercial & Service
+  Configuration Domain" section for the four concepts these models keep apart and the
+  writer contract
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -1549,13 +1554,14 @@ semantics (what counts as evidence of owner control), not directory presentation
   it will read `tracked: true` / `legacy_adopted` / `consistent` /
   `not_established` / `not_applicable` purely from its data
 
-## Commercial & Service Configuration Domain — Phase 1, Step 3B
+## Commercial & Service Configuration Domain — Phase 1, Steps 3B + 3C
 
 `commercial_app` — a first-party BUSINESS-DOMAIN app holding the restaurant-level
-commercial facts that had no authoritative home. Step 3B is **SCHEMA ONLY**: two
-models, their constraints and the initial migration. There is no writer, no service,
-no serializer, no endpoint and no management command — the same shape Step 2A used
-for the onboarding domain, and absence of a row still means "not yet recorded".
+commercial facts that had no authoritative home. Step 3B built the SCHEMA (two models,
+their constraints, the initial migration); Step 3C added the INTERNAL DOMAIN WRITERS
+that are now the only supported way to mutate it. There is still **no serializer, no
+endpoint, no management command and no HTTP surface of any kind**, and absence of a
+row still means "not yet recorded".
 
 **It is deliberately NOT in `platform_admin_app`.** That app is a CONTROL PLANE /
 operator surface; these are business-domain facts that readiness (`restaurants_app`)
@@ -1688,6 +1694,96 @@ row**: a newly created restaurant gets ZERO commercial rows until a future onboa
 service deliberately records them, and **`is_test` is not a schema shortcut** (a test
 tenant rehearses the same path; zero-priced terms are legitimate only once recorded).
 Tests pin all of this, including that no signal receivers are registered.
+
+### The domain writers (Step 3C) — the ONLY supported mutation paths
+`commercial_app/service_configuration.py`, `commercial_app/subscription_terms.py`,
+with `errors.py` (one `CommercialMutationError` carrying a stable `.code`) and
+`mutation_context.py` (`lock_restaurant`, `resolve_actor`, `parse_uuid`).
+
+    set_payment_timing(restaurant_id, value, actor, expected_current)
+    set_payment_collection_mode(restaurant_id, value, actor, expected_current)
+    record_subscription_terms(...)      first terms; NEVER supersedes
+    replace_subscription_terms(...)     close + insert, atomically
+    end_subscription_terms(restaurant_id, expected_terms_id, ended_at)
+
+- **THE `Restaurant` ROW IS THE SERIALIZATION POINT for every commercial mutation.**
+  Each service opens ONE `transaction.atomic()`, `select_for_update()`s the restaurant
+  by exact UUID, re-checks `deleted` on the LOCKED row, then touches its own child
+  tables. The commercial rows may not exist yet, so the tenant row is the only thing
+  two concurrent operators are guaranteed to share. LOCK ORDER:
+  `Restaurant → RestaurantServiceConfiguration` / `Restaurant →
+  RestaurantSubscriptionTerms` — a tail extension of the documented global order that
+  cannot cycle. **It must NEVER reach for the admission advisory lock afterwards**:
+  the lifecycle transition takes that lock FIRST and the row second, so acquiring it
+  after the row would invert that order. It is not needed at all today — nothing in
+  the order path reads payment timing or collection mode. WHEN timing is eventually
+  enforced in the order/kitchen path, changing it while live WILL need the barrier
+- **OPTIMISTIC CONCURRENCY.** Both configuration writers take `expected_current`
+  (no default — `None` is a real assertion, so a forgotten argument must not make it
+  by accident) and compare it against the value read UNDER THE LOCK; a mismatch is
+  `stale_service_configuration`. Terms writers use exact identity instead:
+  `expected_terms_id` names the row the caller believes is open
+- **SAME-STATE RETRY IS A NO-OP, checked BEFORE staleness.** If the stored value
+  already equals the request, the call succeeds having written nothing — not even
+  `set_at`/`set_by` — even when `expected_current` is stale. A lost HTTP response
+  followed by an identical retry must not become a conflict, and must not rewrite the
+  attribution of a decision somebody else made. `record_subscription_terms` and
+  `end_subscription_terms` have the same property; `replace_subscription_terms`
+  no-ops only on a PROOF that identifies the exact completed replacement (named row
+  ended precisely at the requested instant, open row carrying exactly the requested
+  facts from that instant) — never on "some open row has this amount". An END retry
+  additionally requires that NOTHING HAS OPENED SINCE: if fresh terms were recorded
+  after the end, replying "already done" would report success for a postcondition
+  (no open terms) that no longer holds and would slip past the `expected_terms_id`
+  guard, so it is a `stale_subscription_terms` conflict instead
+- **TERMS ARE NEVER EDITED IN PLACE.** History is create / close+insert / close;
+  `ended_at` is the only intended terminal mutation. A future invoice is raised UNDER
+  a specific row and a future approval is given FOR one, both by `id` — if the numbers
+  could move underneath them neither reference would mean anything. The DATABASE does
+  not enforce this (no trigger, no signal): **the service is the discipline**
+- **FUTURE-DATED TERMS ARE REFUSED** (`future_effective_terms_not_supported`, for both
+  `effective_from` and `ended_at`). The open-row invariant is `ended_at IS NULL`, a
+  predicate that consults no clock, so a scheduled row would need a sweeper — and
+  nothing in this repo runs on a schedule. Backdating is fully supported. A
+  replacement's boundary is CONTINUOUS: the outgoing row's `ended_at` is set to
+  exactly the successor's `effective_from`, so there is no gap and no overlap
+- **THE TIMELINE IS MONOTONIC.** `record_subscription_terms` after an earlier set was
+  ended refuses an `effective_from` before that closure — otherwise terms effective
+  1 July and ended 1 August could be followed by terms effective 15 July, and "which
+  terms were in force on 20 July?" would have two answers. The check reads the LATEST
+  `ended_at` across the whole history, not just the most recent row. Back-to-back
+  (`effective_from == latest ended_at`) is legitimate and accepted
+- **MALFORMED INPUT NEVER ESCAPES AS A PYTHON OR DATABASE EXCEPTION.** Two bounds
+  exist for that reason alone and both were found by review: `recurring_amount` is
+  magnitude-checked BEFORE it is quantized (`Decimal('1e100').quantize(...)` raises
+  `InvalidOperation`), and `billing_interval_count` is capped at 2^31-1 because
+  `PositiveIntegerField` is a 32-bit `integer` on PostgreSQL and a larger value
+  raised `DataError` at the INSERT. Both would have surfaced through a future
+  adapter as a 500 instead of a named refusal — the same class of defect
+  `restaurant_reads.MAX_PAGE` exists to prevent
+- **NO CLEAR/UNCONFIGURE OPERATION YET**, and `set_*(value=None)` is refused rather
+  than overloaded. NULL is legitimate BEFORE a decision; deliberately removing a
+  recorded consequential decision raises readiness and owner-approval semantics that
+  are not frozen
+- **NO AUTHORIZATION AND NO AUDIT LIVE HERE.** The services never inspect
+  `account_type`, an `AdminSession`, elevation, CSRF or a request, and never write
+  `AdminAuditLog`; `resolve_actor` answers *who did this*, never *were they allowed
+  to*. A test AST-scans the package and fails if any non-test module imports
+  `platform_admin_app`. The future Admin adapter wraps **domain mutation + audit in
+  ONE OUTER transaction** so a failed audit rolls the mutation back — which only
+  works because the domain does not own the audit write; the internal atomic blocks
+  nest as savepoints inside it
+- **Lifecycle state does NOT gate these writes** (a tenant may need correction while
+  onboarding, live or suspended); whether an `offboarded` tenant is editable is
+  control-plane policy for the endpoint PR. `check_go_live_readiness` is UNCHANGED and
+  still returns `readiness_not_configured` — writable commercial facts do not make a
+  restaurant ready. No owner-approval row is created, cleared or marked stale (none
+  exists), and **nothing is bound to `configuration.updated_at`**
+- **NO LEGACY SYNCHRONISATION**, in either direction: the writers never write or read
+  `require_order_prepayments`, `Table.prepayment_required`,
+  `preferred_subscription_method`, `flat_fee`, `subscription_validity`,
+  `subscription_expiry_date` or `DinifyTransaction.payment_mode`. Tests pin that
+  representative legacy fields are byte-identical after successful mutations
 
 ### Tenancy
 No serializer, so the TENANT-STRUCT-00 machinery (which reasons about DRF
