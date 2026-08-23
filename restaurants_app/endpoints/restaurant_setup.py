@@ -971,18 +971,36 @@ class RestaurantSetupEndpoint(APIView):
                     status=409,
                 )
 
-        # `flat_fee` is the Dinify subscription price charged to the restaurant
-        # (finance_app tx_subscription bills restaurant.flat_fee) — platform-owned
-        # state no principal on THIS plane may write, so it is stripped
-        # UNCONDITIONALLY. It used to be stripped only for non-admins, leaving a
+        # `flat_fee` (the subscription PRICE Dinify charges the restaurant) and
+        # `preferred_subscription_method` (the BILLING METHOD deciding whether a
+        # subscription charge may be raised at all) are the two halves of Dinify's
+        # side of the commercial relationship. Both are platform-owned state no
+        # principal on THIS plane may write, so both are stripped UNCONDITIONALLY.
+        #
+        # `flat_fee` used to be stripped only for non-admins, leaving a
         # `dinify_admin` role-holder able to zero a subscription price through the
         # tenant portal; with ambient admin authority gone there is no such
-        # principal, and the strip covers a delegated `settings`-scope session too.
-        # Phase 1: pricing is admin-plane functionality, built natively on
-        # /api/admin/v1 — the key deliberately STAYS in EDIT_INFORMATION so that
-        # writer can still go through Secretary. Stripping (not 403) matches how
-        # Secretary already ignores non-applicable fields; the tenant portal never
-        # sends the field, so nothing legitimate breaks.
+        # principal. Delegation cannot reach this route in either case —
+        # restaurant-setup is GET-only on the delegated allowlist.
+        #
+        # `preferred_subscription_method` stayed writable when `flat_fee` was
+        # closed, which was an oversight rather than a decision. It is read by
+        # `finance_app.tx_subscription.initiate`, whose ONLY gate is
+        # `preferred_subscription_method == 'per_order'` -> refuse: an owner could
+        # set `monthly` here and then POST api/v1/finances/transactions/ (which
+        # authorises on `can_manage_restaurant`, and an owner passes) to have Dinify
+        # record a subscription charge against terms it never chose. Closing the
+        # write closes that path at its source; the transaction controller is
+        # unchanged.
+        #
+        # Phase 1: both are admin-plane functionality, built natively on
+        # /api/admin/v1 — the keys deliberately STAY in EDIT_INFORMATION so that
+        # writer can still go through Secretary. This is a post-gate payload strip,
+        # NOT an EDIT_INFORMATION removal; contrast `status` / `is_test`, which have
+        # a dedicated single writer assigning the model field directly and are
+        # therefore absent from EDIT_INFORMATION entirely. Stripping (not 403)
+        # matches how Secretary already ignores non-applicable fields; the tenant
+        # portal never sends either field, so nothing legitimate breaks.
         #
         # `status` USED TO BE STRIPPED HERE TOO. It no longer needs to be, and the
         # strip would now be misleading: PR-5 made the lifecycle a constrained axis
@@ -993,7 +1011,8 @@ class RestaurantSetupEndpoint(APIView):
         # POST admin/v1/restaurants/<id>/transition/.
         if config_detail == 'restaurants':
             platform_only_fields = [
-                key for key in ('flat_fee',) if key in put_data
+                key for key in ('flat_fee', 'preferred_subscription_method')
+                if key in put_data
             ]
             if platform_only_fields:
                 # request.data is uncopied on this path and may be an immutable

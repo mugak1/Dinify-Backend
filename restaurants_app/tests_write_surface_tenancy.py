@@ -271,9 +271,11 @@ class RestaurantMassAssignmentTests(_TwoTenantBase):
     """SerializerPutRestaurant cannot reassign server-owned identity / audit
     fields (owner, created_by, deleted_by) from request input (TENANT-ISO-PR5).
 
-    (Platform-owned status / flat_fee stay in EDIT_INFORMATION but are stripped
-    for non-admins at the restaurant-setup endpoint per PR #211 — a separate,
-    already-tested control; here we prove the serializer-level read_only wall.)
+    (The platform-owned commercial fields — ``flat_fee`` and
+    ``preferred_subscription_method`` — stay in EDIT_INFORMATION but are stripped
+    UNCONDITIONALLY at the restaurant-setup endpoint; ``status`` left
+    EDIT_INFORMATION entirely at PR-5. Both are separate, already-tested controls;
+    here we prove the serializer-level read_only wall.)
     """
 
     def test_owner_and_audit_fields_are_not_writable(self):

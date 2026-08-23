@@ -1273,6 +1273,21 @@ class MassAssignmentClosureTests(ClosureFixtureBase):
         self.restaurant_a.refresh_from_db()
         self.assertEqual(self.restaurant_a.flat_fee, before)
 
+    def test_preferred_subscription_method_is_stripped_for_the_owner_too(self):
+        # The BILLING METHOD is the other half of Dinify's commercial relationship
+        # with the tenant, and it was left writable when `flat_fee` was closed.
+        # Same unconditional strip, same principal (the owner is the only one who
+        # reaches this PUT), same field-level contract: the rename applies, the
+        # commercial setting does not move.
+        resp = self._setup_put(self.owner_a, 'restaurants', {
+            'id': str(self.restaurant_a.id), 'name': 'Method Renamed',
+            'preferred_subscription_method': 'per_order',
+        })
+        self.assertEqual(resp.json().get('status'), 200, resp.content)
+        self.restaurant_a.refresh_from_db()
+        self.assertEqual(self.restaurant_a.name, 'Method Renamed')
+        self.assertEqual(self.restaurant_a.preferred_subscription_method, 'monthly')
+
     def test_the_legacy_platform_role_cannot_write_the_restaurant_at_all(self):
         """
         The lifecycle — and now the whole restaurant record — is closed to a
@@ -1426,6 +1441,44 @@ class SubscriptionTransactionClosureTests(ClosureFixtureBase):
         self.assertEqual(txn.transaction_amount, Decimal('50000.00'))
         self.assertEqual(txn.restaurant_id, self.restaurant_a.id)
 
+    def test_owner_cannot_unlock_billing_by_editing_the_subscription_method(self):
+        """
+        THE CHAIN THIS CLOSES, end to end.
+
+        `tx_subscription.initiate`'s only gate is
+        `preferred_subscription_method == 'per_order'` -> refuse. While that field
+        was tenant-writable, an owner could PUT `monthly` through the generic
+        restaurant edit route and then bill their own restaurant — recording a
+        subscription charge against terms Dinify never chose.
+
+        Restaurant B is left at the model default (`per_order`). The edit is now
+        stripped, so the controller — which is UNCHANGED by this PR — still refuses.
+        """
+        self.assertEqual(
+            self.restaurant_b.preferred_subscription_method, 'per_order',
+        )
+
+        edit = self.client.put(
+            _setup_url('restaurants'),
+            data={'id': str(self.restaurant_b.id), 'name': 'Closure B Renamed',
+                  'preferred_subscription_method': 'monthly'},
+            format='json', **self._jwt(self.owner_b),
+        )
+        self.assertEqual(edit.json().get('status'), 200, edit.content)
+        self.restaurant_b.refresh_from_db()
+        self.assertEqual(self.restaurant_b.name, 'Closure B Renamed')   # edit applied
+        self.assertEqual(
+            self.restaurant_b.preferred_subscription_method, 'per_order',
+        )
+
+        before = DinifyTransaction.objects.filter(restaurant=self.restaurant_b).count()
+        resp = self._subscribe(self.owner_b, self.restaurant_b.id)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(
+            DinifyTransaction.objects.filter(restaurant=self.restaurant_b).count(),
+            before,
+        )
+
     def test_non_manager_cannot_bill_a_restaurant(self):
         # owner_b holds no role at A; kitchen staff at A is not a manager.
         self.assertEqual(self._subscribe(self.owner_b, self.restaurant_a.id).status_code, 404)
@@ -1562,6 +1615,31 @@ class DelegatedAdministratorClosureTests(ClosureFixtureBase):
                 action=ADMIN_DELEGATION_ACTION_DENIED, result=RESULT_DENIED,
             ).exists()
         )
+
+    def test_a_delegated_session_cannot_write_the_commercial_settings(self):
+        """
+        The strip closes the tenant path; delegation must not offer a way around it.
+
+        It does not, and for a stronger reason than the strip: `restaurant-setup` is
+        GET-only on ALLOWED_ROUTES, so DelegatedAccessMiddleware refuses the write
+        BEFORE dispatch — the request never reaches the strip at all. Asserted with
+        the higher (`support`) scope, so this is the widest delegated principal that
+        exists. Driven through the real mint/exchange services rather than a config
+        assertion, because the config is only the boundary if the middleware
+        enforces it.
+        """
+        headers, _ = self._delegated(self.restaurant_a, scope=SCOPE_SUPPORT)
+        response = self.client.put(
+            _setup_url('restaurants'),
+            data={'id': str(self.restaurant_a.id),
+                  'preferred_subscription_method': 'per_order',
+                  'flat_fee': '0.00'},
+            format='json', **headers,
+        )
+        self.assertEqual(response.status_code, 403, response.content)
+        self.restaurant_a.refresh_from_db()
+        self.assertEqual(self.restaurant_a.preferred_subscription_method, 'monthly')
+        self.assertEqual(self.restaurant_a.flat_fee, Decimal('50000.00'))
 
     def test_a_support_scope_ticket_cannot_be_raised_for_the_other_tenant(self):
         headers, _ = self._delegated(self.restaurant_a, scope=SCOPE_SUPPORT)
