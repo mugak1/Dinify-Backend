@@ -580,6 +580,16 @@ so keep it current when conventions change.
   expired invitation, and no onboarding row created on read. Invitation CREDENTIALS
   are never projected — no `token_hash`, no raw token, no claim URL; an invitation is
   a state word plus, where it is evidence, a timestamp
+- Commercial & service configuration: ✅ SCHEMA (Phase 1, Step 3B) — a new
+  first-party app `commercial_app` with `RestaurantServiceConfiguration` (payment
+  timing `pay_first`/`pay_after` + payment collection mode `offline`/`psp_online`,
+  both nullable with NO default, each with its own attribution triple) and
+  `RestaurantSubscriptionTerms` (the recurring restaurant→Dinify software fee, 0..N
+  with at most one OPEN row). Migration `commercial_app/0001_initial` is purely
+  additive with NO backfill and creates zero rows. **No writer, no service, no
+  serializer, no endpoint, no command** — and no PSP model, no tax-obligation field,
+  no owner-approval model. See the "Commercial & Service Configuration Domain"
+  section for the four concepts these models keep apart
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -1539,6 +1549,155 @@ semantics (what counts as evidence of owner control), not directory presentation
   it will read `tracked: true` / `legacy_adopted` / `consistent` /
   `not_established` / `not_applicable` purely from its data
 
+## Commercial & Service Configuration Domain — Phase 1, Step 3B
+
+`commercial_app` — a first-party BUSINESS-DOMAIN app holding the restaurant-level
+commercial facts that had no authoritative home. Step 3B is **SCHEMA ONLY**: two
+models, their constraints and the initial migration. There is no writer, no service,
+no serializer, no endpoint and no management command — the same shape Step 2A used
+for the onboarding domain, and absence of a row still means "not yet recorded".
+
+**It is deliberately NOT in `platform_admin_app`.** That app is a CONTROL PLANE /
+operator surface; these are business-domain facts that readiness (`restaurants_app`)
+and other non-Admin code will read. It is equally not in `finance_app`, which holds
+payment/transaction RECORDS — commercial terms are not transactions.
+
+### FOUR CONCEPTS THAT ARE ROUTINELY CONFUSED
+Read this before adding a field. The tree still contains remnants of two earlier,
+incomplete payment designs and it is easy to reverse-engineer the wrong architecture
+from them.
+
+| Concept | Level | Vocabulary | Home |
+|---|---|---|---|
+| **Payment timing** | restaurant | `pay_first` \| `pay_after` | `RestaurantServiceConfiguration.payment_timing` |
+| **Payment collection mode** | restaurant | `offline` \| `psp_online` | `RestaurantServiceConfiguration.payment_collection_mode` |
+| **Payment method / tender** | **transaction** | `cash` \| `momo` \| `card` | `finance_app.DinifyTransaction.payment_mode` — UNCHANGED |
+| **Dinify subscription** | restaurant → Dinify | recurring software fee | `RestaurantSubscriptionTerms` |
+
+- **Payment timing is a SERVICE-MODEL fact**: must settlement be recorded before the
+  kitchen may fire the order (counter café, QSR, nightlife), or does the order fire
+  immediately and the tab settle at the end (full-service dining)? It NEVER
+  determines custody, whether Dinify initiates anything, whether payment is digital,
+  which tender the diner used, or which provider is involved
+- **Payment collection mode is a CUSTODY fact**: does Dinify initiate the diner
+  payment at all? `offline` = it does not; the restaurant collects the money itself
+  (cash, its own MTN/Airtel merchant till, its own card terminal, another external
+  mechanism) and Dinify may RECORD the settlement without ever executing it.
+  `psp_online` = Dinify initiates through a licensed provider on the restaurant's
+  behalf; the RESTAURANT remains merchant of record and funds settle directly to it.
+  Dinify never holds, controls, pools or disburses diner money in either mode. It
+  never determines timing or tender
+- **`offline` IS A PERMANENT, FIRST-CLASS COMMERCIAL MODE** — not degraded, not a
+  fallback, not temporary, not pre-launch-only, not test-only. PSP-backed collection
+  AUGMENTS Dinify later and is not a prerequisite for anyone to launch: **the first
+  commercial restaurant must be able to go live in `offline`**
+- **THE TWO AXES ARE INDEPENDENT.** All four timing × collection combinations are
+  legitimate and there is deliberately NO cross-constraint coupling them. A test
+  pins all four
+- **Dinify's revenue model is a recurring SOFTWARE SUBSCRIPTION** — never commission,
+  a surcharge, a percentage of GMV, a per-order fee, or anything netted from diner
+  settlements. Restaurant → Dinify money is ordinary first-party revenue and must
+  never be confused with diner → restaurant money
+
+### RestaurantServiceConfiguration
+OneToOne with `Restaurant` (PROTECT), UUID pk, plain `models.Model` (NOT
+`users_app.BaseModel` — `deleted`/`archived`/`vacuumed` assert rows get hidden, which
+is wrong for commercial configuration). Both axes are **nullable with NO DEFAULT**:
+"not configured" must stay distinguishable from a decision, which is exactly what
+`subscription_validity` (`default=True`, only writer deleted) can no longer do.
+Defaulting the mode to `offline` would be the same mistake in a new table — VALID and
+CHOSEN are different facts.
+
+Each axis carries its OWN attribution pair (`*_set_at` / `*_set_by`, User FK PROTECT)
+answering *who last established the current value, and when* — not owner approval,
+and not a replacement for change history, which stays in `AdminAuditLog`. Two
+separate pairs rather than one generic `updated_by`, because the axes may end up with
+DIFFERENT write authority. No "must be platform staff" rule is encoded at the model
+layer; the future domain writer owns authorization.
+
+**There is NO tender field and there must never be one** — a restaurant on `offline`
+may take cash from one diner and mobile money from the next.
+
+### RestaurantSubscriptionTerms
+FK to `Restaurant` (PROTECT), UUID pk, **0..N with at most ONE OPEN row**
+(`one_open_subscription_terms_per_restaurant`, a partial unique index over
+`ended_at IS NULL`). Terms change by CLOSING the open row and INSERTING a replacement,
+never by editing an amount in place — a future invoice or owner approval references
+the exact row it was raised or given under. Like
+`one_unresolved_owner_invitation_per_onboarding`, the predicate consults no clock (a
+partial-index predicate must be immutable), which is what makes the future writer's
+close-then-insert step load-bearing.
+
+Fields: `recurring_amount` (DecimalField 12,2), `currency` (CharField(3), **no
+default**, DB-constrained to three uppercase ASCII letters — WHICH currencies are
+supported is writer policy, not a database fact), `billing_interval_unit` ∈
+{day, week, month, year} + `billing_interval_count` ≥ 1, `effective_from` (required,
+never fabricated from `Restaurant.time_created`), `ended_at` (nullable), and
+`recorded_at` / `recorded_by`.
+
+- **It is called TERMS, not Agreement.** A platform administrator recording terms does
+  not prove the restaurant's OWNER agreed to them; `Agreement` would assert consent
+  this platform has never observed. Evidence of the current owner's consent comes from
+  the future owner go-live approval. For the same reason there are no `agreed_at` /
+  `agreed_by` / `signed_at` columns — only `recorded_*`
+- **It is NOT** payment received, an invoice, an invoice paid, good standing, a
+  successful transaction, a trial, merchant readiness or any diner payment state.
+  There is no `status` / `active` / `valid` / `paid` / `good_standing` / `expired`
+  column: each would need a maintainer and **nothing in this repo runs on a schedule**.
+  "Open" is DERIVED — `ended_at IS NULL`
+- **`recurring_amount = 0` is legal and meaningful** (a test tenant rehearsing the real
+  path, a free pilot, a waived period) and is a DIFFERENT fact from "no terms exist",
+  which is the absence of a row. That is why there is no separate `chargeable` boolean
+- **No plan catalogue, no `commission_rate`, no `per_order_rate`, no surcharge** — and
+  `per_order` is deliberately absent from the interval vocabulary, since reviving it
+  would restate the per-order-commission framing the non-custodial posture keeps out
+- **No FK to `Order` or `DinifyTransaction`** — that is exactly how commercial TERMS
+  would quietly become a payment-state model. A test pins it
+
+### NO PSP STATE, NO TAX-OBLIGATION FIELD, NO OWNER APPROVAL
+No provider name, merchant id, provider account, merchant status or webhook state
+appears anywhere, and `psp_online` is provider-agnostic. **There is no PSP integration
+in this repository**, so there is no provider-authoritative state to project; a local
+`ready` flag nobody writes would read `not_configured` forever or be an operator
+asserting a fact only the provider can know. PSP merchant state arrives WITH the first
+integration; until then readiness can derive `not_applicable` (offline) vs
+"required but unavailable" (psp_online) from the collection mode alone.
+
+No `tax_obligation` field was added — the repository has no authoritative basis for
+deciding which Ugandan restaurants must supply which identifier. The tenant-owned
+`vat_registered` / `vat_rate` / `tin` are unchanged.
+
+**Future owner go-live approval will bind to the EXACT facts it approved** — the
+current `owner_id`, the exact `RestaurantSubscriptionTerms.id`, the exact
+`payment_timing` and the exact `payment_collection_mode`. It must **NOT** bind to
+`RestaurantServiceConfiguration.updated_at`: a generic row timestamp would let an
+unrelated future edit silently invalidate a valid approval, and would equally fail to
+invalidate one if a value changed without the timestamp moving.
+
+### NO BACKFILL, NO AUTOMATIC ROWS
+Migration `commercial_app/0001_initial` creates two tables and **nothing else** — no
+`RunPython`, no `RunSQL`, no touch of any existing table, zero runtime rows. Nothing
+is derived from `require_order_prepayments` (ZERO runtime readers — a stored intention
+nothing enforces cannot establish a service model), `Table.prepayment_required`,
+`preferred_subscription_method`, `flat_fee`, `subscription_validity`,
+`subscription_expiry_date` or `DinifyTransaction.payment_mode`. Those legacy fields
+survive unchanged for compatibility/history — expand first, contract later.
+
+There is **no signal, no `post_save`, no `get_or_create` on a read path and no default
+row**: a newly created restaurant gets ZERO commercial rows until a future onboarding
+service deliberately records them, and **`is_test` is not a schema shortcut** (a test
+tenant rehearses the same path; zero-priced terms are legitimate only once recorded).
+Tests pin all of this, including that no signal receivers are registered.
+
+### Tenancy
+No serializer, so the TENANT-STRUCT-00 machinery (which reasons about DRF
+`ModelSerializer` relations) discovers nothing, `baseline.txt` is unchanged and the
+ratchet reports no additions — the cleanest possible outcome, since there is no
+writable relation to classify. Tests prove no serializer targets either model, that
+neither is reachable through the `restaurant-setup` catch-all, that a `restaurants`
+PUT cannot smuggle the fields, and that no delegated route mentions the domain.
+
+
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns
   a human-readable reason, or `None` if deletable), NOT in the generic
@@ -1864,7 +2023,11 @@ semantics (what counts as evidence of owner control), not directory presentation
   control plane"; 0009 creates the onboarding domain, two new tables with their
   constraints and NOTHING else — no `RunPython`, no backfill, no existing table
   touched — see "Admin Onboarding Domain"),
-  `misc_app/migrations/0004_drop_service_tickets.py`
+  `misc_app/migrations/0004_drop_service_tickets.py`,
+  `commercial_app/migrations/0001_initial.py` (the Step-3B commercial domain: two
+  new tables with their constraints and one index, NO `RunPython`/`RunSQL`, no
+  existing table touched, zero rows created — see "Commercial & Service
+  Configuration Domain")
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main` and on PRs to `main`

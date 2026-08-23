@@ -68,6 +68,11 @@ INSTALLED_APPS = [
     'support_app',
     'reviews_app',
     'platform_admin_app',
+    # Restaurant-level commercial / service-configuration domain (payment timing,
+    # payment collection mode, Dinify subscription terms). A business-domain app,
+    # deliberately NOT part of platform_admin_app: that is a control plane, and
+    # these facts will be read by readiness and other non-Admin code.
+    'commercial_app',
 ]
 
 MIDDLEWARE = [
