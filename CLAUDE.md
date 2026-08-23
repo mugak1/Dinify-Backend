@@ -1033,15 +1033,26 @@ the catch-all `<str:config_detail>/` route.
   only thing that can register a file edit — it keys on `key in self.data` (NOT
   "value is non-null"), so an explicit `null`-clear of a file field counts as a
   change and persists (HTTP 200), rather than collapsing to "no changes detected"
-- `flat_fee` (the Dinify subscription price billed by
-  `finance_app.tx_subscription`) is registered in `EDIT_INFORMATION['restaurants']`
-  but is PLATFORM-owned — the restaurant-setup write path STRIPS the key from
-  EVERY `restaurants` PUT payload AFTER `check_permission` and BEFORE the Secretary
-  dispatch (PR #211; made unconditional by PR-A), so no principal on this plane can
-  zero a subscription price. It used to be stripped only for non-admins, which left
-  a `dinify_admin` role-holder able to write it. This is a post-gate payload strip,
-  NOT an EDIT_INFORMATION removal — the key deliberately STAYS in EDIT_INFORMATION
-  so the Phase-1 admin-plane writer can still go through Secretary
+- TWO commercial keys are registered in `EDIT_INFORMATION['restaurants']` but are
+  PLATFORM-owned: `flat_fee` (the subscription PRICE billed by
+  `finance_app.tx_subscription`) and `preferred_subscription_method` (the BILLING
+  METHOD, and the ONLY gate in `tx_subscription.initiate` — `== 'per_order'` →
+  refuse). The restaurant-setup write path STRIPS BOTH keys from EVERY
+  `restaurants` PUT payload AFTER `check_permission` and BEFORE the Secretary
+  dispatch (`platform_only_fields` in `restaurant_setup.py`), so no principal on
+  this plane can zero a subscription price or change the billing terms. `flat_fee`
+  was closed first (PR #211; made unconditional by PR-A — it used to be stripped
+  only for non-admins, leaving a `dinify_admin` role-holder able to write it);
+  `preferred_subscription_method` was left behind by that PR, so an owner could set
+  `monthly` and then `POST api/v1/finances/transactions/` (owner passes
+  `can_manage_restaurant`) to have Dinify record a subscription charge against
+  terms it never chose — closed by adding it to the same strip, with
+  `tx_subscription` itself unchanged. This is a post-gate payload strip, NOT an
+  EDIT_INFORMATION removal — both keys deliberately STAY in EDIT_INFORMATION so the
+  Phase-1 admin-plane writer can still go through Secretary, and neither is
+  `read_only` on `SerializerPutRestaurant` for the same reason. Delegated sessions
+  never reach this at all: `restaurant-setup` is GET-only on `ALLOWED_ROUTES`, so
+  the middleware refuses a delegated write before dispatch
 - `status` is DIFFERENT and stricter: PR-5 REMOVED it from
   `EDIT_INFORMATION['restaurants']` entirely (and made it `read_only` on
   `SerializerPutRestaurant`), so NO principal writes it through Secretary — see
@@ -1147,7 +1158,8 @@ the catch-all `<str:config_detail>/` route.
   (Secretary builds its payload solely from those keys) and `read_only` on
   `SerializerPutRestaurant`. The legacy admin `changeApprovalStatus` PUT is
   RETIRED: a Dinify admin can no longer write `status` through restaurant-setup
-  either. The `flat_fee` non-admin strip in `restaurant_setup.py` REMAINS
+  either. The platform-owned commercial strip in `restaurant_setup.py` REMAINS
+  (`flat_fee` + `preferred_subscription_method`)
 - The service takes `lock_admission_exclusive(restaurant.pk)` as the FIRST statement
   in its transaction — before the `Restaurant` row lock — so a transition excludes
   every in-flight order admission (Closure PR 2). **LOCK ORDER, and the advisory lock

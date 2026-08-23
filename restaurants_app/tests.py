@@ -4825,11 +4825,21 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
     """
     BUG-P3-2 + PR-5: platform-owned restaurant fields on the restaurant-setup PUT.
 
-    `flat_fee` (the Dinify subscription price billed by finance_app
+    `flat_fee` (the Dinify subscription PRICE billed by finance_app
     tx_subscription) keeps the original contract: a tenant (owner/manager) PUT
     carrying it has it silently stripped — matching how Secretary ignores
-    non-applicable fields — while the rest of the edit still applies, and a Dinify
-    admin retains write access.
+    non-applicable fields — while the rest of the edit still applies. (The strip is
+    UNCONDITIONAL since PR-A; the "a Dinify admin retains write access" half of the
+    original contract is gone with ambient authority, as the legacy-role tests
+    below assert.)
+
+    `preferred_subscription_method` (the BILLING METHOD, and the only gate in
+    tx_subscription.initiate) now gets the SAME treatment. It was left writable
+    when flat_fee was closed, so an owner could set `monthly` here and then reach
+    POST api/v1/finances/transactions/ to have a subscription charge recorded
+    against terms Dinify never chose. Both keys deliberately STAY in
+    EDIT_INFORMATION — this is a post-gate payload strip, so the Phase-1 admin
+    writer can still reach them through Secretary.
 
     `status` is now stricter than "admin-only". PR-5 made the lifecycle a
     constrained axis with exactly ONE writer (restaurants_app.controllers.lifecycle,
@@ -4859,6 +4869,9 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
             name='Active Bistro', location='loc-active',
             status=RestaurantStatus_Live, owner=self.owner,
             flat_fee=Decimal('2500.00'),
+            # Stated explicitly rather than left to the model default: the strip
+            # assertions below are only legible if the starting value is visible.
+            preferred_subscription_method='per_order',
         )
         RestaurantEmployee.objects.create(
             user=self.owner, restaurant=self.active_restaurant,
@@ -4963,6 +4976,84 @@ class RestaurantAdminOnlyFieldGuardTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.active_restaurant.refresh_from_db()
         self.assertEqual(self.active_restaurant.flat_fee, Decimal('2500.00'))
+
+    def test_tenant_subscription_method_stripped_name_applies(self):
+        """
+        The billing method is stripped while a legitimate field in the SAME request
+        still applies — the field-level contract `flat_fee` already has.
+
+        `monthly` is the value that matters: it is the one that would make
+        tx_subscription.initiate stop refusing (its only gate is `== 'per_order'`).
+        """
+        response = self._put_restaurant(self.owner, {
+            'id': str(self.active_restaurant.id),
+            'name': 'Method Renamed Bistro',
+            'preferred_subscription_method': 'monthly',
+        })
+        self.assertEqual(response.status_code, 200, response.content)
+        self.active_restaurant.refresh_from_db()
+        self.assertEqual(self.active_restaurant.name, 'Method Renamed Bistro')
+        self.assertEqual(
+            self.active_restaurant.preferred_subscription_method, 'per_order',
+        )
+
+    def test_tenant_subscription_method_only_write_is_stripped_noop(self):
+        """
+        A method-only tenant PUT is fully stripped, so Secretary finds no applicable
+        field and returns the EXISTING 400 'No changes detected' — the same
+        strip/no-op semantics `flat_fee` and `status` already produce. No new
+        response contract is introduced for this field.
+        """
+        response = self._put_restaurant(self.owner, {
+            'id': str(self.active_restaurant.id),
+            'preferred_subscription_method': 'yearly',
+        })
+        self.assertEqual(response.status_code, 400, response.content)
+        self.active_restaurant.refresh_from_db()
+        self.assertEqual(
+            self.active_restaurant.preferred_subscription_method, 'per_order',
+        )
+
+    def test_both_commercial_fields_are_stripped_in_one_request(self):
+        """
+        Closing the method must not reopen the price. One PUT carrying both halves
+        of Dinify's commercial relationship plus a legitimate edit: the edit lands,
+        neither commercial field moves.
+        """
+        from decimal import Decimal
+        response = self._put_restaurant(self.owner, {
+            'id': str(self.active_restaurant.id),
+            'name': 'Both Stripped Bistro',
+            'flat_fee': '0.00',
+            'preferred_subscription_method': 'monthly',
+        })
+        self.assertEqual(response.status_code, 200, response.content)
+        self.active_restaurant.refresh_from_db()
+        self.assertEqual(self.active_restaurant.name, 'Both Stripped Bistro')
+        self.assertEqual(self.active_restaurant.flat_fee, Decimal('2500.00'))
+        self.assertEqual(
+            self.active_restaurant.preferred_subscription_method, 'per_order',
+        )
+
+    def test_subscription_method_stays_editable_for_the_phase_1_admin_writer(self):
+        """
+        The strip is a POST-GATE PAYLOAD strip, not an EDIT_INFORMATION removal.
+
+        Both commercial keys must remain in EDIT_INFORMATION['restaurants'] so the
+        Phase-1 admin-plane writer can still go through Secretary — the contract
+        `flat_fee` has carried since PR#211. Removing them here would silently break
+        that writer before it is built, and a comment cannot notice that happening.
+        """
+        from dinify_backend.configss.edit_information import EDIT_INFORMATION
+        from restaurants_app.serializers import SerializerPutRestaurant
+        keys = {entry['key'] for entry in EDIT_INFORMATION['restaurants']}
+        self.assertIn('preferred_subscription_method', keys)
+        self.assertIn('flat_fee', keys)
+        # ...and neither is read_only on the write serializer, for the same reason.
+        self.assertNotIn(
+            'preferred_subscription_method',
+            SerializerPutRestaurant.Meta.read_only_fields,
+        )
 
     def test_tenant_normal_edit_without_admin_fields_unaffected(self):
         """Regression: an edit carrying no admin-only field behaves exactly as before."""
