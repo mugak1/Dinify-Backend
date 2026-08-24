@@ -20,7 +20,7 @@ parses on ACCESS, so an unreadable body escaped the audit entirely), and the rea
 rule was a second. Copying either into a new module is how the copies drift.
 """
 from rest_framework import serializers
-from rest_framework.exceptions import ParseError
+from rest_framework.exceptions import ParseError, UnsupportedMediaType
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -214,13 +214,28 @@ class ElevatedCommercialWriteView(AdminAPIView):
         ``self.audit``, so an elevated administrator's unsafe request would be absent
         from the control-plane log purely because it was unreadable.
 
-        The parse detail describes the CALLER'S OWN input and carries no server
+        TWO DISTINCT EXCEPTIONS REACH HERE, and catching only the first is the easy
+        mistake: a malformed JSON body raises ``ParseError``, but a body whose
+        ``Content-Type`` has no parser at all raises ``UnsupportedMediaType``, which
+        is NOT a subclass of it. Both are "the server could not read this request",
+        so both must be audited — but they are answered differently, because the
+        STATUS is the caller's remedy. A ``400`` says *the body was wrong*; a
+        ``415`` says *send JSON*. Folding the second into the first would delete the
+        one clue that tells the operator which mistake they made.
+
+        (Note that an EMPTY body never reaches either branch — DRF only invokes a
+        parser when there is content — so an empty ``text/plain`` request is an
+        ordinary validation failure, not a media-type one.)
+
+        The exception detail describes the CALLER'S OWN input and carries no server
         state, so it is passed through: hiding it would cost an operator the one clue
         they need without protecting anything.
         """
         try:
             return request.data, None
-        except ParseError as exc:
+        except (ParseError, UnsupportedMediaType) as exc:
+            unsupported = isinstance(exc, UnsupportedMediaType)
+            status = 415 if unsupported else 400
             self.audit(
                 request,
                 self.audit_action,
@@ -231,15 +246,17 @@ class ElevatedCommercialWriteView(AdminAPIView):
                 # No reason can be read from a body that would not parse, and one
                 # must never be invented.
                 reason='',
-                error_code='malformed_body',
+                error_code=(
+                    'unsupported_media_type' if unsupported else 'malformed_body'
+                ),
             )
             return None, Response(
                 {
-                    'status': 400,
+                    'status': status,
                     'message': 'The request could not be applied.',
                     'errors': {'__all__': [str(exc.detail)]},
                 },
-                status=400,
+                status=status,
             )
 
     def reject_invalid(self, request, restaurant, serializer):

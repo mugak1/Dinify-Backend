@@ -1547,11 +1547,18 @@ structurally incapable of disagreeing about them.
   audited: anonymous requests, CSRF failures (both refused inside authentication, before
   any administrative decision) and a missing/soft-deleted target (the transition
   endpoint's existing convention — nothing was denied and no tenant was touched).
-  **`request.data` PARSES ON ACCESS**, so that access is guarded: unguarded, DRF answers a
-  malformed body with its own bare `{"detail": ...}` — a different shape from every other
+  **`request.data` PARSES ON ACCESS**, so that access is guarded: unguarded, DRF answers an
+  unreadable body with its own bare `{"detail": ...}` — a different shape from every other
   error here — and the request never reaches `self.audit`, so an elevated administrator's
-  unsafe request would be missing from the log purely because it was unreadable
-  (`malformed_body`)
+  unsafe request would be missing from the log purely because it was unreadable.
+  **TWO DISTINCT EXCEPTIONS reach that guard and catching only the first is the easy
+  mistake**: malformed JSON raises `ParseError` (→ **400**, `malformed_body`), while a
+  `Content-Type` with no parser raises `UnsupportedMediaType` — NOT a subclass of it — and
+  bypassed the guard entirely until Step 3D.2b (→ **415**, `unsupported_media_type`). Both
+  are audited; they keep different statuses because the status IS the caller's remedy — 400
+  says the body was wrong, 415 says send JSON, and folding one into the other deletes the
+  clue. An EMPTY body reaches neither branch (DRF invokes a parser only when there is
+  content), so empty `text/plain` is an ordinary validation failure
 - **A REJECTED REQUEST RECORDS `reason` ONLY IF THE REASON FIELD ITSELF VALIDATED**, and
   then its NORMALIZED value — corrected in Step 3D.2b. The audit used to carry the RAW
   `request.data['reason']`, so a refused request wrote an untrimmed, over-long or
@@ -1653,7 +1660,9 @@ Step-3C mutations are reachable over HTTP and nothing else is.
 - **STATUS MAPPING.** Changed success and every same-state no-op are `200`;
   `subscription_terms_already_open` / `stale_subscription_terms` /
   `no_open_subscription_terms` / `subscription_terms_not_found` are `409`; a malformed
-  or unparseable body is `400` with field-keyed `errors`; a missing or soft-deleted
+  or unparseable body is `400` with field-keyed `errors`; an unreadable `Content-Type` is
+  `415` (`unsupported_media_type`, audited — see the parse-guard bullet in the 3D.2a
+  section, which both surfaces share); a missing or soft-deleted
   restaurant is a silent `404`; stale or absent elevation is `403`.
   **`subscription_terms_not_found` is a 409, NOT a 404** — this route's target is the
   RESTAURANT, which exists; the terms id is a concurrency assertion about it, and
