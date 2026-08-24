@@ -915,6 +915,73 @@ class RequestValidationTests(_CommercialWriteTestCase):
             with self.subTest(case=label):
                 self._assert_rejected(mode_url(self.restaurant), body, field)
 
+    def test_unparseable_json_is_a_400_in_the_house_envelope(self):
+        """
+        A body DRF cannot parse never reaches the serializer.
+
+        ``request.data`` raises ``ParseError`` on access, which DRF turns into its
+        own bare ``{"detail": ...}`` 400 — a different shape from every other error
+        this endpoint returns, so a client branching on ``errors`` would break on it.
+        """
+        for url in (timing_url(self.restaurant), mode_url(self.restaurant)):
+            with self.subTest(url=url):
+                response = self.client.post(
+                    url,
+                    data='{"value": "pay_first", ',  # truncated
+                    content_type='application/json',
+                )
+                self.assertEqual(response.status_code, 400, response.content)
+                payload = response.json()
+                self.assertEqual(payload['status'], 400)
+                self.assertIn('errors', payload)
+                self.assertIn('__all__', payload['errors'])
+
+    def test_unparseable_json_is_audited_exactly_once(self):
+        """
+        An elevated administrator sent an unsafe request. That it was unreadable
+        does not make it a non-event — and the parse failure happens BEFORE the
+        serializer exists, so nothing downstream would have recorded it.
+        """
+        before = AdminAuditLog.objects.count()
+        self.client.post(
+            timing_url(self.restaurant),
+            data='{"value": "pay_first", ',
+            content_type='application/json',
+        )
+        self.assertEqual(AdminAuditLog.objects.count(), before + 1)
+        entry = AdminAuditLog.objects.order_by('-created_at', '-id').first()
+        self.assertEqual(entry.action, ADMIN_RESTAURANT_PAYMENT_TIMING_SET)
+        self.assertEqual(entry.result, RESULT_FAILURE)
+        self.assertEqual(entry.error_code, 'malformed_body')
+        self.assertEqual(str(entry.restaurant_id), str(self.restaurant.id))
+        self.assertIsNone(entry.before_state)
+        self.assertIsNone(entry.after_state)
+        self.assertFalse(RestaurantServiceConfiguration.objects.exists())
+
+    def test_an_unparseable_body_against_a_missing_target_is_still_a_silent_404(self):
+        """The target check comes first, and its no-audit convention still wins."""
+        deleted = _make_restaurant('Unparseable House', deleted=True)
+        before = AdminAuditLog.objects.count()
+        response = self.client.post(
+            timing_url(deleted), data='{oops', content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 404, response.content)
+        self.assertEqual(AdminAuditLog.objects.count(), before)
+
+    def test_a_non_dict_body_is_rejected_and_audited(self):
+        """Already correct before the parse fix — pinned so it cannot regress."""
+        before = AdminAuditLog.objects.count()
+        response = self.client.post(
+            timing_url(self.restaurant),
+            data='["not", "a", "dict"]', content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn('non_field_errors', response.json()['errors'])
+        self.assertEqual(AdminAuditLog.objects.count(), before + 1)
+        entry = AdminAuditLog.objects.order_by('-created_at', '-id').first()
+        self.assertEqual(entry.result, RESULT_FAILURE)
+        self.assertEqual(entry.error_code, 'invalid_request')
+
     def test_an_empty_body_is_rejected_on_every_field(self):
         response = self.client.post(
             timing_url(self.restaurant), data={},

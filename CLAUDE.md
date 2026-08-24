@@ -1489,11 +1489,16 @@ no serializer, no audit action for them; that is Step 3D.2b.
   ONE ACTION PER ENDPOINT, not per outcome — `AdminAuditLog.result` carries that axis, and
   a `*_changed`/`*_no_op`/`*_failed` trio would make "how often did anyone try?"
   unanswerable without knowing every spelling. Covers changed success, **no-op success**,
-  invalid body, stale conflict and elevation denial (via a `permission_denied` override,
-  since DRF rejects permissions before the handler). NOT audited: anonymous requests, CSRF
-  failures (both refused inside authentication, before any administrative decision) and a
-  missing/soft-deleted target (the transition endpoint's existing convention — nothing was
-  denied and no tenant was touched)
+  invalid body, an **unparseable body**, stale conflict and elevation denial (via a
+  `permission_denied` override, since DRF rejects permissions before the handler). NOT
+  audited: anonymous requests, CSRF failures (both refused inside authentication, before
+  any administrative decision) and a missing/soft-deleted target (the transition
+  endpoint's existing convention — nothing was denied and no tenant was touched).
+  **`request.data` PARSES ON ACCESS**, so that access is guarded: unguarded, DRF answers a
+  malformed body with its own bare `{"detail": ...}` — a different shape from every other
+  error here — and the request never reaches `self.audit`, so an elevated administrator's
+  unsafe request would be missing from the log purely because it was unreadable
+  (`malformed_body`)
 - **`before_state` / `after_state` carry ONLY that axis**, e.g.
   `{"payment_timing": "pay_first"}`. Equal on a no-op — the request happened, nothing
   moved. A conflict records the real current value from the error's `actual_current` and

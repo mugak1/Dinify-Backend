@@ -60,6 +60,7 @@ out.
 """
 from django.db import transaction
 from rest_framework import serializers
+from rest_framework.exceptions import ParseError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -283,7 +284,41 @@ class _CommercialAxisWriteView(AdminAPIView):
         if restaurant is None:
             return _not_found()
 
-        serializer = self.serializer_class(data=request.data)
+        # ``request.data`` PARSES ON ACCESS, and a body DRF cannot read raises here
+        # rather than reaching the serializer at all. Left unguarded, DRF answers
+        # with its own bare ``{"detail": ...}`` — a different shape from every other
+        # error this endpoint returns — and, more importantly, the request never
+        # reaches `self.audit`, so an elevated administrator's unsafe request would
+        # be absent from the control-plane log purely because it was unreadable.
+        #
+        # The parse detail describes the CALLER'S OWN input and carries no server
+        # state, so it is passed through: hiding it would cost an operator the one
+        # clue they need without protecting anything.
+        try:
+            payload = request.data
+        except ParseError as exc:
+            self.audit(
+                request,
+                self.audit_action,
+                result=RESULT_FAILURE,
+                resource_type='Restaurant',
+                resource_id=str(restaurant.id),
+                restaurant_id=restaurant.id,
+                # No reason can be read from a body that would not parse, and one
+                # must never be invented.
+                reason='',
+                error_code='malformed_body',
+            )
+            return Response(
+                {
+                    'status': 400,
+                    'message': 'The request could not be applied.',
+                    'errors': {'__all__': [str(exc.detail)]},
+                },
+                status=400,
+            )
+
+        serializer = self.serializer_class(data=payload)
         if not serializer.is_valid():
             # A malformed body from an authenticated, elevated administrator is
             # still an administrative ATTEMPT at a consequential change, so it is
