@@ -18,6 +18,10 @@ from platform_admin_app.endpoints.delegation import (
     AdminDelegationRevokeView,
     AdminDelegationsView,
 )
+from platform_admin_app.endpoints.commercial import (
+    AdminRestaurantPaymentCollectionModeView,
+    AdminRestaurantPaymentTimingView,
+)
 from platform_admin_app.endpoints.restaurants import (
     AdminRestaurantDetailView,
     AdminRestaurantListView,
@@ -69,5 +73,23 @@ urlpatterns = [
         'restaurants/<uuid:restaurant_id>/transition/',
         AdminRestaurantTransitionView.as_view(),
         name='admin-restaurant-transition',
+    ),
+
+    # Commercial / service configuration writes (Phase 1, Step 3D.2a). Both
+    # elevation-gated and reason-required, and both delegate the mutation to
+    # `commercial_app.service_configuration`.
+    #
+    # TWO EXPLICIT PATHS, never one route with a field parameter: these are two
+    # different commercial decisions, and the route should tell a reviewer which one
+    # a request made without them having to read a body.
+    path(
+        'restaurants/<uuid:restaurant_id>/commercial/payment-timing/',
+        AdminRestaurantPaymentTimingView.as_view(),
+        name='admin-restaurant-payment-timing',
+    ),
+    path(
+        'restaurants/<uuid:restaurant_id>/commercial/payment-collection-mode/',
+        AdminRestaurantPaymentCollectionModeView.as_view(),
+        name='admin-restaurant-payment-collection-mode',
     ),
 ]

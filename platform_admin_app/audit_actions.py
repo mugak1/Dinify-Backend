@@ -91,6 +91,25 @@ ADMIN_RESTAURANT_TEST_CLASSIFICATION_CHANGED = (
     'admin.restaurant.test_classification_changed'
 )
 
+# --- admin.restaurant: commercial / service configuration -------------------
+# A restaurant's canonical PAYMENT TIMING (`pay_first` | `pay_after`) was set through
+# the Admin control plane, and its PAYMENT COLLECTION MODE (`offline` | `psp_online`).
+#
+# ONE ACTION PER ENDPOINT, not one per outcome. There is deliberately no
+# `*_changed` / `*_no_op` / `*_failed` trio: `AdminAuditLog.result` already carries
+# the outcome axis, and splitting it into the action name would make "how often did
+# anyone try to change this restaurant's payment timing?" a question you have to
+# know all the spellings to ask. The verb is `_set` for the same reason — it names
+# the administrative operation, which happened whether or not a row moved.
+#
+# before_state / after_state carry ONLY that axis's value before and after; on a
+# same-state retry the two are equal, which is exactly the record wanted: the
+# request was made, and nothing moved. The reason is mandatory at the endpoint.
+ADMIN_RESTAURANT_PAYMENT_TIMING_SET = 'admin.restaurant.payment_timing_set'
+ADMIN_RESTAURANT_PAYMENT_COLLECTION_MODE_SET = (
+    'admin.restaurant.payment_collection_mode_set'
+)
+
 # --- admin.restaurant: the onboarding domain --------------------------------
 # A pre-existing canonical Restaurant was brought into the Admin onboarding domain
 # as ``legacy_adopted`` provenance. Emitted only for a NEW adoption: a re-run of the
