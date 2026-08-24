@@ -110,6 +110,29 @@ ADMIN_RESTAURANT_PAYMENT_COLLECTION_MODE_SET = (
     'admin.restaurant.payment_collection_mode_set'
 )
 
+# The restaurant -> Dinify software-subscription TERMS. Three actions because there
+# are three genuinely different administrative decisions, not because there are three
+# outcomes: `result` still carries success/failure/denied, so there is no
+# `*_success` / `*_failed` / `*_no_op` variant of any of them.
+#
+# before_state / after_state carry ONE narrow snapshot of the terms under
+# `subscription_terms` — id, amount, currency, interval, effective_from — describing
+# THE CANONICAL CURRENT CONFIGURATION as the request found it and left it, never a
+# historical transition replayed. On a no-op the two are equal (or both null, for an
+# end retry): the request happened, nothing moved.
+#
+# These record PRICING TERMS. None of them charges anything, proves the owner agreed,
+# or touches a payment, invoice or PSP.
+ADMIN_RESTAURANT_SUBSCRIPTION_TERMS_RECORDED = (
+    'admin.restaurant.subscription_terms_recorded'
+)
+ADMIN_RESTAURANT_SUBSCRIPTION_TERMS_REPLACED = (
+    'admin.restaurant.subscription_terms_replaced'
+)
+ADMIN_RESTAURANT_SUBSCRIPTION_TERMS_ENDED = (
+    'admin.restaurant.subscription_terms_ended'
+)
+
 # --- admin.restaurant: the onboarding domain --------------------------------
 # A pre-existing canonical Restaurant was brought into the Admin onboarding domain
 # as ``legacy_adopted`` provenance. Emitted only for a NEW adoption: a re-run of the

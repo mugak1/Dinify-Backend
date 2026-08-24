@@ -597,13 +597,18 @@ so keep it current when conventions change.
   migration, no new route, zero extra queries). Step 3D.2a then added the FIRST Admin
   WRITE surface — two elevated, reasoned, audited POST routes for the two
   service-configuration axes (`platform_admin_app/endpoints/commercial.py`), each a
-  thin adapter over the Step-3C writer. **Subscription-terms HTTP writes are still
-  NOT built** (Step 3D.2b), and `commercial_app` itself still has no HTTP surface, no
-  serializer and no management command. See the "Commercial & Service Configuration
-  Domain" section for the four concepts these models keep apart and the writer
-  contract, "The canonical `commercial` object" under Admin Restaurant Reads for what
-  the projection does and does not assert, and "Admin Commercial Writes" for the
-  adapter contract
+  thin adapter over the Step-3C writer. Step 3D.2b then completed the surface with the
+  three SUBSCRIPTION-TERMS writes (`platform_admin_app/endpoints/subscription_terms.py`
+  — record / replace / end), on the same elevated + reasoned + audited contract, and
+  factored the shared control-plane mechanics both adapters use into
+  `platform_admin_app/endpoints/commercial_base.py`. All five Step-3C mutations are
+  now reachable over HTTP and NOTHING ELSE IS — `commercial_app` itself still has no
+  HTTP surface, no serializer and no management command. See the "Commercial &
+  Service Configuration Domain" section for the four concepts these models keep apart
+  and the writer contract, "The canonical `commercial` object" under Admin Restaurant
+  Reads for what the projection does and does not assert, "Admin Commercial Writes"
+  for the service-configuration adapter contract and "Admin Subscription-Terms
+  Writes" for the terms one
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -1021,10 +1026,15 @@ so keep it current when conventions change.
   `restaurants/` + `restaurants/<uuid:id>/` (the Phase-1 Step-1 directory and
   detail READS — see "Admin Restaurant Reads" below), and
   `restaurants/<uuid:id>/transition/` (the ONLY writer of `Restaurant.status`,
-  elevation-gated), and the two Step-3D.2a commercial writes
+  elevation-gated), the two Step-3D.2a commercial writes
   `restaurants/<uuid:id>/commercial/payment-timing/` +
   `restaurants/<uuid:id>/commercial/payment-collection-mode/` (POST, elevation-gated,
-  reason-required — see "Admin Commercial Writes"). The two reads are session-gated
+  reason-required — see "Admin Commercial Writes"), and the three Step-3D.2b
+  subscription-terms writes `restaurants/<uuid:id>/commercial/subscription-terms/`
+  + `.../subscription-terms/replace/` + `.../subscription-terms/end/` (POST, same
+  contract — see "Admin Subscription-Terms Writes"). THREE ROUTES, NOT ONE WITH AN
+  `action` SEGMENT: recording, superseding and closing are different decisions with
+  different tokens and different histories. The two reads are session-gated
   but NOT elevation-gated, and are NOT audited — see that section for why both are
   deliberate
 
@@ -1430,6 +1440,44 @@ detail, identical on `origin/main` and on this branch**. Notes for anyone editin
   index is what makes the join safe**
 - Do NOT swap in a `Prefetch` (two queries for the page) or seven correlated subqueries
 
+### ONE definition of attention
+`needs_attention(restaurant)` (the per-row predicate) and `attention_filter()` (its
+SQL mirror for `?attention=`) are both in `restaurant_reads.py`, and a ratchet test
+asserts they agree across EVERY lifecycle state. A filter that disagrees with the
+badge is how an operator's inbox silently drops work — do not add a second opinion.
+
+### Query parameters and pagination
+`?search=` (name/location, trimmed), `?status=` (a lifecycle state), `?attention=`
+(strict boolean — `true/1/yes` / `false/0/no`), `?page=`, `?page_size=` (default 25,
+max 100). Invalid values are a **400 with a field-keyed `errors` map reporting ALL
+problems at once**, never a silent default: a filter that quietly ignores what it was
+asked returns a plausible page answering a different question. Ordering is
+`('name', 'id')` — the `id` tiebreak is what makes pagination deterministic when two
+restaurants share a name.
+
+**The query string is deny-by-default too.** `KNOWN_PARAMS` is the complete accepted
+set and an unrecognised key is a 400 under `errors['__all__']` — `?stats=live` (a typo
+for `status`) must never return a cheerful unfiltered 200, which is the worst version
+of the silent-default failure because the operator believes they filtered. Adding a
+filter means adding it to `KNOWN_PARAMS` as well as parsing it; a test asserts the two
+stay in step, so a new parameter cannot ship silently rejected. **`page` is bounded by
+`MAX_PAGE` (1,000,000)** for a mechanical reason, not a product one: `page` multiplies
+with `page_size` into a SQL `OFFSET`, and an unbounded page number overflowed
+PostgreSQL's `bigint` and raised `DataError` — a 500 from the one endpoint whose whole
+contract is that a bad parameter is a 400.
+
+### No N+1
+`directory_queryset()` carries `select_related('owner')`, an aggregate
+`open_issue_count`, and a correlated `Subquery` for `last_activity_at` (correlated
+because `AdminAuditLog.restaurant_id` is a plain `UUIDField`, not an FK). A query-count
+test asserts a large page costs the SAME number of queries as a small one — add a
+per-row read and it fails.
+
+### There is no human-readable restaurant reference
+No `REST-0018`. The backend has no such column, and minting a sequential business key
+inside a read endpoint would create a persistent identifier nothing else writes. The
+`Restaurant` UUID is the identity.
+
 ## Admin Commercial Writes — Phase 1, Step 3D.2a
 
 The FIRST supported HTTP path for changing canonical commercial configuration. Two
@@ -1441,8 +1489,13 @@ POST admin/v1/restaurants/<uuid>/commercial/payment-collection-mode/
 ```
 
 Body for both: `{"value": ..., "expected_current": ..., "reason": ...}`. No migration,
-no model change, and **subscription-terms writes are deliberately NOT here** — no URL,
-no serializer, no audit action for them; that is Step 3D.2b.
+no model change. **Subscription-terms writes are deliberately NOT here** — they are
+their own three routes with their own serializers, tokens and audit actions; see
+"Admin Subscription-Terms Writes" below. The control-plane mechanics both adapters
+share (the reason field, the `request.data` parse guard, the domain→HTTP status map,
+the canonical re-read, the `permission_denied` audit override) live in
+`platform_admin_app/endpoints/commercial_base.py` so the two surfaces are
+structurally incapable of disagreeing about them.
 
 - **TWO ROUTES, NEVER ONE WITH A FIELD PARAMETER.** Payment timing is a SERVICE-MODEL
   fact and collection mode a CUSTODY fact — different consequences and plausibly
@@ -1499,6 +1552,17 @@ no serializer, no audit action for them; that is Step 3D.2b.
   error here — and the request never reaches `self.audit`, so an elevated administrator's
   unsafe request would be missing from the log purely because it was unreadable
   (`malformed_body`)
+- **A REJECTED REQUEST RECORDS `reason` ONLY IF THE REASON FIELD ITSELF VALIDATED**, and
+  then its NORMALIZED value — corrected in Step 3D.2b. The audit used to carry the RAW
+  `request.data['reason']`, so a refused request wrote an untrimmed, over-long or
+  entirely non-string value into the log's `reason` column: the one field an operator
+  reads to learn why a change was attempted, filled with something the endpoint had
+  just refused. It cannot be read off `serializer.validated_data` either — DRF empties
+  that after ANY field fails — so `commercial_base.audit_reason()` re-runs the reason
+  field's own validation against `initial_data`, and returns `''` unless
+  `'reason' not in serializer.errors` proves it passed. So a valid `'   ...   '`
+  survives a sibling field's failure as its trimmed form, and a blank, short or
+  numeric reason is recorded as absent rather than as itself
 - **`before_state` / `after_state` carry ONLY that axis**, e.g.
   `{"payment_timing": "pay_first"}`. Equal on a no-op — the request happened, nothing
   moved. A conflict records the real current value from the error's `actual_current` and
@@ -1539,43 +1603,118 @@ no serializer, no audit action for them; that is Step 3D.2b.
   `commercial`, adds the editing UI, sends `expected_current`, collects the reason and handles
   the 409
 
-### ONE definition of attention
-`needs_attention(restaurant)` (the per-row predicate) and `attention_filter()` (its
-SQL mirror for `?attention=`) are both in `restaurant_reads.py`, and a ratchet test
-asserts they agree across EVERY lifecycle state. A filter that disagrees with the
-badge is how an operator's inbox silently drops work — do not add a second opinion.
+## Admin Subscription-Terms Writes — Phase 1, Step 3D.2b
 
-### Query parameters and pagination
-`?search=` (name/location, trimmed), `?status=` (a lifecycle state), `?attention=`
-(strict boolean — `true/1/yes` / `false/0/no`), `?page=`, `?page_size=` (default 25,
-max 100). Invalid values are a **400 with a field-keyed `errors` map reporting ALL
-problems at once**, never a silent default: a filter that quietly ignores what it was
-asked returns a plausible page answering a different question. Ordering is
-`('name', 'id')` — the `id` tiebreak is what makes pagination deterministic when two
-restaurants share a name.
+The Admin HTTP surface over the three Step-3C terms operations, in
+`platform_admin_app/endpoints/subscription_terms.py`:
 
-**The query string is deny-by-default too.** `KNOWN_PARAMS` is the complete accepted
-set and an unrecognised key is a 400 under `errors['__all__']` — `?stats=live` (a typo
-for `status`) must never return a cheerful unfiltered 200, which is the worst version
-of the silent-default failure because the operator believes they filtered. Adding a
-filter means adding it to `KNOWN_PARAMS` as well as parsing it; a test asserts the two
-stay in step, so a new parameter cannot ship silently rejected. **`page` is bounded by
-`MAX_PAGE` (1,000,000)** for a mechanical reason, not a product one: `page` multiplies
-with `page_size` into a SQL `OFFSET`, and an unbounded page number overflowed
-PostgreSQL's `bigint` and raised `DataError` — a 500 from the one endpoint whose whole
-contract is that a bad parameter is a 400.
+```
+POST admin/v1/restaurants/<uuid>/commercial/subscription-terms/          (record)
+POST admin/v1/restaurants/<uuid>/commercial/subscription-terms/replace/
+POST admin/v1/restaurants/<uuid>/commercial/subscription-terms/end/
+```
 
-### No N+1
-`directory_queryset()` carries `select_related('owner')`, an aggregate
-`open_issue_count`, and a correlated `Subquery` for `last_activity_at` (correlated
-because `AdminAuditLog.restaurant_id` is a plain `UUIDField`, not an FK). A query-count
-test asserts a large page costs the SAME number of queries as a small one — add a
-per-row read and it fails.
+No migration, no model change, no schema change and no new domain rule — every
+mutation is `commercial_app.subscription_terms` called unchanged. With this, all five
+Step-3C mutations are reachable over HTTP and nothing else is.
 
-### There is no human-readable restaurant reference
-No `REST-0018`. The backend has no such column, and minting a sequential business key
-inside a read endpoint would create a persistent identifier nothing else writes. The
-`Restaurant` UUID is the identity.
+- **WHAT THESE ROWS ARE.** The recurring SOFTWARE-SUBSCRIPTION terms Dinify has
+  RECORDED for a restaurant — restaurant → Dinify money, entirely separate from
+  diner → restaurant payments. They are **not** an invoice, a payment, paid status,
+  entitlement, good standing, PSP state or owner agreement; recording terms charges
+  nobody and proves nothing about the owner's consent. "Open" is `ended_at IS NULL`
+  and nothing more. Do not let a future field smuggle a billing verdict in here
+- **THREE EXPLICIT ROUTES, NEVER ONE WITH AN `action`.** Recording first terms,
+  superseding the open ones and closing them are materially different decisions with
+  different preconditions, different concurrency tokens and different histories left
+  behind. A `subscription-terms/<str:action>/` route would make "what did this
+  operator do?" a question about a path segment, and one serializer with
+  conditionally-required fields would make the accepted body a question about a value
+  inside it. Same reasoning as the two service-configuration routes
+- **`expected_terms_id` IS ON REPLACE AND END, AND DELIBERATELY ABSENT FROM RECORD.**
+  Record means "this restaurant has no open terms" — an assertion about ABSENCE, which
+  no row id can name; the domain enforces it and answers
+  `subscription_terms_already_open`. A client that sends one on record is not honoured
+  and not humoured: the field is simply not on that contract
+- **THREE STRICT INPUT PRIMITIVES, each closing a specific silent coercion.**
+  `StrictDecimalStringField` refuses a JSON number, because the read emits
+  `recurring_amount` as a decimal string and a float in the middle of that round trip
+  is exactly what loses `0.00` vs `0.0` (a DRF `CharField` would NOT do — it coerces
+  the number to its string form and bypasses the contract with the very input it
+  exists to refuse). `AwareDateTimeField` requires an explicit offset, because DRF's
+  `DateTimeField` makes a naive value aware using the CURRENT timezone — silently
+  converting an omission into an assumption, and midnight EAT vs midnight UTC is three
+  hours of "which terms were in force". `StrictUUIDStringField` refuses a JSON number
+  for the token, because DRF's `UUIDField` evaluates `uuid.UUID(int=42)` and produces
+  a well-formed UUID no row has carried — the request then misses in the domain and
+  comes back **409 "terms changed since they were loaded"** when nothing changed and
+  the body was simply wrong. **A conflict is the one error here that means the world
+  moved; it must never be manufactured by coercion**
+- **STATUS MAPPING.** Changed success and every same-state no-op are `200`;
+  `subscription_terms_already_open` / `stale_subscription_terms` /
+  `no_open_subscription_terms` / `subscription_terms_not_found` are `409`; a malformed
+  or unparseable body is `400` with field-keyed `errors`; a missing or soft-deleted
+  restaurant is a silent `404`; stale or absent elevation is `403`.
+  **`subscription_terms_not_found` is a 409, NOT a 404** — this route's target is the
+  RESTAURANT, which exists; the terms id is a concurrency assertion about it, and
+  answering 404 would tell the operator their restaurant was gone. An unmapped domain
+  code is re-raised rather than relabelled, so an internal condition surfaces as a 500
+  and rolls back
+- **THE AUDIT RULE THAT IS EASIEST TO GET WRONG.** Each endpoint's before/after states
+  describe THE CANONICAL CURRENT CONFIGURATION as this request found it and left it —
+  never a historical transition replayed. `replace_subscription_terms` returns
+  `previous_terms` on an exact retry, as the evidence that the replacement already
+  happened; using that row as this request's `before_state` would write the old → new
+  transition into the log **a second time, as though it had occurred twice**. It did
+  not: the request moved nothing. So a replace no-op audits `before == after ==` the
+  current open terms, an end no-op audits `null → null`, and a record no-op audits
+  equal current states rather than claiming the terms were created again
+- **ONE AUDIT ACTION PER ENDPOINT, not per outcome** —
+  `admin.restaurant.subscription_terms_recorded` / `_replaced` / `_ended`, with
+  `AdminAuditLog.result` carrying that axis. Covers changed success, no-op success,
+  invalid body, unparseable body, every domain conflict and elevation denial. NOT
+  audited: anonymous requests, CSRF failures and a missing/soft-deleted target — the
+  same three exclusions the service-configuration routes make, for the same reasons
+- **THE AUDIT SNAPSHOT IS NARROW.** `terms_snapshot()` carries the id and the immutable
+  commercial facts (`recurring_amount` as a string, `currency`, `billing_interval`,
+  `effective_from`) and nothing else. Deliberately absent: `recorded_by` / `recorded_at`
+  (the audit row already says who and when), `ended_at` (a terminal stamp is not a
+  commercial fact, and on a replacement's outgoing row it would make the before-state
+  describe the closure rather than the terms), and every word this domain does not have
+  — no status, active, paid, valid, good standing, invoice, PSP or transaction. A
+  failure's before-state is THIS restaurant's actual open terms, read by the endpoint —
+  never reconstructed from `exc.details`, which can name a row belonging to another
+  tenant
+- **DOMAIN MUTATION + AUDIT SHARE ONE OUTER `transaction.atomic()`**, exactly as in
+  3D.2a: the Step-3C writer's own atomic block nests as a savepoint, a failed audit
+  rolls the mutation back (pinned by a fault injected at `AdminAuditLog.objects.create`
+  for all three operations), and a refused mutation is still recorded because the domain
+  exception unwinds only its savepoint
+- **THE SUCCESS RESPONSE RETURNS THE CANONICAL STEP-3D.1 `commercial` OBJECT**, re-read
+  from the database inside the same transaction — so a write hands back the exact
+  `expected_terms_id` its next edit needs, byte-identical to a GET. The transitional
+  `payment_mode` / `payment_mode_configured` / `subscription` keys are ABSENT from the
+  write response, as on the other two routes
+- **THE ENDPOINTS ARE ADAPTERS, NOT SECOND WRITERS.** The `Restaurant` lock, the
+  monotonic timeline rule, open-row selection, the continuous close-then-insert
+  boundary, the exact-retry proofs, the future-dating refusal and every no-op rule stay
+  in `commercial_app`. AST scans over BOTH the terms module and `commercial_base` fail
+  the build on `save` / `create` / `update_or_create` / `get_or_create` /
+  `bulk_create` / `delete`, so moving a write one module down does not slip past
+- **NOTHING ELSE MOVES.** No invoice, payment, receivable or PSP row exists or is
+  created; no readiness change (`check_go_live_readiness` still fails closed with
+  `readiness_not_configured`); no lifecycle gate (a tenant may need correction while
+  onboarding, live or suspended) and no lifecycle write; the two service-configuration
+  axes and their attribution are untouched and no configuration row is created by a
+  terms write; no legacy synchronisation in either direction (`flat_fee`,
+  `preferred_subscription_method`, `subscription_validity`, `subscription_expiry_date`,
+  `DinifyTransaction`); a terms write never auto-creates a replacement; historical rows
+  are retained, never deleted; and `is_test` gets no special write semantics
+- **NO ADMISSION ADVISORY LOCK**, for the same load-bearing reason as 3D.2a — the
+  lifecycle transition takes `advisory → Restaurant row`, so acquiring it after the row
+  lock here would invert that order, and nothing in the order path reads terms
+- **The Admin frontend does NOT expose these controls yet** — Step 3E adds the UI, sends
+  the tokens, collects the reason and handles the 409
 
 ## Admin Onboarding Domain — Phase 1, Steps 2A + 2B + 2C
 
@@ -1770,7 +1909,8 @@ semantics (what counts as evidence of owner control), not directory presentation
   it will read `tracked: true` / `legacy_adopted` / `consistent` /
   `not_established` / `not_applicable` purely from its data
 
-## Commercial & Service Configuration Domain — Phase 1, Steps 3B + 3C (+ 3D.1 read)
+## Commercial & Service Configuration Domain — Phase 1, Steps 3B + 3C
+(+ the 3D.1 read and the 3D.2a/3D.2b Admin adapters, which live elsewhere)
 
 `commercial_app` — a first-party BUSINESS-DOMAIN app holding the restaurant-level
 commercial facts that had no authoritative home. Step 3B built the SCHEMA (two models,
@@ -1988,13 +2128,15 @@ with `errors.py` (one `CommercialMutationError` carrying a stable `.code`) and
   `account_type`, an `AdminSession`, elevation, CSRF or a request, and never write
   `AdminAuditLog`; `resolve_actor` answers *who did this*, never *were they allowed
   to*. A test AST-scans the package and fails if any non-test module imports
-  `platform_admin_app`. The Step-3D.2a Admin adapter wraps **domain mutation + audit
-  in ONE OUTER transaction** so a failed audit rolls the mutation back — which only
-  works because the domain does not own the audit write; the internal atomic blocks
-  nest as savepoints inside it
+  `platform_admin_app`. The Step-3D.2a and 3D.2b Admin adapters each wrap **domain
+  mutation + audit in ONE OUTER transaction** so a failed audit rolls the mutation
+  back — which only works because the domain does not own the audit write; the
+  internal atomic blocks nest as savepoints inside it
 - **Lifecycle state does NOT gate these writes** (a tenant may need correction while
-  onboarding, live or suspended); whether an `offboarded` tenant is editable is
-  control-plane policy for the endpoint PR. `check_go_live_readiness` is UNCHANGED and
+  onboarding, live or suspended), and the 3D.2a/3D.2b adapters add no gate of their
+  own — an `offboarded` tenant's commercial facts stay correctable, since offboarding
+  is when they most often need a closing correction. Soft-DELETED is the one refusal,
+  and it comes from `lock_restaurant` on the locked row, surfacing as a silent 404. `check_go_live_readiness` is UNCHANGED and
   still returns `readiness_not_configured` — writable commercial facts do not make a
   restaurant ready. No owner-approval row is created, cleared or marked stale (none
   exists), and **nothing is bound to `configuration.updated_at`**

@@ -30,6 +30,7 @@ from commercial_app.models import (
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     ACCOUNT_TYPE_RESTAURANT_USER,
+    RESTAURANT_LIFECYCLE_STATES,
     RestaurantStatus_Live,
     RestaurantStatus_Onboarding,
 )
@@ -1047,6 +1048,91 @@ class RequestValidationTests(_CommercialWriteTestCase):
             200,
         )
 
+    # --- §8: the reason recorded on a REJECTED request ------------------------
+
+    def test_a_valid_padded_reason_is_audited_trimmed_when_another_field_fails(self):
+        """
+        The reason field itself validated, so it IS the operator's stated reason —
+        and it must be stored normalized, not as the raw padded string that happened
+        to be in the JSON.
+        """
+        before = AdminAuditLog.objects.count()
+        response = self.client.post(
+            timing_url(self.restaurant),
+            data={'value': 'not-a-timing', 'expected_current': None,
+                  'reason': f'   {REASON}   '},
+            content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(AdminAuditLog.objects.count(), before + 1)
+        entry = AdminAuditLog.objects.order_by('-created_at', '-id').first()
+        self.assertEqual(entry.result, RESULT_FAILURE)
+        self.assertEqual(entry.error_code, 'value_invalid_choice')
+        self.assertEqual(entry.reason, REASON)
+
+    def test_a_rejected_reason_is_never_stored(self):
+        """
+        A reason the serializer REFUSED is not a stated reason. Recording it anyway
+        would put text in the control-plane log that the system explicitly declined
+        to accept — and would make "reasons on file" include the ones nobody gave.
+        """
+        cases = (
+            ('too short', {'value': PAYMENT_TIMING_PAY_FIRST,
+                           'expected_current': None, 'reason': 'typo'}),
+            ('blank', {'value': PAYMENT_TIMING_PAY_FIRST,
+                       'expected_current': None, 'reason': ''}),
+            ('whitespace only', {'value': PAYMENT_TIMING_PAY_FIRST,
+                                 'expected_current': None, 'reason': '      '}),
+            ('missing', {'value': PAYMENT_TIMING_PAY_FIRST,
+                         'expected_current': None}),
+            ('over maximum', {'value': PAYMENT_TIMING_PAY_FIRST,
+                              'expected_current': None, 'reason': 'x' * 5000}),
+            ('wrong type', {'value': PAYMENT_TIMING_PAY_FIRST,
+                            'expected_current': None, 'reason': {'a': 1}}),
+        )
+        for label, body in cases:
+            with self.subTest(case=label):
+                before = AdminAuditLog.objects.count()
+                response = self.client.post(
+                    timing_url(self.restaurant), data=body,
+                    content_type='application/json',
+                )
+                self.assertEqual(response.status_code, 400, response.content)
+                self.assertEqual(AdminAuditLog.objects.count(), before + 1)
+                entry = AdminAuditLog.objects.order_by('-created_at', '-id').first()
+                self.assertEqual(entry.result, RESULT_FAILURE)
+                self.assertEqual(entry.reason, '', f'{label}: stored a rejected reason')
+
+    def test_the_same_reason_rule_applies_to_collection_mode(self):
+        before = AdminAuditLog.objects.count()
+        self.client.post(
+            mode_url(self.restaurant),
+            data={'value': 'cash', 'expected_current': None,
+                  'reason': f'  {REASON}  '},
+            content_type='application/json',
+        )
+        entry = AdminAuditLog.objects.order_by('-created_at', '-id').first()
+        self.assertEqual(AdminAuditLog.objects.count(), before + 1)
+        self.assertEqual(entry.reason, REASON)
+
+        self.client.post(
+            mode_url(self.restaurant),
+            data={'value': PAYMENT_COLLECTION_MODE_OFFLINE,
+                  'expected_current': None, 'reason': 'no'},
+            content_type='application/json',
+        )
+        entry = AdminAuditLog.objects.order_by('-created_at', '-id').first()
+        self.assertEqual(entry.reason, '')
+
+    def test_a_non_dict_body_records_no_reason(self):
+        """There is no field to read, and none may be invented."""
+        self.client.post(
+            timing_url(self.restaurant), data='["nope"]',
+            content_type='application/json',
+        )
+        entry = AdminAuditLog.objects.order_by('-created_at', '-id').first()
+        self.assertEqual(entry.reason, '')
+
     def test_a_padded_reason_is_stored_trimmed(self):
         self.set_timing(PAYMENT_TIMING_PAY_FIRST, None, reason=f'   {REASON}   ')
         entry = self.assertAudited(
@@ -1527,10 +1613,14 @@ class NoSideEffectTests(_CommercialWriteTestCase):
 
     def test_no_lifecycle_state_forbids_a_commercial_write(self):
         """
-        §33. The domain deliberately permits correction while onboarding, live or
-        suspended; this PR invents no new prohibition.
+        §33. EVERY lifecycle state, `offboarded` included — the domain deliberately
+        permits correction and this adapter invents no new prohibition. Offboarding
+        is when a tenant's commercial record most often needs a closing correction,
+        so refusing there would leave it permanently wrong with no supported fix.
+        Soft-DELETED is the one refusal, and it is a different axis.
         """
-        for status in (RestaurantStatus_Onboarding, RestaurantStatus_Live):
+        self.assertEqual(len(RESTAURANT_LIFECYCLE_STATES), 4)
+        for status in RESTAURANT_LIFECYCLE_STATES:
             with self.subTest(status=status):
                 restaurant = _make_restaurant(f'State {status}', status=status)
                 response = self.post(

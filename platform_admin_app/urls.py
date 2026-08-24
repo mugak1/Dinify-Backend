@@ -22,6 +22,11 @@ from platform_admin_app.endpoints.commercial import (
     AdminRestaurantPaymentCollectionModeView,
     AdminRestaurantPaymentTimingView,
 )
+from platform_admin_app.endpoints.subscription_terms import (
+    AdminRestaurantEndSubscriptionTermsView,
+    AdminRestaurantRecordSubscriptionTermsView,
+    AdminRestaurantReplaceSubscriptionTermsView,
+)
 from platform_admin_app.endpoints.restaurants import (
     AdminRestaurantDetailView,
     AdminRestaurantListView,
@@ -91,5 +96,25 @@ urlpatterns = [
         'restaurants/<uuid:restaurant_id>/commercial/payment-collection-mode/',
         AdminRestaurantPaymentCollectionModeView.as_view(),
         name='admin-restaurant-payment-collection-mode',
+    ),
+
+    # Subscription-terms writes (Phase 1, Step 3D.2b). Three explicit operations,
+    # never one route with an `action` segment: recording first terms, superseding
+    # the open ones and closing them have different preconditions, different
+    # concurrency tokens and different histories left behind.
+    path(
+        'restaurants/<uuid:restaurant_id>/commercial/subscription-terms/',
+        AdminRestaurantRecordSubscriptionTermsView.as_view(),
+        name='admin-restaurant-subscription-terms',
+    ),
+    path(
+        'restaurants/<uuid:restaurant_id>/commercial/subscription-terms/replace/',
+        AdminRestaurantReplaceSubscriptionTermsView.as_view(),
+        name='admin-restaurant-subscription-terms-replace',
+    ),
+    path(
+        'restaurants/<uuid:restaurant_id>/commercial/subscription-terms/end/',
+        AdminRestaurantEndSubscriptionTermsView.as_view(),
+        name='admin-restaurant-subscription-terms-end',
     ),
 ]
