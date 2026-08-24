@@ -1030,6 +1030,89 @@ class SubscriptionTermsMalformedBodyTests(_TermsWriteTestCase):
                 self.assertIsNone(entry.after_state)
         self.assertFalse(RestaurantSubscriptionTerms.objects.exists())
 
+    def test_an_unsupported_content_type_is_a_415_in_the_house_envelope(self):
+        """
+        A body DRF has no parser for raises ``UnsupportedMediaType``, NOT
+        ``ParseError`` — a separate exception that bypassed the parse guard
+        entirely, so DRF answered with its own bare ``{"detail": ...}``.
+
+        It stays a **415**, not a 400: the caller's remedy is to send JSON, and
+        collapsing it into "the body was wrong" would hide the one clue that
+        says so. Only the envelope and the audit were missing.
+        """
+        for url in self.urls():
+            for content_type in ('text/plain', 'application/xml'):
+                with self.subTest(url=url, content_type=content_type):
+                    response = self.client.post(
+                        url, data='reason=this-is-not-json',
+                        content_type=content_type,
+                    )
+                    self.assertEqual(response.status_code, 415, response.content)
+                    payload = response.json()
+                    self.assertEqual(payload['status'], 415)
+                    self.assertIn('__all__', payload['errors'])
+                    self.assertNotIn('detail', payload)
+
+    def test_an_unsupported_content_type_is_audited_once_with_no_reason(self):
+        """
+        The whole point of the parse guard: an elevated administrator's unsafe
+        request must not be absent from the control-plane log purely because the
+        server could not read it. A reason cannot be recovered from a body no
+        parser will touch, so none is invented.
+        """
+        expected = {
+            record_url(self.restaurant): ADMIN_RESTAURANT_SUBSCRIPTION_TERMS_RECORDED,
+            replace_url(self.restaurant): ADMIN_RESTAURANT_SUBSCRIPTION_TERMS_REPLACED,
+            end_url(self.restaurant): ADMIN_RESTAURANT_SUBSCRIPTION_TERMS_ENDED,
+        }
+        for url in self.urls():
+            with self.subTest(url=url):
+                before = AdminAuditLog.objects.count()
+                self.client.post(
+                    url, data='reason=this-is-not-json', content_type='text/plain',
+                )
+                self.assertEqual(AdminAuditLog.objects.count(), before + 1)
+                entry = self.newest_audit()
+                self.assertEqual(entry.action, expected[url])
+                self.assertEqual(entry.result, RESULT_FAILURE)
+                self.assertEqual(entry.error_code, 'unsupported_media_type')
+                self.assertEqual(entry.reason, '')
+                self.assertIsNone(entry.after_state)
+        self.assertFalse(RestaurantSubscriptionTerms.objects.exists())
+
+    def test_an_unsupported_content_type_against_a_missing_target_is_a_404(self):
+        """
+        Target resolution still comes FIRST. A caller who cannot name a real
+        restaurant learns nothing about which media types the route accepts, and
+        nothing is audited — no tenant was touched.
+        """
+        deleted = _make_restaurant('Gone House', deleted=True)
+        before = AdminAuditLog.objects.count()
+        response = self.client.post(
+            record_url(deleted), data='reason=this-is-not-json',
+            content_type='text/plain',
+        )
+        self.assertEqual(response.status_code, 404, response.content)
+        self.assertEqual(AdminAuditLog.objects.count(), before)
+
+    def test_an_unelevated_session_is_still_refused_before_the_media_type(self):
+        """
+        Authorization outranks readability. DRF checks permissions in ``initial()``,
+        before the handler touches ``request.data``, so this is a 403 with the
+        elevation denial audited — not a 415 that would tell an unelevated caller
+        which media types the route accepts.
+        """
+        self.session.elevated_at = None
+        self.session.save(update_fields=['elevated_at'])
+        before = AdminAuditLog.objects.count()
+        response = self.client.post(
+            record_url(self.restaurant), data='reason=this-is-not-json',
+            content_type='text/plain',
+        )
+        self.assertEqual(response.status_code, 403, response.content)
+        self.assertEqual(AdminAuditLog.objects.count(), before + 1)
+        self.assertEqual(self.newest_audit().result, RESULT_DENIED)
+
     def test_a_malformed_body_against_a_missing_target_is_a_silent_404(self):
         deleted = _make_restaurant('Gone House', deleted=True)
         before = AdminAuditLog.objects.count()

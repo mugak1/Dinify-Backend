@@ -959,6 +959,43 @@ class RequestValidationTests(_CommercialWriteTestCase):
         self.assertIsNone(entry.after_state)
         self.assertFalse(RestaurantServiceConfiguration.objects.exists())
 
+    def test_an_unsupported_content_type_is_a_415_in_the_house_envelope(self):
+        """
+        A body DRF has no parser for raises ``UnsupportedMediaType``, which is NOT
+        a ``ParseError`` — a separate exception that bypassed the parse guard, so
+        DRF answered with its own bare ``{"detail": ...}`` and nothing was audited.
+
+        It stays a **415**: the caller's remedy is to send JSON, and folding it
+        into a 400 would hide the one clue that says so.
+        """
+        for url in (timing_url(self.restaurant), mode_url(self.restaurant)):
+            for content_type in ('text/plain', 'application/xml'):
+                with self.subTest(url=url, content_type=content_type):
+                    response = self.client.post(
+                        url, data='value=pay_first', content_type=content_type,
+                    )
+                    self.assertEqual(response.status_code, 415, response.content)
+                    payload = response.json()
+                    self.assertEqual(payload['status'], 415)
+                    self.assertIn('__all__', payload['errors'])
+                    self.assertNotIn('detail', payload)
+
+    def test_an_unsupported_content_type_is_audited_exactly_once(self):
+        before = AdminAuditLog.objects.count()
+        self.client.post(
+            timing_url(self.restaurant), data='value=pay_first',
+            content_type='text/plain',
+        )
+        self.assertEqual(AdminAuditLog.objects.count(), before + 1)
+        entry = AdminAuditLog.objects.order_by('-created_at', '-id').first()
+        self.assertEqual(entry.action, ADMIN_RESTAURANT_PAYMENT_TIMING_SET)
+        self.assertEqual(entry.result, RESULT_FAILURE)
+        self.assertEqual(entry.error_code, 'unsupported_media_type')
+        self.assertEqual(entry.reason, '')
+        self.assertIsNone(entry.before_state)
+        self.assertIsNone(entry.after_state)
+        self.assertFalse(RestaurantServiceConfiguration.objects.exists())
+
     def test_an_unparseable_body_against_a_missing_target_is_still_a_silent_404(self):
         """The target check comes first, and its no-audit convention still wins."""
         deleted = _make_restaurant('Unparseable House', deleted=True)
