@@ -580,7 +580,8 @@ so keep it current when conventions change.
   expired invitation, and no onboarding row created on read. Invitation CREDENTIALS
   are never projected — no `token_hash`, no raw token, no claim URL; an invitation is
   a state word plus, where it is evidence, a timestamp
-- Commercial & service configuration: ✅ SCHEMA (Phase 1, Step 3B) — a new
+- Commercial & service configuration: ✅ SCHEMA + WRITERS + ADMIN READ (Phase 1,
+  Steps 3B / 3C / 3D.1) — a new
   first-party app `commercial_app` with `RestaurantServiceConfiguration` (payment
   timing `pay_first`/`pay_after` + payment collection mode `offline`/`psp_online`,
   both nullable with NO default, each with its own attribution triple) and
@@ -590,11 +591,16 @@ so keep it current when conventions change.
   tax-obligation field, no owner-approval model. Step 3C then added the INTERNAL
   domain writers (`service_configuration.py`, `subscription_terms.py`, `errors.py`,
   `mutation_context.py`): five named mutations, every one serializing on the
-  `Restaurant` row, with optimistic concurrency and same-state no-ops. **Still NO
-  HTTP surface, no serializer, no management command, no Admin authorization and no
-  audit** — those belong to the control-plane adapter. See the "Commercial & Service
-  Configuration Domain" section for the four concepts these models keep apart and the
-  writer contract
+  `Restaurant` row, with optimistic concurrency and same-state no-ops. Step 3D.1 then
+  added the READ projection — `platform_admin_app/commercial_reads.py`, surfaced as a
+  canonical top-level `commercial` object on BOTH admin restaurant reads (no
+  migration, no new route, zero extra queries). **There is still NO WRITE surface: no
+  HTTP writer, no serializer accepting input, no management command, no Admin
+  authorization and no audit** — those belong to the control-plane adapter (Step
+  3D.2). See the "Commercial & Service Configuration Domain" section for the four
+  concepts these models keep apart and the writer contract, and "The canonical
+  `commercial` object" under Admin Restaurant Reads for what the projection does and
+  does not assert
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -1305,23 +1311,117 @@ GET admin/v1/restaurants/<uuid:id>/        -> AdminRestaurantDetailView
   transition endpoint's existing treatment
 
 ### Three fields that are reported as unconfigured rather than inferred
-Step 1 exposes truth that exists TODAY. Each of these was easy to fake and is not:
+Step 1 exposed truth that existed THEN. Each of these was easy to fake and is not.
+**Two of the three have since been superseded by the canonical `commercial` object
+(Step 3D.1, below) and survive only as compatibility** — read that section before
+touching them:
 
 - **Readiness** delegates to `lifecycle.check_go_live_readiness` — the ONE seam. It
   fails closed today with `readiness_not_configured`, so that is what the portal is
   told. Do NOT build a second checklist here; Step 3 fills the seam. Readiness is
   reported as `not_applicable` outside `onboarding`: "is it ready to go live" has no
-  answer for a live or offboarded tenant, and zero blockers there would read as ready
-- **Payment mode** has NO authoritative persisted field. `require_order_prepayments`
-  is a diner-checkout toggle, NOT the spec's commercial `cash_only`/PSP mode — do not
-  infer one from the other. Emitted as `payment_mode: null` +
-  `payment_mode_configured: false`
+  answer for a live or offboarded tenant, and zero blockers there would read as ready.
+  UNCHANGED by 3D.1 — readable commercial state does not make a restaurant ready
+- **Payment mode** (`payment_mode` + `payment_mode_configured`) — TRANSITIONAL
+  COMPATIBILITY, frozen permanently unconfigured. It is NOT wired to
+  `payment_collection_mode`: the old ambiguous "payment mode" label is a different
+  contract from either Step-3B axis, and repointing it would silently change what the
+  deployed frontend believes it is rendering. `require_order_prepayments` is still
+  never consulted
 - **Subscription** reports the LEGACY `Restaurant` columns under names that say so
   (`source: 'legacy_restaurant_fields'`, `legacy_validity_flag`, `legacy_expiry_at`).
-  `RestaurantSubscription` / `SubscriptionInvoice` / `SubscriptionPayment` do not
-  exist. **`has_outstanding_receivables` is NOT consulted** — it returns a cheerful
-  `False` that means only "invoices do not exist", and wiring it belongs in the same
-  change that makes an invoice capable of becoming overdue
+  `SubscriptionInvoice` / `SubscriptionPayment` do not exist. **`has_outstanding_receivables`
+  is NOT consulted** — it returns a cheerful `False` that means only "invoices do not
+  exist", and wiring it belongs in the same change that makes an invoice capable of
+  becoming overdue. **`has_commercial_subscription` STAYS `false` even for a
+  restaurant with open `RestaurantSubscriptionTerms`** — the deployed Admin frontend
+  renders that boolean as **Active**, which recorded terms do not prove
+
+### The canonical `commercial` object — Phase 1, Step 3D.1
+`platform_admin_app/commercial_reads.py` is where the Step-3B/3C commercial facts are
+read. It exposes TWO functions and `restaurant_reads` uses both:
+`annotate_commercial(queryset)` (the query architecture) and
+`commercial_summary(restaurant)` (the projection). The object is present on the
+directory ROW and the DETAIL response and is byte-identical in both — one helper over
+one set of annotations applied once in `directory_queryset()`, so the two are
+structurally incapable of disagreeing. Read-only PR: no migration, no writer, no HTTP
+write verb, no new route; the reads stay session-gated, NOT elevation-gated and NOT
+audited.
+
+```
+"commercial": {
+    "payment_timing":          {"configured": bool, "value": "pay_first"|"pay_after"|null,
+                                "set_at": ISO8601|null},
+    "payment_collection_mode": {"configured": bool, "value": "offline"|"psp_online"|null,
+                                "set_at": ISO8601|null},
+    "subscription_terms":      {"configured": bool,
+                                "current": null | {"id": UUID, "recurring_amount": "0.00",
+                                                   "currency": "UGX",
+                                                   "billing_interval": {"unit": ..., "count": ...},
+                                                   "effective_from": ISO8601,
+                                                   "recorded_at": ISO8601}}
+}
+```
+
+- **THREE INDEPENDENT FACTS, never flattened.** Each axis carries its own
+  `configured`, and there is deliberately NO `commercial_configured` boolean — every
+  partial combination is a real state, and the readiness engine needs to know which
+  of the three is missing to name a blocker
+- **`configured` on an axis derives from the VALUE, not from the row existing.** A
+  configuration row created by a write to one axis leaves the other NULL, and that
+  restaurant is genuinely unconfigured on the second axis
+- **`subscription_terms.configured` means AN OPEN TERMS ROW EXISTS — nothing more.**
+  Not active, paid, valid, current standing, invoiced, collected or in good standing.
+  `current` means "the terms record currently in force", not a billing verdict. Dinify
+  has never collected a subscription payment through this system
+- **"Open" is `ended_at IS NULL` and only that** — never `effective_from <= now`,
+  never latest `recorded_at`/`effective_from`, never `subscription_validity`,
+  `subscription_expiry_date` or `DinifyTransaction`. Safe to state that flatly because
+  the partial unique index makes "at most one open row" a database fact and the Step-3C
+  writers refuse future-dated terms, so there is no scheduled state to resolve
+- **`recurring_amount` is a decimal STRING.** DRF's JSON encoder renders a bare
+  `Decimal` as a float, which would emit `0.0` for `0.00` and lose the stored scale.
+  `0.00` is a real, deliberate price (free pilot, waived period, test tenant) — NOT
+  "free", "trial" or an absence, which is the absence of a row
+- **THE RESPONSE IS THE CONCURRENCY TOKEN.** `subscription_terms.current.id` is the
+  `expected_terms_id` Step 3C's replace/end writers require, and the two axis `value`s
+  are their `expected_current`. The domain facts ARE the tokens — do NOT add a version
+  counter, and do NOT bind anything to `service_configuration.updated_at`
+- **NO INFERENCE, NO TRANSLATION, NO PSP.** Values are the exact persisted machine
+  vocabulary. `offline` is a fully configured, first-class mode — never "unconfigured",
+  never `cash`; `psp_online` carries no provider, merchant id or readiness verdict.
+  Nothing is derived from `require_order_prepayments`, `Table.prepayment_required`,
+  `flat_fee`, `preferred_subscription_method`, `subscription_validity`,
+  `subscription_expiry_date`, order history, lifecycle or `is_test`. Where a legacy
+  field disagrees, **the `commercial` object wins** and the legacy field is not consulted
+- **NO ACTOR IDENTITY**, enforced by the SQL rather than the serializer: the projection
+  annotates the four service-configuration columns it needs, so `*_set_by_id` and
+  `recorded_by_id` never enter the SELECT list. WHO decided is `AdminAuditLog`'s question
+- **`is_test` gets no special read semantics** and no restaurant is hard-coded
+- **THE PROJECTION IS PURE** — no write, `get_or_create`, save, lock, transaction,
+  audit row or legacy synchronisation. Reading an unconfigured restaurant creates no
+  commercial rows; reading ended history opens nothing
+- **The legacy `payment_mode` / `payment_mode_configured` / `subscription` keys are a
+  TRANSITIONAL COMPATIBILITY CONTRACT.** They are kept byte-for-byte, may disagree with
+  `commercial`, and no new consumer should read them. They are contracted deliberately
+  once the Admin frontend has migrated — **the portal does NOT yet render `commercial`**
+
+### Query architecture (the directory's bounded-query contract survives)
+`annotate_commercial` adds TWO LEFT JOINs to `directory_queryset()`, so the page is
+still retrieved in ONE query and the endpoint costs the SAME as before: measured at
+**4 queries for the list (flat from `page_size=2` to `page_size=20`) and 8 for the
+detail, identical on `origin/main` and on this branch**. Notes for anyone editing it:
+
+- The service configuration is annotated field-by-field rather than `select_related`-ed
+  — one uniform annotation contract (no path that could become a per-row lazy load) and
+  a narrower SELECT, which is what makes "no actor identity" a property of the query
+- Subscription terms are 0..N, so a NAIVE join is a real defect: ten historical rows
+  would return one restaurant ten times, inflate the support aggregate, corrupt
+  `.count()` and shuffle pagination. `FilteredRelation` puts `ended_at IS NULL` in the
+  JOIN's ON clause so historical rows never enter the result, and
+  `one_open_subscription_terms_per_restaurant` guarantees at most one survivor — **that
+  index is what makes the join safe**
+- Do NOT swap in a `Prefetch` (two queries for the page) or seven correlated subqueries
 
 ### ONE definition of attention
 `needs_attention(restaurant)` (the per-row predicate) and `attention_filter()` (its
@@ -1554,14 +1654,17 @@ semantics (what counts as evidence of owner control), not directory presentation
   it will read `tracked: true` / `legacy_adopted` / `consistent` /
   `not_established` / `not_applicable` purely from its data
 
-## Commercial & Service Configuration Domain — Phase 1, Steps 3B + 3C
+## Commercial & Service Configuration Domain — Phase 1, Steps 3B + 3C (+ 3D.1 read)
 
 `commercial_app` — a first-party BUSINESS-DOMAIN app holding the restaurant-level
 commercial facts that had no authoritative home. Step 3B built the SCHEMA (two models,
 their constraints, the initial migration); Step 3C added the INTERNAL DOMAIN WRITERS
-that are now the only supported way to mutate it. There is still **no serializer, no
-endpoint, no management command and no HTTP surface of any kind**, and absence of a
-row still means "not yet recorded".
+that are now the only supported way to mutate it. Step 3D.1 added a READ projection —
+which lives in `platform_admin_app`, NOT here, because it is an Admin-plane response
+shape rather than a domain rule (see "The canonical `commercial` object" under Admin
+Restaurant Reads). `commercial_app` itself still has **no serializer, no endpoint, no
+management command and no HTTP surface of any kind**; nothing writes it over HTTP, and
+absence of a row still means "not yet recorded".
 
 **It is deliberately NOT in `platform_admin_app`.** That app is a CONTROL PLANE /
 operator surface; these are business-domain facts that readiness (`restaurants_app`)
@@ -1786,8 +1889,9 @@ with `errors.py` (one `CommercialMutationError` carrying a stable `.code`) and
   representative legacy fields are byte-identical after successful mutations
 
 ### Tenancy
-No serializer, so the TENANT-STRUCT-00 machinery (which reasons about DRF
-`ModelSerializer` relations) discovers nothing, `baseline.txt` is unchanged and the
+No serializer — the Step 3D.1 read projection builds plain dicts and adds none either
+— so the TENANT-STRUCT-00 machinery (which reasons about DRF `ModelSerializer`
+relations) discovers nothing, `baseline.txt` is unchanged and the
 ratchet reports no additions — the cleanest possible outcome, since there is no
 writable relation to classify. Tests prove no serializer targets either model, that
 neither is reachable through the `restaurant-setup` catch-all, that a `restaurants`

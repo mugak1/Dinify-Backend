@@ -19,20 +19,39 @@ would each have been easy to fake, and each is deliberately not faked:
   a SECOND readiness implementation that Step 3 would then have to reconcile — and,
   worse, one that answers "ready" on inputs it has not actually checked.
 
-  PAYMENT MODE has no authoritative persisted field at all. ``require_order_prepayments``
-  is a diner-checkout toggle, not the commercial ``cash_only`` / PSP-backed mode the
-  Admin spec means, and inferring one from the other would produce a confident answer
-  that is wrong for any restaurant that has configured prepayment for its own reasons.
-  It is reported as unconfigured, because it is.
+  PAYMENT MODE had no authoritative persisted field when Step 1 shipped, so it was
+  reported as unconfigured. ``require_order_prepayments`` is a diner-checkout toggle,
+  not a commercial mode, and inferring one from the other would have produced a
+  confident answer that is wrong for any restaurant that configured prepayment for
+  its own reasons.
 
   SUBSCRIPTION reports the LEGACY ``Restaurant`` columns under names that say so.
-  ``RestaurantSubscription`` / ``SubscriptionInvoice`` / ``SubscriptionPayment`` do
-  not exist yet. ``subscription_validity`` is a bare boolean with no invoice behind
-  it; calling it "paid" or "current" would assert a financial fact the database
-  cannot prove. Note especially that ``lifecycle.has_outstanding_receivables`` is NOT
-  consulted here: the specification requires that seam to be wired in the same change
-  that makes invoices capable of becoming overdue, and calling it today would return
-  a cheerful ``False`` that means only "invoices do not exist".
+  ``subscription_validity`` is a bare boolean with no invoice behind it; calling it
+  "paid" or "current" would assert a financial fact the database cannot prove. Note
+  especially that ``lifecycle.has_outstanding_receivables`` is NOT consulted here:
+  the specification requires that seam to be wired in the same change that makes
+  invoices capable of becoming overdue, and calling it today would return a cheerful
+  ``False`` that means only "invoices do not exist".
+
+━━ STEP 3D.1: ``commercial`` IS NOW THE CANONICAL COMMERCIAL CONTRACT ━━━━━━━━━━━━━
+
+Steps 3B and 3C gave the platform authoritative, transactionally-written commercial
+facts. The top-level ``commercial`` object — computed by
+``platform_admin_app.commercial_reads`` and present on BOTH the directory row and
+the detail response — is where they are read.
+
+``payment_mode`` / ``payment_mode_configured`` / ``subscription`` SURVIVE UNCHANGED
+as a TRANSITIONAL COMPATIBILITY CONTRACT, and that is a deliberate refusal to do the
+tempting thing. Reinterpreting them over the new domain would have been a one-line
+change and a semantic lie in both cases: the old ambiguous "payment mode" label is
+not the same contract as ``payment_collection_mode``, and the deployed Admin
+frontend renders ``subscription.has_commercial_subscription`` as **Active**, which an
+open ``RestaurantSubscriptionTerms`` row does not prove. Terms are recorded pricing
+intent; Dinify has never collected a subscription payment through this system.
+
+So the two coexist, they may disagree, and where they do the ``commercial`` object
+wins. No new consumer should read the legacy three. They are contracted deliberately
+once the Admin frontend has moved — not silently upgraded underneath it.
 
 ━━ ONE DEFINITION OF ATTENTION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -45,7 +64,7 @@ from dinify_backend.configss.string_definitions import (
     RESTAURANT_LIFECYCLE_STATES,
     RestaurantStatus_Onboarding,
 )
-from platform_admin_app import onboarding_reads
+from platform_admin_app import commercial_reads, onboarding_reads
 from platform_admin_app.models import AdminAuditLog
 from restaurants_app.controllers import lifecycle
 from restaurants_app.models import Restaurant
@@ -147,13 +166,24 @@ def attention_filter() -> Q:
 
 def payment_mode_summary(restaurant):
     """
-    The commercial payment mode. UNCONFIGURED — there is no field for it yet.
+    DEPRECATED / TRANSITIONAL COMPATIBILITY CONTRACT. Use ``commercial`` instead.
 
-    ``restaurant`` is accepted and deliberately unused: the signature is the seam.
-    When an authoritative payment-mode field lands (Step 2/3), this reads it and
-    every caller inherits the change; nothing else has to learn a new shape.
+    Frozen at its Step-1 meaning: permanently unconfigured. ``restaurant`` is
+    accepted and deliberately unused.
 
-    Explicitly NOT inferred from ``require_order_prepayments`` (a diner-checkout
+    THIS IS NOT WIRED TO ``payment_collection_mode``, and the temptation to do it
+    here is exactly what this docstring exists to refuse. "Payment mode" was Step
+    1's placeholder for a commercial concept nobody had modelled; Step 3B modelled
+    TWO — a service-model axis (``payment_timing``) and a custody axis
+    (``payment_collection_mode``) — and neither is what the old ambiguous label
+    promised. Pointing this key at one of them would silently change what a deployed
+    client believes it is rendering, which is the failure a compatibility window
+    exists to prevent.
+
+    The canonical answer lives in ``commercial.payment_collection_mode``. This key
+    is removed once the Admin frontend has moved to it, in a change that says so.
+
+    Still explicitly NOT inferred from ``require_order_prepayments`` (a diner-checkout
     toggle), nor from ``preferred_subscription_method`` (how Dinify bills the
     restaurant, not how the restaurant takes money), nor from transaction history.
     """
@@ -165,15 +195,29 @@ def payment_mode_summary(restaurant):
 
 # --- subscription ------------------------------------------------------------
 
-# The Phase-1 commercial models (RestaurantSubscription / SubscriptionInvoice /
-# SubscriptionPayment) do not exist. This flag is in the payload so the portal can
-# branch on a fact rather than on the shape of the object it received.
+# TRANSITIONAL. `SubscriptionInvoice` / `SubscriptionPayment` still do not exist —
+# `commercial_app.RestaurantSubscriptionTerms` (Step 3B) records TERMS, which is a
+# different fact and is projected under the canonical `commercial` object. This flag
+# is in the payload so the deployed portal can branch on a fact rather than on the
+# shape of the object it received; it stays False during the compatibility window.
 SUBSCRIPTION_SOURCE_LEGACY = 'legacy_restaurant_fields'
 
 
 def subscription_summary(restaurant):
     """
-    A TRANSITIONAL view of the legacy subscription columns on ``Restaurant``.
+    DEPRECATED / TRANSITIONAL COMPATIBILITY CONTRACT. Use ``commercial`` instead.
+
+    A view of the legacy subscription columns on ``Restaurant``, frozen at its
+    Step-1 meaning.
+
+    ``has_commercial_subscription`` STAYS FALSE even for a restaurant with open
+    ``RestaurantSubscriptionTerms``, and that is the single most important line in
+    this module to leave alone. The deployed Admin frontend renders this boolean as
+    **Active**. An open terms row proves recorded pricing intent and nothing more —
+    not paid, not collected, not in good standing — so flipping it would put the
+    word "Active" on screen for a restaurant that has never paid Dinify anything.
+    The canonical answer, with the honest vocabulary, is
+    ``commercial.subscription_terms``.
 
     Every key is named for what the column IS, not for what a commercial
     subscription record would mean. ``legacy_validity_flag`` is a bare boolean that
@@ -239,6 +283,13 @@ def directory_queryset():
     aggregate and a correlated subquery respectively. ``owner`` is joined rather than
     lazily loaded for the same reason.
 
+    The commercial columns (Step 3D.1) are added by
+    ``commercial_reads.annotate_commercial`` as two more LEFT JOINs, so they cost no
+    extra query and no per-row access. Applied HERE rather than at each call site,
+    which is also what makes the directory row and the detail response structurally
+    incapable of disagreeing about a restaurant's commercial state: both read the
+    same annotations off this one queryset.
+
     Soft-deleted restaurants are excluded here rather than at each call site, so
     "invisible to the directory" is a property of the queryset and not something a
     future caller has to remember.
@@ -249,7 +300,7 @@ def directory_queryset():
     name. Without the ``id`` tiebreak, pagination could show or skip a row across
     pages, which is the classic non-deterministic-pagination bug.
     """
-    return (
+    return commercial_reads.annotate_commercial(
         Restaurant.objects
         .filter(deleted=False)
         .select_related('owner')
@@ -294,6 +345,9 @@ def serialize_row(restaurant):
         'status': restaurant.status,
         'is_test': restaurant.is_test,
         'readiness': readiness_summary(restaurant),
+        'commercial': commercial_reads.commercial_summary(restaurant),
+        # TRANSITIONAL COMPATIBILITY — see `payment_mode_summary` /
+        # `subscription_summary`. `commercial` above is canonical.
         **payment_mode_summary(restaurant),
         'subscription': subscription_summary(restaurant),
         'open_issue_count': restaurant.open_issue_count,
@@ -477,6 +531,10 @@ def serialize_detail(restaurant):
         'owner': serialize_owner(restaurant.owner, onboarding),
         'onboarding': onboarding,
         'readiness': readiness_summary(restaurant),
+        # Identical to the directory row's — same helper, same annotations.
+        'commercial': commercial_reads.commercial_summary(restaurant),
+        # TRANSITIONAL COMPATIBILITY — see `payment_mode_summary` /
+        # `subscription_summary`. `commercial` above is canonical.
         **payment_mode_summary(restaurant),
         'subscription': subscription_summary(restaurant),
         'support': {'open_issue_count': restaurant.open_issue_count},
