@@ -580,8 +580,8 @@ so keep it current when conventions change.
   expired invitation, and no onboarding row created on read. Invitation CREDENTIALS
   are never projected — no `token_hash`, no raw token, no claim URL; an invitation is
   a state word plus, where it is evidence, a timestamp
-- Commercial & service configuration: ✅ SCHEMA + WRITERS + ADMIN READ (Phase 1,
-  Steps 3B / 3C / 3D.1) — a new
+- Commercial & service configuration: ✅ SCHEMA + WRITERS + ADMIN READ + ADMIN
+  SERVICE-CONFIG WRITES (Phase 1, Steps 3B / 3C / 3D.1 / 3D.2a) — a new
   first-party app `commercial_app` with `RestaurantServiceConfiguration` (payment
   timing `pay_first`/`pay_after` + payment collection mode `offline`/`psp_online`,
   both nullable with NO default, each with its own attribution triple) and
@@ -594,13 +594,16 @@ so keep it current when conventions change.
   `Restaurant` row, with optimistic concurrency and same-state no-ops. Step 3D.1 then
   added the READ projection — `platform_admin_app/commercial_reads.py`, surfaced as a
   canonical top-level `commercial` object on BOTH admin restaurant reads (no
-  migration, no new route, zero extra queries). **There is still NO WRITE surface: no
-  HTTP writer, no serializer accepting input, no management command, no Admin
-  authorization and no audit** — those belong to the control-plane adapter (Step
-  3D.2). See the "Commercial & Service Configuration Domain" section for the four
-  concepts these models keep apart and the writer contract, and "The canonical
-  `commercial` object" under Admin Restaurant Reads for what the projection does and
-  does not assert
+  migration, no new route, zero extra queries). Step 3D.2a then added the FIRST Admin
+  WRITE surface — two elevated, reasoned, audited POST routes for the two
+  service-configuration axes (`platform_admin_app/endpoints/commercial.py`), each a
+  thin adapter over the Step-3C writer. **Subscription-terms HTTP writes are still
+  NOT built** (Step 3D.2b), and `commercial_app` itself still has no HTTP surface, no
+  serializer and no management command. See the "Commercial & Service Configuration
+  Domain" section for the four concepts these models keep apart and the writer
+  contract, "The canonical `commercial` object" under Admin Restaurant Reads for what
+  the projection does and does not assert, and "Admin Commercial Writes" for the
+  adapter contract
 - Deletion integrity: ✅ Tables-domain deletion model — `Order.table` is
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
@@ -1018,8 +1021,12 @@ so keep it current when conventions change.
   `restaurants/` + `restaurants/<uuid:id>/` (the Phase-1 Step-1 directory and
   detail READS — see "Admin Restaurant Reads" below), and
   `restaurants/<uuid:id>/transition/` (the ONLY writer of `Restaurant.status`,
-  elevation-gated). The two reads are session-gated but NOT elevation-gated, and
-  are NOT audited — see that section for why both are deliberate
+  elevation-gated), and the two Step-3D.2a commercial writes
+  `restaurants/<uuid:id>/commercial/payment-timing/` +
+  `restaurants/<uuid:id>/commercial/payment-collection-mode/` (POST, elevation-gated,
+  reason-required — see "Admin Commercial Writes"). The two reads are session-gated
+  but NOT elevation-gated, and are NOT audited — see that section for why both are
+  deliberate
 
 ## Endpoint Pattern — CRITICAL
 New resource types get their own dedicated endpoint file in
@@ -1422,6 +1429,115 @@ detail, identical on `origin/main` and on this branch**. Notes for anyone editin
   `one_open_subscription_terms_per_restaurant` guarantees at most one survivor — **that
   index is what makes the join safe**
 - Do NOT swap in a `Prefetch` (two queries for the page) or seven correlated subqueries
+
+## Admin Commercial Writes — Phase 1, Step 3D.2a
+
+The FIRST supported HTTP path for changing canonical commercial configuration. Two
+routes, one per axis, in `platform_admin_app/endpoints/commercial.py`:
+
+```
+POST admin/v1/restaurants/<uuid>/commercial/payment-timing/
+POST admin/v1/restaurants/<uuid>/commercial/payment-collection-mode/
+```
+
+Body for both: `{"value": ..., "expected_current": ..., "reason": ...}`. No migration,
+no model change, and **subscription-terms writes are deliberately NOT here** — no URL,
+no serializer, no audit action for them; that is Step 3D.2b.
+
+- **TWO ROUTES, NEVER ONE WITH A FIELD PARAMETER.** Payment timing is a SERVICE-MODEL
+  fact and collection mode a CUSTODY fact — different consequences and plausibly
+  different future write authority. A `commercial/<str:field>/` route would make "what
+  did this operator change?" a question about a URL segment, and would let one grant
+  reach both. The same reasoning keeps `service_configuration._set_axis` private behind
+  two named public writers
+- **BOTH ARE ELEVATION-GATED** (`IsAuthenticated` + `IsRecentlyElevated`) and require a
+  substantive `reason` — `MIN_REASON_LENGTH` imported from
+  `platform_admin_app.delegation`, never respelled. Nothing in the order/kitchen path
+  reads payment timing yet and that is NOT a reason to gate it lightly: the decision is
+  consequential when it is RECORDED, because the enforcement built later is built
+  against whatever the configuration then says
+- **CSRF is the existing admin policy**, enforced by `AdminSessionAuthentication` — not
+  disabled, not exempted, not reimplemented per route. Tests use
+  `Client(enforce_csrf_checks=True)`; the DEFAULT test client sets
+  `_dont_enforce_csrf_checks` and would prove nothing
+- **`expected_current` IS REQUIRED, AND MISSING ≠ EXPLICIT NULL.** Explicit `null`
+  asserts "nobody has configured this yet" — the one assertion that succeeds against a
+  fresh restaurant. Omission asserts nothing, so it is a 400; treating it as null would
+  hand a forgetful client that claim by accident and defeat the concurrency check it was
+  meant to exercise. Enforced by `required=True` + `allow_null=True` on the field, never
+  by `request.data.get(...)`
+- **THE ENDPOINT IS AN ADAPTER, NOT A SECOND WRITER.** It calls
+  `commercial_app.service_configuration.set_payment_timing` /
+  `set_payment_collection_mode` and assigns no model field; a test asserts the binding
+  by identity and an AST scan fails the build if `save`/`create`/`update_or_create`
+  appears in the module. Locking, the soft-delete re-check, actor resolution, vocabulary
+  validation, optimistic concurrency, the same-state no-op and attribution stamping all
+  stay in Step 3C
+- **ACTOR IS `request.user`.** There is no `actor_id` / `set_by` request field and there
+  must never be one
+- **STATUS MAPPING:** changed success and same-state no-op both `200`;
+  `stale_service_configuration` → **`409`** with `{"code": "stale_service_configuration"}`
+  and a fixed sentence (never the domain's own message, which names internals); malformed
+  body → `400` with field-keyed `errors`; missing or soft-deleted restaurant → `404`;
+  stale/absent elevation → `403`. A conflict is NOT a 400 — the body was fine, the world
+  moved. An unmapped domain code is deliberately re-raised rather than relabelled, so an
+  internal condition surfaces as a 500 and rolls back
+- **SAME-STATE RETRY IS A 200 WITH `changed=false`**, attribution untouched, even when
+  `expected_current` is stale — Step 3C's rule, reached through HTTP unchanged
+- **ONE AUDIT ROW PER AUTHENTICATED UNSAFE DECISION**, under
+  `admin.restaurant.payment_timing_set` / `admin.restaurant.payment_collection_mode_set`.
+  ONE ACTION PER ENDPOINT, not per outcome — `AdminAuditLog.result` carries that axis, and
+  a `*_changed`/`*_no_op`/`*_failed` trio would make "how often did anyone try?"
+  unanswerable without knowing every spelling. Covers changed success, **no-op success**,
+  invalid body, an **unparseable body**, stale conflict and elevation denial (via a
+  `permission_denied` override, since DRF rejects permissions before the handler). NOT
+  audited: anonymous requests, CSRF failures (both refused inside authentication, before
+  any administrative decision) and a missing/soft-deleted target (the transition
+  endpoint's existing convention — nothing was denied and no tenant was touched).
+  **`request.data` PARSES ON ACCESS**, so that access is guarded: unguarded, DRF answers a
+  malformed body with its own bare `{"detail": ...}` — a different shape from every other
+  error here — and the request never reaches `self.audit`, so an elevated administrator's
+  unsafe request would be missing from the log purely because it was unreadable
+  (`malformed_body`)
+- **`before_state` / `after_state` carry ONLY that axis**, e.g.
+  `{"payment_timing": "pay_first"}`. Equal on a no-op — the request happened, nothing
+  moved. A conflict records the real current value from the error's `actual_current` and
+  **no after_state**; nothing was applied, so none may be invented
+- **DOMAIN MUTATION + AUDIT SHARE ONE OUTER `transaction.atomic()`.** The Step-3C writer's
+  own atomic block nests as a savepoint. **A failed audit rolls the mutation back** — pinned
+  by a test that injects the fault at `AdminAuditLog.objects.create`, i.e. after the writer
+  genuinely mutated the row, plus a guard test proving the writer really ran. The same
+  structure lets a REFUSED mutation still be recorded: the domain exception unwinds only its
+  savepoint, so the failure audit written afterwards commits
+- **THE SUCCESS RESPONSE RETURNS THE CANONICAL STEP-3D.1 `commercial` OBJECT**, re-read from
+  the database inside the same transaction via `commercial_reads` — never assembled from the
+  request, never a second write-path projection. So a write hands the client the exact
+  `expected_current` token its next edit needs, byte-identical to what a GET would return.
+  The transitional `payment_mode` / `payment_mode_configured` / `subscription` keys are
+  deliberately ABSENT from the write response: they exist for the deployed frontend's GET
+  contract, and a new surface must not recruit consumers for them
+- **NOTHING ELSE MOVES.** No readiness change (`check_go_live_readiness` still fails closed
+  with `readiness_not_configured`; `needs_attention` / `attention_filter` untouched); no
+  owner-approval effect and nothing bound to `service_configuration.updated_at`; no legacy
+  synchronisation in either direction (`require_order_prepayments`,
+  `Table.prepayment_required`, `preferred_subscription_method`, `flat_fee`,
+  `subscription_validity`, `subscription_expiry_date`, `DinifyTransaction.payment_mode`);
+  no subscription-terms row created or changed; `is_test` gets no special write semantics
+  and no new lifecycle prohibition is invented
+- **`psp_online` PERFORMS EXACTLY ONE CONFIGURATION MUTATION** — no provider call, merchant
+  record, merchant id, payment initiation, transaction or webhook row. `offline` is accepted
+  as unremarkably as the other: a permanent, first-class mode, never a fallback
+- **NO ADMISSION ADVISORY LOCK.** Deliberate and load-bearing: the lifecycle transition takes
+  `advisory → Restaurant row`, and taking it AFTER the row lock here would invert that order.
+  Nothing in the order path reads these values yet. When payment timing is eventually enforced
+  in order admission, changing it while live will need a deliberate lock-design update — not
+  a lock quietly added here first
+- **GET COST IS UNCHANGED**: 4 queries for the list (flat across page size) and 8 for the
+  detail, measured on this branch; no read module was touched. A POST costs 12–13 (auth,
+  target resolve, row lock, actor, config read, the write, audit, canonical re-read)
+- **The Admin frontend does NOT expose these controls yet** — Step 3E migrates the portal to
+  `commercial`, adds the editing UI, sends `expected_current`, collects the reason and handles
+  the 409
 
 ### ONE definition of attention
 `needs_attention(restaurant)` (the per-row predicate) and `attention_filter()` (its
@@ -1872,8 +1988,8 @@ with `errors.py` (one `CommercialMutationError` carrying a stable `.code`) and
   `account_type`, an `AdminSession`, elevation, CSRF or a request, and never write
   `AdminAuditLog`; `resolve_actor` answers *who did this*, never *were they allowed
   to*. A test AST-scans the package and fails if any non-test module imports
-  `platform_admin_app`. The future Admin adapter wraps **domain mutation + audit in
-  ONE OUTER transaction** so a failed audit rolls the mutation back — which only
+  `platform_admin_app`. The Step-3D.2a Admin adapter wraps **domain mutation + audit
+  in ONE OUTER transaction** so a failed audit rolls the mutation back — which only
   works because the domain does not own the audit write; the internal atomic blocks
   nest as savepoints inside it
 - **Lifecycle state does NOT gate these writes** (a tenant may need correction while
