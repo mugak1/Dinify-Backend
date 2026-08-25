@@ -721,12 +721,57 @@ class RequestValidationTests(_CreationTestCase):
                 )
 
     def test_a_malformed_email_is_refused(self):
-        for value in ('not-an-email', '@example.com', 'jane@'):
+        """
+        Validated with Django's own ``validate_email``, not by where the ``@`` sits.
+
+        The last three cases are the ones a hand-rolled ``'@' in value`` test lets
+        through — and nothing downstream would catch them, because ``Model.save()``
+        does not run field validators, so they would be PERSISTED while the API
+        documents an invalid email as a 400.
+        """
+        for value in ('not-an-email', '@example.com', 'jane@',
+                      'a b@example.com', 'a@-example.com', 'a@@b.com', 'a@b.'):
             with self.subTest(value=value):
                 self.assertRefused(
                     onboarding_creation.INVALID_OWNER_EMAIL,
                     owner=new_owner(email=value),
                 )
+
+    def test_a_malformed_email_never_reaches_the_database(self):
+        """The defect this closes: the column would have accepted it verbatim."""
+        with self.assertRaises(RestaurantCreationError):
+            create(self.admin, owner=new_owner(email='a b@example.com'))
+        self.assertFalse(User.objects.filter(email__contains=' ').exists())
+
+    def test_the_email_refusal_never_echoes_the_address(self):
+        exc = self.assertRefused(
+            onboarding_creation.INVALID_OWNER_EMAIL,
+            owner=new_owner(email='a b@secret-domain.example'),
+        )
+        blob = f'{exc.message} {exc.details}'
+        self.assertNotIn('secret-domain', blob)
+
+    def test_ordinary_addresses_are_still_accepted(self):
+        """Tightening the validator must not narrow the legitimate set."""
+        cases = (
+            ('0700000051', 'jane.doe+tag@sub.example.co.ug'),
+            ('0700000052', 'JANE@Example.COM'),
+        )
+        for index, (phone, value) in enumerate(cases):
+            with self.subTest(value=value):
+                result = create(
+                    self.admin,
+                    name=f'Bistro {index}', location=f'Road {index}',
+                    owner=new_owner(phone_number=phone, email=value),
+                )
+                self.assertEqual(result.owner.email, value.lower())
+
+    def test_an_over_long_email_keeps_its_own_message(self):
+        exc = self.assertRefused(
+            onboarding_creation.INVALID_OWNER_EMAIL,
+            owner=new_owner(email='a' * 250 + '@example.com'),
+        )
+        self.assertIn('at most', exc.message)
 
 
 # --- §31 the actor -----------------------------------------------------------

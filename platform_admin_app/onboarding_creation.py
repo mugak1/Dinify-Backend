@@ -69,6 +69,8 @@ from datetime import timedelta
 from typing import Optional, Union
 
 from django.conf import settings
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
@@ -408,7 +410,7 @@ def _validate_owner_phone(raw) -> str:
 
 def _validate_owner_email(raw) -> Optional[str]:
     """
-    The owner's email, lower-cased, or ``None``.
+    The owner's email, lower-cased and VALIDATED, or ``None``.
 
     OPTIONAL, because it is optional for a canonical restaurant user:
     ``REQUIRED_INFORMATION['new_user']`` has the email entry commented out, and the
@@ -418,18 +420,34 @@ def _validate_owner_email(raw) -> Optional[str]:
     ``login`` looks it up. Blank collapses to ``None`` rather than ``''`` so
     "no email" has ONE representation — an empty string would sit in a column whose
     other absent values are NULL, and would then collide with the next blank one.
+
+    VALIDATED WITH DJANGO'S OWN ``validate_email``, not with a hand-rolled test for
+    where the ``@`` sits. Nothing else on this path will catch a malformed address:
+    ``Model.save()`` does NOT run field validators, and the request field is a
+    ``CharField`` precisely so that blank-versus-absent stays this module's decision
+    — so an address like ``'a b@example.com'`` or ``'a@-example.com'`` would be
+    persisted verbatim while the API documents an invalid email as a 400. Reusing the
+    validator ``EmailField`` itself uses is what makes the accepted set and the
+    column's own idea of a valid address the same set.
+
+    The refusal message is fixed and never echoes the address, so it is safe to log
+    or surface — the same rule ``normalise_msisdn``'s errors follow.
     """
     if raw is None:
         return None
     cleaned = str(raw).strip().lower()
     if not cleaned:
         return None
+    # Length FIRST: an over-long value gets the bound's own message rather than a
+    # generic "invalid", which is the more actionable of the two.
     if len(cleaned) > MAX_EMAIL_LENGTH:
         raise RestaurantCreationError(
             INVALID_OWNER_EMAIL,
             f'The email must be at most {MAX_EMAIL_LENGTH} characters.',
         )
-    if '@' not in cleaned or cleaned.startswith('@') or cleaned.endswith('@'):
+    try:
+        validate_email(cleaned)
+    except DjangoValidationError:
         raise RestaurantCreationError(
             INVALID_OWNER_EMAIL, 'Enter a valid email address.',
         )
@@ -545,6 +563,20 @@ def _create_owner(spec: NewOwner) -> User:
     ``update_user_profile`` already applies to an email change. The refusal names no
     other account: pointing at one would invite exactly the "email identifies the
     owner" inference this contract refuses.
+
+    THE EMAIL CHECK IS BEST-EFFORT, AND UNLIKE THE PHONE CHECK IT IS NOT RACE-FREE.
+    Say so plainly rather than let the paragraph above read as a guarantee: phone is
+    backed by a unique index, so the savepoint below converts a lost race into a
+    refusal, while ``User.email`` carries NO unique constraint — two concurrent
+    creations with different phones and the same address can both miss this read and
+    both insert. Nothing in the schema forbids the pair, and READ COMMITTED gives a
+    ``SELECT`` no predicate lock to take, so no amount of care HERE closes it: the
+    fix is a partial unique index on ``User.email``, which is a CONTRACT migration
+    that fails at deploy if the existing corpus already holds a duplicate, and so
+    needs the production data inspected first. It is recorded as an open seam in
+    CLAUDE.md rather than closed with a new lock domain that would serialise this
+    endpoint against itself while ``self_register`` and ``update_user_profile`` — which
+    carry the identical non-atomic check today — went on writing around it.
     """
     existing_phone = (
         User.objects.filter(phone_number=spec.phone_number)

@@ -762,6 +762,22 @@ class ValidationTests(_CreationEndpointTestCase):
         self.assertIn('phone_number', domain['owner'])
         self.assertIn('phone_number', serializer['owner'])
 
+    def test_a_malformed_email_is_a_400_and_is_never_persisted(self):
+        """
+        The domain validates with Django's own ``validate_email``. Nothing else
+        would: ``Model.save()`` runs no field validators, so an address like
+        ``'a b@example.com'`` would otherwise reach the column verbatim.
+        """
+        for value in ('a b@example.com', 'a@-example.com', 'not-an-email'):
+            with self.subTest(value=value):
+                response = self.post(creation_body(
+                    owner=new_owner_body(email=value),
+                ))
+                self.assertEqual(response.status_code, 400, response.content)
+                self.assertIn('email', response.json()['errors']['owner'])
+                self.assertEqual(response.json()['code'], 'invalid_owner_email')
+                self.assertNoTenantCreated()
+
     def test_a_blank_name_or_location_is_a_400(self):
         for field in ('name', 'location'):
             for value in ('', '   '):

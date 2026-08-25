@@ -26,13 +26,23 @@ contention instead of sleeps, per-thread ``connection.close()``, and
 ``join(timeout=…)`` + ``is_alive()`` so a lock regression becomes a named failure
 rather than a hung CI job.
 
-THE ONE RACE THIS DOES NOT CLOSE, stated rather than papered over: two simultaneous
-creations naming the SAME restaurant under DIFFERENT owners. Nothing in the schema
-forbids that pair, so the cross-owner duplicate check is a read that can be lost.
-Closing it would need either a new global uniqueness index over live rows or a lock
-domain broad enough to serialise unrelated creations — both larger decisions than
-this slice. The same-owner case, which is the double-click an operator actually
-produces, IS closed.
+TWO RACES THIS DOES NOT CLOSE, stated rather than papered over. Both are the same
+shape — a ``SELECT`` that takes no predicate lock under READ COMMITTED, guarding a
+column pair the schema does not constrain — and both are recorded in CLAUDE.md:
+
+* two simultaneous creations naming the SAME restaurant under DIFFERENT owners. The
+  same-owner case, which is the double-click an operator actually produces, IS closed
+  by ``unique_together`` with the owner lock in front of it;
+* two simultaneous creations with DIFFERENT phones and the SAME owner email.
+  ``User.email`` has no unique constraint, so the email pre-check is best-effort —
+  unlike the phone check, which the ``phone_number`` unique index makes race-free.
+  This is an existing repository-wide seam rather than one this surface introduced:
+  ``self_register`` and ``update_user_profile`` carry the identical non-atomic check.
+
+Closing either needs a schema change (a partial unique index — a CONTRACT migration
+that fails at deploy against a corpus already holding duplicates) rather than more
+care in this module, so neither is closed here and neither is papered over with a lock
+domain that would only serialise this endpoint against itself.
 """
 import json
 import threading

@@ -1785,14 +1785,31 @@ lifecycle transition (which holds `Restaurant` and waits on `User` only for the
 cannot read a restaurant that does not exist yet, and taking it would invert the
 documented `advisory → Restaurant` order for nothing.
 
-**KNOWN, DELIBERATELY OPEN RACE:** two simultaneous creations naming the SAME
-restaurant under DIFFERENT owners can both pass the cross-owner read. Nothing in the
-schema forbids that pair, and closing it would need either a new global uniqueness
-index over live rows (whose behaviour against existing data is not obviously safe) or a
-lock domain broad enough to serialise unrelated creations. The same-owner case — the
-double-click an operator actually produces — IS closed. Recorded rather than papered
-over; `platform_admin_app/tests_restaurant_creation_concurrency.py` states it beside
-the races it does close.
+**TWO KNOWN, DELIBERATELY OPEN RACES**, both recorded rather than papered over;
+`platform_admin_app/tests_restaurant_creation_concurrency.py` states them beside the
+races it does close.
+
+1. Two simultaneous creations naming the SAME restaurant under DIFFERENT owners can
+   both pass the cross-owner read. Nothing in the schema forbids that pair, and closing
+   it would need either a new global uniqueness index over live rows (whose behaviour
+   against existing data is not obviously safe) or a lock domain broad enough to
+   serialise unrelated creations. The same-owner case — the double-click an operator
+   actually produces — IS closed.
+2. Two simultaneous creations with DIFFERENT phones and the SAME owner email can both
+   pass the email read. **`User.email` carries no unique constraint**, and under READ
+   COMMITTED a `SELECT` takes no predicate lock, so the pre-check is best-effort — in
+   contrast to the phone check, which the `phone_number` unique index makes race-free.
+   THIS IS AN EXISTING REPOSITORY-WIDE SEAM, not one this surface introduced:
+   `self_register` and `update_user_profile` carry the identical non-atomic
+   `filter(email=...).exists()` check, so a duplicate can already arise from the
+   customer plane. The real fix is a partial unique index on `User.email` (excluding
+   NULL and `''`, of which there are many — `create_user` stores `''` for a missing
+   address). That is a CONTRACT migration under the expand-only rule: it FAILS AT
+   DEPLOY if the corpus already holds a duplicate, so it needs the production data
+   inspected first and belongs in its own PR alongside a repair for whatever it finds.
+   Do NOT close it with an advisory lock here — that would serialise this endpoint
+   against itself while the two customer-plane writers went on writing around it, which
+   reads as enforcement without being it.
 
 ### WHAT CREATION DOES NOT TOUCH
 No `RestaurantServiceConfiguration`, `RestaurantSubscriptionTerms`, invoice, payment,
