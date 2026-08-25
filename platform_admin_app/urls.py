@@ -28,8 +28,8 @@ from platform_admin_app.endpoints.subscription_terms import (
     AdminRestaurantReplaceSubscriptionTermsView,
 )
 from platform_admin_app.endpoints.restaurants import (
+    AdminRestaurantCollectionView,
     AdminRestaurantDetailView,
-    AdminRestaurantListView,
     AdminRestaurantTransitionView,
 )
 from platform_admin_app.views import AdminHealthView
@@ -57,13 +57,21 @@ urlpatterns = [
         name='admin-delegation-revoke',
     ),
 
-    # Restaurant directory + detail (Phase 1, Step 1). READ-ONLY and NOT
-    # elevation-gated: reading the portfolio is ordinary authenticated work, not a
-    # step-up operation. Listed before the transition route for readability only —
-    # the paths are distinct, so ordering carries no routing meaning here.
+    # The restaurant COLLECTION. GET is the Phase-1 Step-1 directory read: NOT
+    # elevation-gated, because reading the portfolio is ordinary authenticated work.
+    # POST is Step-2D creation: elevation-gated, CSRF-protected and audited, because
+    # it mints a tenant, an owner identity and a claim credential in one request.
+    # ONE route for one resource — there is deliberately no `/restaurants/create/`.
+    #
+    # The route name stays `admin-restaurant-list` so existing reversers (including
+    # the delegation-allowlist resolution test) keep working; the view is now
+    # `AdminRestaurantCollectionView`, which is what it actually is.
+    #
+    # Listed before the transition route for readability only — the paths are
+    # distinct, so ordering carries no routing meaning here.
     path(
         'restaurants/',
-        AdminRestaurantListView.as_view(),
+        AdminRestaurantCollectionView.as_view(),
         name='admin-restaurant-list',
     ),
     path(

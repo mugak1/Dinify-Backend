@@ -141,3 +141,27 @@ ADMIN_RESTAURANT_SUBSCRIPTION_TERMS_ENDED = (
 # a command was pasted. before_state / after_state carry the onboarding source
 # before and after, and nothing else — the tenant itself is not modified.
 ADMIN_RESTAURANT_ONBOARDING_ADOPTED = 'admin.restaurant.onboarding_adopted'
+
+# A NEW canonical restaurant was created through the Admin control plane, together
+# with its owner authority, its ``admin_created`` provenance and the initial
+# ``OwnerInvitation`` credential.
+#
+# ONE ACTION FOR ONE DECISION. The request writes up to six rows — possibly a User,
+# a Restaurant, a RestaurantEmployee, a RestaurantOnboarding, an OwnerInvitation and
+# this entry — but it is ONE administrative decision: *create this restaurant under
+# this owner and issue its initial claim credential*. Emitting a separate
+# `restaurant_created` / `employee_added` / `onboarding_recorded` /
+# `invitation_issued` row per table would break the plane's one-entry-per-unsafe-
+# request convention and make "how many restaurants were created?" a question you
+# have to know four spellings to ask.
+#
+# ONE ACTION PER OUTCOME TOO — `AdminAuditLog.result` carries success / failure /
+# denied, so there is no `*_denied` sibling here (unlike the older
+# `transition_denied`, which predates that convention being stated).
+#
+# `before_state` is absent: the resource did not exist. `after_state` carries the
+# narrow platform facts the decision established — lifecycle state, test
+# classification, provenance, the owner's UUID, whether that account was created,
+# and the invitation's id and expiry. NEVER the owner's name, phone or email, and
+# NEVER the raw claim token or its hash.
+ADMIN_RESTAURANT_CREATED = 'admin.restaurant.created'

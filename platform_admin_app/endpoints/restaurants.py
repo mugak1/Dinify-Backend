@@ -1,5 +1,21 @@
 """
-Restaurant admin-plane endpoints — the directory/detail reads, and the transition.
+Restaurant admin-plane endpoints — the collection (read + create), the detail read,
+and the lifecycle transition.
+
+``admin/v1/restaurants/`` is ONE RESOURCE with two methods and two very different
+authority bars:
+
+    GET  -> the directory. An authenticated session, not elevation-gated, not audited.
+    POST -> creation. Authenticated + RECENTLY ELEVATED + CSRF, and audited exactly
+            once per request.
+
+They share a route because they are the same resource — listing a collection and
+adding to it — and putting creation on an invented ``/restaurants/create/`` would
+make the URL, rather than the method, carry the meaning. They do NOT share a
+permission set: ``get_permissions`` resolves per method, so reading the portfolio
+stays ordinary work while creating a tenant is a step-up decision. Every rule about
+what a creation request IS lives in ``endpoints/restaurant_creation``, and every row
+it writes is written by ``platform_admin_app.onboarding_creation``.
 
 READS ARE NOT ELEVATION-GATED, AND THAT IS DELIBERATE. ``IsRecentlyElevated`` exists
 for actions whose blast radius justifies re-proving a second factor mid-session —
@@ -33,12 +49,18 @@ receivables preconditions, the row lock and the audit entry — lives in
 so a second caller (a management command, Phase-1 automation) inherits identical
 behaviour rather than a re-implementation.
 """
+from django.db import transaction
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from platform_admin_app import restaurant_reads
-from platform_admin_app.audit_actions import ADMIN_RESTAURANT_TRANSITION_DENIED
-from platform_admin_app.models import RESULT_DENIED
+from platform_admin_app import onboarding_creation, restaurant_reads
+from platform_admin_app.audit_actions import (
+    ADMIN_RESTAURANT_CREATED,
+    ADMIN_RESTAURANT_TRANSITION_DENIED,
+)
+from platform_admin_app.endpoints import restaurant_creation
+from platform_admin_app.endpoints.reasoned_request import read_request_body
+from platform_admin_app.models import RESULT_DENIED, RESULT_FAILURE, RESULT_SUCCESS
 from platform_admin_app.permissions import IsRecentlyElevated
 from platform_admin_app.views import AdminAPIView
 from restaurants_app.controllers import lifecycle
@@ -50,17 +72,79 @@ def _not_found():
     return Response({'status': 404, 'message': 'Restaurant not found.'}, status=404)
 
 
-class AdminRestaurantListView(AdminAPIView):
+class AdminRestaurantCollectionView(AdminAPIView):
     """
-    ``GET`` the restaurant directory: filtered, paginated, one query for the page.
+    The restaurant collection: ``GET`` the directory, ``POST`` to create one.
 
-    Query parameters: ``search``, ``status``, ``attention``, ``page``, ``page_size``.
-    A malformed one is a 400 with field-keyed errors, never an empty 200 — an empty
+    ``GET`` is filtered, paginated and answered in one query for the page. Query
+    parameters: ``search``, ``status``, ``attention``, ``page``, ``page_size``. A
+    malformed one is a 400 with field-keyed errors, never an empty 200 — an empty
     page means "nothing matches", and returning it for a typo would let the operator
     conclude something false about the portfolio.
+
+    ``POST`` creates a NEW canonical restaurant together with its owner authority,
+    its ``admin_created`` provenance and the owner's initial claim credential — see
+    ``post`` and ``platform_admin_app.onboarding_creation``.
     """
 
+    # NOT a class-level list: the two methods have different bars and
+    # ``permission_classes`` cannot express that. See ``get_permissions``.
     permission_classes = [IsAuthenticated]
+
+    # --- authority ---
+
+    def get_permissions(self):
+        """
+        Per-method authority. ``GET`` needs a session; ``POST`` needs a fresh factor.
+
+        Requiring elevation to LOOK at the directory would train an operator to
+        re-elevate reflexively, which is precisely the habit step-up authentication
+        depends on them not having. Requiring it to CREATE A TENANT is the same bar
+        the lifecycle transition and the commercial writes already set, and creation
+        is at least as consequential: it mints a restaurant, an owner identity and a
+        credential in one request.
+
+        CSRF is unchanged and is not reimplemented here — ``AdminSessionAuthentication``
+        runs Django's double-submit check on every unsafe admin request, because DRF
+        marks each ``APIView`` ``csrf_exempt`` and the middleware therefore never sees
+        it.
+        """
+        if self.request.method == 'POST':
+            return [IsAuthenticated(), IsRecentlyElevated()]
+        return [IsAuthenticated()]
+
+    def permission_denied(self, request, message=None, code=None):
+        """
+        Audit a refused CREATION before DRF turns it into a 403.
+
+        DRF evaluates permissions in ``check_permissions``, before the handler runs,
+        so a stale-elevation POST would otherwise 403 with no entry — breaking
+        ``AdminAPIView``'s "exactly one entry per unsafe request, including denials".
+
+        THREE CONDITIONS, all load-bearing. Only for ``POST``, because ``GET`` is a
+        safe request the convention does not cover. Only when the request
+        AUTHENTICATED — an anonymous call is a 401 about identity, and a CSRF failure
+        is refused inside authentication itself; neither may manufacture an audit
+        actor the plane cannot name. And the body is NEVER read here: a denial is
+        recorded from the request's authority, not from a payload the endpoint has
+        just refused to act on.
+        """
+        if request.method == 'POST' and getattr(
+            request, 'successful_authenticator', None,
+        ):
+            self.audit(
+                request,
+                ADMIN_RESTAURANT_CREATED,
+                result=RESULT_DENIED,
+                resource_type='Restaurant',
+                # No resource id and no restaurant id: nothing was created, and the
+                # collection route names no target.
+                reason=message or 'Recent re-authentication required.',
+                error_code='elevation_required',
+            )
+        return super().permission_denied(request, message=message, code=code)
+
+    # --- read ---
 
     def get(self, request):
         try:
@@ -102,6 +186,170 @@ class AdminRestaurantListView(AdminAPIView):
             },
             status=200,
         )
+
+
+    # --- create ---
+
+    def _audit_failure(self, request, *, reason, error_code):
+        """
+        One failure row for a refused creation.
+
+        NO ``resource_id`` AND NO ``restaurant_id``: the tenant was not created, so
+        there is no id to name, and inventing one would put a row in the log that
+        ``restaurant_reads``'s activity strip would then attribute to some restaurant.
+        No ``before_state`` and no ``after_state`` either — nothing existed and
+        nothing was written.
+        """
+        self.audit(
+            request,
+            ADMIN_RESTAURANT_CREATED,
+            result=RESULT_FAILURE,
+            resource_type='Restaurant',
+            reason=reason,
+            error_code=error_code,
+        )
+
+    def post(self, request):
+        """
+        Create one restaurant, its owner authority, its provenance and its credential.
+
+        Body::
+
+            {"restaurant": {"name": ..., "location": ..., "is_test": false},
+             "owner": {"mode": "new", "first_name": ..., "last_name": ...,
+                       "phone_number": ..., "email": ...},
+             "reason": "..."}
+
+        or, to attach an existing account, ``{"owner": {"mode": "existing",
+        "user_id": "<uuid>"}}``.
+
+        ━━ ONE OUTER TRANSACTION: DOMAIN + AUDIT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        The service call and its ``AdminAuditLog`` entry share one
+        ``transaction.atomic()`` here, and the service's own atomic block nests as a
+        savepoint inside it. That composition is exactly why the audit write does not
+        live in ``onboarding_creation``: if the audit insert fails, the whole creation
+        — the user, the restaurant, the membership, the onboarding row and the
+        invitation — rolls back with it, because an administrative action that cannot
+        be attributed must not be allowed to stand. The same structure is what lets a
+        REFUSED creation still be recorded, since the domain exception unwinds only
+        its own savepoint. Identical to the Step-3D.2 commercial writes.
+
+        ━━ EXACTLY ONE AUDIT ROW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        One request is ONE administrative decision however many rows it writes, so
+        there is one entry under ``admin.restaurant.created`` — on success, on an
+        unreadable body, on a rejected payload, on a domain conflict, and (via
+        ``permission_denied``) on a stale-elevation refusal. Not audited: an anonymous
+        request and a CSRF failure, both refused inside authentication before any
+        decision could exist.
+
+        ━━ WHAT THIS ENDPOINT DOES NOT DO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        It writes no model field of its own, sends no SMS, email or notification,
+        touches no legacy action log, generates no temporary password, and creates no
+        commercial configuration, subscription terms, dining area, table, QR
+        credential, menu row or order. The invitation is ISSUED, not delivered.
+        """
+        payload, unreadable = read_request_body(request)
+        if unreadable is not None:
+            status, error_code, detail = unreadable
+            # No reason can be read from a body that would not parse, and one must
+            # never be invented.
+            self._audit_failure(request, reason='', error_code=error_code)
+            return Response(
+                {
+                    'status': status,
+                    'message': 'The restaurant could not be created.',
+                    'errors': {'__all__': [detail]},
+                },
+                status=status,
+            )
+
+        serializer = restaurant_creation.CreateRestaurantRequestSerializer(
+            data=payload,
+        )
+        if not serializer.is_valid():
+            # `audit_reason()` records the reason ONLY if the reason field itself
+            # validated, and then its NORMALIZED value — never the raw one the
+            # endpoint has just refused.
+            self._audit_failure(
+                request,
+                reason=serializer.audit_reason(),
+                error_code=serializer.audit_error_code(),
+            )
+            return Response(
+                {
+                    'status': 400,
+                    'message': 'The restaurant could not be created.',
+                    'errors': serializer.errors,
+                },
+                status=400,
+            )
+
+        data = serializer.validated_data
+        facts = data['restaurant']
+        reason = data['reason']
+
+        with transaction.atomic():
+            try:
+                result = onboarding_creation.create_admin_restaurant(
+                    name=facts['name'],
+                    location=facts['location'],
+                    is_test=facts['is_test'],
+                    owner=restaurant_creation.owner_spec(data['owner']),
+                    actor=request.user,
+                    reason=reason,
+                )
+            except onboarding_creation.RestaurantCreationError as exc:
+                status = restaurant_creation.STATUS_BY_CODE.get(exc.code)
+                if status is None:
+                    # Deliberately re-raised: an unmapped domain code is an internal
+                    # condition, and relabelling it a tidy client error would hide a
+                    # bug behind a 400. It surfaces as a 500 and rolls back.
+                    raise
+                self._audit_failure(request, reason=reason, error_code=exc.code)
+                return Response(
+                    restaurant_creation.error_body(exc, status), status=status,
+                )
+
+            self.audit(
+                request,
+                ADMIN_RESTAURANT_CREATED,
+                result=RESULT_SUCCESS,
+                resource_type='Restaurant',
+                resource_id=str(result.restaurant.id),
+                restaurant_id=result.restaurant.id,
+                reason=reason,
+                # No `before_state`: the resource did not exist, and a row of nulls
+                # would imply a prior state something could be compared against.
+                after_state=restaurant_creation.after_state(result),
+            )
+
+            # THE CANONICAL PROJECTION, re-read from the database inside the same
+            # transaction — the very same one `GET admin/v1/restaurants/<id>/`
+            # returns, never a second write-path shape. So the onboarding state the
+            # client sees (`tracked`, `admin_created`, `consistent`,
+            # `not_established`, `pending`) is DERIVED by the existing evidence rules
+            # from the rows just written, rather than asserted here.
+            detail = restaurant_reads.serialize_detail(
+                restaurant_reads.directory_queryset()
+                .filter(id=result.restaurant.id)
+                .get()
+            )
+
+        response = Response(
+            restaurant_creation.success_body(result, detail), status=201,
+        )
+        # THE RESPONSE CARRIES THE ONLY COPY OF A CREDENTIAL. Stamped explicitly
+        # rather than through `misc_app.controllers.http.no_store`, which also varies
+        # on the diner capability headers — meaningless on this plane, and a Vary
+        # header that describes a credential this response does not use would be a
+        # small lie in a place that should be exact.
+        response['Cache-Control'] = 'no-store, private'
+        response['Pragma'] = 'no-cache'
+        response['Expires'] = '0'
+        return response
 
 
 class AdminRestaurantDetailView(AdminAPIView):
