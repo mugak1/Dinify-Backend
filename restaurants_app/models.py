@@ -98,9 +98,12 @@ class Restaurant(BaseModel):
     # admin write ENDPOINT — the one writer is the audited operator command
     # `manage.py mark_restaurant_test` (platform_admin_app), which targets a single
     # UUID, requires a platform-staff actor and a reason, and writes the flag and its
-    # audit row in one transaction. Step 2's creation flow decides how the flag is
-    # assigned at onboarding. Indexed because portfolio and financial figures will
-    # exclude it.
+    # audit row in one transaction. At CREATION the admin-plane creation writer
+    # (platform_admin_app.onboarding_creation, Step 2D) sets it from an explicit,
+    # strictly-boolean request field — never inferred from the name, the environment or
+    # the actor, and never re-stated afterwards through mark_restaurant_test, which
+    # exists to CHANGE an existing tenant's classification. Indexed because portfolio
+    # and financial figures will exclude it.
     is_test = models.BooleanField(default=False, db_index=True)
 
     # dynamic configurations

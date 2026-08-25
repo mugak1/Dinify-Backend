@@ -522,8 +522,9 @@ so keep it current when conventions change.
   these rows automatically, so absence means "not yet represented in the Admin
   onboarding domain". Owner go-live approval
   remains Step 3. See the "Admin Onboarding Domain" section
-- Legacy restaurant adoption WRITER: ✅ (Phase 1, Step 2B) — the first and only thing
-  that writes the onboarding domain. `platform_admin_app/onboarding_adoption.py`
+- Legacy restaurant adoption WRITER: ✅ (Phase 1, Step 2B) — the first thing that
+  writes the onboarding domain, and the only writer of `legacy_adopted` provenance
+  (Step 2D added the `admin_created` one; neither can write the other's). `platform_admin_app/onboarding_adoption.py`
   (`adopt_existing_restaurant`) plus the thin operator adapter
   `manage.py adopt_restaurant_onboarding`. NO MIGRATION — the Step 2A schema was
   sufficient. It targets ONE canonical `Restaurant` by immutable UUID (never a name,
@@ -580,6 +581,35 @@ so keep it current when conventions change.
   expired invitation, and no onboarding row created on read. Invitation CREDENTIALS
   are never projected — no `token_hash`, no raw token, no claim URL; an invitation is
   a state word plus, where it is evidence, a timestamp
+- Admin-created restaurant + initial owner invitation: ✅ (Phase 1, Step 2D) — the
+  authoritative CREATION primitive for a new canonical tenant, and the second writer
+  of the onboarding domain. `POST admin/v1/restaurants/` (the existing collection
+  route now answers GET **and** POST — see URL Structure), a thin adapter over
+  `platform_admin_app/onboarding_creation.py::create_admin_restaurant`. **NO
+  MIGRATION** — the Step-2A schema was sufficient; the only settings addition is
+  `ADMIN_OWNER_INVITATION_TTL` (7 days). ONE request is ONE decision and ONE
+  transaction, creating up to six rows: the owner `User` (only in `mode=new`), the
+  `Restaurant`, the owner's `RestaurantEmployee`, `RestaurantOnboarding(source=
+  admin_created, created_by=<actor>)`, one unresolved `OwnerInvitation`, and exactly
+  one `admin.restaurant.created` audit entry. See the "Admin Restaurant Creation"
+  section for the full contract; the load-bearing points:
+  **THE OWNER MODE IS EXPLICIT** (`new` | `existing`) and each mode REFUSES the
+  other's fields — a phone already in use is a **409 `owner_account_already_exists`**,
+  never a silent reuse, because a restaurant attached to the wrong person looks
+  exactly like one attached to the right person. **A NEW OWNER GETS AN UNUSABLE
+  PASSWORD** — no generated temp password, no `self_register`, no credential email or
+  SMS; the retired `admin_register_restaurant` architecture is refused by an AST scan.
+  **AN EXISTING OWNER IS NEVER MODIFIED OR REACTIVATED** — locked and re-read under
+  the transaction; inactive or `platform_staff` is a 409.
+  **RESTAURANT STARTS `onboarding`** and `is_test` is REQUIRED, strict-boolean and
+  never inferred. **ZERO `RestaurantRolePermission` ROWS ARE SEEDED** — the resolver
+  already falls back to `DEFAULT_ROLE_MODULES`. **ONLY THE TOKEN HASH IS PERSISTED**
+  (`sessions.hash_token`); the raw claim token is returned ONCE in a `no-store`
+  response and is unrecoverable afterwards — a lost response is repaired by a future
+  REISSUE, never by plaintext storage. **ISSUANCE IS NOT DELIVERY** and owner control
+  stays `not_established` until a future redemption consumes the invitation. No
+  commercial, readiness, QR, menu, table or lifecycle side effect. Redemption,
+  reissue/cancel, delivery and the Admin creation UI are **NOT built**
 - Commercial & service configuration: ✅ SCHEMA + WRITERS + ADMIN READ + ADMIN
   SERVICE-CONFIG WRITES (Phase 1, Steps 3B / 3C / 3D.1 / 3D.2a) — a new
   first-party app `commercial_app` with `RestaurantServiceConfiguration` (payment
@@ -970,9 +1000,10 @@ so keep it current when conventions change.
   the caller owner after only a JWT decode); restaurant creation then flowed ONLY
   through the admin-gated `admin-register-restaurant` branch — which PR-A also
   REMOVED, along with the whole `create_restaurant.py` module, because its only
-  gate was a `dinify_admin` role string. **There is currently NO API path that
-  creates a restaurant**; this is a knowingly accepted gap until Phase 1 builds
-  onboarding natively on `/api/admin/v1`. Do not re-add one on the customer plane.
+  gate was a `dinify_admin` role string. **There is still NO CUSTOMER-PLANE path that
+  creates a restaurant, and there must never be one again.** The gap was closed on the
+  ADMIN plane instead, natively, by Phase-1 Step 2D: `POST admin/v1/restaurants/`
+  (elevated, CSRF-protected, audited — see "Admin Restaurant Creation").
   `PUT restaurant-setup/subscription-details/` was retired in the same PR (405; the
   settings-gated READ stays live). The last-active-owner guard moved onto the LIVE
   employee-deactivation path (PUT `employees` `{active:'false'}`), resolving the
@@ -1023,8 +1054,12 @@ so keep it current when conventions change.
 - `admin/v1/` → platform_admin_app control plane (`platform_admin_app/urls.py`,
   mounted by `dinify_backend/urls_admin.py`; Apache strips the `/api` prefix).
   Explicit deny-by-default routes only — health, `auth/*`, `delegations/*`,
-  `restaurants/` + `restaurants/<uuid:id>/` (the Phase-1 Step-1 directory and
-  detail READS — see "Admin Restaurant Reads" below), and
+  `restaurants/` (the COLLECTION: **GET** is the Phase-1 Step-1 directory read,
+  session-gated and unaudited; **POST** is the Step-2D creation write,
+  elevation-gated, CSRF-protected and audited — ONE resource, two methods, two
+  authority bars resolved per method by `get_permissions`; there is deliberately no
+  `/restaurants/create/`) + `restaurants/<uuid:id>/` (the Step-1 detail READ — see
+  "Admin Restaurant Reads" and "Admin Restaurant Creation" below), and
   `restaurants/<uuid:id>/transition/` (the ONLY writer of `Restaurant.status`,
   elevation-gated), the two Step-3D.2a commercial writes
   `restaurants/<uuid:id>/commercial/payment-timing/` +
@@ -1285,8 +1320,12 @@ the catch-all `<str:config_detail>/` route.
   (`lifecycle.BLOCKER_READINESS_NOT_CONFIGURED`), so `onboarding → live` is refused
   on EVERY path until Phase 1 wires the real checklist. It used to return ready
   unconditionally without reading its argument — a safety gate that always said yes.
-  Nothing is stranded: no API path creates a restaurant, and the one production
-  restaurant is already `live`. There is deliberately NO override — do not add one.
+  The one production restaurant is already `live`, so nothing existing is stranded —
+  but as of Step 2D an ADMIN-CREATED restaurant IS: it starts `onboarding` and cannot
+  reach `live` until Phase 1 wires the real checklist. That is the accepted, visible
+  cost of a safety gate that fails closed, and it is the right way round — a tenant
+  that cannot go live is recoverable, a tenant that went live unready is not. There
+  is deliberately NO override — do not add one.
   `has_outstanding_receivables` still returns False (`SubscriptionInvoice` does not
   exist yet, and `DinifyTransaction` is never the receivable)
 - Admin transition endpoint: `POST admin/v1/restaurants/<uuid:id>/transition/`
@@ -1305,9 +1344,16 @@ The admin portal's restaurant DIRECTORY and DETAIL reads. Two routes, both on th
 admin plane, both `AdminAPIView` + `IsAuthenticated`:
 
 ```
-GET admin/v1/restaurants/                  -> AdminRestaurantListView
+GET admin/v1/restaurants/                  -> AdminRestaurantCollectionView
 GET admin/v1/restaurants/<uuid:id>/        -> AdminRestaurantDetailView
 ```
+
+The collection view also answers `POST` (Step 2D creation), under a STRICTLY HIGHER
+bar resolved per method by `get_permissions` — elevated, CSRF-protected and audited.
+Everything in this section describes the READS and is unchanged by that; see "Admin
+Restaurant Creation" for the write. (The class was renamed from
+`AdminRestaurantListView` because it is no longer only a list; the route name
+`admin-restaurant-list` is unchanged.)
 
 - THE VIEWS ARE THIN. Every projection lives in `platform_admin_app/restaurant_reads.py`,
   mirroring how the transition endpoint delegates to `restaurants_app.controllers.lifecycle`.
@@ -1477,6 +1523,319 @@ per-row read and it fails.
 No `REST-0018`. The backend has no such column, and minting a sequential business key
 inside a read endpoint would create a persistent identifier nothing else writes. The
 `Restaurant` UUID is the identity.
+
+## Admin Restaurant Creation — Phase 1, Step 2D
+
+The authoritative primitive for a NEW canonical restaurant entering Dinify through the
+platform Admin control plane. ONE route, on the collection resource that already
+serves the directory:
+
+```
+GET  admin/v1/restaurants/    -> the directory read (Step 1). Session-gated, NOT
+                                 elevation-gated, NOT audited. UNCHANGED.
+POST admin/v1/restaurants/    -> creation. IsAuthenticated + IsRecentlyElevated +
+                                 the existing Admin CSRF policy. Audited exactly once.
+```
+
+`AdminRestaurantListView` was renamed `AdminRestaurantCollectionView` (the route NAME
+`admin-restaurant-list` is unchanged, so every reverser keeps working). The two methods
+resolve DIFFERENT permission sets from one view via `get_permissions()` — a class-level
+`permission_classes` cannot express that, and duplicating the GET onto a second view
+would be two directories to keep in step. There is deliberately no
+`/restaurants/create/`, `/restaurants/new/` or `/onboarding/create-restaurant/`: the
+method carries the meaning, not the URL. Nothing was added to the customer plane —
+there is still NO customer-plane path that creates a restaurant.
+
+### The layering
+- `platform_admin_app/onboarding_creation.py` — THE DOMAIN SERVICE
+  (`create_admin_restaurant`). Owns the transaction, the owner lock, the collision
+  rules, the invariant proof and the credential. Returns a frozen `CreationResult`
+  (`restaurant`, `onboarding`, `owner`, `owner_created`, `invitation`, `claim_token`).
+- `platform_admin_app/endpoints/restaurant_creation.py` — THE REQUEST CONTRACT: the
+  strict input primitives, the discriminated owner serializer, the domain-code → HTTP
+  status map, the audit `after_state` and the response body. Writes nothing.
+- `platform_admin_app/endpoints/restaurants.py` — the collection view. HTTP
+  translation, the outer transaction and the audit row.
+- `platform_admin_app/endpoints/reasoned_request.py` — NEW, and a MOVE not a copy: the
+  reason contract (`ReasonedRequestSerializer`, `MAX_REASON_LENGTH`, `audit_reason`,
+  `audit_error_code`) and the guarded body parse (`read_request_body`) came out of
+  `commercial_base`, which re-exports them so every existing import is unchanged. Both
+  rules were real review findings; a second copy is how they come back.
+
+### What one successful request creates, atomically
+1. the owner `User` — **only** in `mode=new`;
+2. the canonical `Restaurant`;
+3. the owner's `RestaurantEmployee`;
+4. `RestaurantOnboarding(source='admin_created', created_by=<actor>)`;
+5. one unresolved `OwnerInvitation`;
+6. exactly one `AdminAuditLog` entry.
+
+All six or none. A failure at any stage unwinds every earlier one THROUGH THE
+DATABASE, never through compensating deletes — and an EXISTING owner is only ever read
+and locked, so there is nothing about it to undo.
+
+### THE OWNER MODE IS EXPLICIT
+```
+{"restaurant": {"name": ..., "location": ..., "is_test": false},
+ "owner": {"mode": "new", "first_name": ..., "last_name": ...,
+           "phone_number": ..., "email": ...},          // email OPTIONAL
+ "reason": "..."}
+
+{"owner": {"mode": "existing", "user_id": "<exact User UUID>"}}
+```
+- **`mode` is a closed vocabulary and each mode REFUSES the other's fields** (400),
+  read off the keys the caller actually SENT — a key that was sent is a claim they
+  made, and dropping it as blank would confirm a belief that is wrong. Presence is
+  captured in the nested serializer's `to_internal_value`, because a nested serializer
+  has no `initial_data`.
+- The service takes a DISCRIMINATED UNION (`NewOwner` | `ExistingOwner`), so the
+  hybrid the endpoint refuses is *unrepresentable* one layer down.
+- **A phone already in use is a 409 `owner_account_already_exists`, NEVER a silent
+  reuse.** "That number exists, so that must be who you meant" is the quiet
+  wrong-owner failure this contract exists to prevent: a restaurant attached to the
+  wrong person looks exactly like one attached to the right person, and nobody finds
+  out until they sign in. The conflict body carries the existing account's UUID (and
+  nothing else — no name, phone or email) so the operator can look at it and
+  deliberately request `mode=existing`.
+- **A duplicate non-blank EMAIL is refused too (409 `owner_email_already_in_use`), and
+  the refusal names no account.** Email is NOT identity here and is never used to
+  select an owner — but `users_app.controllers.login` and
+  `reset_password._resolve_user` both call `User.objects.get(email=...)`, so a
+  duplicate would break email login AND password reset with a **500 for both users**.
+  `update_user_profile` already refuses an email change for exactly this reason. Do
+  not let this policy mutate into "email identifies the owner".
+
+### A NEW OWNER HAS NO PASSWORD
+`account_type=restaurant_user`, `username` = `phone_number` = the canonical
+`256XXXXXXXXX` MSISDN (`normalise_msisdn`, Uganda-only), `roles=[]`, names
+`.strip().title()` per the repo convention, email lower-cased or NULL, `country='UG'`
+from the server — and `set_unusable_password()`.
+
+**NO TEMPORARY PASSWORD ARCHITECTURE.** No generated password, no `self_register`, no
+`create_employee`, no credential email or SMS, no OTP, and the invitation is never
+marked consumed. The retired `admin_register_restaurant` did all of that; a test
+AST-scans `onboarding_creation` and fails the build if `self_register`,
+`create_employee`, `Notification`, `save_action`, `OtpManager`, `random`,
+`make_password` or `get_random_string` reappear by name. `prompt_password_change` keeps
+its model default and is NOT touched — it must never become the proof of claim.
+
+### AN EXISTING OWNER IS NEVER MODIFIED
+Resolved by exact UUID, `select_for_update(of=('self',))` and re-read INSIDE the
+transaction — `of=('self',)` and no `select_related`, so it locks the `users` row and
+nothing else (the PR-E lesson). Refused with 409 when the account is **inactive**
+(`owner_account_inactive` — reactivating somebody's account is a separate decision with
+its own actor and reason, and this operation was not asked to make it) or is
+**`platform_staff`** (`owner_account_not_restaurant_user`; `services.guard_membership_creation`
+refuses the membership independently). Unknown UUID is **409
+`owner_account_not_found`, NOT 404** — the caller is an authenticated administrator who
+named that UUID, and a 404 on this route would say the wrong thing was missing.
+Nothing about the account is altered: not the name, email, phone, username, password,
+roles, `prompt_password_change` or `is_active`. A `User` owning several restaurants is
+an ordinary supported case.
+
+### RESTAURANT FACTS: THREE, AND DELIBERATELY NOT THE MODEL
+`name`, `location`, `is_test`. A `ModelSerializer` would make forty-odd columns
+candidate request fields and turn creation into an untyped edit API for a tenant that
+does not exist yet. `status` starts `onboarding` (never from the request — lifecycle
+remains the only writer afterwards), `country` is the server Phase-1 value, `owner` and
+`created_by` are supplied by the service, and every other column keeps its model
+default. `created_by` is ATTRIBUTION, not authority.
+
+Name and location are whitespace-normalised (trimmed, internal runs collapsed) and
+**not case-folded or title-cased** — the retired path title-cased names, which renders
+"KFC" as "Kfc".
+
+**`is_test` is REQUIRED and STRICT** — a `StrictBooleanField` refusing `1`, `"true"`,
+`"yes"` and `null`, so the classification cannot be decided by a coercion table. It is
+never inferred from the name, location, environment or actor. Creation is allowed to
+set it directly because this IS the trusted platform-owned creation writer; do NOT
+route a new restaurant through `mark_restaurant_test` afterwards — that command changes
+an EXISTING tenant's classification, and using it here would emit a second audit event
+for a fact the creation request already stated.
+
+### OWNER AUTHORITY, AND THE INVARIANT PROOF
+`Restaurant.owner` alone is a name on a row: the customer plane resolves permissions
+from an active, non-deleted owner-role `RestaurantEmployee`. Exactly one is created,
+with the canonical `RESTAURANT_OWNER` constant (never a hand-typed `'owner'`), and
+`assert_owner_consistency(restaurant)` is then called INSIDE the transaction — so a
+creation that failed the invariant could not commit. It validates and never repairs.
+
+**ZERO `RestaurantRolePermission` ROWS ARE SEEDED**, and that is a decision rather than
+an omission. `permissions_check._resolve_from_roles` short-circuits an owner to full
+access and every other role falls back to `role_defaults.DEFAULT_ROLE_MODULES` when no
+override row exists — `ensure_role_permissions`'s own docstring says the resolver is
+correct without them. Seeding four rows that restate the coded defaults would create
+state whose only future is to drift from them. (The retired creator seeded them; that
+is not a reason.)
+
+### THE CREDENTIAL
+`secrets.token_urlsafe(48)` (~288 bits, the same standard as an admin session token, a
+login challenge and a delegation code), hashed with `sessions.hash_token` — **only the
+hash is persisted**. The raw token is returned ONCE, in the 201 body, in a response
+stamped `Cache-Control: no-store, private`. It is never logged, never audited, never in
+a cookie, never in a `Location` header, and **no claim URL is fabricated** — a token is
+a credential; a URL is a product promise, and the customer-plane redemption route does
+not exist.
+
+`ADMIN_OWNER_INVITATION_TTL` (default 7 days, `getattr`-with-matching-default like
+every other admin constant) is read once, and `issued_at` / `expires_at` come from ONE
+captured `now` so the window is exactly the TTL. Expiry stays DERIVED
+(`OwnerInvitation.is_expired`) — nothing here runs on a schedule.
+
+**A LOST RESPONSE IS UNRECOVERABLE BY DESIGN.** If the server commits and the response
+is lost, the platform holds a valid unresolved invitation and only its hash. The remedy
+is the future REISSUE operation, which will atomically supersede the unresolved
+invitation and mint a fresh token. Do NOT store recoverable plaintext, do NOT return
+the stored hash as a credential, and do NOT invent an "exact retry returns the same
+token" guarantee the schema cannot support.
+
+**ISSUANCE IS NOT DELIVERY.** No SMS, no email, no notification, no delivery claim —
+the schema has no delivery columns for exactly that reason. Operator-mediated handoff
+is the first implementation; delivery lands additively later.
+
+### THE SUCCESS PAYLOAD
+```
+201 {"status": 201, "message": "Restaurant created.", "data": {
+  "restaurant": { ...the canonical Step-1 DETAIL projection... },
+  "owner_account": {"id": "<uuid>", "created": true|false},
+  "owner_invitation": {"id": ..., "issued_at": ..., "expires_at": ...,
+                       "claim_token": "<RAW, ONCE>"}}}
+```
+`restaurant` is `restaurant_reads.serialize_detail` re-read from the database INSIDE
+the same transaction — the same bytes `GET admin/v1/restaurants/<id>/` returns, never a
+second "created restaurant" shape. So the onboarding words the client sees (`tracked`,
+`admin_created`, `consistent`, `not_established`, `pending`) are DERIVED by the existing
+Step-2C evidence rules from the rows just written; `onboarding_reads` was NOT modified
+to produce them, and a test proves the two payloads match. `owner_account.created` is
+stated by the operation, never re-derived — a brand-new account and a long-standing one
+are indistinguishable a moment later.
+
+### AUDIT — EXACTLY ONE ENTRY PER POST
+`admin.restaurant.created`. ONE action for ONE decision however many rows moved, and
+one action per OUTCOME too (`AdminAuditLog.result` carries success / failure / denied).
+Covers: success, an unreadable body, a rejected payload, every domain conflict, and a
+stale-elevation refusal (via a `permission_denied` override, since DRF rejects
+permissions before the handler). NOT audited: an anonymous request, a CSRF failure
+(both refused inside authentication, before any decision exists) and a `GET`.
+
+- Success: `resource_id` / `restaurant_id` = the new tenant; **no `before_state`** (the
+  resource did not exist — a row of nulls would imply a prior state); `after_state` =
+  `restaurant_status`, `is_test`, `admin_onboarding_source`, `owner_user_id`,
+  `owner_account_created`, `owner_invitation_id`, `owner_invitation_expires_at`.
+  **No owner name, phone or email. No raw token and no token hash.**
+- Failure / denied: no `resource_id`, no `restaurant_id`, no state blobs — nothing was
+  created, and naming an id would put a row in the log the activity strip would then
+  attribute to some restaurant.
+- A rejected request records `reason` ONLY if the reason field itself validated, and
+  then its NORMALIZED value (`ReasonedRequestSerializer.audit_reason`). An unreadable
+  body records `reason=''` — a reason must never be invented from a body that would
+  not parse. A denial records nothing from the body at all.
+
+**DOMAIN MUTATION + AUDIT SHARE ONE OUTER `transaction.atomic()`** in the view; the
+service's own atomic block nests as a savepoint. A failed audit rolls the entire
+creation back (pinned by a fault injected at `AdminAuditLog.objects.create`, plus a
+guard test proving the domain rows really existed at that moment), and a REFUSED
+creation is still recorded because the domain exception unwinds only its savepoint.
+The SERVICE therefore writes no audit row itself — deliberately unlike
+`onboarding_adoption`, whose adapter is a shell command: here the auditable unit is THE
+REQUEST, which also has to record denials and unreadable bodies the service never sees.
+
+### STATUS MAP
+- **400** — malformed request facts: missing fields, blank name/location, invalid
+  `owner.mode`, cross-mode fields, invalid UUID syntax, a non-boolean `is_test`, an
+  invalid phone or email, a missing or too-short reason. Field-keyed `errors`, NESTED
+  the way DRF nests them (`{"owner": {"phone_number": [...]}}`) — including for a
+  DOMAIN refusal such as `normalise_msisdn`'s, so one field never has two error
+  shapes depending on which layer refused it.
+- **409** — a well-formed request the platform's current state contradicts:
+  `owner_account_already_exists`, `owner_email_already_in_use`,
+  `owner_account_not_found`, `owner_account_inactive`,
+  `owner_account_not_restaurant_user`, `restaurant_already_exists`. Carries `code`,
+  and (for the two account conflicts) a `details` object of UUIDs only.
+- **415** `unsupported_media_type` / **400** `malformed_body` — `request.data` parses
+  ON ACCESS, and the two exceptions are distinct (`UnsupportedMediaType` is NOT a
+  `ParseError` subclass). Both audited; different statuses, because the status is the
+  caller's remedy.
+- **403** stale/absent elevation, **401** anonymous.
+- An UNMAPPED domain code is deliberately re-raised → **500** and a rollback, never
+  relabelled a tidy client error.
+
+### DUPLICATE PROTECTION AND CONCURRENCY
+Two rules, one answer:
+- **SAME OWNER** — `Restaurant.Meta.unique_together (name, location, owner)`, a
+  database fact. The pre-check produces a sentence; the constraint behind a SAVEPOINT
+  is what enforces it, and it counts SOFT-DELETED rows too (the index has no `deleted`
+  predicate). An `IntegrityError` is re-checked before being called a duplicate — an
+  unrelated one is re-raised.
+- **ANY OWNER** — the same name at the same location, case-insensitively, among
+  non-soft-deleted restaurants. The rule the retired creator applied, kept because it
+  is the strongest truthful duplicate statement this repo has made and an accidental
+  double submission is far likelier than two businesses sharing a name AND a location.
+
+**Creation is not adoption**: a duplicate is REFUSED, never answered by handing back
+the restaurant somebody else created.
+
+Serialization points: an EXISTING owner's `User` row (locked); a NEW owner's
+`phone_number` unique index (no lock needed — it is a database fact). LOCK ORDER:
+`User → (INSERT Restaurant) → (INSERT RestaurantEmployee) → (INSERT
+RestaurantOnboarding) → (INSERT OwnerInvitation) → AdminAuditLog`. It row-locks nothing
+but the owner and never waits on a `Restaurant` row, so it cannot cycle against the
+lifecycle transition (which holds `Restaurant` and waits on `User` only for the
+`FOR KEY SHARE` its audit insert takes). **NO ADMISSION ADVISORY LOCK** — an order path
+cannot read a restaurant that does not exist yet, and taking it would invert the
+documented `advisory → Restaurant` order for nothing.
+
+**TWO KNOWN, DELIBERATELY OPEN RACES**, both recorded rather than papered over;
+`platform_admin_app/tests_restaurant_creation_concurrency.py` states them beside the
+races it does close.
+
+1. Two simultaneous creations naming the SAME restaurant under DIFFERENT owners can
+   both pass the cross-owner read. Nothing in the schema forbids that pair, and closing
+   it would need either a new global uniqueness index over live rows (whose behaviour
+   against existing data is not obviously safe) or a lock domain broad enough to
+   serialise unrelated creations. The same-owner case — the double-click an operator
+   actually produces — IS closed.
+2. Two simultaneous creations with DIFFERENT phones and the SAME owner email can both
+   pass the email read. **`User.email` carries no unique constraint**, and under READ
+   COMMITTED a `SELECT` takes no predicate lock, so the pre-check is best-effort — in
+   contrast to the phone check, which the `phone_number` unique index makes race-free.
+   THIS IS AN EXISTING REPOSITORY-WIDE SEAM, not one this surface introduced:
+   `self_register` and `update_user_profile` carry the identical non-atomic
+   `filter(email=...).exists()` check, so a duplicate can already arise from the
+   customer plane. The real fix is a partial unique index on `User.email` (excluding
+   NULL and `''`, of which there are many — `create_user` stores `''` for a missing
+   address). That is a CONTRACT migration under the expand-only rule: it FAILS AT
+   DEPLOY if the corpus already holds a duplicate, so it needs the production data
+   inspected first and belongs in its own PR alongside a repair for whatever it finds.
+   Do NOT close it with an advisory lock here — that would serialise this endpoint
+   against itself while the two customer-plane writers went on writing around it, which
+   reads as enforcement without being it.
+
+### WHAT CREATION DOES NOT TOUCH
+No `RestaurantServiceConfiguration`, `RestaurantSubscriptionTerms`, invoice, payment,
+receivable, PSP row, tax decision or owner go-live approval; no `payment_timing` or
+`payment_collection_mode`. No dining area, table, QR credential, menu section, menu
+item, order, test order, support issue or delegation grant. No readiness change —
+`check_go_live_readiness` still fails closed with `readiness_not_configured`. No
+`RestaurantRolePermission` rows. No legacy action log
+(`misc_app.controllers.save_action_log`), no `Notification`, no `Secretary`. A newborn
+tenant being commercially and operationally EMPTY is correct: those absences are the
+readiness blockers a later step will name.
+
+### NOT BUILT BY THIS STEP
+The Angular creation UI, owner-invitation REDEMPTION, the password/claim flow,
+RESEND / REISSUE, CANCEL, delivery, readiness, owner go-live approval, QR / menu /
+table setup, commercial configuration and lifecycle controls. **Step 2 is not
+complete.**
+
+### SPEC DEBT (reported, not resolved here)
+The Admin MVP document's §6 still says "no admin-plane onboarding API in Phase 1"
+while its own §15 sequences "Create restaurant shell + owner invitation", and this file
+already records that the customer-plane creation path was removed *until Phase 1
+rebuilds onboarding natively on `/api/admin/v1`*. The product evolved in favour of the
+latter and this step implements it. The stale §6 wording is NOT a reason to put
+creation back on the customer plane; reconcile the Admin spec when the creation UI
+slice touches it.
 
 ## Admin Commercial Writes — Phase 1, Step 3D.2a
 
@@ -1725,16 +2084,24 @@ Step-3C mutations are reachable over HTTP and nothing else is.
 - **The Admin frontend does NOT expose these controls yet** — Step 3E adds the UI, sends
   the tokens, collects the reason and handles the 409
 
-## Admin Onboarding Domain — Phase 1, Steps 2A + 2B + 2C
+## Admin Onboarding Domain — Phase 1, Steps 2A + 2B + 2C + 2D
 
-Three faces of one domain, all in `platform_admin_app/`: the SCHEMA and its validator
+Four faces of one domain, all in `platform_admin_app/`: the SCHEMA and its validator
 (Step 2A — two models in `models.py` plus `onboarding.py`, migration
-`platform_admin_app/0009`), ONE writer (Step 2B — `onboarding_adoption.py` and its
-management command, no migration), and the READ projection (Step 2C —
-`onboarding_reads.py`, no migration). **There is still NO endpoint that writes, NO
-invitation service and NO attestation writer.** **No restaurant is adopted
-automatically**: there is no backfill, no signal and no `get_or_create`, so absence
-still means "not yet represented in the Admin onboarding domain".
+`platform_admin_app/0009`), the ADOPTION writer (Step 2B — `onboarding_adoption.py`
+and its management command, no migration), the READ projection (Step 2C —
+`onboarding_reads.py`, no migration), and the CREATION writer (Step 2D —
+`onboarding_creation.py` plus `POST admin/v1/restaurants/`, no migration; see "Admin
+Restaurant Creation").
+
+TWO WRITERS, ONE PER PROVENANCE, and neither can write the other's: adoption records a
+PRE-EXISTING tenant as `legacy_adopted` and refuses to convert `admin_created`;
+creation makes a NEW tenant as `admin_created` and never adopts anything. **There is
+still NO attestation writer and no redemption, reissue or cancel service** —
+`OwnerInvitation` rows are MINTED by creation and nothing yet resolves one. **No
+restaurant is adopted or created automatically**: there is no backfill, no signal and
+no `get_or_create`, so absence still means "not yet represented in the Admin
+onboarding domain".
 
 ### RestaurantOnboarding — provenance, not a second restaurant
 The durable record of HOW one canonical `Restaurant` entered the Admin onboarding
@@ -1790,7 +2157,9 @@ a second FK would be a second value able to drift. No identity snapshot.
   The predicate deliberately does NOT consult the clock (a partial-index predicate
   must be immutable), so an **expired-but-unsuperseded row still occupies the slot**
   — which is what makes the future reissue path's supersede step load-bearing,
-  exactly as `challenges.create_challenge` consumes before it inserts
+  exactly as `challenges.create_challenge` consumes before it inserts. As of Step 2D
+  rows ARE minted (one per admin-created restaurant, unresolved); nothing yet consumes,
+  cancels or supersedes one
 - **Expired is DERIVED** (`expires_at <= now`, the `is_expired` property), never a
   stored `status='expired'`: nothing in this repo runs on a schedule to maintain one
 - The three terminal stamps are mutually exclusive (three named constraints);
@@ -1877,8 +2246,12 @@ thin operator adapter that adds NO policy of its own.
 `platform_admin_app/onboarding_reads.py`. Called by
 `restaurant_reads.serialize_detail` exactly as it calls
 `lifecycle.check_go_live_readiness` — a thin delegation to whoever owns the question.
-It lives beside the domain's other two faces because what it computes is ONBOARDING
-semantics (what counts as evidence of owner control), not directory presentation.
+It lives beside the domain's other faces because what it computes is ONBOARDING
+semantics (what counts as evidence of owner control), not directory presentation. Step
+2D consumes it unchanged: the four words a freshly created restaurant reads back
+(`tracked` / `admin_created` / `consistent` / `not_established`, invitation `pending`)
+are DERIVED by these rules from the rows the creation writer produced — the projection
+was not taught to say them.
 
 ```
 "onboarding": {
@@ -2417,7 +2790,8 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   derive at admission. There is still NO admin-plane write endpoint and no Admin UI
   for the flag, and no restaurant has been classified with the command yet
 - `adopt_restaurant_onboarding` in `platform_admin_app/management/commands/` — the
-  ONLY writer of the Admin onboarding domain. Represents exactly ONE pre-existing
+  only writer of `legacy_adopted` onboarding provenance (the `admin_created` one is
+  `POST admin/v1/restaurants/`). Represents exactly ONE pre-existing
   restaurant named by UUID as `RestaurantOnboarding(source='legacy_adopted')`,
   attributed to an active `platform_staff` `--actor` and a `--reason` (the same
   10-char bar as a lifecycle transition), with the row and its

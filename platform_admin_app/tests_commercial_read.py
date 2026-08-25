@@ -1198,16 +1198,42 @@ class CommercialReadTouchesNothingElseTests(_CommercialReadTestCase):
         self.assertEqual(self.get(_detail_url(restaurant)).status_code, 200)
         self.assertEqual(AdminAuditLog.objects.count(), before)
 
-    def test_no_write_verb_is_accepted_on_either_route(self):
-        """§22. This PR is GET-only."""
+    def test_the_commercial_read_added_no_write_verb(self):
+        """
+        §22. The COMMERCIAL projection is read-only, and remains so.
+
+        ``POST`` on the collection is EXCLUDED here, and only there: Phase-1 Step 2D
+        later added restaurant CREATION on that verb. That is not a commercial write
+        — it records no payment timing, collection mode or subscription terms — and it
+        is covered by ``tests_restaurant_creation_endpoint``. The two assertions below
+        keep this test's real subject intact: every other verb is still refused, and
+        the collection's ``POST`` is the elevated creation route rather than something
+        the commercial read opened.
+        """
         restaurant = _make_restaurant('Read Only')
         for method in ('post', 'put', 'patch', 'delete'):
             for url in (LIST_URL, _detail_url(restaurant)):
+                if method == 'post' and url == LIST_URL:
+                    continue
                 with self.subTest(method=method, url=url):
                     response = getattr(self.client, method)(
                         url, data={}, content_type='application/json',
                     )
                     self.assertEqual(response.status_code, 405, response.content)
+
+    def test_the_collections_post_is_the_elevated_creation_route(self):
+        """
+        §22, continued. This session is authenticated but NEVER elevated, so a
+        ``POST`` must be refused for want of a second factor — proving the verb is
+        the step-up creation route and not a write the commercial read exposed.
+        """
+        self.assertIsNone(self.session.elevated_at)
+        response = self.client.post(
+            LIST_URL, data={}, content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 403, response.content)
+        self.assertFalse(RestaurantServiceConfiguration.objects.exists())
+        self.assertFalse(RestaurantSubscriptionTerms.objects.exists())
 
 
 # --- writer / reader agreement ------------------------------------------------

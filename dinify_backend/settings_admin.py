@@ -91,6 +91,21 @@ ADMIN_LOCKOUT_BACKOFF_CAP = timedelta(minutes=60)
 # action. Consumed by platform_admin_app.permissions (attached to nothing yet).
 ADMIN_ELEVATION_MAX_AGE = timedelta(minutes=5)
 
+# --- Admin onboarding constants ------------------------------------------------------
+# How long an owner has to redeem the claim credential issued when Admin creates
+# their restaurant. Same getattr-with-matching-default contract as everything above,
+# so `platform_admin_app.onboarding_creation` behaves identically under the base and
+# test settings.
+#
+# Seven days is the initial Phase-1 claim window: long enough for an
+# operator-mediated handoff (there is no delivery infrastructure behind this yet) and
+# short enough that a credential nobody used stops being live. EXPIRY IS DERIVED on
+# read (`OwnerInvitation.is_expired`), never stored — nothing in this repository runs
+# on a schedule to maintain a `status='expired'` column. An expired-but-unsuperseded
+# invitation still occupies the one-unresolved-per-onboarding slot, which is what
+# makes the future reissue path's supersede step load-bearing.
+ADMIN_OWNER_INVITATION_TTL = timedelta(days=7)
+
 # --- Admin delegation constants -----------------------------------------------------
 # Two independent clocks: the exchange code is a HANDOFF window (the admin has minutes
 # to pass it to the restaurant portal), while the delegated session it buys is a WORK
