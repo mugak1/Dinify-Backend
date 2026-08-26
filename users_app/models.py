@@ -11,6 +11,9 @@ from django.utils import timezone
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_CHOICES,
     ACCOUNT_TYPE_RESTAURANT_USER,
+    CUSTOMER_ACCESS_ESTABLISHED,
+    CUSTOMER_ACCESS_STATE_CHOICES,
+    CUSTOMER_ACCESS_STATES,
 )
 
 
@@ -60,6 +63,39 @@ class User(AbstractUser):
         db_index=True,
     )
 
+    # CUSTOMER-PLANE ACCESS STATE (Step 2D.1). Whether this identity may be admitted
+    # onto the customer plane AT ALL — a separate axis from every neighbouring field:
+    #
+    #   account_type   which plane the account belongs to
+    #   is_active      whether it was administratively deactivated
+    #   password       whether one particular credential authenticates
+    #   this field     whether the identity is admitted to the plane in the first place
+    #
+    # `established` is the default and covers every identity that predates this gate
+    # plus every ordinary creation path (self-registration, staff invite, the
+    # order-matching command). `pending_initial_claim` is written by exactly one
+    # caller — `platform_admin_app.onboarding_creation` creating a BRAND-NEW owner —
+    # and is enforced at every customer token mint, at token presentation and at
+    # refresh (`users_app.customer_access`).
+    #
+    # NOT owner-control evidence. Owner control stays restaurant-scoped and
+    # evidence-based (a consumed OwnerInvitation for the current owner); this is
+    # identity-scoped operational authorization, and the two must not be conflated —
+    # an established owner of restaurant A who is named owner of a new restaurant B
+    # keeps full customer access while B's invitation is still pending.
+    #
+    # SERVER-WRITTEN ONLY, and protected the same way `account_type` is: absent from
+    # `SerGetUserProfile.fields`, absent from every EDIT_INFORMATION section (there is
+    # no `user` section at all), and never assigned by a customer-plane controller.
+    #
+    # `db_default` as well as `default` is deliberate — see migration 0014.
+    customer_access_state = models.CharField(
+        max_length=32,
+        choices=CUSTOMER_ACCESS_STATE_CHOICES,
+        default=CUSTOMER_ACCESS_ESTABLISHED,
+        db_default=CUSTOMER_ACCESS_ESTABLISHED,
+    )
+
     # track if profile is
 
     class Meta:
@@ -68,6 +104,18 @@ class User(AbstractUser):
         """
         db_table = 'users'
         ordering = ['username']
+        constraints = [
+            # The vocabulary as a DATABASE fact, matching how the other closed
+            # vocabularies in this repo are held (`Restaurant.status`,
+            # `RestaurantOnboarding.source`). `choices=` is a form/admin nicety and
+            # not an integrity boundary: a value outside this set would be read by
+            # `customer_access.is_established` as "not established" and would silently
+            # lock the account out, so it must not be storable in the first place.
+            models.CheckConstraint(
+                condition=models.Q(customer_access_state__in=CUSTOMER_ACCESS_STATES),
+                name='user_customer_access_state_vocabulary',
+            ),
+        ]
 
 
 class BaseModel(models.Model):

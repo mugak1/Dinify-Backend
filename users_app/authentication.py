@@ -54,30 +54,49 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import AuthenticationFailed
 
 from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
+from users_app import customer_access
 
 logger = logging.getLogger(__name__)
 
 
 class CustomerJWTAuthentication(JWTAuthentication):
     """
-    ``JWTAuthentication`` that refuses platform-staff accounts.
+    ``JWTAuthentication`` that refuses platform-staff and not-yet-claimed accounts.
 
-    Subtracts only: a token that resolves to a ``restaurant_user`` is returned by
-    ``super()`` untouched, and every other failure mode (bad signature, expiry,
-    blacklist, missing claim, unknown user, inactive user) is left exactly as
+    Subtracts only: a token that resolves to an established ``restaurant_user`` is
+    returned by ``super()`` untouched, and every other failure mode (bad signature,
+    expiry, blacklist, missing claim, unknown user, inactive user) is left exactly as
     SimpleJWT produces it.
     """
 
     def get_user(self, validated_token):
         """
-        Resolve the token's subject, refusing platform staff.
+        Resolve the token's subject, refusing platform staff and pre-claim identities.
 
-        The check runs AFTER ``super()`` deliberately: the row is already loaded by
-        then, so this costs no additional query, and a token that was going to fail
+        The checks run AFTER ``super()`` deliberately: the row is already loaded by
+        then, so they cost no additional query, and a token that was going to fail
         for an ordinary reason still fails for that reason.
+
+        WHY GATE PRESENTATION WHEN NO PENDING IDENTITY SHOULD BE ABLE TO MINT ONE
+        (Step 2D.1). Because the invariant worth having is *a pre-claim identity
+        cannot EXERCISE customer authority*, not *today's known mint paths will not
+        hand it one*. The mint paths were audited and gated — but that was equally
+        true of ``account_type`` before this class existed, and the gap that argument
+        left open is the reason the file exists. This closes the same class of window
+        for the new axis: a token minted moments before a future transition into a
+        refused state, a mint path added later, a shell or fixture issuance.
+
+        Both refusals reuse SimpleJWT's own ``user_inactive`` failure — byte-identical
+        to what a DEACTIVATED ordinary customer gets from ``super()`` — so a prober
+        can distinguish neither "promoted to platform staff" nor "provisioned but not
+        yet claimed" from "deactivated". The real reason goes to the log, without the
+        username and without the token.
         """
         user = super().get_user(validated_token)
         if getattr(user, 'account_type', None) == ACCOUNT_TYPE_PLATFORM_STAFF:
             logger.info('jwt auth: refused (platform staff on customer origin)')
+            raise AuthenticationFailed(_('User is inactive'), code='user_inactive')
+        if customer_access.is_refused(user):
+            logger.info('jwt auth: refused (customer access not established)')
             raise AuthenticationFailed(_('User is inactive'), code='user_inactive')
         return user

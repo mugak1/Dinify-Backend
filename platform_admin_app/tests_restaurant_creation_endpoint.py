@@ -27,6 +27,8 @@ from commercial_app.models import (
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     ACCOUNT_TYPE_RESTAURANT_USER,
+    CUSTOMER_ACCESS_ESTABLISHED,
+    CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
     RESTAURANT_OWNER,
     RestaurantStatus_Onboarding,
 )
@@ -61,6 +63,12 @@ REASON = 'Creating the restaurant after the signed onboarding agreement.'
 
 # Distinct phone range from every other admin suite.
 _PHONE = iter(f'25670970{n:05d}' for n in range(1, 9999))
+
+# External I/O the customer OTP path touches, patched in the multi-tenant proof.
+_PATCH_OTP_SMS = 'users_app.controllers.otp_manager.send_sms'
+_PATCH_NOTIFICATION = (
+    'misc_app.controllers.notifications.notification.Notification.create_notification'
+)
 
 _ADMIN_OVERRIDES = dict(
     ROOT_URLCONF='dinify_backend.urls_admin',
@@ -237,6 +245,63 @@ class CreateWithNewOwnerTests(_CreationEndpointTestCase):
     def test_owner_is_a_restaurant_user_with_an_unusable_password(self):
         self.assertEqual(self.owner.account_type, ACCOUNT_TYPE_RESTAURANT_USER)
         self.assertFalse(self.owner.has_usable_password())
+
+    def test_owner_customer_access_is_pending_initial_claim(self):
+        """Step 2D.1 — the identity is not on the customer plane until claim."""
+        self.assertEqual(
+            self.owner.customer_access_state, CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
+        )
+        self.assertTrue(self.owner.is_active)
+
+    def test_the_new_owner_cannot_reach_the_customer_plane(self):
+        """
+        The end-to-end statement Step 2D.1 exists to make TRUE, proved INDEPENDENTLY
+        of the restaurant rows above it: no login, no generic password reset, and no
+        session even from a directly fabricated token.
+        """
+        from django.test import Client as PlainClient
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        from users_app.controllers.login import login
+        from users_app.controllers.reset_password import initiate_password_reset
+
+        # Login: refused even after a password is forced onto the account.
+        self.owner.set_password('forced-password')
+        self.owner.save(update_fields=['password'])
+        self.assertEqual(
+            login(self.owner.username, 'forced-password')['status'], 401,
+        )
+
+        # Generic password reset: refused at the resolver, indistinguishably from an
+        # account that does not exist.
+        self.assertEqual(
+            initiate_password_reset(self.owner.username)['status'], 400,
+        )
+
+        # A fabricated access token: refused at presentation.
+        token = str(RefreshToken.for_user(self.owner).access_token)
+        with override_settings(ROOT_URLCONF='dinify_backend.urls'):
+            response = PlainClient().get(
+                '/api/v1/users/user-profile/',
+                HTTP_AUTHORIZATION=f'Bearer {token}',
+            )
+        self.assertEqual(response.status_code, 401)
+
+    def test_the_success_audit_records_no_access_state(self):
+        """
+        §26. One action per request, and its after_state describes the CREATION
+        decision. The gate is enforcement, not a second administrative event, and the
+        creation audit already records that the account was provisioned.
+        """
+        import json
+
+        entry = self.assertAudited(
+            ADMIN_RESTAURANT_CREATED, result=RESULT_SUCCESS,
+        )
+        self.assertNotIn(
+            'customer_access_state', json.dumps(entry.after_state),
+        )
+        self.assertEqual(AdminAuditLog.objects.count(), 1)
 
     def test_owner_holds_no_platform_authority(self):
         self.assertEqual(self.owner.roles, [])
@@ -553,6 +618,77 @@ class ExistingOwnerEndpointTests(_CreationEndpointTestCase):
         entry = self.assertAudited(ADMIN_RESTAURANT_CREATED, result=RESULT_SUCCESS)
         self.assertFalse(entry.after_state['owner_account_created'])
         self.assertEqual(entry.after_state['owner_user_id'], str(self.existing.pk))
+
+    def test_an_established_owner_keeps_customer_access_and_can_still_sign_in(self):
+        """
+        §32 — THE MULTI-TENANT REGRESSION, proved through real authentication.
+
+        The owner already holds restaurant A. Admin creates restaurant B for them,
+        which mints a PENDING invitation and leaves B's owner control
+        ``not_established``. None of that may touch the identity: B's pending
+        credential is restaurant-scoped evidence, and reading it as a global gate
+        would take a live tenant's owner away from them.
+        """
+        from django.test import Client as PlainClient
+
+        from users_app.controllers.login import login
+        from users_app.controllers.otp_manager import OtpManager
+
+        # Restaurant A: the owner is already trading, and signs in normally.
+        self.existing.set_password('password')
+        self.existing.save(update_fields=['password'])
+        first = self.attach(name='Restaurant A', location='Kololo')
+        self.assertEqual(first.status_code, 201, first.content)
+
+        # Restaurant B, created later for the same account.
+        second = self.attach(name='Restaurant B', location='Ntinda')
+        self.assertEqual(second.status_code, 201, second.content)
+
+        # B genuinely holds an unresolved invitation and unestablished owner control.
+        detail = second.json()['data']['restaurant']
+        self.assertEqual(detail['onboarding']['invitation']['status'], 'pending')
+        self.assertEqual(
+            detail['onboarding']['owner_control']['status'], 'not_established',
+        )
+
+        # The IDENTITY is untouched, and still authenticates.
+        self.existing.refresh_from_db()
+        self.assertEqual(
+            self.existing.customer_access_state, CUSTOMER_ACCESS_ESTABLISHED,
+        )
+        with patch(_PATCH_OTP_SMS, return_value=True), patch(_PATCH_NOTIFICATION):
+            response = login(self.existing.username, 'password')
+            self.assertEqual(response['status'], 200, response)
+            # An owner is privileged, so login escalates to OTP rather than
+            # returning a token — the ordinary contract for this account, and a
+            # path a pending identity is refused before it ever reaches.
+            self.assertTrue(response['data']['require_otp'])
+
+            # Both restaurants already resolve as owned authority.
+            restaurant_ids = {
+                entry['restaurant_id']
+                for entry in response['data']['profile']['restaurant_roles']
+            }
+            self.assertIn(
+                first.json()['data']['restaurant']['id'], restaurant_ids,
+            )
+            self.assertIn(
+                second.json()['data']['restaurant']['id'], restaurant_ids,
+            )
+
+            # Completing the OTP still mints a real customer session.
+            verified = OtpManager().verify_otp(
+                user_id=str(self.existing.id), otp='1234',
+            )
+        self.assertTrue(verified['data']['valid'], verified)
+
+        # And that session can still exercise authority on restaurant A.
+        with override_settings(ROOT_URLCONF='dinify_backend.urls'):
+            profile = PlainClient().get(
+                '/api/v1/users/user-profile/',
+                HTTP_AUTHORIZATION=f"Bearer {verified['data']['token']}",
+            )
+        self.assertNotEqual(profile.status_code, 401)
 
 
 # --- §30 32-40 refusals ------------------------------------------------------

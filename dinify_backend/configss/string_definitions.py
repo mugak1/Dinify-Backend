@@ -134,6 +134,41 @@ ACCOUNT_TYPE_CHOICES = [
 ]
 
 
+# customer-plane access state on User (Step 2D.1 — the pre-claim gate).
+#
+# A SEPARATE AXIS from `account_type`, `is_active` and password usability, and it
+# answers only one question: MAY THIS IDENTITY BE ADMITTED ONTO THE CUSTOMER PLANE AT
+# ALL? Everything else keeps its own meaning — `account_type` says which plane an
+# account belongs to, `is_active` says whether it was administratively deactivated,
+# and a password says whether one particular credential authenticates.
+#
+# `established` is the ordinary state and the default for every identity: legacy rows,
+# self-registration, staff invites, the order-matching command. It is NOT an
+# assertion that anything was verified — it means "this identity is subject to the
+# ordinary customer rules and nothing more".
+#
+# `pending_initial_claim` is written by exactly one place today —
+# `platform_admin_app.onboarding_creation` creating a BRAND-NEW owner — and means the
+# identity was provisioned by Dinify and has not yet completed its first owner claim.
+# The future owner-invitation redemption is the only sanctioned writer of the
+# transition back to `established`, and it must do so atomically with consuming the
+# invitation. There is deliberately no general `establish_customer_access()` service.
+#
+# DO NOT add states here. `suspended`, `disabled`, `expired`, `invited`, `cancelled`
+# and `verified` are other questions that `is_active` and `OwnerInvitation` already
+# own; a second vocabulary for them would make two columns disagree.
+CUSTOMER_ACCESS_ESTABLISHED = 'established'
+CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM = 'pending_initial_claim'
+CUSTOMER_ACCESS_STATES = (
+    CUSTOMER_ACCESS_ESTABLISHED,
+    CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
+)
+CUSTOMER_ACCESS_STATE_CHOICES = [
+    (CUSTOMER_ACCESS_ESTABLISHED, CUSTOMER_ACCESS_ESTABLISHED),
+    (CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM, CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM),
+]
+
+
 # portal module registry (role-based access grid)
 MODULE_DASHBOARD = 'dashboard'
 MODULE_KITCHEN = 'kitchen'

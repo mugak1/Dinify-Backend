@@ -10,15 +10,18 @@ Flow:
 
 The plaintext/generated password is never sent over SMS or email.
 """
+import logging
 import secrets
 import string
-from rest_framework_simplejwt.tokens import RefreshToken
 from users_app.models import User
 from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
 from misc_app.controllers.save_action_log import save_action
 from users_app.controllers.otp_manager import OtpManager
+from users_app import customer_access
+
+logger = logging.getLogger(__name__)
 
 
 def _make_random_password(length=20):
@@ -113,7 +116,13 @@ def reset_password(username, otp):
     # Issue a token so the client can call change-password immediately.
     # The verify_otp for purpose='login' would return a token, but this
     # is purpose='reset-password' so we issue one explicitly.
-    token = RefreshToken.for_user(user)
+    #
+    # Through the single sanctioned customer mint. Unreachable for a non-established
+    # identity — `_resolve_user` refused it long before this line — so this is the
+    # backstop, and the direction of its failure is deliberate: an ungated mint here
+    # is exactly the defect Step 2D.1 exists to close, and it must never come back as
+    # a quiet success.
+    token = customer_access.issue_customer_tokens(user)
 
     return {
         'status': 200,
@@ -129,15 +138,36 @@ def reset_password(username, otp):
 
 def _resolve_user(username):
     """
-    Resolve a user by email or phone number.
+    Resolve a user ELIGIBLE FOR GENERIC PASSWORD RESET, by email or phone number.
 
-    Platform-staff accounts resolve to None — the same result as "no such user", so
-    nothing is disclosed. This flow ends in ``RefreshToken.for_user`` (a customer
-    token) and, before that, overwrites the account password; leaving it open would
-    let anyone who knows an admin's email mint a customer session as them and lock
-    them out of the admin plane. Guarding the single resolver closes both
-    ``initiate_password_reset`` and ``reset_password`` at once. Admin credential
-    recovery is the ``reset_platform_admin_totp`` management command, not this path.
+    Two kinds of account resolve to ``None`` — the same result as "no such user", so
+    nothing is disclosed either way, and both refusals therefore reach the caller as
+    the identical ``NO_PHONE_NUMBER`` 400.
+
+    PLATFORM STAFF. This flow ends in a customer token mint and, before that,
+    overwrites the account password; leaving it open would let anyone who knows an
+    admin's email mint a customer session as them and lock them out of the admin
+    plane. Admin credential recovery is the ``reset_platform_admin_totp`` management
+    command, not this path.
+
+    NOT-YET-CLAIMED IDENTITIES (Step 2D.1). This is the bypass Step 2D.1 closes, and
+    it was the reason an unusable password was never a sufficient invariant: an owner
+    provisioned by Admin has no password precisely so that only the invitation can
+    establish one — but generic reset needed nothing except their phone number to
+    install one and hand out a session. The platform would then hold ``owner_control:
+    not_established`` and ``invitation: pending`` for an account already exercising
+    owner authority.
+
+    GUARDING THE RESOLVER CLOSES BOTH STAGES AT ONCE, which is why the check lives
+    here rather than in ``initiate_password_reset``. A caller can invoke the
+    completion route directly, and an OTP may already exist from before the state was
+    written — neither matters if the identity cannot be resolved into this flow at
+    all.
+
+    AND RESET IS NOT CLAIM. This must never be "fixed" by consuming the
+    ``OwnerInvitation`` from here: password reset never sees the claim credential, so
+    it cannot know the right person is on the other end — which is the whole thing the
+    invitation is for.
     """
     try:
         if '@' in username:
@@ -148,5 +178,9 @@ def _resolve_user(username):
         return None
 
     if user.account_type == ACCOUNT_TYPE_PLATFORM_STAFF:
+        return None
+    if customer_access.is_refused(user):
+        logger.info(
+            'password reset: refused (customer access not established)')
         return None
     return user

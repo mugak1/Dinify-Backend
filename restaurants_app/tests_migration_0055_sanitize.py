@@ -167,18 +167,25 @@ class Migration0055ExecutorTests(TransactionTestCase):
 
     # Pin users_app to its latest migration in BOTH targets so the historical User
     # model state matches the applied DB schema (the country_of_origin->country
-    # rename otherwise drifts between project_state and the DB). BUMP this to the
-    # new head whenever a users_app migration is added: each test migrates
-    # users_app to this pin and tearDown only restores restaurants_app, so a stale
-    # (older) pin leaves users_app migrated BACKWARD — dropping newer columns like
-    # User.account_type — for every test that runs after this class.
+    # rename otherwise drifts between project_state and the DB).
+    #
+    # The pin still wants bumping when a users_app migration lands — it decides which
+    # historical User model THIS class's own tests see — but a stale one can no
+    # longer damage the rest of the suite: ``tearDown`` now restores users_app to its
+    # graph leaf as well as restaurants_app. It used to restore only restaurants_app,
+    # so a stale pin left users_app migrated BACKWARD for every test ordered after
+    # this class, dropping whichever column the newer migrations had added. That is
+    # exactly what happened when ``users_app/0014`` added ``customer_access_state``
+    # against a pin still reading ``0011``: six later TransactionTestCases died with
+    # "column customer_access_state does not exist". Resolving the leaf cannot go
+    # stale, which is the same fix the restaurants_app restore already carries.
     migrate_from = [
         ('restaurants_app', '0054_table_qr_version'),
-        ('users_app', '0011_flip_admin_account_type'),
+        ('users_app', '0014_customer_access_state'),
     ]
     migrate_to = [
         ('restaurants_app', '0055_sanitize_menu_item_extras'),
-        ('users_app', '0011_flip_admin_account_type'),
+        ('users_app', '0014_customer_access_state'),
     ]
 
     def _migrate(self, targets):
@@ -317,6 +324,11 @@ class Migration0055ExecutorTests(TransactionTestCase):
         # `leaf_nodes` cannot go stale: a new migration moves the leaf, and this
         # follows it. There is exactly one leaf per app unless the graph has been
         # forked, which `makemigrations --check` in CI already refuses.
+        # BOTH apps this class rewinds, not just one. users_app is pinned in the
+        # targets above, so a stale pin would otherwise leave it rolled back here.
         executor = MigrationExecutor(connection)
         executor.loader.build_graph()
-        self._migrate(executor.loader.graph.leaf_nodes('restaurants_app'))
+        self._migrate(
+            executor.loader.graph.leaf_nodes('restaurants_app')
+            + executor.loader.graph.leaf_nodes('users_app')
+        )
