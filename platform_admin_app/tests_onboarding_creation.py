@@ -22,6 +22,8 @@ from commercial_app.models import (
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     ACCOUNT_TYPE_RESTAURANT_USER,
+    CUSTOMER_ACCESS_ESTABLISHED,
+    CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
     RESTAURANT_OWNER,
     RestaurantStatus_Live,
     RestaurantStatus_Onboarding,
@@ -160,13 +162,39 @@ class CreateWithNewOwnerTests(_CreationTestCase):
 
     def test_owner_password_is_unusable(self):
         """
-        NO PASSWORD IS GENERATED — the whole point of the invitation architecture.
+        NO PASSWORD IS GENERATED — there is no credential to email, SMS, leak or
+        rotate.
 
-        An unusable password means there is no credential to email, SMS, leak or
-        rotate, and nothing can authenticate as this account until a future
-        redemption establishes one.
+        Defence in depth BESIDE the access gate below, never the gate itself: an
+        unusable password was the original invariant and it was not sufficient,
+        because generic password reset exists precisely to replace one.
         """
         self.assertFalse(self.result.owner.has_usable_password())
+
+    def test_owner_customer_access_is_pending_initial_claim(self):
+        """
+        THE STEP-2D.1 GATE. This identity is not on the customer plane until the
+        owner invitation is redeemed — enforced at every door by
+        ``users_app.customer_access``, not by the password being unusable.
+        """
+        self.assertEqual(
+            self.result.owner.customer_access_state,
+            CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
+        )
+
+    def test_the_three_account_facts_are_independent(self):
+        """
+        Each axis says exactly one thing, and a reader must be able to rely on that:
+        the account belongs to the customer plane, was NOT deactivated, and has not
+        yet been admitted. Collapsing any two would make one of them lie.
+        """
+        owner = self.result.owner
+        self.assertEqual(owner.account_type, ACCOUNT_TYPE_RESTAURANT_USER)
+        self.assertTrue(owner.is_active)
+        self.assertEqual(
+            owner.customer_access_state, CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
+        )
+        self.assertFalse(owner.has_usable_password())
 
     def test_owner_holds_no_platform_authority(self):
         self.assertEqual(self.result.owner.roles, [])
@@ -487,7 +515,7 @@ class ExistingOwnerTests(_CreationTestCase):
             for field in (
                 'username', 'email', 'phone_number', 'password', 'roles',
                 'first_name', 'last_name', 'country', 'account_type',
-                'is_active', 'prompt_password_change',
+                'is_active', 'prompt_password_change', 'customer_access_state',
             )
         }
 
@@ -514,6 +542,62 @@ class ExistingOwnerTests(_CreationTestCase):
     def test_the_existing_account_is_not_modified_in_any_way(self):
         self.attach()
         self.assertOwnerUntouched()
+
+    def test_customer_access_state_is_never_touched(self):
+        """
+        Step 2D.1. Creating another restaurant for somebody is not an event that
+        should rewrite their authentication state in EITHER direction.
+        """
+        self.assertEqual(
+            self.existing.customer_access_state, CUSTOMER_ACCESS_ESTABLISHED,
+        )
+        self.attach()
+        self.existing.refresh_from_db()
+        self.assertEqual(
+            self.existing.customer_access_state, CUSTOMER_ACCESS_ESTABLISHED,
+        )
+
+    def test_an_established_owner_is_not_knocked_back_to_pending(self):
+        """
+        THE PRINCIPAL FALSE POSITIVE. An established owner of restaurant A who is
+        named as the owner of a new restaurant B must keep full customer access while
+        B's invitation is still pending — which is exactly why the gate is an
+        IDENTITY fact and not a reading of invitation state.
+        """
+        from users_app import customer_access
+
+        first = self.attach(name='First Bistro', location='Kololo')
+        second = self.attach(name='Second Bistro', location='Ntinda')
+
+        self.existing.refresh_from_db()
+        self.assertEqual(
+            self.existing.customer_access_state, CUSTOMER_ACCESS_ESTABLISHED,
+        )
+        self.assertTrue(customer_access.is_established(self.existing))
+
+        # Both restaurants genuinely hold an unresolved invitation, so the pending
+        # invitations are real and the account is unaffected by them anyway.
+        for result in (first, second):
+            self.assertFalse(result.invitation.is_resolved)
+
+    def test_creation_does_not_require_the_owner_to_be_established(self):
+        """
+        Deliberately NOT a precondition. A legitimate account may sit in some future
+        exceptional state, and attaching a restaurant must neither refuse it on that
+        basis nor quietly "repair" it.
+        """
+        User.objects.filter(pk=self.existing.pk).update(
+            customer_access_state=CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
+        )
+        self.existing.refresh_from_db()
+        result = self.attach()
+        self.assertEqual(result.owner.pk, self.existing.pk)
+        self.existing.refresh_from_db()
+        self.assertEqual(
+            self.existing.customer_access_state,
+            CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
+            'attaching a restaurant silently repaired the account state',
+        )
 
     def test_a_uuid_string_is_accepted(self):
         result = self.attach(owner=ExistingOwner(user_id=str(self.existing.pk)))

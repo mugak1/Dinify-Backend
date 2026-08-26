@@ -41,6 +41,15 @@ NOT A CLAIM. The invitation begins UNRESOLVED and owner control stays
 ``admin_created`` provenance the database refuses attestation outright, because an
 administrator vouching for an owner they just invented is not evidence of anything.
 
+AND THE ACCOUNT CANNOT BE USED BEFORE THAT CLAIM (Step 2D.1). A new owner is created
+``customer_access_state=pending_initial_claim``, which refuses it the customer plane
+outright — login, generic password reset, login OTP, token presentation and refresh
+alike. That is a change of INVARIANT, not of emphasis: the original design rested on
+the unusable password, and generic password reset needed only the owner's phone
+number to replace one. The future redemption is the sole sanctioned writer of the
+transition back to ``established``, and must perform it atomically with consuming the
+invitation.
+
 NOT COMMERCIAL, AND NOT OPERATIONAL. No service configuration, no subscription
 terms, no invoice, no PSP, no readiness verdict, no owner go-live approval; no dining
 area, table, QR credential, menu section, menu item, order or support issue. A
@@ -77,6 +86,7 @@ from django.utils import timezone
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     ACCOUNT_TYPE_RESTAURANT_USER,
+    CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
     RESTAURANT_OWNER,
     RestaurantStatus_Onboarding,
 )
@@ -494,7 +504,19 @@ def _attach_existing_owner(user_id) -> User:
     reactivating somebody's account is a consequential decision with its own actor,
     reason and audit trail, and it is not one this operation has been asked to make.
     Nothing about the account is altered: not the name, email, phone, username,
-    password, roles, ``prompt_password_change`` or any other field.
+    password, roles, ``prompt_password_change``, ``customer_access_state`` or any
+    other field.
+
+    IN PARTICULAR ``customer_access_state`` IS NEITHER READ NOR WRITTEN HERE
+    (Step 2D.1), and both halves are deliberate. Not written, because creating a
+    second restaurant for somebody is not an event that should rewrite their account's
+    authentication state in either direction — a pending identity is not claimed by
+    Admin giving it another restaurant, and an established one must not be knocked
+    back. Not read, because an established owner of restaurant A named as the owner of
+    a new restaurant B keeps full customer access while B's invitation is pending;
+    that is the multi-tenant case the identity-level gate exists to get right, and
+    requiring ``established`` here would only add a condition with no security value
+    while breaking a legitimate one.
     """
     owner = (
         User.objects
@@ -616,11 +638,26 @@ def _create_owner(spec: NewOwner) -> User:
         # membership created alongside this account, never a string here.
         roles=[],
         account_type=ACCOUNT_TYPE_RESTAURANT_USER,
+        # THE PRE-CLAIM GATE (Step 2D.1). This identity was provisioned by Dinify and
+        # has not completed its first owner claim, so it is not admitted onto the
+        # customer plane at all — no login, no generic password reset, no login OTP,
+        # no token presentation, no refresh (`users_app.customer_access`).
+        #
+        # THREE INDEPENDENT FACTS, and the separation is the point: `account_type`
+        # says which plane this identity belongs to, `is_active` (left True) says it
+        # was not administratively deactivated, and this says it has not yet been
+        # admitted. Conflating any two of them would make one of the three lie.
+        #
+        # It is written HERE and only here. Before Step 2D.1 the invariant rested on
+        # the unusable password below, which was never sufficient: generic password
+        # reset exists precisely to replace an unusable password, and needed nothing
+        # but this owner's phone number to do it.
+        customer_access_state=CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
     )
-    # THE WHOLE POINT, stated as one greppable line rather than inferred from
-    # `make_password(None)`: no password is generated, so there is no credential to
-    # email, to SMS, to leak or to rotate. Nothing can authenticate as this account
-    # until a future redemption establishes one.
+    # NO PASSWORD IS GENERATED, stated as one greppable line rather than inferred from
+    # `make_password(None)`: there is no credential to email, to SMS, to leak or to
+    # rotate. It is defence in depth BESIDE the gate above, never the gate itself —
+    # password usability is the thing being protected, not the protection.
     owner.set_unusable_password()
     try:
         # A SAVEPOINT around the INSERT. Catching `IntegrityError` without one would

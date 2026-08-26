@@ -610,6 +610,17 @@ so keep it current when conventions change.
   stays `not_established` until a future redemption consumes the invitation. No
   commercial, readiness, QR, menu, table or lifecycle side effect. Redemption,
   reissue/cancel, delivery and the Admin creation UI are **NOT built**
+- Pre-claim customer-access gate: ✅ (Phase 1, Step 2D.1) — the follow-up that makes
+  Step 2D's central claim TRUE rather than aspirational. A new owner had an unusable
+  password, and generic password reset needed only their phone number to replace one
+  and hand out a customer session, leaving `owner_control: not_established` /
+  `invitation: pending` on an account already exercising owner authority.
+  `User.customer_access_state` (`established` | `pending_initial_claim`, migration
+  `users_app/0014`, additive with a `db_default` and a vocabulary `CheckConstraint`)
+  is the identity-level fact; `users_app/customer_access.py` is the one policy and
+  the one sanctioned customer token mint. Every existing identity and every ordinary
+  creation path is `established`; only Step-2D `mode=new` writes pending, and
+  `mode=existing` never touches it. See the "Pre-Claim Customer Access" section
 - Commercial & service configuration: ✅ SCHEMA + WRITERS + ADMIN READ + ADMIN
   SERVICE-CONFIG WRITES (Phase 1, Steps 3B / 3C / 3D.1 / 3D.2a) — a new
   first-party app `commercial_app` with `RestaurantServiceConfiguration` (payment
@@ -1605,11 +1616,20 @@ and locked, so there is nothing about it to undo.
   `update_user_profile` already refuses an email change for exactly this reason. Do
   not let this policy mutate into "email identifies the owner".
 
-### A NEW OWNER HAS NO PASSWORD
+### A NEW OWNER HAS NO PASSWORD AND NO CUSTOMER ACCESS
 `account_type=restaurant_user`, `username` = `phone_number` = the canonical
 `256XXXXXXXXX` MSISDN (`normalise_msisdn`, Uganda-only), `roles=[]`, names
 `.strip().title()` per the repo convention, email lower-cased or NULL, `country='UG'`
-from the server — and `set_unusable_password()`.
+from the server, `set_unusable_password()` — and, since Step 2D.1,
+**`customer_access_state=pending_initial_claim`** (see "Pre-Claim Customer Access"
+below).
+
+**THE UNUSABLE PASSWORD WAS NEVER THE INVARIANT**, and this file used to say
+otherwise. Generic password reset exists precisely to replace an unusable password
+and needed nothing but the owner's phone number to do it, so "nothing can
+authenticate as this account until redemption" was an aspiration rather than an
+enforced fact. Step 2D.1 makes it true by adding an identity-level gate; the unusable
+password remains as defence in depth beside it, never as the gate.
 
 **NO TEMPORARY PASSWORD ARCHITECTURE.** No generated password, no `self_register`, no
 `create_employee`, no credential email or SMS, no OTP, and the invitation is never
@@ -1630,8 +1650,12 @@ refuses the membership independently). Unknown UUID is **409
 `owner_account_not_found`, NOT 404** — the caller is an authenticated administrator who
 named that UUID, and a 404 on this route would say the wrong thing was missing.
 Nothing about the account is altered: not the name, email, phone, username, password,
-roles, `prompt_password_change` or `is_active`. A `User` owning several restaurants is
-an ordinary supported case.
+roles, `prompt_password_change`, `is_active` or `customer_access_state`. A `User`
+owning several restaurants is an ordinary supported case — and `customer_access_state`
+is neither read nor written here, in either direction: creating another restaurant for
+somebody must not rewrite their authentication state, and an established owner of
+restaurant A named as owner of a new restaurant B keeps full customer access while B's
+invitation is pending.
 
 ### RESTAURANT FACTS: THREE, AND DELIBERATELY NOT THE MODEL
 `name`, `location`, `is_test`. A `ModelSerializer` would make forty-odd columns
@@ -1826,7 +1850,8 @@ readiness blockers a later step will name.
 The Angular creation UI, owner-invitation REDEMPTION, the password/claim flow,
 RESEND / REISSUE, CANCEL, delivery, readiness, owner go-live approval, QR / menu /
 table setup, commercial configuration and lifecycle controls. **Step 2 is not
-complete.**
+complete.** (Step 2D.1 later added the pre-claim access gate — enforcement of the
+pending state, not the redemption that clears it.)
 
 ### SPEC DEBT (reported, not resolved here)
 The Admin MVP document's §6 still says "no admin-plane onboarding API in Phase 1"
@@ -1836,6 +1861,171 @@ rebuilds onboarding natively on `/api/admin/v1`*. The product evolved in favour 
 latter and this step implements it. The stale §6 wording is NOT a reason to put
 creation back on the customer plane; reconcile the Admin spec when the creation UI
 slice touches it.
+
+## Pre-Claim Customer Access — Phase 1, Step 2D.1
+
+The gate that makes Step 2D's central claim enforceable. `User.customer_access_state`
+is an IDENTITY-level fact answering one question — *may this identity be admitted onto
+the customer plane at all?* — and it is checked at every door that could hand out or
+honour a customer session.
+
+### THE BYPASS IT CLOSES
+Step 2D creates a new owner with an unusable password and an `OwnerInvitation` as the
+account-claim credential. Nothing enforced that. Generic password reset needed only
+the owner's phone number:
+
+```
+initiate-reset-password(phone) -> OTP -> reset-password(phone, otp)
+    -> set_password() -> RefreshToken.for_user() -> a customer session
+```
+
+leaving the platform asserting `owner_control: not_established` and `invitation:
+pending` about an account already exercising owner authority over the restaurant.
+**AN UNUSABLE PASSWORD WAS NEVER THE INVARIANT** — it is what password reset exists to
+replace. Correct the older wording wherever it survives: the account is unusable
+before claim because of this gate, not because of the password.
+
+### THE VOCABULARY — TWO STATES, AND NO MORE
+`established` | `pending_initial_claim` (`string_definitions.py`).
+
+`established` is the ordinary state, the model default, and what every pre-existing
+identity migrated to. It asserts nothing about verification — it means "subject to the
+ordinary customer rules and nothing more". `pending_initial_claim` means the identity
+was provisioned by Dinify and has not completed its first owner claim.
+
+Do NOT add `suspended`, `disabled`, `expired`, `invited`, `cancelled` or `verified`:
+`is_active` and `OwnerInvitation` already own those questions, and a second vocabulary
+for them is two columns that can disagree.
+
+### WHY NOT AN EXISTING FIELD
+- `is_active` means ADMINISTRATIVELY DEACTIVATED and is read by Django and SimpleJWT
+  throughout; reusing it would make every "account disabled" message and any future
+  reactivation path lie. A pending owner stays `is_active=True`.
+- `prompt_password_change` defaults `True` for every account ever created, so it
+  distinguishes nothing — and a claim flow must never make it the proof of claim.
+- `has_usable_password()` is the thing being protected, not the protection.
+- `last_login` is null for plenty of legitimate accounts; a `UserOtp` row is transient.
+
+### WHY INVITATION STATE CANNOT BE THE GLOBAL GATE
+`OwnerInvitation` and `RestaurantOnboarding` are RESTAURANT-scoped and one `User` may
+own several restaurants. An established owner of restaurant A who is named owner of a
+new restaurant B holds a PENDING invitation for B; reading invitation state globally
+would revoke their access to A — a live tenant losing its owner because Dinify created
+a second one. **This is the principal false positive the design exists to avoid**, and
+it is pinned end-to-end (creation, projection, real login, real OTP, real session).
+
+### THE FOUR CONCEPTS STAY SEPARATE
+| | question |
+|---|---|
+| `customer_access_state` | may this User authenticate on the customer plane? |
+| `owner_relationship` | does `Restaurant.owner` agree with the owner membership? |
+| `owner_control` | has Dinify obtained evidence that the current owner controls this restaurant? |
+| `invitation.status` | what happened to that restaurant's claim credential? |
+
+They correlate for a new owner and are NOT aliases. `onboarding_reads` was NOT taught
+to read `customer_access_state`: owner control remains evidence-based (an invitation
+consumed by the CURRENT owner) and nothing else.
+
+### THE POLICY AND THE ONE MINT — `users_app/customer_access.py`
+- `is_established(user)` / `is_refused(user)` — fail closed on `None`, `AnonymousUser`,
+  a missing attribute or an out-of-vocabulary value. Deliberately narrow: it does NOT
+  absorb `is_active`, `account_type`, roles, permissions, OTP or password state, which
+  keep their own owners. There is no `can_authenticate()` mega-helper.
+- `issue_customer_tokens(user)` — **the only production `RefreshToken.for_user` call**.
+  Raises `CustomerAccessRefused` for a non-established identity. Callers still gate
+  explicitly and answer with their own surface's generic refusal; the exception is the
+  backstop, so a forgotten gate is a loud 500 rather than a quiet token.
+
+### THE SIX DOORS, ALL FAIL-CLOSED
+| door | where | refusal |
+|---|---|---|
+| login | `login.py`, beside the `platform_staff` check | generic `WRONG_PASSWORD` |
+| password reset | `reset_password._resolve_user` — guards BOTH stages at once | generic `NO_PHONE_NUMBER` |
+| customer-auth OTP issuance | `OtpManager.make_otp` | `False` (delivery failure) |
+| login-OTP mint sink | `OtpManager.verify_otp` | the shared `invalid` dict |
+| token presentation | `CustomerJWTAuthentication.get_user` | SimpleJWT `user_inactive` |
+| token refresh | `GatedTokenRefreshView` | SimpleJWT `InvalidToken` |
+
+The login gate sits ABOVE the `last_login` write, the mint, the success action log and
+the role traversal that leads to OTP issuance. The reset gate is in the shared
+RESOLVER, not in `initiate_password_reset`, because a caller can invoke stage two
+directly and an OTP may already exist. **Password reset must never be "fixed" by
+consuming the `OwnerInvitation`** — it never sees the claim credential, so it cannot
+know the right person is on the other end.
+
+OTP is gated NARROWLY, by purpose (`CUSTOMER_AUTH_OTP_PURPOSES` = `login`,
+`reset-password`) and never by user: the future redemption may want a factor of its
+own, and the one identity it needs to reach is precisely a pending one.
+
+Presentation and refresh are gated even though no pending identity should be able to
+MINT one, because the invariant worth having is *a pre-claim identity cannot EXERCISE
+customer authority* — not *today's known mint paths will not hand it one*. That is the
+same argument that produced `CustomerJWTAuthentication` for `account_type`.
+
+### NO NEW ACCOUNT-STATE ORACLE
+Every refusal reuses the surface's EXISTING generic answer, so an anonymous caller who
+knows a phone number cannot distinguish a pending owner from a wrong password, an
+unknown account, a deactivated one or platform staff. Logs say `refused: customer
+access not established` and carry no credential, token, OTP or owner PII.
+
+### NOT AUDITED
+Anonymous customer login/reset refusals are customer authentication attempts, not
+platform-admin decisions, so they write no `AdminAuditLog` row. The Step-2D creation
+audit already records that the account was provisioned and deliberately does NOT carry
+`customer_access_state` — one action per request, describing the creation decision.
+
+### MIGRATION AND ROLLBACK
+`users_app/0014_customer_access_state`: one `AddField` plus the vocabulary
+`AddConstraint`. **NO `RunPython`** and no inference from invitations, onboarding rows,
+password state, login history or memberships — the only truthful rule is *every
+identity that predates this gate is `established`*, which the field default applies to
+the whole corpus in one statement.
+
+It carries **`db_default` as well as `default`**, and that is load-bearing rather than
+decoration. Django manages defaults in Python: `AddField` adds the column with a
+default and immediately DROPS it, so a NOT NULL column ends up with no database
+default. Fine for reads; not for writes — and `users` is a table old code INSERTs into
+(`self_register`, `determine-customers`). Under the expand-only rule a rollback lands
+OLD CODE ON NEW SCHEMA, and those inserts would hit a NOT NULL violation. `db_default`
+keeps a real database default so they succeed and land on `established`. A test asserts
+it by INSERTing through raw SQL without naming the column.
+
+### NO CUSTOMER-PLANE WRITE SURFACE
+`customer_access_state` is protected exactly as `account_type` is — by ABSENCE. It is
+not in `SerGetUserProfile.fields` (the only `ModelSerializer` over `User`), there is no
+`user` section in `EDIT_INFORMATION` at all, and `self_update_user_profile` takes named
+keyword arguments. Pinned by tests including an end-to-end profile `PUT` that tries to
+smuggle it.
+
+### THE FUTURE REDEMPTION CONTRACT — DOCUMENTED, NOT BUILT
+Initial-owner redemption for a NEW owner must, in ONE transaction:
+
+1. consume the exact claim invitation as the CURRENT owner; **and**
+2. move `customer_access_state`: `pending_initial_claim` -> `established`;
+
+plus whatever credential establishment is then designed. It must never produce
+*invitation consumed but access still pending*, nor *access established but invitation
+not consumed*.
+
+**There is deliberately NO supported writer of that transition yet.** In particular
+there is no public `establish_customer_access(user)` service — a caller could invoke it
+without claim evidence — and a test asserts its absence. Invitation EXPIRY changes
+nothing about the identity: no sweeper, no signal, no clock-driven `User` mutation; a
+future reissue supersedes and mints afresh.
+
+### STRUCTURAL RATCHET
+`users_app/tests_customer_access_gate.py` AST-scans every production module and fails
+if any of them calls `RefreshToken.for_user` outside `users_app/customer_access.py`.
+The bypass this step closes was ONE innocent-looking mint in a flow nobody thought of
+as authentication; auditing the three that existed fixes today, and the scan is what
+fixes tomorrow.
+
+### NOT BUILT / STILL OPEN
+Redemption, reissue, cancel, delivery, the Admin creation UI, readiness and owner
+go-live approval remain deferred, and **Step 2 is still incomplete**. The two known
+races recorded under "Admin Restaurant Creation" — non-atomic `User.email` uniqueness
+and cross-owner same-name+location duplication — are UNCHANGED and still open; neither
+is touched here.
 
 ## Admin Commercial Writes — Phase 1, Step 3D.2a
 
@@ -2850,12 +3040,14 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   fields; 0035 adds the launch-boundary `Order.is_test` flag),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
-  `users_app/migrations/0013_close_ambient_admin_authority.py` (0010 adds
+  `users_app/migrations/0014_customer_access_state.py` (0010 adds
   `User.account_type`; 0011 flips existing platform-role holders to
   `platform_staff`; 0012 makes `phone_number` unique — see the "Platform-admin
   identity layer" bullet; 0013 blacklists outstanding platform-staff refresh
   tokens and strips platform-only roles from `restaurant_user` rows, data-only and
-  idempotent — see "Tenant Isolation / Role-Permission ENFORCEMENT"),
+  idempotent — see "Tenant Isolation / Role-Permission ENFORCEMENT"; 0014 adds the
+  Step-2D.1 `customer_access_state` gate, one `AddField` plus its vocabulary
+  `AddConstraint`, NO `RunPython` — see "Pre-Claim Customer Access"),
   `platform_admin_app/migrations/0009_restaurantonboarding_ownerinvitation_and_more.py`
   (0001 identity, 0002 `AdminSession`, 0003 `AdminAuditLog`, 0004 TOTP replay counter,
   0005 `DelegationGrant`, 0006 `DelegatedSession`, 0007 the break-glass

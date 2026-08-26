@@ -11,17 +11,28 @@ from django.db import transaction
 from django.utils import timezone
 from users_app.models import User, UserOtp
 from misc_app.controllers.notifications.notification import Notification
-from rest_framework_simplejwt.tokens import RefreshToken
 from notifications_app.controllers.messenger import Messenger
 from notifications_app.controllers.sms import send_sms
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
+from users_app import customer_access
 
 logger = logging.getLogger(__name__)
 
 # Lock an OTP challenge after this many failed verification attempts. A module
 # constant (not a per-row column) so it can't be tampered with per challenge.
 OTP_MAX_ATTEMPTS = 5
+
+# The OTP purposes that are part of GENERIC CUSTOMER AUTHENTICATION — the two flows
+# that can end in a customer session or a customer password. An identity that is not
+# customer-access-established is refused these, and ONLY these.
+#
+# NARROW ON PURPOSE (Step 2D.1). A blanket "this user gets no OTPs at all" would
+# foreclose the very flow the pending state exists for: the future owner-invitation
+# redemption may well want a factor of its own, under its own purpose, and it must be
+# able to reach a pending identity — that is the one identity it is for. So the policy
+# names the two customer-auth purposes rather than the user.
+CUSTOMER_AUTH_OTP_PURPOSES = frozenset({'login', 'reset-password'})
 
 
 def _otp_pepper() -> bytes:
@@ -57,6 +68,30 @@ class OtpManager:
                 msisdn = normalise_msisdn(msisdn)
             except MsisdnError:
                 logger.warning("make_otp: could not canonicalise msisdn; using raw value")
+        # ISSUANCE GATE (Step 2D.1). Refuse to mint a generic customer-auth OTP for an
+        # identity that may not hold a customer session. The security boundary is at
+        # the SINKS below (verify_otp's mint, and reset_password's resolver); this is
+        # the half that stops a spendable-looking credential existing at all, exactly
+        # as `services.revoke_pending_customer_otps` does for promotion — and it stops
+        # the platform telling an owner "OTP sent" for a flow it will then refuse.
+        #
+        # Returns False, which every caller already handles as a delivery failure: the
+        # two callers that matter never reach this line for a pending identity (login
+        # gates first, `initiate_password_reset`'s resolver gates first), so in
+        # practice only `resend_otp` sees it, and its 500 is the same answer a real
+        # SMS failure produces. Purposes outside CUSTOMER_AUTH_OTP_PURPOSES are
+        # untouched.
+        if (
+            purpose in CUSTOMER_AUTH_OTP_PURPOSES
+            and user is not None
+            and customer_access.is_refused(user)
+        ):
+            logger.info(
+                'make_otp: refused (customer access not established, purpose=%s)',
+                purpose,
+            )
+            return False
+
         env = config('ENV')
         otp = secrets.randbelow(9000) + 1000
         otp_str = str(otp)
@@ -268,7 +303,21 @@ class OtpManager:
                     'verify_otp: refused (platform staff on customer origin)')
                 return invalid
 
-            token = RefreshToken.for_user(otp_user)
+            # The Step-2D.1 half of the same argument, and an INDEPENDENT token sink:
+            # a pending identity cannot ORIGINATE a login OTP (make_otp refuses the
+            # purpose above, and login gates before ever asking), but a code already
+            # in flight when the state was written would otherwise still be spendable
+            # here. Same shape as the refusal above it — the shared `invalid` dict —
+            # because verify-otp is AllowAny with a client-supplied user id, so a
+            # distinct response would be an account-state oracle, and three callers
+            # index ['data']['valid'] unguarded.
+            if customer_access.is_refused(otp_user):
+                logger.info(
+                    'verify_otp: refused (customer access not established)')
+                return invalid
+
+            # The single sanctioned customer mint.
+            token = customer_access.issue_customer_tokens(otp_user)
             return {
                 'status': 200,
                 'message': 'Valid OTP',

@@ -6,7 +6,6 @@ import time
 from typing import Optional
 from django.utils import timezone
 from django.contrib.auth import authenticate
-from rest_framework_simplejwt.tokens import RefreshToken
 from users_app.models import User
 from users_app.serializers import SerGetUserProfile
 from dinify_backend.configs import ACTION_LOG_STATUSES
@@ -14,6 +13,7 @@ from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.save_action_log import save_action
 from users_app.controllers.otp_manager import OtpManager
 from users_app.controllers.permissions_check import get_any_restaurant_roles
+from users_app import customer_access
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     RESTAURANT_OWNER,
@@ -106,11 +106,34 @@ def login(
 
     # Platform staff authenticate on the admin origin only. Refused HERE — after
     # authenticate() so this is not an account-type oracle for an anonymous prober,
-    # and before the unconditional RefreshToken.for_user() below, so no customer
-    # token is ever minted for an admin account. Placing it above the `source`
+    # and before the customer token mint below, so no customer token is ever
+    # minted for an admin account. Placing it above the `source`
     # branch also means the client-supplied source='diner' cannot route around it.
     if auth_user.account_type == ACCOUNT_TYPE_PLATFORM_STAFF:
         logger.info("login [%s]: refused (platform staff on customer origin)", username)
+        return {
+            'status': 401,
+            'message': MESSAGES.get('WRONG_PASSWORD')
+        }
+
+    # An identity provisioned by Admin that has not completed its first owner claim
+    # is not on this plane yet. Refused HERE, beside the account_type refusal and for
+    # the same structural reason: this is after authenticate() has resolved the row
+    # (so it is not an oracle for an anonymous prober) and BEFORE every customer-access
+    # side effect below it — the last_login write, the token mint, the success action
+    # log, the role traversal, and the OTP issuance that traversal can lead to.
+    #
+    # THE PASSWORD IS NOT THE GATE. Reaching this line at all means authenticate()
+    # succeeded, so the account's password was usable — which for a pending identity
+    # should be impossible and is exactly why the check does not read password state.
+    # If some other path ever establishes a password before claim, this still refuses.
+    #
+    # The message is the generic wrong-password one, identical to what a bad password,
+    # an unknown username and a platform-staff account already receive: login is
+    # AllowAny, so a distinct response here would be a new account-state oracle.
+    if customer_access.is_refused(auth_user):
+        logger.info(
+            "login [%s]: refused (customer access not established)", username)
         return {
             'status': 401,
             'message': MESSAGES.get('WRONG_PASSWORD')
@@ -122,7 +145,10 @@ def login(
     login_time = timezone.now()
     User.objects.filter(username=username).update(last_login=login_time)
     auth_user.last_login = login_time
-    token = RefreshToken.for_user(auth_user)
+    # The single sanctioned customer mint (users_app.customer_access). The gate above
+    # has already refused a non-established identity; this is the backstop that makes
+    # forgetting such a gate a loud failure rather than a quiet token.
+    token = customer_access.issue_customer_tokens(auth_user)
 
     t_token = time.monotonic()
     logger.info("login [%s]: update + token %.3fs", username, t_token - t_auth)
