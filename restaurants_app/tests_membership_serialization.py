@@ -25,11 +25,17 @@ would be noise, and noise gets muted).
 import ast
 import pathlib
 import uuid
+from unittest import mock
 
 from django.db import transaction
 from django.test import TestCase, TransactionTestCase
 
-from dinify_backend.configss.string_definitions import RESTAURANT_OWNER
+from dinify_backend.configss.string_definitions import (
+    RESTAURANT_MANAGER, RESTAURANT_OWNER,
+)
+from misc_app.controllers.notifications.notification import Notification
+from restaurants_app.controllers import create_employee as create_employee_module
+from restaurants_app.controllers.create_employee import create_employee
 from restaurants_app.controllers.employee_membership_lock import (
     lock_restaurant_for_membership_mutation,
 )
@@ -306,3 +312,101 @@ class BarrierPrimitiveTests(TransactionTestCase):
             .values_list('id', 'roles', 'active', 'deleted')
         )
         self.assertEqual(before, after)
+
+
+class BarrierIsNotHeldAcrossNotificationIoTests(TransactionTestCase):
+    """
+    The barrier is taken as late as the invariant allows (Codex P2 on PR #306).
+
+    ``Notification.create_notification`` writes to MongoDB SYNCHRONOUSLY —
+    ``save_to_mongodb`` without ``async_=True``, unlike ``save_action``, which is
+    threaded — and the client's ``serverSelectionTimeoutMS`` is 2s. MongoDB is
+    unreachable from the live box, so every such call costs the full timeout.
+
+    Holding the parent ``Restaurant`` row across that I/O is not merely slow. A
+    lifecycle transition waiting on the row holds the EXCLUSIVE admission advisory
+    lock while it waits, and every diner order at the restaurant queues behind THAT.
+    A single employee creation could have stalled ordering for seconds.
+
+    These two tests pin the shape of the fix, not its timing: a benchmark would be
+    flaky and would not say WHY it regressed.
+    """
+
+    reset_sequences = False
+
+    def setUp(self):
+        super().setUp()
+        self.creator = User.objects.create_user(
+            first_name='Cre', last_name='Ator', email='io-creator@test.com',
+            phone_number='256700000781', username='256700000781',
+            country='UG', password='x', roles=[],
+        )
+        self.restaurant = Restaurant.objects.create(
+            name='Notification IO', location='loc-io', owner=self.creator,
+        )
+        RestaurantEmployee.objects.create(
+            user=self.creator, restaurant=self.restaurant,
+            roles=[RESTAURANT_OWNER], active=True,
+        )
+
+    def _create(self, phone):
+        return create_employee(
+            first_name='New', last_name='Hire', email=f'{phone}@test.com',
+            phone_number=phone, restaurant=self.restaurant,
+            roles=[RESTAURANT_MANAGER], creator=self.creator, skip_otp=True,
+        )
+
+    def test_the_barrier_is_taken_after_self_register(self):
+        # `self_register` issues TWO synchronous notifications. If the barrier were
+        # taken first — as it was when this PR was opened — the parent row would be
+        # held across both.
+        order = []
+        real_register = create_employee_module.self_register
+        real_lock = create_employee_module.lock_restaurant_for_membership_mutation
+
+        def tracking_register(*args, **kwargs):
+            order.append('self_register')
+            return real_register(*args, **kwargs)
+
+        def tracking_lock(restaurant_id):
+            order.append('barrier')
+            return real_lock(restaurant_id)
+
+        with mock.patch.object(Notification, 'create_notification', lambda _self: None), \
+                mock.patch.object(
+                    create_employee_module, 'self_register', tracking_register), \
+                mock.patch.object(
+                    create_employee_module,
+                    'lock_restaurant_for_membership_mutation', tracking_lock):
+            response = self._create('0772500011')
+
+        self.assertEqual(response['status'], 200, response)
+        self.assertEqual(
+            order, ['self_register', 'barrier'],
+            'the barrier must be acquired AFTER self_register, so its synchronous '
+            'MongoDB notification I/O happens outside the parent Restaurant lock',
+        )
+
+    def test_the_trailing_notification_runs_after_the_transaction_commits(self):
+        # The last notification used to sit inside the atomic block, and therefore
+        # inside the lock. It is fire-and-forget — nothing reads its result — so it
+        # belongs after the commit.
+        in_transaction = []
+
+        def spy(_self):
+            in_transaction.append(transaction.get_connection().in_atomic_block)
+
+        with mock.patch.object(Notification, 'create_notification', spy):
+            response = self._create('0772500012')
+
+        self.assertEqual(response['status'], 200, response)
+        self.assertTrue(
+            any(in_transaction[:-1]),
+            'expected at least one in-transaction notification, otherwise this test '
+            'proves nothing about the last one',
+        )
+        self.assertFalse(
+            in_transaction[-1],
+            'the trailing membership notification must run after the transaction '
+            'has committed and released the parent Restaurant row',
+        )
