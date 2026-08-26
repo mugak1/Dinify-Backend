@@ -35,6 +35,22 @@ CLAUDE.md). The consequence is the honest one: the answer is a snapshot, valid f
 the instant it was read. A MUTATING caller must therefore establish its own
 transaction and locking discipline FIRST and call this INSIDE it — the check is only
 as authoritative as the transaction surrounding it.
+
+THE WRITER CONTRACT IS NOW ENFORCED ON BOTH SIDES (Step 2E.1). The sentence above
+described what a caller ought to do; for a long time only half the repository did it.
+The onboarding writers took the ``Restaurant`` row first and asserted inside that
+transaction, but the customer plane's ``RestaurantEmployee`` writers took no
+``Restaurant`` lock at all, so a membership could change between this check and the
+consequential write it was guarding (PR #305, Codex P1). Every production membership
+mutation now takes the parent ``Restaurant`` row via
+``restaurants_app.controllers.employee_membership_lock``, so a caller that holds that
+row genuinely does make this assertion authoritative for the duration of its
+transaction — including against INSERTS and REACTIVATIONS, which no lock on the rows
+read here could ever have covered.
+
+That changes nothing about THIS function, which still opens no transaction and takes
+no lock. A caller that does not hold the parent row still gets a snapshot, and always
+will.
 """
 from dinify_backend.configss.string_definitions import RESTAURANT_OWNER
 from restaurants_app.models import RestaurantEmployee
