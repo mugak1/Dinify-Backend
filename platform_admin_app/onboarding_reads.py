@@ -47,8 +47,22 @@ it saw would make the drift undetectable next time — and would do it with no a
 no reason and nothing recording that it happened.
 
 CREDENTIALS ARE NEVER PROJECTED. No ``token_hash``, no raw token, no claim URL. An
-invitation is reported as a STATE WORD and, where it is evidence, a timestamp.
+invitation is reported as a STATE WORD plus the safe metadata Step 2E needs to make
+it actionable — its id and its issue and expiry instants. The id is an opaque handle
+an operator names when they reissue or cancel; the TOKEN is the credential, and the
+two must never become interchangeable because they sit in the same object.
+
+━━ ONE DEFINITION OF THE CURRENT INVITATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+``select_head_invitation`` is that definition, and Step 2E's writers
+(``onboarding_invitations``) call it rather than deciding for themselves. A writer
+with its own opinion would disagree with this projection in exactly the case that
+matters — an operator reads a screen showing invitation A, clicks Cancel, and the
+server cancels something else.
 """
+from dataclasses import dataclass
+from typing import Optional
+
 from django.utils import timezone
 
 from platform_admin_app.models import (
@@ -135,7 +149,7 @@ def _untracked():
         'recorded_at': None,
         'owner_relationship': {'status': STATUS_UNAVAILABLE},
         'owner_control': _control(STATUS_UNAVAILABLE),
-        'invitation': {'status': STATUS_UNAVAILABLE},
+        'invitation': _no_invitation(STATUS_UNAVAILABLE),
     }
 
 
@@ -201,7 +215,41 @@ def _legacy_owner_control(onboarding, restaurant):
     )
 
 
-def _redeemed_by_current_owner(onboarding, restaurant):
+# --- the head invitation -----------------------------------------------------
+#
+# ONE DEFINITION OF "THE CURRENT INVITATION", used by the projection below AND by
+# every writer in ``platform_admin_app.onboarding_invitations``.
+#
+# Before Step 2E only this module needed the answer, so the rules lived inline in
+# ``_admin_created_evidence``. A writer that decided for itself which invitation was
+# current would be a SECOND opinion, and the two would disagree in exactly the case
+# that matters: an operator reads a screen showing invitation A, clicks Cancel, and
+# the server cancels something else. Sharing the selector makes that disagreement
+# structurally impossible rather than merely tested for.
+
+
+@dataclass(frozen=True)
+class HeadInvitation:
+    """
+    The invitation this onboarding currently presents, and how it reads.
+
+    ``invitation`` is ``None`` only for ``not_issued``. ``status`` is the word the
+    projection publishes. ``establishes_current_owner_control`` says whether this row
+    is EVIDENCE that the CURRENT owner controls the restaurant — which is a different
+    question from "is it consumed", and the difference is the whole reason the two
+    axes are not flattened: an invitation consumed by a PREVIOUS owner is consumed
+    and establishes nothing.
+
+    Frozen, and carrying no token material: this object is passed to a projection and
+    to an audit-state builder, and neither has any business near a credential.
+    """
+
+    invitation: Optional['OwnerInvitation']
+    status: str
+    establishes_current_owner_control: bool
+
+
+def _redeemed_by_current_owner(onboarding, restaurant, *, for_update=False):
     """
     The most recent invitation CONSUMED BY THE CURRENT OWNER, or ``None``.
 
@@ -216,19 +264,15 @@ def _redeemed_by_current_owner(onboarding, restaurant):
     """
     if restaurant.owner_id is None:
         return None
-    return (
-        OwnerInvitation.objects
-        .filter(
-            onboarding=onboarding,
-            invited_user_id=restaurant.owner_id,
-            consumed_at__isnull=False,
-        )
-        .order_by('-consumed_at')
-        .first()
+    queryset = OwnerInvitation.objects.filter(
+        onboarding=onboarding,
+        invited_user_id=restaurant.owner_id,
+        consumed_at__isnull=False,
     )
+    return _locked(queryset, for_update).order_by('-consumed_at').first()
 
 
-def _unresolved_invitation(onboarding):
+def _unresolved_invitation(onboarding, *, for_update=False):
     """
     The onboarding's live invitation, or ``None``. At most one can exist.
 
@@ -237,19 +281,16 @@ def _unresolved_invitation(onboarding):
     so an EXPIRED invitation is still unresolved and still holds the slot. That is why
     expiry is decided here, against the clock, and never stored.
     """
-    return (
-        OwnerInvitation.objects
-        .filter(
-            onboarding=onboarding,
-            consumed_at__isnull=True,
-            cancelled_at__isnull=True,
-            superseded_at__isnull=True,
-        )
-        .first()
+    queryset = OwnerInvitation.objects.filter(
+        onboarding=onboarding,
+        consumed_at__isnull=True,
+        cancelled_at__isnull=True,
+        superseded_at__isnull=True,
     )
+    return _locked(queryset, for_update).first()
 
 
-def _latest_resolved_invitation(onboarding):
+def _latest_resolved_invitation(onboarding, *, for_update=False):
     """
     The most recent invitation that reached a terminal stamp, or ``None``.
 
@@ -257,7 +298,7 @@ def _latest_resolved_invitation(onboarding):
     something was tried and ended. Ordered by ``-issued_at``, the model's own default
     ordering, so "most recent" means the same thing here as everywhere else.
     """
-    return (
+    queryset = (
         OwnerInvitation.objects
         .filter(onboarding=onboarding)
         .exclude(
@@ -265,9 +306,29 @@ def _latest_resolved_invitation(onboarding):
             cancelled_at__isnull=True,
             superseded_at__isnull=True,
         )
-        .order_by('-issued_at')
-        .first()
     )
+    return _locked(queryset, for_update).order_by('-issued_at').first()
+
+
+def _locked(queryset, for_update):
+    """
+    ``select_for_update(of=('self',))`` when a WRITER is asking; the plain queryset
+    otherwise.
+
+    ``of=('self',)`` is not decoration. On PostgreSQL a bare ``select_for_update()``
+    locks every row the statement joins, which is how the delegation-redemption ABBA
+    cycle happened (PR-E): a query that only meant to lock a grant also held a
+    ``User`` row and a ``Restaurant`` row. None of the three queries above uses
+    ``select_related``, so there is no join to widen today — and stating the narrow
+    scope explicitly is what stops a future ``select_related`` from silently widening
+    it.
+
+    READS NEVER LOCK. ``for_update`` defaults to False so the projection's behaviour
+    is unchanged and a GET still opens no transaction; Django would raise on a
+    ``select_for_update`` outside one anyway, which is the failure mode this default
+    exists to keep impossible.
+    """
+    return queryset.select_for_update(of=('self',)) if for_update else queryset
 
 
 def _resolved_state(invitation) -> str:
@@ -279,6 +340,96 @@ def _resolved_state(invitation) -> str:
     return INVITATION_SUPERSEDED
 
 
+def select_head_invitation(
+    onboarding, restaurant, *, now=None, for_update=False,
+) -> HeadInvitation:
+    """
+    THE canonical current invitation for an ``admin_created`` onboarding.
+
+    Four cases, in this order, short-circuiting on the first hit — AT MOST THREE
+    ``LIMIT 1`` QUERIES, each answering one named question:
+
+      1. an invitation CONSUMED BY THE CURRENT OWNER. It is simultaneously the
+         invitation's headline state and the only evidence that establishes control
+         for ``admin_created`` provenance, which is why one lookup answers both;
+      2. otherwise the single UNRESOLVED row, read as ``expired`` or ``pending``
+         against the clock;
+      3. otherwise the latest RESOLVED row — something was tried and ended;
+      4. otherwise nothing has ever been issued.
+
+    Fetching the whole history and sorting in Python would be one query but an
+    unbounded number of rows, and would put the ordering rules somewhere a reader has
+    to reconstruct them.
+
+    ``now`` lets a caller pass ONE captured instant so a decision and the record of
+    it cannot straddle the expiry boundary. ``for_update`` is for writers only and
+    requires an open transaction — see ``_locked``.
+    """
+    moment = now or timezone.now()
+
+    redeemed = _redeemed_by_current_owner(
+        onboarding, restaurant, for_update=for_update,
+    )
+    if redeemed is not None:
+        return HeadInvitation(redeemed, INVITATION_CONSUMED, True)
+
+    unresolved = _unresolved_invitation(onboarding, for_update=for_update)
+    if unresolved is not None:
+        status = (
+            INVITATION_EXPIRED if unresolved.expires_at <= moment
+            else INVITATION_PENDING
+        )
+        return HeadInvitation(unresolved, status, False)
+
+    historical = _latest_resolved_invitation(onboarding, for_update=for_update)
+    if historical is not None:
+        return HeadInvitation(historical, _resolved_state(historical), False)
+
+    return HeadInvitation(None, INVITATION_NOT_ISSUED, False)
+
+
+def invitation_projection(head: HeadInvitation) -> dict:
+    """
+    One head invitation as the API publishes it: a state word plus SAFE metadata.
+
+    THE METADATA IS THE CONCURRENCY TOKEN. ``id`` is exactly what the reissue and
+    cancel endpoints require as ``expected_invitation_id``, which is the point of
+    exposing it: an operator can only act on the invitation state they actually
+    reviewed if the read hands them a way to name it. ``issued_at`` and ``expires_at``
+    are what make ``pending`` and ``expired`` legible — "expires in two days" and
+    "expired last month" are different operational situations and the status word
+    alone cannot tell them apart.
+
+    NOTHING ELSE. No ``token_hash``, no raw token, no claim URL, no delivery state,
+    no password or OTP state, no invited-user identity. An invitation id is an opaque
+    handle; a token is a credential; the two must not become interchangeable because
+    they happen to sit in the same object.
+
+    ``not_issued`` carries null metadata, which is honest rather than a placeholder:
+    there is no row, so there is nothing to name.
+    """
+    invitation = head.invitation
+    return {
+        'status': head.status,
+        'id': str(invitation.id) if invitation is not None else None,
+        'issued_at': _iso(invitation.issued_at) if invitation is not None else None,
+        'expires_at': _iso(invitation.expires_at) if invitation is not None else None,
+    }
+
+
+def _no_invitation(status: str) -> dict:
+    """
+    The invitation projection for a restaurant that has no ``OwnerInvitation`` axis at
+    all — ``not_applicable`` (legacy adoption) or ``unavailable`` (untracked, or an
+    unrecognised provenance).
+
+    Same KEYS as a represented invitation, all null. A client should not have to
+    branch on the status word to know which keys exist; a missing key and a null one
+    read very differently to a portal that forgot to check.
+    """
+    return {'status': status, 'id': None, 'issued_at': None, 'expires_at': None}
+
+
 def _admin_created_evidence(onboarding, restaurant):
     """
     Owner control and invitation state for ``admin_created`` provenance.
@@ -286,12 +437,8 @@ def _admin_created_evidence(onboarding, restaurant):
     Computed together because they share their first and most important lookup: for a
     restaurant Dinify created, control is established by ONE thing — an invitation
     consumed by the person who is the owner now — and that same row is also the
-    invitation's headline state.
-
-    AT MOST THREE ``LIMIT 1`` QUERIES, each answering one named question, and it
-    short-circuits on the first hit. Fetching the whole history and sorting in Python
-    would be one query but an unbounded number of rows, and would put the ordering
-    rules somewhere a reader has to reconstruct them.
+    invitation's headline state. Both come from ``select_head_invitation``, the one
+    selector the Step-2E writers also use.
 
     A CONSUMED INVITATION AND ``not_established`` CAN CO-OCCUR, and it is not a
     contradiction: it means somebody consumed an invitation and is no longer the
@@ -299,35 +446,21 @@ def _admin_created_evidence(onboarding, restaurant):
     axis reports whether the CURRENT owner's control was established. Conflating them
     is how a replacement owner inherits evidence nobody gave them.
     """
-    redeemed = _redeemed_by_current_owner(onboarding, restaurant)
-    if redeemed is not None:
-        return (
-            _control(
-                CONTROL_INVITATION_REDEEMED,
-                EVIDENCE_INVITATION_REDEEMED,
-                redeemed.consumed_at,
-            ),
-            {'status': INVITATION_CONSUMED},
+    head = select_head_invitation(onboarding, restaurant)
+
+    if head.establishes_current_owner_control:
+        control = _control(
+            CONTROL_INVITATION_REDEEMED,
+            EVIDENCE_INVITATION_REDEEMED,
+            head.invitation.consumed_at,
         )
+    else:
+        # No current-owner evidence. Control is not established whatever the
+        # invitation history says — a pending, expired, cancelled or superseded
+        # invitation is an attempt, not a confirmation.
+        control = _control(CONTROL_NOT_ESTABLISHED)
 
-    # No current-owner evidence. Control is not established whatever the invitation
-    # history says — a pending, expired, cancelled or superseded invitation is an
-    # attempt, not a confirmation.
-    control = _control(CONTROL_NOT_ESTABLISHED)
-
-    unresolved = _unresolved_invitation(onboarding)
-    if unresolved is not None:
-        status = (
-            INVITATION_EXPIRED if unresolved.expires_at <= timezone.now()
-            else INVITATION_PENDING
-        )
-        return control, {'status': status}
-
-    historical = _latest_resolved_invitation(onboarding)
-    if historical is not None:
-        return control, {'status': _resolved_state(historical)}
-
-    return control, {'status': INVITATION_NOT_ISSUED}
+    return control, invitation_projection(head)
 
 
 def _recorded_at(onboarding):
@@ -370,7 +503,7 @@ def onboarding_summary(restaurant):
 
     if onboarding.source == ONBOARDING_SOURCE_LEGACY_ADOPTED:
         owner_control = _legacy_owner_control(onboarding, restaurant)
-        invitation = {'status': INVITATION_NOT_APPLICABLE}
+        invitation = _no_invitation(INVITATION_NOT_APPLICABLE)
     elif onboarding.source == ONBOARDING_SOURCE_ADMIN_CREATED:
         owner_control, invitation = _admin_created_evidence(onboarding, restaurant)
     else:
@@ -382,7 +515,7 @@ def onboarding_summary(restaurant):
         # through in `source`, so the anomaly is visible rather than smoothed away,
         # and both derived axes fail closed.
         owner_control = _control(CONTROL_NOT_ESTABLISHED)
-        invitation = {'status': STATUS_UNAVAILABLE}
+        invitation = _no_invitation(STATUS_UNAVAILABLE)
 
     return {
         'tracked': True,

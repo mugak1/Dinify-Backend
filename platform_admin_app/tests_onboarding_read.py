@@ -258,7 +258,10 @@ class UntrackedRestaurantTests(_ReadTestCase):
         self.assertEqual(
             block['owner_relationship'], {'status': STATUS_UNAVAILABLE},
         )
-        self.assertEqual(block['invitation'], {'status': STATUS_UNAVAILABLE})
+        self.assertEqual(block['invitation'], {
+            'status': STATUS_UNAVAILABLE, 'id': None, 'issued_at': None,
+            'expires_at': None,
+        })
         self.assertEqual(block['owner_control'], {
             'status': STATUS_UNAVAILABLE, 'evidence': None, 'evidence_at': None,
         })
@@ -311,7 +314,12 @@ class LegacyAdoptedTests(_ReadTestCase):
                 'evidence': None,
                 'evidence_at': None,
             },
-            'invitation': {'status': INVITATION_NOT_APPLICABLE},
+            # Same KEYS as a represented invitation, all null. A client should not
+            # have to branch on the status word to know which keys exist.
+            'invitation': {
+                'status': INVITATION_NOT_APPLICABLE, 'id': None,
+                'issued_at': None, 'expires_at': None,
+            },
         })
 
     def test_recorded_at_is_the_adoption_moment_not_the_restaurant_creation(self):
@@ -848,11 +856,31 @@ class NoCredentialExposureTests(_ReadTestCase):
         ):
             self.assertNotIn(term, body, f'{term!r} leaked into the detail payload')
 
-    def test_the_invitation_block_is_exactly_one_status_word(self):
+    def test_the_invitation_block_carries_a_status_and_safe_metadata_only(self):
+        """
+        Step 2E added ``id``/``issued_at``/``expires_at`` so an operator can name the
+        exact invitation they reviewed when they reissue or cancel it. The block is
+        asserted EXACTLY, so a fifth key cannot appear without this failing — which is
+        the whole guard: an id is an opaque handle, a token is a credential, and the
+        two must not become interchangeable because they sit in the same object.
+        """
+        block = self.onboarding(self.restaurant)['invitation']
         self.assertEqual(
-            self.onboarding(self.restaurant)['invitation'],
-            {'status': INVITATION_CONSUMED},
+            set(block), {'status', 'id', 'issued_at', 'expires_at'},
         )
+        self.assertEqual(block['status'], INVITATION_CONSUMED)
+        self.assertEqual(block['id'], str(self.invitation.id))
+        self.assertEqual(block['issued_at'], self.invitation.issued_at.isoformat())
+        self.assertEqual(block['expires_at'], self.invitation.expires_at.isoformat())
+
+    def test_the_projected_id_is_the_row_id_and_not_the_token_hash(self):
+        """
+        Stated separately because "we expose an identifier" and "we expose the RIGHT
+        identifier" are different claims, and the second is the one that matters.
+        """
+        block = self.onboarding(self.restaurant)['invitation']
+        self.assertNotEqual(block['id'], self.invitation.token_hash)
+        self.assertNotIn(self.invitation.token_hash, json.dumps(block))
 
     def test_owner_pii_is_not_expanded_beyond_the_approved_fields(self):
         """

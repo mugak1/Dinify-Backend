@@ -769,13 +769,22 @@ class OwnerInvitation(models.Model):
     canonical ``Restaurant.owner`` plus the owner-role membership is), not a second
     owner field, not an email delivery log, not a password and not an OTP row.
 
-    THIS PR PERSISTS THE SHAPE ONLY. No minting, no redemption, no cancellation, no
-    resend — and deliberately no delivery columns (``delivery_channel`` /
-    ``delivered_at`` / provider ids). The recon found today's transactional delivery
-    infrastructure too unreliable to freeze a contract around; the first
-    implementation can hand a claim link over operator-mediated, and delivery can be
-    added additively once its architecture is chosen and proven. Baking the current
-    notification system into this schema would be the expensive mistake.
+    WHAT WRITES THIS ROW, as of Step 2E. Minting is
+    ``onboarding_invitations.mint_owner_invitation`` — the ONE credential primitive,
+    called both by Step-2D creation and by Step-2E reissue, so an initial credential
+    and a reissued one are indistinguishable in entropy, hashing and window.
+    ``superseded_at`` is stamped by ``reissue_owner_invitation`` and
+    ``cancelled_at``/``cancelled_by`` by ``cancel_owner_invitation``. REDEMPTION IS
+    STILL NOT BUILT: nothing writes ``consumed_at``, and Step 2F owns that transaction.
+
+    STILL NO DELIVERY COLUMNS (``delivery_channel`` / ``delivered_at`` / provider ids),
+    and still deliberately. The recon found today's transactional delivery
+    infrastructure too unreliable to freeze a contract around; the raw token is handed
+    to the authenticated, elevated operator who asked for it, and delivery can be added
+    additively once its architecture is chosen and proven. Baking the current
+    notification system into this schema would be the expensive mistake. This is also
+    why the Admin operation is called REISSUE rather than "resend" — there is no send
+    to re-do.
 
     THE RESTAURANT IS DERIVED, never stored: invitation -> onboarding -> restaurant.
     A second FK would be a second value able to drift from the first.
@@ -853,10 +862,13 @@ class OwnerInvitation(models.Model):
             # term, because a PostgreSQL partial-index predicate must be IMMUTABLE
             # and a clock comparison is not. An expired-but-unsuperseded invitation
             # therefore keeps occupying the slot — deliberately. That is what makes
-            # the future reissue service's supersede step load-bearing: it must
-            # atomically stamp the old row before inserting its replacement, exactly
-            # as `challenges.create_challenge` consumes before it inserts under
-            # `one_live_admin_challenge_per_user`.
+            # `onboarding_invitations.reissue_owner_invitation`'s supersede step
+            # load-bearing: it stamps the old row before inserting its replacement,
+            # inside one transaction under the `Restaurant` lock, exactly as
+            # `challenges.create_challenge` consumes before it inserts under
+            # `one_live_admin_challenge_per_user`. Reissuing out of an EXPIRED head is
+            # the case that proves it: the row reads "expired" but is still unresolved,
+            # so without the supersede the insert would violate this index.
             models.UniqueConstraint(
                 fields=['onboarding'],
                 condition=models.Q(

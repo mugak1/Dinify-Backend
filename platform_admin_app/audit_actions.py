@@ -165,3 +165,30 @@ ADMIN_RESTAURANT_ONBOARDING_ADOPTED = 'admin.restaurant.onboarding_adopted'
 # and the invitation's id and expiry. NEVER the owner's name, phone or email, and
 # NEVER the raw claim token or its hash.
 ADMIN_RESTAURANT_CREATED = 'admin.restaurant.created'
+
+# --- admin.restaurant: the owner-invitation credential lifecycle -------------
+# The two administrative decisions Step 2E adds over a restaurant's owner claim
+# credential. Both are consequential: one MINTS a live credential and kills whatever
+# was outstanding, the other terminates one.
+#
+# `reissued`, never `resent`. Nothing in this system delivers anything — there is no
+# email, no SMS, no notification and no delivery column on the schema — so an action
+# name promising a delivery event would put a claim in the permanent record that the
+# platform cannot back up. What actually happens is ROTATION, and the log should say
+# so.
+#
+# ONE ACTION PER ENDPOINT, not one per outcome: `AdminAuditLog.result` already carries
+# success / failure / denied, so there is no `*_failed` / `*_no_op` / `*_denied`
+# sibling for either. before_state / after_state carry ONE narrow invitation snapshot
+# each — id, status, issued_at, expires_at — and NEVER the raw claim token, its hash,
+# or anything about the invited owner beyond what the restaurant id already implies.
+#
+# On a cancellation EXACT RETRY the two states are equal and both read `cancelled`:
+# the request happened, and nothing moved. Recording the original transition a second
+# time would say the credential was cancelled twice.
+ADMIN_RESTAURANT_OWNER_INVITATION_REISSUED = (
+    'admin.restaurant.owner_invitation_reissued'
+)
+ADMIN_RESTAURANT_OWNER_INVITATION_CANCELLED = (
+    'admin.restaurant.owner_invitation_cancelled'
+)
