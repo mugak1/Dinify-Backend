@@ -49,6 +49,9 @@ from dinify_backend.configss.messages import (
     OK_UPDATED_SECTION_GROUP, ERR_UPDATED_SECTION_GROUP  # noqa
 )
 from restaurants_app.controllers.create_employee import create_employee
+from restaurants_app.controllers.employee_membership_lock import (
+    lock_restaurant_for_membership_mutation,
+)
 from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER,
     MODULE_SETTINGS,
@@ -641,7 +644,17 @@ class RestaurantSetupEndpoint(APIView):
             'non_unique_handling': RECORDS_NON_UNIQUE_COMBINATIONS.get(config_detail),
             'server_values': server_values,
         }
-        response = Secretary(secretary_args).create()
+        # A membership INSERT runs under the parent-Restaurant barrier, same as every
+        # other membership writer. The parent is the one `check_permission` has
+        # already authorized for this create (`_resolve_employees` reads
+        # `data['restaurant']` on the create action), so locking it neither widens nor
+        # narrows what this caller may reach.
+        if config_detail == 'employees':
+            with transaction.atomic():
+                lock_restaurant_for_membership_mutation(post_data.get('restaurant'))
+                response = Secretary(secretary_args).create()
+        else:
+            response = Secretary(secretary_args).create()
 
         # if the config_detail is menusections,
         # check if the groups were posted so as to create them
@@ -824,6 +837,125 @@ class RestaurantSetupEndpoint(APIView):
             status=response['status']
         )
 
+    def _update_employee(
+        self, request, auth, put_data, serializer, edit_information,
+        success_message, error_message,
+    ):
+        """
+        PUT employees, under the parent-Restaurant serialization barrier.
+
+        A membership PUT rewrites ``roles`` and/or ``active`` — the two facts
+        ``platform_admin_app.onboarding.assert_owner_consistency`` reads. Being an
+        UPDATE that never touches the FK, PostgreSQL's referential integrity does not
+        block it against a held parent lock (measured; see
+        ``employee_membership_lock``), so without this barrier it could commit in the
+        window between an onboarding writer's consistency assertion and the
+        credential or provenance row that assertion was guarding.
+
+        THE PARENT IS RESOLVED SERVER-SIDE, from the membership's own FK via
+        ``_RESTAURANT_RESOLVERS`` — never from a client-supplied ``restaurant``. That
+        is the same resolution ``check_permission`` has already authorized against,
+        and it is what makes ``{id: <victim's membership>, restaurant: <mine>}``
+        unable to move the lock somewhere harmless. The FK itself is ``read_only`` on
+        ``SerializerPutRestaurantEmployee``, so the parent cannot shift underneath the
+        lock either.
+
+        ORDER: Restaurant -> (last-owner guard) -> RestaurantEmployee. The guard's
+        CHECK and the WRITE it guards are now inside the same lock; leaving the check
+        outside would have swapped one check-then-act race for another.
+
+        An unresolvable or vanished membership takes the lock helper's ``None`` path
+        and falls through to Secretary's existing scoped lookup, which answers the
+        ordinary non-enumerating 404. No existence or tenancy oracle widens.
+        """
+        with transaction.atomic():
+            lock_restaurant_for_membership_mutation(
+                _resolve_target_restaurant_id('employees', 'update', put_data)
+            )
+
+            # A restaurant must always keep at least one ACTIVE owner. The live
+            # deactivation path is PUT {active:'false'} (the old DELETE-employees
+            # branch was dead), so the last-owner guard lives here. Resolve the
+            # target through the SAME server-scoped queryset Secretary uses — an
+            # out-of-scope id then gets the ordinary not-found posture instead of a
+            # raw lookup that leaks existence. Returns 409 (never 403 — a 403
+            # force-logs-out the client), matching the deletion-integrity guards.
+            if _is_false_flag(put_data.get('active')):
+                target = build_scoped_instance_queryset(
+                    request.user, 'employees',
+                    SerializerPutRestaurantEmployee.Meta.model,
+                ).filter(id=put_data.get('id')).values('roles', 'restaurant').first()
+                if (
+                    target
+                    and RESTAURANT_OWNER in target['roles']
+                    and not RestaurantEmployee.objects.filter(
+                        restaurant_id=target['restaurant'],
+                        roles__contains=[RESTAURANT_OWNER],
+                        active=True,
+                        deleted=False,
+                    ).exclude(id=put_data.get('id')).exists()
+                ):
+                    return Response(
+                        {'status': 409,
+                         'message': 'You need to assign another restaurant owner '
+                                    'before you can deactivate this one.'},
+                        status=409,
+                    )
+
+            response = Secretary({
+                'serializer': serializer,
+                'data': put_data,
+                'edit_considerations': edit_information,
+                'user_id': auth['id'],
+                'username': auth['username'],
+                'success_message': success_message,
+                'error_message': error_message,
+                'user': request.user,
+                'instance_queryset': build_scoped_instance_queryset(
+                    request.user, 'employees', serializer.Meta.model,
+                ),
+            }).update()
+
+        return Response(response, status=response['status'])
+
+    def _delete_employee(self, request, auth, data, serializer):
+        """
+        DELETE employees, under the parent-Restaurant serialization barrier.
+
+        The soft-delete writes ``deleted=True``, which removes the row from exactly
+        the set ``assert_owner_consistency`` counts — so it changes the invariant's
+        answer just as surely as a role change does, and a child DELETE/UPDATE takes
+        no parent lock of its own. The route is LIVE: only the special-cased branch
+        that used to hold the last-owner guard was dead (DC-BE-011); ``employees`` is
+        still in the ``delete()`` dispatch and is covered by a cross-tenant test.
+
+        LOCK ORDER NOTE. ``Secretary.delete()`` runs ``ConVacuumDeletedRecords()``
+        inline inside its transaction, and ``VACUUM_MODELS`` leads with
+        ``Restaurant`` — so the sweep can in principle UPDATE ``restaurants`` rows
+        while this transaction already holds one, which is the ``RestaurantEmployee
+        -> Restaurant`` inversion to watch for. It is not reachable: no production
+        path soft-deletes a ``Restaurant`` (the ``delete()`` dispatch has no
+        ``restaurants`` key), so that sweep's queryset is empty by construction. The
+        sweep's child models are safe on their own terms — an UPDATE that leaves the
+        FK unchanged takes no lock on the parent row (measured on PostgreSQL 16).
+        """
+        with transaction.atomic():
+            lock_restaurant_for_membership_mutation(
+                _resolve_target_restaurant_id('employees', 'delete', data)
+            )
+            response = Secretary({
+                'serializer': serializer,
+                'data': data,
+                'user_id': auth['id'],
+                'username': auth['username'],
+                'user': request.user,
+                'instance_queryset': build_scoped_instance_queryset(
+                    request.user, 'employees', serializer.Meta.model,
+                ),
+            }).delete()
+
+        return Response(response, status=response['status'])
+
     def put(self, request, config_detail):
         """
         handle the PUT method
@@ -943,33 +1075,18 @@ class RestaurantSetupEndpoint(APIView):
             }
             return Response(response, status=403)
 
-        # A restaurant must always keep at least one ACTIVE owner. The live
-        # deactivation path is PUT {active:'false'} (the old DELETE-employees
-        # branch was dead), so the last-owner guard lives here. Resolve the
-        # target through the SAME server-scoped queryset Secretary uses — an
-        # out-of-scope id then gets the ordinary not-found posture instead of a
-        # raw lookup that leaks existence. Returns 409 (never 403 — a 403
-        # force-logs-out the client), matching the deletion-integrity guards.
-        if config_detail == 'employees' and _is_false_flag(put_data.get('active')):
-            target = build_scoped_instance_queryset(
-                request.user, config_detail, SerializerPutRestaurantEmployee.Meta.model,
-            ).filter(id=put_data.get('id')).values('roles', 'restaurant').first()
-            if (
-                target
-                and RESTAURANT_OWNER in target['roles']
-                and not RestaurantEmployee.objects.filter(
-                    restaurant_id=target['restaurant'],
-                    roles__contains=[RESTAURANT_OWNER],
-                    active=True,
-                    deleted=False,
-                ).exclude(id=put_data.get('id')).exists()
-            ):
-                return Response(
-                    {'status': 409,
-                     'message': 'You need to assign another restaurant owner '
-                                'before you can deactivate this one.'},
-                    status=409,
-                )
+        # An employee PUT changes `roles` or `active` — the exact two facts
+        # `assert_owner_consistency` reads — so it runs under the parent-Restaurant
+        # serialization barrier, in its own branch. Nothing between here and the
+        # Secretary call below applies to employees (the platform-field strip is
+        # `restaurants`; the parsing and image sentinels are `menuitems` /
+        # `menusections`), so splitting it out costs no behaviour and keeps the
+        # last-owner guard and the write inside one lock.
+        if config_detail == 'employees':
+            return self._update_employee(
+                request, auth, put_data, serializer, edit_information,
+                success_message, error_message,
+            )
 
         # `flat_fee` (the subscription PRICE Dinify charges the restaurant) and
         # `preferred_subscription_method` (the BILLING METHOD deciding whether a
@@ -1182,6 +1299,13 @@ class RestaurantSetupEndpoint(APIView):
             blocker = group.deletion_blockers() if group else None
             if blocker:
                 return Response({'status': 409, 'message': blocker}, status=409)
+
+        # A membership soft-delete changes the owner-consistency predicate, so it
+        # runs under the parent-Restaurant barrier in its own branch.
+        if config_detail == 'employees':
+            return self._delete_employee(
+                request, auth, data, serializer[config_detail],
+            )
 
         secretary_args = {
             'serializer': serializer[config_detail],

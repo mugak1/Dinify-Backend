@@ -627,6 +627,25 @@ so keep it current when conventions change.
   now share ONE mint primitive. Neither operation touches `customer_access_state`,
   and nothing consumes an invitation: `owner_control` still has no path to
   `invitation_redeemed`. See the "Admin Owner-Invitation Lifecycle" section
+- Owner-membership serialization: ✅ (Phase 1, Step 2E.1) — the repository-wide
+  remediation of PR #305's Codex P1, which was VALID.
+  `assert_owner_consistency` is a validator that reads a SNAPSHOT (its own docstring
+  says so), so it is only as authoritative as the transaction around it. The
+  onboarding writers always did their half — `onboarding_adoption` and
+  `onboarding_invitations` take the `Restaurant` row FIRST and call the assertion
+  inside it — but the customer plane's `RestaurantEmployee` writers took NO
+  `Restaurant` lock, so a membership could change between the check and the
+  credential or provenance row it was guarding. **EVERY PRODUCTION MEMBERSHIP
+  MUTATION NOW TAKES THE PARENT `Restaurant` ROW**, via
+  `restaurants_app/controllers/employee_membership_lock.py`
+  (`lock_restaurant_for_membership_mutation`). NO MIGRATION — this is transaction and
+  locking discipline over existing canonical data. **INSERTS AND REACTIVATIONS ARE
+  COVERED, not merely updates**: a row lock cannot predicate-lock a row that does not
+  exist yet, and reactivating a soft-deleted owner membership produces a second live
+  owner out of a row the assertion (which filters `deleted=False`) never read. Adoption
+  and invitation reissue INHERIT the guarantee with no change of their own; cancellation
+  stays independent of owner consistency; Step 2F may rely on the same barrier and is
+  still unbuilt. See the "Owner-Membership Serialization" section
 - Pre-claim customer-access gate: ✅ (Phase 1, Step 2D.1) — the follow-up that makes
   Step 2D's central claim TRUE rather than aspirational. A new owner had an unusable
   password, and generic password reset needed only their phone number to replace one
@@ -1286,7 +1305,12 @@ the catch-all `<str:config_detail>/` route.
   advisory lock and row-locks no existing `Table`, so it cannot cycle against
   either order path (which row-lock `Table` but never `Restaurant`) or against the
   transition (which holds the advisory lock and then waits for `Restaurant`; this
-  one never reaches for the advisory lock, so it can only block, never cycle)
+  one never reaches for the advisory lock, so it can only block, never cycle).
+  A SECOND participant of exactly that shape joined in Step 2E.1:
+  `Restaurant → RestaurantEmployee` (membership mutation,
+  `restaurants_app/controllers/employee_membership_lock.py`). Same reasoning, same
+  conclusion — it takes the `Restaurant` row and never afterwards reaches for the
+  advisory lock, so it can block the transition but cannot cycle against it
 - The service enforces the matrix against the row read under `select_for_update`
   (so concurrent transitions serialize), requires a reason (≥10 chars, mirroring
   `platform_admin_app.delegation.MIN_REASON_LENGTH`), and writes an
@@ -2808,6 +2832,182 @@ the Angular Admin UI, readiness and owner go-live approval. **Step 2 is still
 incomplete.** The two known races recorded under "Admin Restaurant Creation" —
 non-atomic `User.email` uniqueness and cross-owner same-name+location duplication — are
 UNCHANGED and still open; neither is touched here.
+
+## Owner-Membership Serialization — Phase 1, Step 2E.1
+
+The repository-wide remediation of PR #305's Codex **P1**, which was correct. Not a
+new feature: one small primitive plus five call sites, no migration, no schema change,
+no new rule about what anybody may do.
+
+### THE FINDING, and why it was valid
+> When a tenant-plane `PUT .../employees` changes the current owner's `roles` or
+> `active` state concurrently, that path locks only the `RestaurantEmployee` row and
+> does not participate in this service's `Restaurant` lock. It can therefore commit
+> immediately after `assert_owner_consistency()` reads a valid membership but before
+> the invitation is inserted, causing this endpoint to return a live claim credential
+> for an owner relationship that is already inconsistent.
+
+`assert_owner_consistency` is a VALIDATOR and says so: *"the answer is a snapshot,
+valid for the instant it was read… a MUTATING caller must therefore establish its own
+transaction and locking discipline FIRST and call this INSIDE it."* The onboarding
+writers always did their half — `onboarding_adoption` (Step 2B) and
+`onboarding_invitations` (Step 2E) both take the `Restaurant` row first and assert
+inside that transaction. The other half was missing: `Secretary.update()`/`delete()`
+take `select_for_update()` on the TARGET row only, and `build_scoped_instance_queryset`
+filters on a plain `restaurant_id__in` column with no join, so there was nothing to
+widen the lock onto the parent. **The exposure predates Step 2E** — adoption has shipped
+with the same window since Step 2B.
+
+### WHY LOCKING THE MEMBERSHIP ROWS WOULD HAVE BEEN A PARTIAL FIX
+Under READ COMMITTED a `SELECT … FOR UPDATE` takes no predicate lock, so locking the
+rows the assertion READ cannot stop a row it could not have read from appearing.
+**REACTIVATION is that case and it is reachable today**: a soft-deleted owner membership
+is invisible to the assertion (`deleted=False`), and `create_employee_from_existing_user`
+revives it with an UPDATE. `unique_together (user, restaurant)` does not help — a second
+owner is a different user.
+
+### THE `Restaurant` ROW IS THE SERIALIZATION POINT
+Every membership belongs to exactly one restaurant; an INSERT has no membership row to
+lock yet; and the onboarding writers already take that row, so the customer plane joins
+an ordering already proven rather than inventing a second one.
+
+`restaurants_app/controllers/employee_membership_lock.py` —
+`lock_restaurant_for_membership_mutation(restaurant_id)`. It asserts it is inside a
+transaction (a `select_for_update` in autocommit is released by the statement that took
+it, and every test would still pass), takes `select_for_update(of=('self',))` with no
+`select_related` (PR-E's lesson: an over-broad lock is how the delegation ABBA cycle
+happened), and does NOTHING else — no authorization, no membership read, no mutation,
+no advisory lock. It returns `None` for an unresolvable target rather than raising, so
+it cannot invent a refusal in endpoints that already have their own not-found posture.
+
+**The generic `Secretary` was deliberately NOT broadened.** It serves menu items,
+tables, dining areas, sections and employees alike; changing the lock order for every
+resource because employees need a parent barrier would be a far larger lock-domain
+change than the defect warrants.
+
+### MEASURED POSTGRESQL BEHAVIOUR — half of this was already true by accident
+While one transaction holds the `restaurants` row `FOR UPDATE` (PostgreSQL 16,
+measured, not assumed):
+
+| concurrent statement on `restaurant_employees` | blocked? | why |
+|---|---|---|
+| INSERT referencing that restaurant | **YES** | RI takes `FOR KEY SHARE` on the parent |
+| UPDATE that CHANGES the FK to it | **YES** | same RI re-check |
+| UPDATE that leaves the FK alone | **NO** | keys unchanged → the RI trigger never fires |
+| DELETE of the child row | **NO** | no parent RI check |
+
+So the membership INSERT was already serialized — **incidentally**, by one database's
+RI triggers rather than by anything this repository states. Everything the finding
+names (`roles`, `active`) and everything adjacent (soft-delete, reactivation) was not.
+The barrier makes it explicit for all of them. `restaurants_app/tests_table_allocation_lock.py`
+records the same trap from the other side: a test written there to prove table-allocation
+locking PASSED against the buggy code because `bulk_create`'s FK lock stalled the
+allocator anyway. Never read "it blocked" as "the barrier works" without a negative control.
+
+### LOCK ORDER
+`Restaurant → RestaurantEmployee`, never the inverse. A tail extension of the documented
+global order, in the same shape as table-number allocation (`Restaurant → INSERT Table`,
+PR-H §2): it takes the `Restaurant` row and never afterwards reaches for the admission
+advisory lock, so it can BLOCK the lifecycle transition but cannot cycle against it.
+**NO ADMISSION ADVISORY LOCK** — membership management does not participate in order
+admission, and taking that lock after the row would invert `advisory → Restaurant`.
+
+**THE ONE INVERSION IN THE TREE, analysed and unreachable.** `Secretary.delete()` runs
+`ConVacuumDeletedRecords().vacuum()` INLINE inside its transaction, and `VACUUM_MODELS`
+leads with `Restaurant` — so in principle a membership delete could hold one
+`restaurants` row and then UPDATE others, which is `RestaurantEmployee → Restaurant`.
+It cannot happen: **no production path soft-deletes a `Restaurant`** (the `delete()`
+dispatch dict has no `restaurants` key), so that sweep's queryset is empty by
+construction. The sweep's child models are safe on their own terms — an UPDATE that
+leaves the FK unchanged takes no lock on the parent row (measured above). If a
+restaurant soft-delete is ever added, this becomes live and needs re-analysis.
+
+### THE PRODUCTION MEMBERSHIP WRITERS, and what each does now
+| writer | shape | change |
+|---|---|---|
+| `POST restaurant-setup/create-employee/` → `controllers/create_employee.py` | new `User` + INSERT via Secretary | barrier taken as the FIRST statement of the transaction it already opened |
+| `POST restaurant-setup/employees/` (existing-user shortcut) → `controllers/employees/create_employee.py` | REACTIVATION (UPDATE) | had **no transaction at all**; now one transaction, barrier first, membership re-read under its own row lock |
+| `POST restaurant-setup/employees/` (generic) | INSERT via Secretary | barrier around `Secretary.create()` |
+| `PUT restaurant-setup/employees/` | UPDATE `roles`/`active` | own `_update_employee` branch: barrier → last-owner guard → `Secretary.update()`, all in one transaction |
+| `DELETE restaurant-setup/employees/` | soft-delete | own `_delete_employee` branch: barrier → `Secretary.delete()` |
+| `platform_admin_app/onboarding_creation.py` | INSERT | **NO CHANGE, deliberately** — see below |
+
+**Step 2D creation needs no barrier and does not get one.** It creates the owner
+membership for a `Restaurant` INSERTed moments earlier in the same uncommitted
+transaction. No concurrent writer can see that parent row, so there is nothing to
+serialize against; locking a row this transaction just created would be ceremony, and
+it would add a second `Restaurant` acquisition to a service whose lock order
+(`User → INSERT Restaurant → …`) is deliberately documented.
+
+**The parent is resolved SERVER-SIDE on update and delete**, from the membership's own
+FK via `_RESTAURANT_RESOLVERS` — never from a client-supplied `restaurant`. That is the
+same resolution `check_permission` already authorized against, and `restaurant` is
+`read_only` on `SerializerPutRestaurantEmployee`, so the parent cannot shift under the
+lock. A vanished membership takes the helper's `None` path and falls through to
+Secretary's existing scoped lookup and its non-enumerating 404. **No authority changed**:
+the same callers may mutate membership as before, they simply participate in the barrier.
+
+### THE LAST-OWNER GUARD IS NOW INSIDE THE LOCK
+It was `check` (outside any lock) → `write` (inside Secretary's). Both halves now sit in
+the same transaction under the same `Restaurant` row, so the check is authoritative for
+the write it guards.
+
+**REPORTED, NOT FIXED (a pre-existing integrity gap, not a concurrency one):** that guard
+covers `PUT {active:'false'}` ONLY. Removing `RESTAURANT_OWNER` from `roles`, or
+soft-deleting the membership outright, leaves a restaurant with no owner authority and is
+not refused. Closing it means deciding owner-reassignment semantics, which is a product
+decision and not a concurrency PR's to make.
+
+**ALSO REPORTED, NOT FIXED:** the generic `POST restaurant-setup/employees/` branch is
+broken on `origin/main` — `restaurant` is `read_only` and no `server_values` supplies it,
+so any user without a soft-deleted membership to revive gets an `IntegrityError` (NOT NULL
+on `restaurant_id`) surfacing as a 500. Only the reactivation shortcut and
+`create-employee` actually work. Untouched here; fixing it means deciding whether that
+branch should exist.
+
+### THE PROOFS
+`platform_admin_app/tests_owner_membership_concurrency.py` (13 tests, `TransactionTestCase`,
+PostgreSQL only). Blocking is proved POSITIVELY — the customer connection sets
+`lock_timeout` and PostgreSQL raises by name — never by watching a thread fail to finish.
+The admin thread parks at the REAL seam (`assert_owner_consistency` runs, THEN the thread
+stops), so the customer write is attempted in exactly the window the finding names.
+Synchronisation is `threading.Event`; no `sleep` decides anything; every wait has a
+timeout so a deadlock fails loudly.
+
+Both orderings are pinned for reissue (holds the barrier → the mutation cannot commit
+inside the decision; mutation commits first → reissue refuses with the canonical
+consistency conflict and mints nothing), for role removal, deactivation, soft-delete,
+INSERT and REACTIVATION, and for legacy adoption.
+
+**NEGATIVE CONTROL.** Neutralising the barrier in the production source (dropping the
+`select_for_update`) makes **5 of the 7** positive proofs fail. The two that survive are
+exactly the predicted ones: the INSERT (still blocked by referential integrity — which is
+why it is documented as not being evidence) and a sequential Case-B test that does not
+race at all. The suite also carries `BarrierRemovedTests`, which patch the barrier out at
+EVERY import site and assert the bad interleaving reproduces — a live claim credential
+minted for a restaurant with no owner authority, and a second owner reactivated inside
+the decision.
+
+### THE RATCHET
+`restaurants_app/tests_membership_serialization.py` (MEMBERSHIP-LOCK-00). An AST scan
+over production modules: the set that can write a membership must equal a stated
+inventory, each entry must either reference the barrier by name or carry a recorded
+exemption, and the inventory must not name a module that no longer writes. It detects
+manager-level mutations, `RestaurantEmployee(...)`, use of the write serializer, and
+direct assignment to `roles`/`active`/`deleted` — verified to fire on both an innocent
+`objects.create` helper and a direct-instance revive. Test and fixture writes are out of
+scope; a ratchet that fired on those would be noise.
+
+### STEP 2F MAY RELY ON THIS — it is still unbuilt
+Owner-invitation redemption will need `Restaurant` lock → owner consistency → consume the
+invitation → establish customer access, in one transaction. The customer-plane membership
+side of that transaction is now safe by construction, PROVIDED redemption takes the same
+parent lock first. Nothing about redemption is implemented here.
+
+**Cancellation semantics are unchanged.** Step 2E's cancel deliberately does NOT require
+owner consistency and still does not. Because cancel already locks the `Restaurant`, a
+simultaneous membership mutation may now wait briefly for it — that is serialization, not
+a new precondition, and cancellation remains available on a drifted tenant.
 
 ## Commercial & Service Configuration Domain — Phase 1, Steps 3B + 3C
 (+ the 3D.1 read and the 3D.2a/3D.2b Admin adapters, which live elsewhere)

@@ -1,5 +1,8 @@
 import random
 from typing import Optional
+from restaurants_app.controllers.employee_membership_lock import (
+    lock_restaurant_for_membership_mutation,
+)
 from restaurants_app.models import Restaurant
 from users_app.controllers.self_register import self_register
 from users_app.models import User
@@ -22,6 +25,18 @@ def create_employee(
     skip_otp: Optional[bool] = False
 ) -> dict:
     with transaction.atomic():
+        # THE SERIALIZATION POINT for membership writes (Restaurant ->
+        # RestaurantEmployee). Taken as the first statement inside the transaction
+        # this function already opened, so it is held through the Secretary.create()
+        # below rather than acquired and released around it.
+        #
+        # A membership INSERT is in fact already blocked against a held parent lock
+        # by PostgreSQL's referential integrity (the FK takes FOR KEY SHARE on the
+        # restaurants row). Taking the lock explicitly makes the barrier a property
+        # of this code rather than of one database's RI triggers, and keeps every
+        # membership writer on one visible contract.
+        lock_restaurant_for_membership_mutation(getattr(restaurant, 'pk', None))
+
         # password = User.objects.make_random_password()
         # password = 'password'
         password = ''.join(random.choices(
