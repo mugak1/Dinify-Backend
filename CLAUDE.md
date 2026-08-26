@@ -610,6 +610,23 @@ so keep it current when conventions change.
   stays `not_established` until a future redemption consumes the invitation. No
   commercial, readiness, QR, menu, table or lifecycle side effect. Redemption,
   reissue/cancel, delivery and the Admin creation UI are **NOT built**
+- Admin owner-invitation lifecycle: ✅ (Phase 1, Step 2E) — the administrative
+  CREDENTIAL LIFECYCLE between Step-2D issuance and the still-unbuilt Step-2F
+  redemption. `platform_admin_app/onboarding_invitations.py` (the domain) plus
+  `endpoints/owner_invitation.py` and two routes, `POST
+  admin/v1/restaurants/<uuid>/owner-invitation/reissue/` and `.../cancel/`. **NO
+  MIGRATION** — the Step-2A schema already carried `superseded_at`, the cancellation
+  pair and the one-unresolved index. Both routes are elevated, CSRF-protected,
+  reason-required and audited exactly once, and both take a REQUIRED
+  `expected_invitation_id` that asserts IDENTITY, not status. REISSUE supersedes any
+  unresolved credential and mints a fresh one for the CURRENT canonical owner
+  (requiring `assert_owner_consistency`), returning one raw token ONCE under
+  `no-store`; CANCEL terminates the exact unresolved credential, creates no
+  replacement, and deliberately does NOT require owner consistency — revoking a
+  credential must stay possible when a tenant's state is messy. Reissue and creation
+  now share ONE mint primitive. Neither operation touches `customer_access_state`,
+  and nothing consumes an invitation: `owner_control` still has no path to
+  `invitation_redeemed`. See the "Admin Owner-Invitation Lifecycle" section
 - Pre-claim customer-access gate: ✅ (Phase 1, Step 2D.1) — the follow-up that makes
   Step 2D's central claim TRUE rather than aspirational. A new owner had an unusable
   password, and generic password reset needed only their phone number to replace one
@@ -1072,7 +1089,11 @@ so keep it current when conventions change.
   `/restaurants/create/`) + `restaurants/<uuid:id>/` (the Step-1 detail READ — see
   "Admin Restaurant Reads" and "Admin Restaurant Creation" below), and
   `restaurants/<uuid:id>/transition/` (the ONLY writer of `Restaurant.status`,
-  elevation-gated), the two Step-3D.2a commercial writes
+  elevation-gated), the two Step-2E owner-invitation lifecycle writes
+  `restaurants/<uuid:id>/owner-invitation/reissue/` +
+  `.../owner-invitation/cancel/` (POST, elevation-gated, reason-required, audited —
+  `reissue` NOT `resend`, because nothing is ever delivered; see "Admin
+  Owner-Invitation Lifecycle"), the two Step-3D.2a commercial writes
   `restaurants/<uuid:id>/commercial/payment-timing/` +
   `restaurants/<uuid:id>/commercial/payment-collection-mode/` (POST, elevation-gated,
   reason-required — see "Admin Commercial Writes"), and the three Step-3D.2b
@@ -1708,8 +1729,8 @@ captured `now` so the window is exactly the TTL. Expiry stays DERIVED
 
 **A LOST RESPONSE IS UNRECOVERABLE BY DESIGN.** If the server commits and the response
 is lost, the platform holds a valid unresolved invitation and only its hash. The remedy
-is the future REISSUE operation, which will atomically supersede the unresolved
-invitation and mint a fresh token. Do NOT store recoverable plaintext, do NOT return
+is REISSUE, which Step 2E built: it supersedes the unresolved invitation and mints a
+fresh token in one transaction. Do NOT store recoverable plaintext, do NOT return
 the stored hash as a credential, and do NOT invent an "exact retry returns the same
 token" guarantee the schema cannot support.
 
@@ -1848,10 +1869,11 @@ readiness blockers a later step will name.
 
 ### NOT BUILT BY THIS STEP
 The Angular creation UI, owner-invitation REDEMPTION, the password/claim flow,
-RESEND / REISSUE, CANCEL, delivery, readiness, owner go-live approval, QR / menu /
-table setup, commercial configuration and lifecycle controls. **Step 2 is not
-complete.** (Step 2D.1 later added the pre-claim access gate — enforcement of the
-pending state, not the redemption that clears it.)
+delivery, readiness, owner go-live approval, QR / menu / table setup, commercial
+configuration and lifecycle controls. **Step 2 is not complete.** (Step 2D.1 later
+added the pre-claim access gate — enforcement of the pending state, not the redemption
+that clears it. Step 2E then added REISSUE and CANCEL; there is deliberately no
+"resend", because nothing is delivered.)
 
 ### SPEC DEBT (reported, not resolved here)
 The Admin MVP document's §6 still says "no admin-plane onboarding API in Phase 1"
@@ -2041,8 +2063,10 @@ as authentication; auditing the three that existed fixes today, and the scan is 
 fixes tomorrow.
 
 ### NOT BUILT / STILL OPEN
-Redemption, reissue, cancel, delivery, the Admin creation UI, readiness and owner
-go-live approval remain deferred, and **Step 2 is still incomplete**. The two known
+Redemption, delivery, the Admin creation UI, readiness and owner go-live approval
+remain deferred, and **Step 2 is still incomplete**. (Reissue and cancel landed in
+Step 2E; neither touches `customer_access_state` in either direction, and both are
+pinned to prove it.) The two known
 races recorded under "Admin Restaurant Creation" — non-atomic `User.email` uniqueness
 and cross-owner same-name+location duplication — are UNCHANGED and still open; neither
 is touched here.
@@ -2300,18 +2324,20 @@ Four faces of one domain, all in `platform_admin_app/`: the SCHEMA and its valid
 (Step 2A — two models in `models.py` plus `onboarding.py`, migration
 `platform_admin_app/0009`), the ADOPTION writer (Step 2B — `onboarding_adoption.py`
 and its management command, no migration), the READ projection (Step 2C —
-`onboarding_reads.py`, no migration), and the CREATION writer (Step 2D —
+`onboarding_reads.py`, no migration), the CREATION writer (Step 2D —
 `onboarding_creation.py` plus `POST admin/v1/restaurants/`, no migration; see "Admin
-Restaurant Creation").
+Restaurant Creation"), and the CREDENTIAL LIFECYCLE (Step 2E —
+`onboarding_invitations.py` plus two `owner-invitation/` routes, no migration; see
+"Admin Owner-Invitation Lifecycle").
 
-TWO WRITERS, ONE PER PROVENANCE, and neither can write the other's: adoption records a
-PRE-EXISTING tenant as `legacy_adopted` and refuses to convert `admin_created`;
-creation makes a NEW tenant as `admin_created` and never adopts anything. **There is
-still NO attestation writer and no redemption, reissue or cancel service** —
-`OwnerInvitation` rows are MINTED by creation and nothing yet resolves one. **No
-restaurant is adopted or created automatically**: there is no backfill, no signal and
-no `get_or_create`, so absence still means "not yet represented in the Admin
-onboarding domain".
+TWO PROVENANCE WRITERS, ONE PER PROVENANCE, and neither can write the other's: adoption
+records a PRE-EXISTING tenant as `legacy_adopted` and refuses to convert
+`admin_created`; creation makes a NEW tenant as `admin_created` and never adopts
+anything. **There is still NO attestation writer and NO REDEMPTION** — Step 2E resolves
+invitations by SUPERSEDING and CANCELLING them, and nothing writes `consumed_at`, so
+`owner_control` still has no path to `invitation_redeemed`. **No restaurant is adopted
+or created automatically**: there is no backfill, no signal and no `get_or_create`, so
+absence still means "not yet represented in the Admin onboarding domain".
 
 ### RestaurantOnboarding — provenance, not a second restaurant
 The durable record of HOW one canonical `Restaurant` entered the Admin onboarding
@@ -2366,10 +2392,12 @@ a second FK would be a second value able to drift. No identity snapshot.
   over `onboarding` where `consumed_at`/`cancelled_at`/`superseded_at` are all NULL.
   The predicate deliberately does NOT consult the clock (a partial-index predicate
   must be immutable), so an **expired-but-unsuperseded row still occupies the slot**
-  — which is what makes the future reissue path's supersede step load-bearing,
-  exactly as `challenges.create_challenge` consumes before it inserts. As of Step 2D
-  rows ARE minted (one per admin-created restaurant, unresolved); nothing yet consumes,
-  cancels or supersedes one
+  — which is what makes Step 2E's reissue supersede step load-bearing, exactly as
+  `challenges.create_challenge` consumes before it inserts. Reissuing out of an
+  EXPIRED head is the case that proves it: the row reads `expired` but is still
+  unresolved, so without the supersede the replacement insert would violate the index.
+  As of Step 2E rows are MINTED by creation and reissue, SUPERSEDED by reissue and
+  CANCELLED by cancel; **nothing consumes one** — that is Step 2F
 - **Expired is DERIVED** (`expires_at <= now`, the `is_expired` property), never a
   stored `status='expired'`: nothing in this repo runs on a schedule to maintain one
 - The three terminal stamps are mutually exclusive (three named constraints);
@@ -2479,7 +2507,10 @@ was not taught to say them.
                            "evidence_at": ISO8601 | null},
     "invitation":         {"status": "unavailable" | "not_applicable" |
                                      "not_issued" | "pending" | "expired" |
-                                     "consumed" | "cancelled" | "superseded"}
+                                     "consumed" | "cancelled" | "superseded",
+                           "id": UUID | null,
+                           "issued_at": ISO8601 | null,
+                           "expires_at": ISO8601 | null}
 }
 ```
 
@@ -2500,6 +2531,283 @@ was not taught to say them.
 - Baba House is NOT hard-coded anywhere — no UUID or name special case. After deploy
   it will read `tracked: true` / `legacy_adopted` / `consistent` /
   `not_established` / `not_applicable` purely from its data
+- **THE INVITATION AXIS CARRIES SAFE CONCURRENCY METADATA (Step 2E).** `id`,
+  `issued_at` and `expires_at` sit beside `status` so an operator can NAME the exact
+  invitation they reviewed when they reissue or cancel it — `id` IS the
+  `expected_invitation_id` those two routes require. `issued_at`/`expires_at` are what
+  make `pending` and `expired` legible: "expires in two days" and "expired last month"
+  are different operational situations and the status word alone cannot tell them
+  apart. **Still NEVER** `token_hash`, a raw token, a claim URL, delivery state, or
+  password/OTP state — an invitation id is an opaque handle, a token is a credential,
+  and the two must not become interchangeable because they sit in the same object.
+  The three keys are present and null for `not_issued` / `not_applicable` /
+  `unavailable`, so a client never has to branch on the status word to know which keys
+  exist. Query cost is UNCHANGED — the projection already held the row when it decided
+  the status
+- **ONE DEFINITION OF THE CURRENT INVITATION (Step 2E).** `select_head_invitation` is
+  that definition, and the Step-2E writers call it rather than deciding for
+  themselves — a writer with its own opinion would disagree with this projection in
+  exactly the case that matters (an operator reads a screen showing invitation A,
+  clicks Cancel, and the server cancels something else). **The head is the ACTIONABLE
+  credential**: the single unresolved row (`expired` or `pending` against the clock),
+  else an invitation consumed BY THE CURRENT OWNER, else the latest resolved row, else
+  `not_issued`
+- **THE UNRESOLVED ROW COMES FIRST, AND THE ORDER CHANGED IN STEP 2E.** Through Step
+  2C the current owner's consumed row came first, and both axes were answered from
+  that one short-circuiting chain. That HID A LIVE CREDENTIAL in a state reissue makes
+  reachable: owner A consumes an invitation, ownership moves to B, a credential is
+  issued to B, ownership moves back to A. A's consumed row then answered "what is this
+  onboarding's invitation?", so the read published a RESOLVED id — cancellation refused
+  that id (already resolved) and refused B's (stale), and reissue refused outright
+  because A's control was established. B's live claim credential was **impossible to
+  revoke through the API**. No deployed behaviour changed with the fix: nothing writes
+  `consumed_at` until redemption lands in Step 2F, so a consumed row and an unresolved
+  row cannot coexist on a live system yet
+- **OWNER CONTROL IS ITS OWN LOOKUP** (`HeadInvitation.control_evidence`), computed
+  independently of the head. The two questions — *what is outstanding?* and *has the
+  current owner claimed?* — are genuinely independent, and answering both from one
+  chain is what produced the hidden credential. So `invitation: pending` alongside
+  `owner_control: invitation_redeemed` is a legitimate, non-contradictory pair, just
+  as `invitation: consumed` alongside `not_established` already was. COST: two `LIMIT
+  1` queries when anything is outstanding or the owner has claimed, three when
+  neither — one more than the old chain spent on a settled claimed restaurant, and
+  that extra query IS the fix, because the only way to know nothing is outstanding is
+  to ask
+
+## Admin Owner-Invitation Lifecycle — Phase 1, Step 2E
+
+The ADMINISTRATIVE CREDENTIAL LIFECYCLE that sits between Step 2D's initial issuance
+and Step 2F's redemption. Two routes, two domain operations, NO MIGRATION — the Step-2A
+schema already carried `superseded_at`, `cancelled_at`/`cancelled_by` and the
+one-unresolved index:
+
+```
+POST admin/v1/restaurants/<uuid>/owner-invitation/reissue/
+POST admin/v1/restaurants/<uuid>/owner-invitation/cancel/
+```
+
+Body for both: `{"expected_invitation_id": "<UUID>", "reason": "..."}`.
+
+- **`reissue`, NOT `resend`.** The name is load-bearing and appears in the route, the
+  audit action and the module. This system performs NO DELIVERY of any kind — no email,
+  no SMS, no notification, no delivery column on the schema, no provider — so a verb
+  promising a delivery event would be a promise the platform cannot keep, made in the
+  URL where an operator is most likely to believe it. What happens is ROTATION: the old
+  credential dies, a new raw token is handed to the authenticated elevated operator
+- **TWO EXPLICIT ROUTES, never one with an `action` segment.** Rotating a live
+  credential and terminating one are opposite decisions — one hands out authority, the
+  other withdraws it — and the route should tell a reviewer which a request made
+  without them reading a body. Same reasoning as the three subscription-terms routes
+- **BOTH ARE ELEVATION-GATED** (`IsAuthenticated` + `IsRecentlyElevated`), CSRF-protected
+  by the existing `AdminSessionAuthentication` policy, and require a substantive
+  `reason` (`MIN_REASON_LENGTH`, imported from `lifecycle`, never respelled). Anonymous
+  → 401 unaudited; CSRF failure → 403 unaudited (both refused inside authentication,
+  before any decision exists); stale elevation → 403 with exactly one denial audit
+
+### The layering
+- `platform_admin_app/onboarding_invitations.py` — THE DOMAIN. Owns the credential
+  policy, the transaction, the locks, the head selection, the concurrency token, owner
+  binding, the supersede-before-insert step and the TTL. It writes NO `AdminAuditLog`
+  row and inspects no session — `_resolve_actor` answers *whose decision this was*,
+  never *were they allowed to*
+- `platform_admin_app/endpoints/owner_invitation.py` — THE ADAPTER. Authority, the
+  request contract, the audit row, HTTP translation and the no-store headers. An AST
+  test fails the build if `save`/`update`/`create`/`delete` appears in it
+
+### THE CREDENTIAL POLICY IS IN ONE PLACE
+`mint_owner_invitation` is THE ONLY place an owner claim credential is generated —
+`secrets.token_urlsafe(48)`, `sessions.hash_token`, `ADMIN_OWNER_INVITATION_TTL`, one
+captured `now`. **Step 2D's creation service now calls it too**, so an initial
+credential and a reissued one are indistinguishable in entropy, hashing and window; the
+constants and `owner_invitation_ttl` MOVED here and are re-exported from
+`onboarding_creation` so every existing import site is unchanged. A test asserts the
+binding BY IDENTITY, so a second copy cannot pass by producing similar output. The
+primitive deliberately does NOT supersede anything — freeing the slot is the caller's
+job under the caller's lock, and hiding a destructive step inside something called
+"mint" would make half a rotation invisible at the call site.
+
+### WHAT `expected_invitation_id` ASSERTS — STATED EXACTLY
+**IDENTITY, NOT STATUS.** It asserts *the invitation I reviewed is still the one this
+onboarding presents as its head*. It does NOT assert the invitation is still in the
+state the operator saw.
+
+That has a concrete consequence, and it is deliberate: if another operator CANCELS A
+while a reissue naming A is in flight, A remains the head (nothing unresolved exists,
+and A is the latest resolved row), so the reissue proceeds and mints B. That is the
+same outcome the operator would reach by reloading — seeing `cancelled`, id A — and
+deliberately clicking Reissue, which is a REQUIRED workflow.
+
+What the token DOES prevent is the failure it exists for: once a reissue has moved the
+head from A to B, a request naming A is stale and refused, so an old Cancel click can
+never terminate a credential the operator has never seen.
+
+**Identity is not enough on its own.** Matching the id does not mean "any transition is
+now fine" — each operation applies its OWN preconditions to the state found UNDER THE
+LOCK, never to a pre-lock read. It is REQUIRED with no default: an omitted token is a
+400, never "act on whatever is current".
+
+### LOCK ORDER
+```
+Restaurant -> RestaurantOnboarding -> head OwnerInvitation   (domain, one atomic block)
+                                   -> AdminAuditLog          (adapter, outer transaction)
+```
+A tail extension of the documented global order — `onboarding_adoption` already
+establishes `Restaurant -> RestaurantOnboarding`, and `OwnerInvitation` is a table
+nothing else locks — so it cannot cycle against anything that exists.
+`select_for_update(of=('self',))` throughout, so a future `select_related` cannot
+silently widen the lock (the PR-E lesson). **NO ADMISSION ADVISORY LOCK**: the order
+path reads no invitation fact, and taking that lock AFTER the `Restaurant` row would
+invert the lifecycle transition's `advisory -> Restaurant` order.
+
+`one_unresolved_owner_invitation_per_onboarding` is the FINAL DATABASE BACKSTOP, not
+the concurrency user experience — the loser of a race gets `stale_owner_invitation`,
+not an `IntegrityError` surfacing as a 500.
+
+### REISSUE — the state matrix
+| head | what happens |
+|---|---|
+| **pending** | superseded; new pending minted |
+| **expired** | superseded (still unresolved, still holds the slot); new pending minted. **No persisted "expired" stamp or status is ever written** |
+| **cancelled** | left cancelled and untouched; new pending minted beside it. There is no "uncancel" |
+| **consumed by a PREVIOUS owner** | not mutated, evidence not transferred; new pending minted for the CURRENT owner |
+| **consumed by the CURRENT owner** | **REFUSED** — `owner_control_already_established` |
+
+The refusal asks *has the CURRENT owner's control been established?*, never *has any
+invitation in history ever been consumed?* — read from the head selector's
+`establishes_current_owner_control`, the same evidence rule the read publishes, and
+never from a raw `consumed_at`.
+
+- **IT ALWAYS BINDS TO THE CURRENT CANONICAL OWNER** — `Restaurant.owner`, re-read
+  under the lock. Never the previous invitation's `invited_user` (which may name a
+  former owner), never `onboarding.created_by`, and never a request field: **the
+  request carries no owner identity and the service takes no owner argument at all**
+- **IT REQUIRES OWNER CONSISTENCY.** `assert_owner_consistency` must pass before
+  anything is minted, because an invitation instructs one specific person to take
+  control and issuing one while the two answers to "who owns this?" disagree would hand
+  authority to whichever answer was read. It validates and NEVER repairs — a drifted
+  tenant is a 409 carrying the canonical code and is left exactly as it was
+- The owner must also be ACTIVE and a `restaurant_user`; neither is repaired
+
+### CANCEL — the state matrix
+| head | what happens |
+|---|---|
+| **pending** | `cancelled_at` + `cancelled_by` stamped. `changed=true` |
+| **expired** | same — an expired invitation is unresolved and still holds the slot |
+| **already cancelled** | EXACT RETRY: `changed=false`, timestamp and actor UNMOVED |
+| **consumed** or **superseded** | **REFUSED** — `owner_invitation_already_resolved` |
+
+It writes those two columns and nothing else: no delete (history is evidence), no
+`superseded_at`/`consumed_at` (each says something different and untrue about how the
+credential ended), no touch of `expires_at` or `token_hash`, and **no replacement** —
+that is reissue's job, and conflating them would make "cancel" mean "rotate".
+
+**THE EXACT RETRY IS SAFE HERE AND IMPOSSIBLE ON REISSUE**, because cancellation returns
+no credential. It is only available while nothing has moved: once a reissue has made a
+new invitation the head, the old id is stale and refused.
+
+### CANCELLATION DELIBERATELY DOES NOT REQUIRE OWNER CONSISTENCY
+**The asymmetry is the design.** Reissue MINTS authority and needs a sound owner target.
+Cancellation REMOVES authority, and a drifted tenant with a live claim credential
+outstanding is precisely when an administrator most needs to be able to kill it — making
+revocation wait for the ownership mess to be resolved would leave the credential live
+for as long as the mess took to fix. It still infers nothing and repairs nothing.
+
+### THE CREDENTIAL, AND THE LOST RESPONSE
+Only the SHA-256 hash is persisted. The raw token is returned ONCE, in the reissue 200
+body, in its own `owner_invitation` object (never merged into `onboarding`, so no future
+change to the canonical projection can start carrying it), under **`Cache-Control:
+no-store, private` + `Pragma: no-cache` + `Expires: 0`**, all three pinned. It never
+enters an audit row, a log, an exception, a cookie, a `Location` header or a query
+string, and **no claim URL is fabricated** — the customer-plane redemption route does
+not exist.
+
+**A LOST RESPONSE IS RECOVERED BY ROTATING AGAIN, NEVER BY RECOVERING PLAINTEXT.** The
+sequence is pinned end to end: reissue commits → response lost → the retry naming the
+old id is a **409 `stale_owner_invitation`** → the client reloads and the canonical read
+shows the credential it never saw → it deliberately reissues THAT one, superseding the
+unknown credential and minting a known one. Do NOT store recoverable plaintext, return
+the hash as a credential, or invent an "identical retry returns the same token"
+guarantee the schema cannot support. **This is why reissue is rotation and not
+"resend".**
+
+### TTL AND EXPIRY
+Reissue uses the SAME `ADMIN_OWNER_INVITATION_TTL` as creation, from ONE captured `now`
+(`issued_at = now`, `expires_at = now + TTL`). A reissued credential gets a FRESH
+window and never inherits the previous expiry; cancellation never changes expiry.
+**Expiry stays DERIVED** (`expires_at <= now`) — no `status` column, no `expired_at`, no
+sweeper, no signal, and nothing in this repo runs on a schedule.
+
+### NEITHER OPERATION TOUCHES CUSTOMER ACCESS
+`User.customer_access_state` above all: a restaurant-scoped credential is not an
+identity claim in either direction. A `pending_initial_claim` owner stays PENDING (they
+simply have no claimable credential until Admin reissues); an `established` owner stays
+ESTABLISHED (their access to their OTHER restaurants has nothing to do with this one).
+Both cases are pinned, and an AST scan fails the build if either module assigns the
+field. Also untouched: the owner's password, `is_active`, `prompt_password_change`,
+`last_login`; `Restaurant.owner` and the owner membership; the onboarding row's
+provenance and attestation triple; and every historical invitation's stamps, expiry and
+token hash.
+
+**Redemption remains the ONLY supported writer of `pending_initial_claim → established`,
+and it still does not exist.** Issuing another credential is not evidence of anything:
+`owner_control` stays `not_established` after a reissue.
+
+### AUDIT
+Two actions, `admin.restaurant.owner_invitation_reissued` and
+`admin.restaurant.owner_invitation_cancelled`. **ONE ACTION PER ENDPOINT, not per
+outcome** — `AdminAuditLog.result` carries success/failure/denied, so there is no
+`*_failed` / `*_no_op` / `*_denied` sibling. Covers changed success, the cancel no-op,
+an invalid body, an unreadable body (400) and an unsupported media type (415), every
+domain conflict, and elevation denial via a `permission_denied` override. NOT audited:
+anonymous requests, CSRF failures, and a missing/soft-deleted target.
+
+`before_state` / `after_state` carry ONE narrow snapshot each under `owner_invitation`
+— exactly `{status, id, issued_at, expires_at}`, asserted as an exact key set. **Never**
+the raw token, the `token_hash`, the owner's id, name, phone or email, or any whole-object
+serialization. A reissue's before-state is the head AS THE REQUEST FOUND IT, captured
+under the lock before the stamp was written — so a rotation out of `expired` records
+`expired`, which the stamped row can no longer tell anybody. A cancel EXACT RETRY audits
+`before == after == cancelled`: the request happened, nothing moved. A failure's
+before-state is this restaurant's real head, read by the endpoint — never reconstructed
+from `exc.details`, which can name a row the caller has no business being handed.
+
+**DOMAIN MUTATION + AUDIT SHARE ONE OUTER `transaction.atomic()`** in the adapter; the
+service's own block nests as a savepoint. A failed audit rolls the rotation or the
+cancellation back — pinned by a fault injected at `AdminAuditLog.objects.create`, plus
+guard tests proving the domain had genuinely written by that point. A REFUSED mutation
+is still recorded, because the domain exception unwinds only its savepoint.
+
+### STATUS MAP
+- **400** — malformed request facts: a missing, null, blank, non-string, numeric or
+  malformed `expected_invitation_id`; a missing, short, blank or over-long reason;
+  malformed JSON. A numeric token is a 400 and **never a 409** — a conflict means the
+  world moved and must not be manufactured by a coercion table
+- **415** `unsupported_media_type` (audited; distinct from 400 because the status is
+  the caller's remedy)
+- **404** — missing or soft-deleted restaurant, silent and unaudited. The TARGET is
+  resolved BEFORE the body is read, so these routes cannot become an existence oracle
+- **409** — `onboarding_not_tracked`, `owner_invitation_not_applicable` (legacy
+  adoption — provenance is never converted), `stale_owner_invitation`,
+  `owner_invitation_not_issued`, `owner_control_already_established`,
+  `owner_account_not_found` / `_inactive` / `_not_restaurant_user`,
+  `owner_invitation_already_resolved`, and the three owner-consistency codes. Conflict
+  bodies carry a fixed sentence plus the code and **no `details`** — naming the current
+  invitation id would invite a blind retry instead of a reload
+- An UNMAPPED domain code is deliberately re-raised → 500 and a rollback
+
+### READ/WRITE AGREEMENT
+For every supported state — pending, expired, cancelled, reissued-pending, and a
+historical consumed row under a NEW current owner — the id the detail read publishes is
+exactly the id the write endpoints accept, and a write's canonical `onboarding` object
+equals the next GET's byte for byte. There is no second interpretation of "the current
+invitation".
+
+### NOT BUILT BY THIS STEP
+Owner-invitation REDEMPTION (Step 2F), the claim/password flow, delivery of any kind,
+the Angular Admin UI, readiness and owner go-live approval. **Step 2 is still
+incomplete.** The two known races recorded under "Admin Restaurant Creation" —
+non-atomic `User.email` uniqueness and cross-owner same-name+location duplication — are
+UNCHANGED and still open; neither is touched here.
 
 ## Commercial & Service Configuration Domain — Phase 1, Steps 3B + 3C
 (+ the 3D.1 read and the 3D.2a/3D.2b Admin adapters, which live elsewhere)

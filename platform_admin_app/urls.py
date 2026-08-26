@@ -27,6 +27,10 @@ from platform_admin_app.endpoints.subscription_terms import (
     AdminRestaurantRecordSubscriptionTermsView,
     AdminRestaurantReplaceSubscriptionTermsView,
 )
+from platform_admin_app.endpoints.owner_invitation import (
+    AdminOwnerInvitationCancelView,
+    AdminOwnerInvitationReissueView,
+)
 from platform_admin_app.endpoints.restaurants import (
     AdminRestaurantCollectionView,
     AdminRestaurantDetailView,
@@ -86,6 +90,28 @@ urlpatterns = [
         'restaurants/<uuid:restaurant_id>/transition/',
         AdminRestaurantTransitionView.as_view(),
         name='admin-restaurant-transition',
+    ),
+
+    # The owner-invitation credential lifecycle (Phase 1, Step 2E). Both
+    # elevation-gated, CSRF-protected, reason-required and audited exactly once, and
+    # both delegate the mutation to `platform_admin_app.onboarding_invitations`.
+    #
+    # TWO EXPLICIT PATHS, never one route with an `action` segment: rotating a live
+    # credential and terminating one are opposite decisions, and the route should tell
+    # a reviewer which one a request made without them having to read a body.
+    #
+    # `reissue`, NOT `resend`. This system delivers nothing — no email, no SMS, no
+    # notification, no delivery column on the schema — so a route promising a delivery
+    # event would put a claim in the URL that the platform cannot keep.
+    path(
+        'restaurants/<uuid:restaurant_id>/owner-invitation/reissue/',
+        AdminOwnerInvitationReissueView.as_view(),
+        name='admin-restaurant-owner-invitation-reissue',
+    ),
+    path(
+        'restaurants/<uuid:restaurant_id>/owner-invitation/cancel/',
+        AdminOwnerInvitationCancelView.as_view(),
+        name='admin-restaurant-owner-invitation-cancel',
     ),
 
     # Commercial / service configuration writes (Phase 1, Step 3D.2a). Both

@@ -71,13 +71,10 @@ REFUSED creation can still be recorded, because the domain exception unwinds onl
 own savepoint. ``commercial_app`` is built the same way and for the same reason.
 """
 import re
-import secrets
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Optional, Union
 
-from django.conf import settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
@@ -91,13 +88,17 @@ from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Onboarding,
 )
 from misc_app.controllers.msisdn import MsisdnError, normalise_msisdn
-from platform_admin_app import sessions
 from platform_admin_app.models import (
     ONBOARDING_SOURCE_ADMIN_CREATED,
     OwnerInvitation,
     RestaurantOnboarding,
 )
 from platform_admin_app.onboarding import assert_owner_consistency
+from platform_admin_app.onboarding_invitations import (  # noqa: F401
+    OWNER_INVITATION_TTL_DEFAULT,
+    mint_owner_invitation,
+    owner_invitation_ttl,
+)
 from platform_admin_app.services import guard_membership_creation
 from restaurants_app.controllers.lifecycle import MIN_REASON_LENGTH
 from restaurants_app.models import Restaurant, RestaurantEmployee
@@ -105,16 +106,11 @@ from users_app.models import User
 
 # --- policy constants --------------------------------------------------------
 
-# The owner claim window. Read through ``getattr`` with this same default so the
-# service behaves identically under the base and test settings, where the
-# admin-only names are undefined — the contract every other admin constant follows
-# (see ``platform_admin_app.sessions``).
-OWNER_INVITATION_TTL_DEFAULT = timedelta(days=7)
-
-# Raw claim-token entropy, matching ``sessions._TOKEN_BYTES``: 48 bytes -> a 64-char
-# url-safe string (~288 bits). The same standard as an admin session token, a login
-# challenge and a delegation code, because this is the same kind of thing.
-_TOKEN_BYTES = 48
+# THE CREDENTIAL POLICY LIVES IN ``onboarding_invitations``, imported above, and is
+# re-exported here so every existing import site keeps working. Initial issuance and
+# Step-2E reissue must produce indistinguishable credentials — same entropy, same
+# hash, same window — and the only way to guarantee that is for both to call one
+# mint primitive rather than to agree by convention.
 
 # PHASE-1 IS UGANDA-ONLY, deliberately and not merely by omission. ``Restaurant``
 # carries a ``country`` column and ``normalise_msisdn`` accepts a country argument,
@@ -267,13 +263,6 @@ class CreationResult:
 
 
 # --- validation --------------------------------------------------------------
-
-def owner_invitation_ttl():
-    """The configured owner claim window."""
-    return getattr(
-        settings, 'ADMIN_OWNER_INVITATION_TTL', OWNER_INVITATION_TTL_DEFAULT,
-    )
-
 
 def _collapse(raw):
     """
@@ -927,24 +916,20 @@ def create_admin_restaurant(
             owner_control_attested_by=None,
         )
 
-        # THE CREDENTIAL. High-entropy, url-safe, generated with `secrets`; only its
-        # SHA-256 hash is persisted, via the same `sessions.hash_token` used for admin
-        # sessions and delegation codes rather than a second hashing function.
-        claim_token = secrets.token_urlsafe(_TOKEN_BYTES)
-        invitation = OwnerInvitation.objects.create(
+        # THE CREDENTIAL, minted by the ONE primitive Step-2E reissue also uses
+        # (`onboarding_invitations.mint_owner_invitation`) rather than by a second
+        # inline copy of the same four decisions. It generates a high-entropy urlsafe
+        # token with `secrets`, persists ONLY its SHA-256 hash via the same
+        # `sessions.hash_token` used for admin sessions and delegation codes, stamps
+        # `issued_at`/`expires_at` from the ONE captured `now` above, and leaves the
+        # row unresolved. This restaurant has no prior invitation to supersede — it
+        # did not exist a moment ago — which is exactly why superseding is the
+        # caller's job and not the primitive's.
+        invitation, claim_token = mint_owner_invitation(
             onboarding=onboarding,
             invited_user=owner_user,
             issued_by=resolved_actor,
-            token_hash=sessions.hash_token(claim_token),
-            issued_at=now,
-            expires_at=now + owner_invitation_ttl(),
-            # Left unresolved. Marking it consumed here would assert that the owner
-            # confirmed control at the moment Dinify created their account, which is
-            # the one thing this credential exists to find out.
-            consumed_at=None,
-            cancelled_at=None,
-            cancelled_by=None,
-            superseded_at=None,
+            now=now,
         )
 
     return CreationResult(
