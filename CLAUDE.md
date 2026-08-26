@@ -1981,6 +1981,26 @@ password state, login history or memberships — the only truthful rule is *ever
 identity that predates this gate is `established`*, which the field default applies to
 the whole corpus in one statement.
 
+**ONE CLASS THE DEFAULT CANNOT COVER, and it is a deploy-time check rather than a code
+change.** Step 2D shipped the `mode=new` creator before this gate existed (live on UAT
+from 2026-08-25), so an owner created in the window between the two deploys migrates to
+`established` while still holding an unresolved invitation. It is NOT backfilled,
+because the obvious rule is wrong in the dangerous direction: the invitation is minted
+unconditionally, so a `mode=existing` owner holds one too, and demoting them would lock
+a live tenant out of its own restaurant — the exact multi-tenant false positive this
+design exists to prevent. Nothing in the schema distinguishes the two modes; only
+`AdminAuditLog.after_state['owner_account_created']` does. The exposure is therefore
+ENUMERATED before deploying, not guessed:
+
+```sql
+SELECT after_state->>'owner_user_id', created_at FROM admin_audit_log
+WHERE action = 'admin.restaurant.created' AND result = 'success'
+  AND after_state->>'owner_account_created' = 'true';
+```
+
+Empty is the expected answer. Non-empty means setting exactly those users pending as a
+deliberate operator action against a named list.
+
 It carries **`db_default` as well as `default`**, and that is load-bearing rather than
 decoration. Django manages defaults in Python: `AddField` adds the column with a
 default and immediately DROPS it, so a NOT NULL column ends up with no database

@@ -33,6 +33,40 @@ metadata-only change — no table rewrite. There is deliberately no index: nothi
 queries on this column alone, it is only ever read for an already-resolved row.
 ``AddConstraint`` validates the existing rows, which at this scale is instantaneous
 and, since every row was just set to ``established``, cannot fail.
+
+━━ THE ONE CLASS THIS DEFAULT CANNOT COVER — CHECK BEFORE DEPLOYING ━━━━━━━━━━━━━
+
+Step 2D shipped the ``mode=new`` owner creator BEFORE this gate existed. Any owner it
+created in the window between that deploy and this one has an unresolved invitation
+and an unusable password, and this migration will call them ``established`` — which is
+the pre-2D.1 state, i.e. still reachable by generic password reset. The window is real
+rather than hypothetical (Step 2D reached UAT on 2026-08-25), though creating such an
+owner needs a platform-staff account, a live admin session, a fresh second factor, a
+CSRF token and a hand-built POST: there is no Admin creation UI.
+
+IT IS NOT BACKFILLED HERE, and the reason is not squeamishness about ``RunPython``.
+The obvious rule — "everyone holding an unresolved invitation under ``admin_created``
+onboarding" — is WRONG, and wrong in the direction that matters: the invitation is
+minted unconditionally, so an ``mode=existing`` owner has one too. That owner is an
+established account, very possibly already trading at another restaurant, and
+demoting them would lock a live tenant out of its own restaurant. That is precisely
+the multi-tenant false positive this whole design exists to avoid. NOTHING IN THE
+SCHEMA DISTINGUISHES THE TWO MODES — only ``AdminAuditLog.after_state`` does, via
+``owner_account_created``.
+
+So the exposure is ENUMERATED, not guessed. One query names it exactly::
+
+    SELECT after_state->>'owner_user_id' AS owner_user_id, created_at
+    FROM admin_audit_log
+    WHERE action = 'admin.restaurant.created'
+      AND result = 'success'
+      AND after_state->>'owner_account_created' = 'true';
+
+Empty (the expected result) — nothing to do, and this migration is complete on its
+own. Non-empty — set exactly those users to ``pending_initial_claim`` before or
+immediately after deploying, as a deliberate, attributed operator action against a
+named list, rather than by a heuristic baked into a migration that would then run
+forever against every environment for a window that closed the moment it was applied.
 """
 from django.db import migrations, models
 
