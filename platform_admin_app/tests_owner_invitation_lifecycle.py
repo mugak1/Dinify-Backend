@@ -38,7 +38,10 @@ from platform_admin_app.onboarding import (
     OwnerConsistencyError,
 )
 from platform_admin_app.onboarding_creation import NewOwner
-from platform_admin_app.onboarding_reads import onboarding_summary
+from platform_admin_app.onboarding_reads import (
+    onboarding_summary,
+    select_head_invitation,
+)
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from users_app.models import User
 
@@ -324,6 +327,172 @@ class ReissueAfterAPreviousOwnerConsumedTests(_LifecycleTestCase):
         self.reissue()
         summary = onboarding_summary(self.restaurant)
         self.assertEqual(summary['owner_control']['status'], 'not_established')
+
+
+class ALiveCredentialIsAlwaysRevocableTests(_LifecycleTestCase):
+    """
+    THE REGRESSION FROM CODEX'S P2 REVIEW, reproduced end to end.
+
+    An outstanding claim credential must always be nameable by the read and killable
+    by the API. The first version of this PR could produce one that was neither.
+
+    The sequence: owner A consumes an invitation; ownership moves to B; a credential
+    is issued to B; ownership moves BACK to A. The selector then answered "what is
+    this onboarding's invitation?" with A's CONSUMED row, because owner-control
+    evidence came first in one short-circuiting chain. So the read published a
+    resolved id, cancellation refused that id (already resolved) and refused B's id
+    (stale), and reissue refused outright because A's control was established.
+    **B's live credential could not be revoked through the API at all** — the one
+    outcome a credential-lifecycle surface must never produce.
+
+    Fixed by ordering the UNRESOLVED row first and computing owner control as its own
+    independent lookup. Both axes are now simultaneously true, which is the point of
+    their being two axes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # 1. The original owner claims the restaurant.
+        OwnerInvitation.objects.filter(pk=self.invitation.pk).update(
+            consumed_at=timezone.now(),
+        )
+
+        # 2. Ownership moves to a successor, consistently.
+        self.successor = _make_restaurant_user('revocable-successor@t.com')
+        self._reseat(self.owner, self.successor)
+
+        # 3. A credential is issued to the successor.
+        self.live = self.reissue(expected=self.invitation.id).invitation
+
+        # 4. Ownership moves BACK to the original owner.
+        self._reseat(self.successor, self.owner)
+
+    def _reseat(self, outgoing, incoming):
+        RestaurantEmployee.objects.filter(
+            restaurant=self.restaurant, user=outgoing,
+        ).update(active=False)
+        RestaurantEmployee.objects.update_or_create(
+            restaurant=self.restaurant, user=incoming,
+            defaults={'roles': [RESTAURANT_OWNER], 'active': True},
+        )
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(owner=incoming)
+        self.restaurant.refresh_from_db()
+
+    def test_the_read_names_the_live_credential_not_the_consumed_one(self):
+        block = onboarding_summary(self.restaurant)['invitation']
+        self.assertEqual(block['id'], str(self.live.id))
+        self.assertEqual(block['status'], 'pending')
+
+    def test_owner_control_is_still_reported_from_the_consumed_row(self):
+        """Both axes true at once — the live credential does not erase the evidence."""
+        summary = onboarding_summary(self.restaurant)
+        self.assertEqual(
+            summary['owner_control']['status'], 'invitation_redeemed',
+        )
+        self.assertEqual(
+            summary['owner_control']['evidence_at'],
+            OwnerInvitation.objects.get(pk=self.invitation.pk)
+            .consumed_at.isoformat(),
+        )
+
+    def test_the_live_credential_can_be_cancelled(self):
+        """The whole point: it is revocable."""
+        result = self.cancel(expected=self.live.id)
+        self.assertTrue(result.changed)
+        self.live.refresh_from_db()
+        self.assertIsNotNone(self.live.cancelled_at)
+
+    def test_reissue_is_still_refused_because_control_is_established(self):
+        """
+        Correct, and not a contradiction with the above. There is nothing to issue a
+        NEW credential for — the current owner has claimed — but the outstanding one
+        still has to be killable, and cancellation is what kills it.
+        """
+        self.assertRefused(
+            lambda: self.reissue(expected=self.live.id),
+            onboarding_invitations.OWNER_CONTROL_ALREADY_ESTABLISHED,
+        )
+
+    def test_cancelling_it_leaves_the_control_evidence_intact(self):
+        """
+        And the head then falls back to the current owner's redemption — ``consumed``,
+        not ``cancelled``.
+
+        That is the ordering doing its job rather than an oversight: with nothing
+        outstanding, the meaningful terminal fact about this onboarding's credential is
+        that the CURRENT owner claimed one, which is exactly what branch 2 is for. The
+        cancelled row belongs to a credential issued to somebody who is no longer the
+        owner, and it stays in the history where the audit log can find it.
+        """
+        self.cancel(expected=self.live.id)
+        summary = onboarding_summary(self.restaurant)
+        self.assertEqual(
+            summary['owner_control']['status'], 'invitation_redeemed',
+        )
+        self.assertEqual(summary['invitation']['status'], 'consumed')
+        self.assertEqual(summary['invitation']['id'], str(self.invitation.id))
+        # The cancellation really happened; it is simply no longer the headline.
+        self.live.refresh_from_db()
+        self.assertIsNotNone(self.live.cancelled_at)
+
+
+class HeadSelectionOrderingTests(_LifecycleTestCase):
+    """
+    The ordering rule itself, stated directly: an UNRESOLVED row is always the head.
+    """
+
+    def test_an_unresolved_row_outranks_a_current_owner_redemption(self):
+        OwnerInvitation.objects.filter(pk=self.invitation.pk).update(
+            consumed_at=timezone.now(),
+        )
+        live = OwnerInvitation.objects.create(
+            onboarding=self.onboarding, invited_user=self.owner,
+            issued_by=self.admin, token_hash='f' * 64,
+            issued_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+        head = select_head_invitation(self.onboarding, self.restaurant)
+        self.assertEqual(head.invitation.id, live.id)
+        self.assertEqual(head.status, 'pending')
+
+    def test_control_evidence_is_a_separate_row_from_the_head(self):
+        consumed_id = self.invitation.id
+        OwnerInvitation.objects.filter(pk=consumed_id).update(
+            consumed_at=timezone.now(),
+        )
+        live = OwnerInvitation.objects.create(
+            onboarding=self.onboarding, invited_user=self.owner,
+            issued_by=self.admin, token_hash='e' * 64,
+            issued_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+        head = select_head_invitation(self.onboarding, self.restaurant)
+        self.assertEqual(head.invitation.id, live.id)
+        self.assertEqual(head.control_evidence.id, consumed_id)
+        self.assertTrue(head.establishes_current_owner_control)
+
+    def test_they_are_the_same_row_on_a_settled_restaurant(self):
+        """The ordinary case: one invitation, claimed by the owner, nothing outstanding."""
+        OwnerInvitation.objects.filter(pk=self.invitation.pk).update(
+            consumed_at=timezone.now(),
+        )
+        head = select_head_invitation(self.onboarding, self.restaurant)
+        self.assertEqual(head.invitation.id, self.invitation.id)
+        self.assertEqual(head.control_evidence.id, self.invitation.id)
+        self.assertEqual(head.status, 'consumed')
+
+    def test_a_previous_owners_redemption_is_not_control_evidence(self):
+        """Unchanged by the reordering — evidence is still per-owner."""
+        OwnerInvitation.objects.filter(pk=self.invitation.pk).update(
+            consumed_at=timezone.now(),
+        )
+        successor = _make_restaurant_user('ordering-successor@t.com')
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(owner=successor)
+        self.restaurant.refresh_from_db()
+        head = select_head_invitation(self.onboarding, self.restaurant)
+        self.assertIsNone(head.control_evidence)
+        self.assertFalse(head.establishes_current_owner_control)
+        self.assertEqual(head.status, 'consumed')
 
 
 # --- §34 reissue: the refusals ------------------------------------------------

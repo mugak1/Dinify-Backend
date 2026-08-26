@@ -2548,10 +2548,31 @@ was not taught to say them.
   that definition, and the Step-2E writers call it rather than deciding for
   themselves — a writer with its own opinion would disagree with this projection in
   exactly the case that matters (an operator reads a screen showing invitation A,
-  clicks Cancel, and the server cancels something else). Its order is unchanged from
-  Step 2C: an invitation consumed BY THE CURRENT OWNER, else the single unresolved row
-  (`expired` or `pending` against the clock), else the latest resolved row, else
+  clicks Cancel, and the server cancels something else). **The head is the ACTIONABLE
+  credential**: the single unresolved row (`expired` or `pending` against the clock),
+  else an invitation consumed BY THE CURRENT OWNER, else the latest resolved row, else
   `not_issued`
+- **THE UNRESOLVED ROW COMES FIRST, AND THE ORDER CHANGED IN STEP 2E.** Through Step
+  2C the current owner's consumed row came first, and both axes were answered from
+  that one short-circuiting chain. That HID A LIVE CREDENTIAL in a state reissue makes
+  reachable: owner A consumes an invitation, ownership moves to B, a credential is
+  issued to B, ownership moves back to A. A's consumed row then answered "what is this
+  onboarding's invitation?", so the read published a RESOLVED id — cancellation refused
+  that id (already resolved) and refused B's (stale), and reissue refused outright
+  because A's control was established. B's live claim credential was **impossible to
+  revoke through the API**. No deployed behaviour changed with the fix: nothing writes
+  `consumed_at` until redemption lands in Step 2F, so a consumed row and an unresolved
+  row cannot coexist on a live system yet
+- **OWNER CONTROL IS ITS OWN LOOKUP** (`HeadInvitation.control_evidence`), computed
+  independently of the head. The two questions — *what is outstanding?* and *has the
+  current owner claimed?* — are genuinely independent, and answering both from one
+  chain is what produced the hidden credential. So `invitation: pending` alongside
+  `owner_control: invitation_redeemed` is a legitimate, non-contradictory pair, just
+  as `invitation: consumed` alongside `not_established` already was. COST: two `LIMIT
+  1` queries when anything is outstanding or the owner has claimed, three when
+  neither — one more than the old chain spent on a settled claimed restaurant, and
+  that extra query IS the fix, because the only way to know nothing is outstanding is
+  to ask
 
 ## Admin Owner-Invitation Lifecycle — Phase 1, Step 2E
 

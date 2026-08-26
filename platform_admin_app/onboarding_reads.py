@@ -233,12 +233,15 @@ class HeadInvitation:
     """
     The invitation this onboarding currently presents, and how it reads.
 
-    ``invitation`` is ``None`` only for ``not_issued``. ``status`` is the word the
-    projection publishes. ``establishes_current_owner_control`` says whether this row
-    is EVIDENCE that the CURRENT owner controls the restaurant — which is a different
-    question from "is it consumed", and the difference is the whole reason the two
-    axes are not flattened: an invitation consumed by a PREVIOUS owner is consumed
-    and establishes nothing.
+    ``invitation`` is the ACTIONABLE credential — ``None`` only for ``not_issued`` —
+    and ``status`` is the word the projection publishes for it.
+
+    ``control_evidence`` is a SEPARATE row: the invitation consumed by the CURRENT
+    owner, if one exists. **The two are computed independently and are frequently not
+    the same row**, which is the whole reason the axes are not flattened. An
+    invitation consumed by a PREVIOUS owner is consumed and establishes nothing; an
+    invitation consumed by the current owner establishes control while a LIVE
+    unresolved credential may still be outstanding beside it.
 
     Frozen, and carrying no token material: this object is passed to a projection and
     to an audit-state builder, and neither has any business near a credential.
@@ -246,7 +249,11 @@ class HeadInvitation:
 
     invitation: Optional['OwnerInvitation']
     status: str
-    establishes_current_owner_control: bool
+    control_evidence: Optional['OwnerInvitation']
+
+    @property
+    def establishes_current_owner_control(self) -> bool:
+        return self.control_evidence is not None
 
 
 def _redeemed_by_current_owner(onboarding, restaurant, *, for_update=False):
@@ -344,48 +351,71 @@ def select_head_invitation(
     onboarding, restaurant, *, now=None, for_update=False,
 ) -> HeadInvitation:
     """
-    THE canonical current invitation for an ``admin_created`` onboarding.
+    THE canonical current invitation for an ``admin_created`` onboarding, plus the
+    separate question of whether the CURRENT owner's control has been established.
 
-    Four cases, in this order, short-circuiting on the first hit — AT MOST THREE
-    ``LIMIT 1`` QUERIES, each answering one named question:
+    ━━ THE HEAD IS THE ACTIONABLE CREDENTIAL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-      1. an invitation CONSUMED BY THE CURRENT OWNER. It is simultaneously the
-         invitation's headline state and the only evidence that establishes control
-         for ``admin_created`` provenance, which is why one lookup answers both;
-      2. otherwise the single UNRESOLVED row, read as ``expired`` or ``pending``
-         against the clock;
+      1. the single UNRESOLVED row, read as ``expired`` or ``pending`` against the
+         clock. A live credential is ALWAYS what an operator needs to see and act on;
+      2. otherwise an invitation CONSUMED BY THE CURRENT OWNER — nothing is
+         outstanding, and what happened to the credential is that it was claimed;
       3. otherwise the latest RESOLVED row — something was tried and ended;
       4. otherwise nothing has ever been issued.
 
-    Fetching the whole history and sorting in Python would be one query but an
-    unbounded number of rows, and would put the ordering rules somewhere a reader has
-    to reconstruct them.
+    **UNRESOLVED COMES FIRST, AND THAT ORDERING IS A FIX RATHER THAN A PREFERENCE.**
+    It used to come second, behind the current owner's consumed row, and that hid a
+    live credential in a state Step 2E made reachable: owner A consumes an invitation,
+    ownership moves to B, a credential is issued to B, ownership moves back to A. A's
+    consumed row then answered "what is this onboarding's invitation?", so the read
+    published a resolved id, cancellation refused the id it had published (already
+    resolved) and refused B's id (stale), and reissue refused outright because A's
+    control was established — leaving B's live claim credential **impossible to revoke
+    through the API at all**. A credential that cannot be killed is the one outcome a
+    credential-lifecycle surface must not produce.
 
-    ``now`` lets a caller pass ONE captured instant so a decision and the record of
-    it cannot straddle the expiry boundary. ``for_update`` is for writers only and
+    ━━ OWNER CONTROL IS COMPUTED INDEPENDENTLY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    ``control_evidence`` is its own lookup and its own row. The two questions —
+    *what is outstanding?* and *has the current owner claimed?* — are genuinely
+    independent, and the bug above is exactly what answering both from one
+    short-circuiting chain produced. They CAN be the same row (a settled restaurant
+    whose only invitation was claimed by its owner) and they frequently are not.
+
+    ━━ COST ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    TWO OR THREE ``LIMIT 1`` QUERIES, each answering one named question, constant in
+    the size of the tenant's history. Two when anything is outstanding or the current
+    owner has claimed; three only when neither is true. That is one more than the old
+    chain spent on a settled claimed restaurant — and it IS the fix: the only way to
+    know nothing is outstanding is to ask.
+
+    ``now`` lets a caller pass ONE captured instant so a decision and the record of it
+    cannot straddle the expiry boundary. ``for_update`` is for writers only and
     requires an open transaction — see ``_locked``.
     """
     moment = now or timezone.now()
 
+    unresolved = _unresolved_invitation(onboarding, for_update=for_update)
     redeemed = _redeemed_by_current_owner(
         onboarding, restaurant, for_update=for_update,
     )
-    if redeemed is not None:
-        return HeadInvitation(redeemed, INVITATION_CONSUMED, True)
 
-    unresolved = _unresolved_invitation(onboarding, for_update=for_update)
     if unresolved is not None:
         status = (
             INVITATION_EXPIRED if unresolved.expires_at <= moment
             else INVITATION_PENDING
         )
-        return HeadInvitation(unresolved, status, False)
+        return HeadInvitation(unresolved, status, redeemed)
+
+    if redeemed is not None:
+        return HeadInvitation(redeemed, INVITATION_CONSUMED, redeemed)
 
     historical = _latest_resolved_invitation(onboarding, for_update=for_update)
     if historical is not None:
-        return HeadInvitation(historical, _resolved_state(historical), False)
+        return HeadInvitation(historical, _resolved_state(historical), None)
 
-    return HeadInvitation(None, INVITATION_NOT_ISSUED, False)
+    return HeadInvitation(None, INVITATION_NOT_ISSUED, None)
 
 
 def invitation_projection(head: HeadInvitation) -> dict:
@@ -434,25 +464,31 @@ def _admin_created_evidence(onboarding, restaurant):
     """
     Owner control and invitation state for ``admin_created`` provenance.
 
-    Computed together because they share their first and most important lookup: for a
-    restaurant Dinify created, control is established by ONE thing — an invitation
-    consumed by the person who is the owner now — and that same row is also the
-    invitation's headline state. Both come from ``select_head_invitation``, the one
-    selector the Step-2E writers also use.
+    Both come from ``select_head_invitation`` — the one selector the Step-2E writers
+    also use — but from its two INDEPENDENT answers rather than from one chain. For a
+    restaurant Dinify created, control is established by exactly one thing: an
+    invitation consumed by the person who is the owner NOW.
 
-    A CONSUMED INVITATION AND ``not_established`` CAN CO-OCCUR, and it is not a
-    contradiction: it means somebody consumed an invitation and is no longer the
-    owner. The invitation axis reports what happened to the credential; the control
-    axis reports whether the CURRENT owner's control was established. Conflating them
-    is how a replacement owner inherits evidence nobody gave them.
+    TWO AXES, AND THE PAIRS THAT LOOK LIKE CONTRADICTIONS ARE NOT:
+
+      * ``invitation: consumed`` with ``owner_control: not_established`` means
+        somebody consumed an invitation and is no longer the owner;
+      * ``invitation: pending`` with ``owner_control: invitation_redeemed`` means the
+        current owner has claimed AND a live credential is outstanding beside that —
+        the state whose live credential the old single-chain ordering hid.
+
+    The invitation axis reports what is OUTSTANDING; the control axis reports whether
+    the CURRENT owner's control was established. Conflating them is how a replacement
+    owner inherits evidence nobody gave them, and how a live credential becomes
+    invisible.
     """
     head = select_head_invitation(onboarding, restaurant)
 
-    if head.establishes_current_owner_control:
+    if head.control_evidence is not None:
         control = _control(
             CONTROL_INVITATION_REDEEMED,
             EVIDENCE_INVITATION_REDEEMED,
-            head.invitation.consumed_at,
+            head.control_evidence.consumed_at,
         )
     else:
         # No current-owner evidence. Control is not established whatever the

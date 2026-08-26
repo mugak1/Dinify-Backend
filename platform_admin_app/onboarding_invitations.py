@@ -686,6 +686,13 @@ def reissue_owner_invitation(
     selector's ``establishes_current_owner_control``, which is the same evidence rule
     the read projection publishes, and never from a raw ``consumed_at``.
 
+    THAT VERDICT IS INDEPENDENT OF THE HEAD, and deliberately so: the head is whatever
+    is ACTIONABLE, so a restaurant can simultaneously have an outstanding credential
+    (the head) and an established owner (the evidence). Reissue is then correctly
+    refused — there is nothing to issue a new credential for — while CANCELLATION
+    remains available for the outstanding one, which is what makes a live credential
+    revocable in that state rather than stranded.
+
     ━━ AND THE PRECONDITION THAT IS NOT ABOUT INVITATIONS ━━━━━━━━━━━━━━━━━━━━━━━━
 
     ``assert_owner_consistency`` must pass before anything is minted. An invitation

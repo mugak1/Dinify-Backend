@@ -648,22 +648,66 @@ class AdminCreatedInvitationTests(_ReadTestCase):
         _invite(self.onboarding_row, self.restaurant.owner, self.admin)
         self.assertEqual(self.invitation_status(), INVITATION_PENDING)
 
-    def test_current_owner_redemption_outranks_a_later_live_invitation(self):
+    def test_redemption_and_a_live_invitation_are_reported_on_their_own_axes(self):
         """
+        THE TWO AXES ARE INDEPENDENT, and this is the state that proves it.
+
         Control, once established for the current owner, is not undone by a new
-        invitation being outstanding — the owner already proved control.
+        invitation being outstanding — the owner already proved control. But the
+        INVITATION axis reports what is OUTSTANDING, so a live unresolved credential
+        is what it names, and the consumed row remains the control evidence.
+
+        **THIS ASSERTION CHANGED IN STEP 2E, and not casually.** It previously
+        expected ``consumed`` here, because the selector answered both questions from
+        one short-circuiting chain with the current owner's consumed row first. That
+        hid the live credential: the read published a RESOLVED id, so cancellation
+        refused the id it had just published and refused the live one as stale, and
+        reissue refused outright because control was established — leaving an
+        outstanding claim credential **impossible to revoke through the API**.
+
+        The state is not reachable on a deployed system today (nothing writes
+        ``consumed_at`` until redemption lands in Step 2F, so a consumed row and an
+        unresolved row cannot coexist), which is why no production behaviour changes
+        with it. Step 2E's reissue is what makes it reachable at all.
         """
         consumed = _invite(
             self.onboarding_row, self.restaurant.owner, self.admin, consumed=True,
             issued_at=timezone.now() - timedelta(days=5),
         )
-        _invite(self.onboarding_row, _make_user('someone-else@t.com'), self.admin)
+        live = _invite(
+            self.onboarding_row, _make_user('someone-else@t.com'), self.admin,
+        )
 
+        # Control: unchanged, and still evidenced by the row that was consumed.
         self.assertControl(
             self.restaurant, CONTROL_INVITATION_REDEEMED,
             EVIDENCE_INVITATION_REDEEMED, consumed.consumed_at,
         )
-        self.assertEqual(self.invitation_status(), INVITATION_CONSUMED)
+        # Invitation: the OUTSTANDING credential, named so it can be acted on.
+        block = self.onboarding(self.restaurant)['invitation']
+        self.assertEqual(block['status'], INVITATION_PENDING)
+        self.assertEqual(block['id'], str(live.id))
+
+    def test_a_live_credential_is_never_hidden_behind_a_consumed_one(self):
+        """
+        The regression, stated as the property rather than as a shape: whenever an
+        unresolved invitation exists, the read names IT — whoever it was issued to and
+        whatever the current owner has previously claimed. A credential-lifecycle API
+        that cannot name a live credential cannot revoke one.
+        """
+        _invite(
+            self.onboarding_row, self.restaurant.owner, self.admin, consumed=True,
+            issued_at=timezone.now() - timedelta(days=5),
+        )
+        live = _invite(
+            self.onboarding_row, _make_user('live-holder@t.com'), self.admin,
+        )
+        self.assertEqual(
+            self.onboarding(self.restaurant)['invitation']['id'], str(live.id),
+        )
+        # And it is genuinely unresolved — the thing that makes it actionable.
+        live.refresh_from_db()
+        self.assertFalse(live.is_resolved)
 
     def test_the_most_recent_current_owner_redemption_is_used(self):
         """
