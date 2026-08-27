@@ -101,6 +101,13 @@ CONTROL_STALE_ATTESTATION = 'stale_attestation'
 INVITATION_NOT_ISSUED = 'not_issued'
 INVITATION_PENDING = 'pending'
 INVITATION_EXPIRED = 'expired'
+# The Step-2F.2 invitation-level guess budget is spent. UNRESOLVED, like `expired`: the
+# credential still holds the per-onboarding slot, is still reissuable and still
+# cancellable — it simply cannot be challenged or redeemed any more. Its own word rather
+# than a flavour of `expired`, because the operator's remedy is the same (reissue) but
+# the cause is not, and "expired" on a credential issued this morning reads as a clock
+# problem when it is a security event.
+INVITATION_VERIFICATION_LOCKED = 'verification_locked'
 INVITATION_CONSUMED = 'consumed'
 INVITATION_CANCELLED = 'cancelled'
 INVITATION_SUPERSEDED = 'superseded'
@@ -347,6 +354,32 @@ def _resolved_state(invitation) -> str:
     return INVITATION_SUPERSEDED
 
 
+def _unresolved_status(invitation, moment) -> str:
+    """
+    How an UNRESOLVED invitation reads. Three words, and the precedence is explicit.
+
+        verification_locked  the guess budget is spent (Step 2F.2)
+        expired              the issue window has passed
+        pending              usable
+
+    VERIFICATION LOCK COMES FIRST, and the ordering is a decision rather than an
+    accident. Both states are unclaimable and both are remedied by a reissue, so an
+    invitation that is simultaneously locked and expired could honestly be reported
+    either way — but only one of them tells the operator that somebody sat there
+    guessing. Reporting `expired` would file a security event as a clock problem.
+
+    Neither is stored. `expires_at` is compared against ONE captured `moment` so a
+    decision and the record of it cannot straddle the boundary; the lock is derived from
+    the counter by the model's own `is_verification_locked`, used rather than restated so
+    the read and the redemption service cannot disagree about what "locked" means.
+    """
+    if invitation.is_verification_locked:
+        return INVITATION_VERIFICATION_LOCKED
+    if invitation.expires_at <= moment:
+        return INVITATION_EXPIRED
+    return INVITATION_PENDING
+
+
 def select_head_invitation(
     onboarding, restaurant, *, now=None, for_update=False,
 ) -> HeadInvitation:
@@ -402,11 +435,7 @@ def select_head_invitation(
     )
 
     if unresolved is not None:
-        status = (
-            INVITATION_EXPIRED if unresolved.expires_at <= moment
-            else INVITATION_PENDING
-        )
-        return HeadInvitation(unresolved, status, redeemed)
+        return HeadInvitation(unresolved, _unresolved_status(unresolved, moment), redeemed)
 
     if redeemed is not None:
         return HeadInvitation(redeemed, INVITATION_CONSUMED, redeemed)

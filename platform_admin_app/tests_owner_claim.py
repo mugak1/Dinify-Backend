@@ -708,56 +708,83 @@ class OwnerClaimPurposeTests(_ClaimTestCase):
             CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
         )
 
-    def test_verify_otp_does_not_bind_the_purpose_it_was_asked_for(self):
+    def test_verify_otp_now_binds_the_purpose_it_is_asked_for(self):
         """
-        RECORDED, NOT FIXED — and it is the single most important thing Step 2F.2
-        inherits.
+        THE GAP THIS TEST USED TO RECORD IS CLOSED — and its own instruction was to
+        become this assertion once it was.
 
-        ``verify_otp`` takes no expected purpose. It selects the most recent live
-        challenge for the identity and reads the purpose OFF THE ROW. So "the code was
-        correct" does NOT today mean "the code was an owner-claim code", and a
-        redemption that called ``verify_otp`` and trusted a bare ``valid: True`` would
-        accept a code issued for something else entirely.
-
-        Harmless here — this endpoint only ISSUES — but Step 2F.2 must either extend
-        ``verify_otp`` with an explicit expected-purpose filter or check
-        ``UserOtp.purpose`` itself under its own lock. Building that extension now
-        would be speculative; pinning the gap is not.
+        Through Step 2F.1 ``verify_otp`` took no expected purpose: it selected the most
+        recent live challenge for the identity and read ``purpose`` OFF THE ROW, so "the
+        code was correct" did not mean "the code was issued for what I am authorising".
+        Step 2F.2 added ``expected_purpose`` and ``expected_msisdn``, which NARROW the
+        locked query rather than being checked after it — so a challenge issued for
+        something else is never selected and is left entirely untouched.
         """
         from users_app.controllers.otp_manager import OtpManager
         import inspect
-        signature = inspect.signature(OtpManager.verify_otp)
-        self.assertNotIn(
-            'purpose', signature.parameters,
-            'verify_otp gained a purpose parameter — Step 2F.2 should now USE it, '
-            'and this test should become the assertion that it does',
-        )
+
+        parameters = inspect.signature(OtpManager.verify_otp).parameters
+        self.assertIn('expected_purpose', parameters)
+        self.assertIn('expected_msisdn', parameters)
+        # BOTH DEFAULT TO None, so the four pre-existing callers are unchanged.
+        self.assertIsNone(parameters['expected_purpose'].default)
+        self.assertIsNone(parameters['expected_msisdn'].default)
+
+    def test_an_unbound_verify_still_behaves_exactly_as_before(self):
+        """
+        Backward compatibility, exercised rather than asserted from the signature: the
+        four existing callers pass neither argument and must keep selecting the most
+        recent live challenge for the identity whatever it was issued for.
+        """
+        from users_app.controllers.otp_manager import OtpManager
+        self.assertEqual(self.challenge(token=self.token).status_code, 200)
+
+        result = OtpManager().verify_otp(user_id=str(self.owner.id), otp='1234')
+
+        self.assertTrue(result['data']['valid'])
+        self.assertIsNotNone(self.otps().get().consumed_at)
 
 
 @_UNTHROTTLED
 class CrossPurposeOtpReplacementTests(_ClaimTestCase):
     """
-    CURRENT OTP REPLACEMENT SEMANTICS, DOCUMENTED RATHER THAN CHANGED.
+    OTP REPLACEMENT SEMANTICS — RESTATED TRUTHFULLY FOR STEP 2F.2.
 
-    ``make_otp`` deletes prior challenges with
-    ``UserOtp.objects.filter(user=user, msisdn=msisdn).delete()`` — **purpose-blind**.
-    And both generic callers pass no ``msisdn`` (``login.py`` and
-    ``reset_password.py``), so their rows store ``msisdn=NULL`` and that filter
-    matches them.
+    ━━ WHAT THESE TESTS USED TO SAY, AND WHY IT CHANGED ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    CONSEQUENCE, in both directions: an owner-claim challenge destroys a live login or
-    reset code for that identity, and a login attempt destroys a live owner-claim
-    challenge.
+    Through Step 2F.1 this endpoint called ``make_otp(user=…, purpose='owner-claim')``
+    with NO ``msisdn``, so its row stored ``msisdn=NULL``. ``make_otp``'s replacement
+    delete is ``filter(user=user, msisdn=msisdn).delete()`` — purpose-blind — and both
+    generic callers (``login.py``, ``reset_password.py``) also pass no ``msisdn``. All
+    three therefore shared the ``msisdn IS NULL`` bucket and destroyed each other's
+    challenges. That was documented here rather than fixed, because purpose-scoping the
+    delete would change what a login OTP does to a reset OTP.
 
-    NOT FIXED HERE, deliberately. The complete fix is purpose-scoped deletion, which
-    changes what a login OTP does to a reset OTP — a change to two shipped
-    authentication flows, with its own analysis and its own blast radius. A
-    half-measure that made only ``owner-claim`` polite would leave the likelier
-    direction (a login wiping a claim challenge) wide open while looking closed.
+    Step 2F.2 requires the challenge to RECORD ITS DESTINATION (``UserOtp.msisdn``), so
+    redemption can bind the factor to the phone the code actually went to. Passing an
+    explicit ``msisdn`` moves the owner-claim row into its own bucket — which changes the
+    collision behaviour in BOTH directions, and improves it in both:
 
-    These tests exist so the behaviour is VISIBLE and a future change is deliberate.
-    They will fail the day someone scopes the delete, which is exactly when a human
-    should be looking.
+      * an owner-claim challenge NO LONGER destroys a live login or reset code;
+      * a login or reset attempt NO LONGER destroys a live owner-claim challenge, which
+        is load-bearing: otherwise requesting a login code would silently kill the claim
+        challenge the owner is in the middle of using.
+
+    THE PURPOSE-BLIND DELETE ITSELF IS UNCHANGED. This is not the broad purpose-scoped
+    migration; ``login`` and ``reset-password`` still share the NULL bucket and still
+    replace one another exactly as they always have. Only owner-claim moved.
+
+    ━━ THE ONE INTERACTION THAT SURVIVES, AND IT IS NOT A REGRESSION ━━━━━━━━━━━━━━
+
+    Two live rows for one identity can now coexist, and a PURPOSE-BLIND
+    ``verify_otp(user_id=…)`` still picks the most recent. So a newer owner-claim
+    challenge shadows an older login code for the generic verify endpoint.
+
+    That is the SAME user-visible outcome as before — previously the login row was
+    deleted outright, so the login code did not work either — and coexistence for one
+    user already occurs on ``origin/main`` via ``resend_otp``, which has always passed
+    ``msisdn=user.phone_number``. Redemption itself is immune: it binds purpose AND
+    destination, so it selects its own row or none.
     """
 
     def _established_owner(self):
@@ -766,37 +793,91 @@ class CrossPurposeOtpReplacementTests(_ClaimTestCase):
         )
         self.owner.refresh_from_db()
 
-    def test_an_owner_claim_challenge_replaces_a_live_login_otp(self):
+    def _make(self, purpose):
         from users_app.controllers.otp_manager import OtpManager
+        self.assertTrue(OtpManager().make_otp(user=self.owner, purpose=purpose))
+
+    def test_the_challenge_records_its_delivery_destination(self):
+        """The premise of everything below, and of Step 2F.2's factor binding."""
+        self.assertEqual(self.challenge(token=self.token).status_code, 200)
+        row = self.otps().get()
+        self.assertEqual(row.msisdn, self.owner.phone_number)
+        self.assertEqual(row.purpose, OWNER_CLAIM_OTP_PURPOSE)
+
+    def test_an_owner_claim_challenge_no_longer_destroys_a_live_login_otp(self):
+        """CHANGED BEHAVIOUR, and an improvement: it used to delete the login row."""
         self._established_owner()
-        self.assertTrue(OtpManager().make_otp(user=self.owner, purpose='login'))
+        self._make('login')
         self.assertEqual(self.otps().get().purpose, 'login')
 
         self.assertEqual(self.challenge(token=self.token).status_code, 200)
 
-        # One row survives, and it is the claim challenge. The login code is gone.
-        self.assertEqual(self.otps().count(), 1)
-        self.assertEqual(self.otps().get().purpose, OWNER_CLAIM_OTP_PURPOSE)
+        purposes = set(self.otps().values_list('purpose', flat=True))
+        self.assertEqual(purposes, {'login', OWNER_CLAIM_OTP_PURPOSE})
 
-    def test_a_login_otp_replaces_a_live_owner_claim_challenge(self):
-        from users_app.controllers.otp_manager import OtpManager
+    def test_a_login_otp_no_longer_destroys_a_live_owner_claim_challenge(self):
+        """
+        CHANGED BEHAVIOUR, and the load-bearing direction: an owner mid-claim who
+        requests a login code must not lose the challenge they are using.
+        """
         self.assertEqual(self.challenge(token=self.token).status_code, 200)
-        self.assertEqual(self.otps().get().purpose, OWNER_CLAIM_OTP_PURPOSE)
+        claim_row = self.otps().get(purpose=OWNER_CLAIM_OTP_PURPOSE).pk
 
         self._established_owner()
-        self.assertTrue(OtpManager().make_otp(user=self.owner, purpose='login'))
+        self._make('login')
 
+        self.assertTrue(self.otps().filter(pk=claim_row).exists())
+        self.assertEqual(
+            set(self.otps().values_list('purpose', flat=True)),
+            {'login', OWNER_CLAIM_OTP_PURPOSE},
+        )
+
+    def test_a_reset_otp_no_longer_destroys_a_live_owner_claim_challenge(self):
+        self.assertEqual(self.challenge(token=self.token).status_code, 200)
+        self._established_owner()
+        self._make('reset-password')
+        self.assertEqual(
+            set(self.otps().values_list('purpose', flat=True)),
+            {'reset-password', OWNER_CLAIM_OTP_PURPOSE},
+        )
+
+    def test_login_and_reset_still_replace_each_other(self):
+        """
+        UNCHANGED, and pinned so it stays that way. Both still pass no `msisdn`, so both
+        still occupy the NULL bucket. This PR did NOT purpose-scope the delete.
+        """
+        self._established_owner()
+        self._make('login')
+        self._make('reset-password')
         self.assertEqual(self.otps().count(), 1)
-        self.assertEqual(self.otps().get().purpose, 'login')
+        self.assertEqual(self.otps().get().purpose, 'reset-password')
 
-    def test_a_second_challenge_replaces_the_first(self):
-        # The one direction that is unambiguously desirable: a re-request supersedes
-        # the previous code rather than leaving two live.
+    def test_a_second_challenge_still_replaces_the_first(self):
+        """
+        The one direction that is unambiguously desirable, and it still holds: both
+        owner-claim rows share the same (user, msisdn) bucket, so a re-request supersedes
+        the previous code rather than leaving two live.
+        """
         self.challenge(token=self.token)
         first = self.otps().get().pk
         self.challenge(token=self.token)
         self.assertEqual(self.otps().count(), 1)
         self.assertNotEqual(self.otps().get().pk, first)
+
+    def test_the_delete_is_still_purpose_blind(self):
+        """
+        Stated structurally, so a future purpose-scoped migration is a DELIBERATE change
+        that updates this test rather than a quiet one that slips past the tests above.
+        """
+        import inspect
+        from users_app.controllers import otp_manager
+
+        source = inspect.getsource(otp_manager.OtpManager.make_otp)
+        self.assertIn(
+            'UserOtp.objects.filter(user=user, msisdn=msisdn).delete()', source,
+            'the replacement delete changed shape — re-derive which rows each caller '
+            'now collides with before updating these expectations',
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1111,22 +1192,65 @@ class ClaimSecretSafetyTests(TestCase):
                         with self.subTest(module=relative, arg=argument.attr):
                             self.assertNotIn(argument.attr, leaky)
 
+    # The ONLY keys this module may read out of a request body. The claim token is not
+    # among them and never will be — it has exactly one entry point, the header.
+    #
+    # NARROWED FROM A BLANKET BAN ON `request.data` (Step 2F.2). Redemption legitimately
+    # reads a body: it carries the OTP and, for a brand-new owner, the chosen password.
+    # Banning the attribute outright would have meant either giving up the scan or moving
+    # redemption somewhere it is not scanned — so the rule now says what it actually
+    # means: a body key must be on this list.
+    BODY_KEYS = frozenset({'otp', 'new_password'})
+
     def test_the_claim_token_is_read_from_the_header_and_nowhere_else(self):
         source = (REPO_ROOT / 'platform_admin_app/endpoints/owner_claim.py').read_text()
-        # `request.data` / `request.query_params` / `COOKIES` must not appear at all:
-        # the token has exactly one entry point.
-        for forbidden in ('request.data', 'query_params', 'COOKIES', 'GET.get'):
+        # These have NO legitimate use here — a credential in a query string lands in
+        # access logs and browser history, and a cookie is ambient authority by another
+        # name.
+        for forbidden in ('query_params', 'COOKIES', 'GET.get', 'request.POST'):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
         self.assertIn('request.headers.get', source)
 
+        # ...and every literal key read out of a mapping must be an expected body field.
+        # `request.headers.get(CLAIM_TOKEN_HEADER)` passes a NAME, not a literal, so the
+        # header read is not caught by this and the body reads are.
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'get'
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                continue
+            key = node.args[0].value
+            with self.subTest(key=key):
+                self.assertIn(
+                    key, self.BODY_KEYS,
+                    f'{key!r} is read out of a mapping in the claim endpoints. If it '
+                    f'is a body field it belongs in BODY_KEYS; if it is the claim '
+                    f'token it belongs in the header and nowhere else.',
+                )
+
     def test_the_preflight_result_carries_no_credential(self):
+        """
+        Pinned as an EXACT set, so a new field is a deliberate decision.
+
+        ``canonical_phone`` (Step 2F.2) is the delivery DESTINATION, not a credential:
+        it is the account's own already-stored phone number, it is what the endpoint
+        hands `make_otp` so the `UserOtp` row records where the code went, and it never
+        appears in a response. A claim token, its hash and an OTP are the things that
+        must never be reachable through this object.
+        """
         fields = set(owner_claim.ClaimPreflight.__dataclass_fields__)
         self.assertEqual(
             fields,
             {
                 'invitation', 'onboarding', 'restaurant', 'invited_user',
-                'credential_setup_required',
+                'credential_setup_required', 'canonical_phone',
             },
         )
         for forbidden in ('token', 'raw_token', 'token_hash', 'claim_token'):

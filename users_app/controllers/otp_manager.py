@@ -195,8 +195,50 @@ class OtpManager:
         otp: str,
         user_id: Optional[str] = None,
         msisdn: Optional[str] = None,
-        email: Optional[str] = None
+        email: Optional[str] = None,
+        expected_purpose: Optional[str] = None,
+        expected_msisdn: Optional[str] = None,
     ) -> dict:
+        """
+        Verify a submitted OTP for one identity. Returns the shared result dict.
+
+        ``user_id`` / ``msisdn`` / ``email`` select WHOSE challenge to look at. The two
+        ``expected_*`` arguments are different in kind: they NARROW the locked query, so
+        a row that does not match them is not merely rejected — it is never selected, and
+        a challenge issued for something else is left completely untouched.
+
+        ━━ WHY EXPECTED PURPOSE EXISTS (Step 2F.2) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        Without it this method picks the most recent live challenge for the identity and
+        reads ``purpose`` OFF THE ROW, so "the code was correct" does not mean "the code
+        was issued for what I am about to authorise". For login that is harmless — there
+        is one flow and it checks the purpose after the fact. For owner-claim redemption,
+        which converts a bearer credential into restaurant authority, it is not: a valid
+        login or password-reset code would satisfy it, and under ``ENV=dev`` every code
+        is ``1234``, so the numbers would match by construction.
+
+        ━━ AND WHY EXPECTED DESTINATION EXISTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        An OTP proves control of the number it was DELIVERED TO. If the identity's phone
+        changes after a challenge is issued, the old code proves control of the old
+        number and nothing about the current one. ``expected_msisdn`` binds the row to
+        the destination the caller believes is current, so a code sent to a superseded
+        number cannot be spent.
+
+        It is matched EXACTLY and is deliberately NOT canonicalised here, unlike the
+        ``msisdn`` identity selector above. The caller passes a value it has already
+        proved canonical; normalising would let ``+256…`` satisfy a ``256…`` expectation,
+        which is precisely the widening the binding exists to prevent. A mismatch simply
+        selects no row and answers ``invalid``, which is fail-closed.
+
+        ━━ BACKWARD COMPATIBILITY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        Both default to ``None`` and add NOTHING to the query when omitted, so the four
+        existing callers (``self_register``, ``reset_password``, the ``verify-otp``
+        endpoint and ``create_employee``) behave exactly as before. That is pinned by
+        tests rather than assumed — this is an authentication primitive, and a silent
+        change to what it selects would be felt in three shipped flows.
+        """
         # Canonicalise the msisdn so lookups match canonically-stored OTPs.
         # Defensive: on a bad msisdn, leave it raw — the lookup simply finds
         # nothing and returns "invalid OTP" rather than raising.
@@ -245,10 +287,21 @@ class OtpManager:
             # Fetch the SINGLE active challenge for this identity (NOT by the
             # submitted hash — the hash now depends on the per-row salt) and
             # lock the row so concurrent verifies serialise on the counter.
+            # The optional bindings NARROW this query rather than being checked after
+            # it. That matters: a purpose or destination mismatch must leave the other
+            # challenge entirely alone — unselected, unconsumed and with its own attempt
+            # counter untouched — instead of burning somebody else's factor.
+            bindings = {}
+            if expected_purpose is not None:
+                bindings['purpose'] = expected_purpose
+            if expected_msisdn is not None:
+                bindings['msisdn'] = expected_msisdn
+
             challenge = (
                 UserOtp.objects.select_for_update()
                 .filter(
                     **identity,
+                    **bindings,
                     consumed_at__isnull=True,
                     expiry_time__gte=time_now,
                 )

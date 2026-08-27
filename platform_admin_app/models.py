@@ -760,6 +760,26 @@ class RestaurantOnboarding(models.Model):
         return f'RestaurantOnboarding<{self.restaurant_id}:{self.source}>'
 
 
+# THE INVITATION-LEVEL FAILED-VERIFICATION BUDGET.
+#
+# A CLOSED SERVER POLICY, not a per-request or per-invitation setting: it caps how many
+# times a bearer claim credential may be used to guess an owner-claim OTP, for the whole
+# life of that credential.
+#
+# WHY THE OTP ROW'S OWN CAP IS NOT ENOUGH. `UserOtp.attempts` is capped at
+# `OTP_MAX_ATTEMPTS`, but `OtpManager.make_otp` DELETES the previous challenge and
+# INSERTS a fresh row with `attempts=0` — so requesting another challenge resets that
+# budget. Safe enough for ordinary login UX, and wrong for converting a stolen bearer
+# token into restaurant authority: five guesses, request another code, five more, and a
+# four-digit space is exhausted. This counter lives on the CREDENTIAL, so re-issuing the
+# second factor cannot reset it. Only minting a NEW invitation does — which is an
+# elevated, reasoned, audited Admin decision (Step 2E reissue).
+#
+# It is deliberately NOT configurable per request or per invitation: a per-row limit is
+# a per-row way to raise it.
+OWNER_CLAIM_MAX_FAILED_ATTEMPTS = 5
+
+
 class OwnerInvitation(models.Model):
     """
     One persisted, single-use attempt to have ONE specific ``User`` confirm control
@@ -848,6 +868,29 @@ class OwnerInvitation(models.Model):
     )
     superseded_at = models.DateTimeField(null=True, blank=True)
 
+    # HOW MANY TIMES THIS CREDENTIAL HAS FAILED OWNER-CLAIM VERIFICATION.
+    #
+    # Incremented by `owner_claim_redemption` and by nothing else, and only when a
+    # purpose- and destination-bound owner-claim OTP verification FAILS. Never by a
+    # refused claim state, a malformed body, a rejected password or a throttle.
+    #
+    # `db_default` as well as `default`, for the same rollback reason as
+    # `User.customer_access_state` (see migration `users_app/0014`): Django adds a
+    # column WITH a default and immediately drops it, so a NOT NULL column ends up with
+    # no database default. Under the expand-only rule a rollback lands OLD CODE ON NEW
+    # SCHEMA, and `mint_owner_invitation` in that older code INSERTs an invitation
+    # without naming this column. `db_default` keeps a real database default so that
+    # insert succeeds and lands on zero — the correct value for a credential minted by
+    # code that predates the budget.
+    #
+    # NOTHING ELSE ABOUT THE ATTEMPT IS STORED: not the submitted code, not the client
+    # IP, not a timestamp. A counter is the whole fact needed to stop guessing; the rest
+    # would be a credential-adjacent audit trail nobody asked for on an anonymous route.
+    claim_failed_attempts = models.PositiveSmallIntegerField(
+        default=0,
+        db_default=0,
+    )
+
     class Meta:
         db_table = 'owner_invitation'
         ordering = ['-issued_at']
@@ -918,6 +961,21 @@ class OwnerInvitation(models.Model):
                 condition=models.Q(expires_at__gt=models.F('issued_at')),
                 name='owner_invitation_expires_after_issue',
             ),
+            # THE BUDGET AS A DATABASE FACT, matching how every other closed policy in
+            # this repo is held (`Restaurant.status`, `RestaurantOnboarding.source`,
+            # `User.customer_access_state`). The service already caps the increment; this
+            # is the backstop for the day it stops doing so, on the one counter whose
+            # whole job is to stop guessing.
+            #
+            # The bound is written as a LITERAL matching `OWNER_CLAIM_MAX_FAILED_ATTEMPTS`
+            # rather than interpolated, because a migration must not change meaning when a
+            # module constant moves. `tests_owner_claim_redemption` asserts the two agree,
+            # so raising the policy requires a deliberate migration rather than silently
+            # turning the sixth increment into an IntegrityError.
+            models.CheckConstraint(
+                condition=models.Q(claim_failed_attempts__lte=5),
+                name='owner_invitation_claim_attempts_bounded',
+            ),
         ]
 
     def __str__(self):
@@ -943,6 +1001,31 @@ class OwnerInvitation(models.Model):
         return self.expires_at <= timezone.now()
 
     @property
+    def is_verification_locked(self):
+        """
+        Derived, never stored: this credential has spent its owner-claim guess budget.
+
+        DERIVED FOR THE SAME REASON EXPIRY IS. A persisted ``claim_locked_at`` or
+        ``status='verification_locked'`` would be a second representation of a fact the
+        counter already states, and nothing in this repository runs on a schedule to
+        keep one honest.
+
+        A verification-locked invitation is STILL UNRESOLVED: it holds the
+        per-onboarding slot, it can be superseded by a reissue and it can be cancelled.
+        What it cannot do is be challenged or redeemed. That is exactly the shape of
+        expiry, one axis over — the credential has not been consumed, cancelled or
+        superseded, and it cannot currently be used.
+        """
+        return self.claim_failed_attempts >= OWNER_CLAIM_MAX_FAILED_ATTEMPTS
+
+    @property
     def is_claimable(self):
-        """Unresolved AND unexpired — the only state a token may be redeemed in."""
-        return not self.is_resolved and not self.is_expired
+        """
+        The only state a token may be redeemed in: unresolved, unexpired, and with
+        verification budget left.
+        """
+        return (
+            not self.is_resolved
+            and not self.is_expired
+            and not self.is_verification_locked
+        )
