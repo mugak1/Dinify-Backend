@@ -2291,3 +2291,239 @@ class ReplayAndLostResponseTests(RedemptionTestCase):
         self.assertFalse(
             OwnerInvitation.objects.filter(token_hash=access).exists(),
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# §16 — the SERVICE's own authoritative checks, not the preflight's
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@_UNTHROTTLED
+class ServiceRechecksEverythingTests(RedemptionTestCase):
+    """
+    THE ENDPOINT TESTS DO NOT PROVE THESE, and red-teaming is how that surfaced.
+
+    ``UnclaimableStateTests`` drives HTTP, and the endpoint runs
+    ``owner_claim.resolve_claim_token`` as a preflight first — which performs its OWN
+    owner-consistency, ownership, eligibility and invitation-state checks. So an
+    endpoint-level drift test is satisfied by the PREFLIGHT and says nothing about
+    whether the service re-checks anything under the lock.
+
+    That distinction is the entire point of the preflight/authoritative split: the
+    preflight's answer is a snapshot with no lock behind it, and the service must not
+    trust a single fact from it. Removing ``assert_owner_consistency`` from the service
+    left every endpoint test green (only the PostgreSQL concurrency suite caught it) —
+    so these call ``redeem_owner_claim`` DIRECTLY, with the drift already committed,
+    and pin each authoritative check in the fast suite as well.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.challenge(token=self.token)
+
+    def redeem_directly(self, password=GOOD_PASSWORD):
+        return owner_claim_redemption.redeem_owner_claim(
+            raw_token=self.token, otp=DEV_OTP,
+            encoded_password=make_password(password) if password else None,
+        )
+
+    def assertServiceRefuses(self, code):
+        with self.assertRaises(owner_claim_redemption.RedemptionRefused) as caught:
+            self.redeem_directly()
+        self.assertEqual(caught.exception.code, code)
+        self.assertNothingHappened()
+        # ...and the second factor was never spent on a claim-state refusal.
+        otp = UserOtp.objects.get()
+        self.assertIsNone(otp.consumed_at)
+        self.assertEqual(otp.attempts, 0)
+        self.assertEqual(self.fresh_invitation().claim_failed_attempts, 0)
+
+    def test_the_service_refuses_a_deactivated_owner_membership(self):
+        RestaurantEmployee.objects.filter(restaurant=self.restaurant).update(
+            active=False,
+        )
+        self.assertServiceRefuses(
+            owner_claim_redemption.OWNER_RELATIONSHIP_INCONSISTENT,
+        )
+
+    def test_the_service_refuses_a_soft_deleted_owner_membership(self):
+        RestaurantEmployee.objects.filter(restaurant=self.restaurant).update(
+            deleted=True,
+        )
+        self.assertServiceRefuses(
+            owner_claim_redemption.OWNER_RELATIONSHIP_INCONSISTENT,
+        )
+
+    def test_the_service_refuses_a_removed_owner_role(self):
+        RestaurantEmployee.objects.filter(restaurant=self.restaurant).update(
+            roles=['manager'],
+        )
+        self.assertServiceRefuses(
+            owner_claim_redemption.OWNER_RELATIONSHIP_INCONSISTENT,
+        )
+
+    def test_the_service_refuses_a_second_live_owner_membership(self):
+        other = User.objects.create_user(
+            first_name='Two', last_name='Owner',
+            email=f'ocr-svc-{next(_PHONE)}@t.com',
+            phone_number=f'256{next(_PHONE)[1:]}',
+            username=f'256{next(_PHONE)[1:]}', country='UG', password='x', roles=[],
+        )
+        RestaurantEmployee.objects.create(
+            restaurant=self.restaurant, user=other, roles=['owner'],
+            active=True, deleted=False,
+        )
+        self.assertServiceRefuses(
+            owner_claim_redemption.OWNER_RELATIONSHIP_INCONSISTENT,
+        )
+
+    def test_the_service_refuses_when_ownership_has_moved(self):
+        replacement = User.objects.create_user(
+            first_name='New', last_name='Owner',
+            email=f'ocr-svcnew-{next(_PHONE)}@t.com',
+            phone_number=f'256{next(_PHONE)[1:]}',
+            username=f'256{next(_PHONE)[1:]}', country='UG', password='x', roles=[],
+        )
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(owner=replacement)
+        with self.assertRaises(owner_claim_redemption.RedemptionRefused) as caught:
+            self.redeem_directly()
+        self.assertIn(
+            caught.exception.code,
+            {
+                owner_claim_redemption.INVITED_USER_NOT_OWNER,
+                owner_claim_redemption.OWNER_RELATIONSHIP_INCONSISTENT,
+            },
+        )
+        self.assertIsNone(self.fresh_invitation().consumed_at)
+
+    def test_the_service_refuses_a_deactivated_owner_account(self):
+        User.objects.filter(pk=self.owner.pk).update(is_active=False)
+        self.assertServiceRefuses(owner_claim_redemption.OWNER_INACTIVE)
+
+    def test_the_service_refuses_a_promoted_owner_account(self):
+        User.objects.filter(pk=self.owner.pk).update(
+            account_type=ACCOUNT_TYPE_PLATFORM_STAFF,
+        )
+        self.assertServiceRefuses(
+            owner_claim_redemption.OWNER_NOT_RESTAURANT_USER,
+        )
+
+    def test_the_service_refuses_a_non_canonical_stored_phone(self):
+        User.objects.filter(pk=self.owner.pk).update(
+            phone_number=f'+{self.owner.phone_number}',
+        )
+        self.assertServiceRefuses(
+            owner_claim_redemption.OWNER_PHONE_NOT_CANONICAL,
+        )
+
+    def test_the_service_refuses_a_soft_deleted_restaurant(self):
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(deleted=True)
+        self.assertServiceRefuses(owner_claim_redemption.RESTAURANT_GONE)
+
+    def test_the_service_refuses_a_cancelled_invitation(self):
+        """
+        NOTE WHICH GUARD FIRES, because it differs from the superseded case below and
+        the difference is the head selector working correctly.
+
+        Cancellation leaves NOTHING unresolved, so the head falls through to "the latest
+        resolved row" — which is this invitation. The token therefore DOES match the
+        head, and the next check refuses it as resolved. A superseded invitation, by
+        contrast, has a live successor that becomes the head, so the token fails the
+        identity check first.
+        """
+        onboarding_invitations.cancel_owner_invitation(
+            restaurant_id=str(self.restaurant.pk),
+            expected_invitation_id=str(self.invitation.pk),
+            actor=self.admin, reason='Cancelling for the service-level test.',
+        )
+        with self.assertRaises(owner_claim_redemption.RedemptionRefused) as caught:
+            self.redeem_directly()
+        self.assertEqual(
+            caught.exception.code, owner_claim_redemption.INVITATION_RESOLVED,
+        )
+        invitation = self.fresh_invitation()
+        self.assertIsNotNone(invitation.cancelled_at)
+        self.assertIsNone(invitation.consumed_at)
+
+    def test_the_service_refuses_a_superseded_invitation(self):
+        onboarding_invitations.reissue_owner_invitation(
+            restaurant_id=str(self.restaurant.pk),
+            expected_invitation_id=str(self.invitation.pk),
+            actor=self.admin, reason='Rotating for the service-level test.',
+        )
+        with self.assertRaises(owner_claim_redemption.RedemptionRefused) as caught:
+            self.redeem_directly()
+        self.assertEqual(
+            caught.exception.code,
+            owner_claim_redemption.TOKEN_DOES_NOT_MATCH_HEAD,
+        )
+        old = self.fresh_invitation()
+        self.assertIsNone(old.consumed_at)
+        self.assertIsNotNone(old.superseded_at)
+
+    def test_the_service_refuses_an_expired_invitation(self):
+        now = timezone.now()
+        OwnerInvitation.objects.filter(pk=self.invitation.pk).update(
+            issued_at=now - timezone.timedelta(days=10),
+            expires_at=now - timezone.timedelta(days=3),
+        )
+        self.assertServiceRefuses(owner_claim_redemption.INVITATION_EXPIRED)
+
+    def test_the_service_refuses_a_verification_locked_invitation(self):
+        OwnerInvitation.objects.filter(pk=self.invitation.pk).update(
+            claim_failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS,
+        )
+        with self.assertRaises(owner_claim_redemption.RedemptionRefused) as caught:
+            self.redeem_directly()
+        self.assertEqual(
+            caught.exception.code,
+            owner_claim_redemption.INVITATION_VERIFICATION_LOCKED,
+        )
+        self.assertIsNone(UserOtp.objects.get().consumed_at)
+
+    def test_the_service_refuses_a_legacy_adopted_tenant(self):
+        from platform_admin_app.models import (
+            ONBOARDING_SOURCE_LEGACY_ADOPTED, RestaurantOnboarding,
+        )
+        RestaurantOnboarding.objects.filter(pk=self.onboarding.pk).update(
+            source=ONBOARDING_SOURCE_LEGACY_ADOPTED, created_by=None,
+            adopted_at=timezone.now(), adopted_by=self.admin,
+        )
+        self.assertServiceRefuses(owner_claim_redemption.NOT_ADMIN_CREATED)
+
+    def test_the_service_refuses_an_unknown_token_without_locking(self):
+        with self.assertRaises(owner_claim_redemption.RedemptionRefused) as caught:
+            owner_claim_redemption.redeem_owner_claim(
+                raw_token='not-a-real-token', otp=DEV_OTP,
+                encoded_password=make_password(GOOD_PASSWORD),
+            )
+        self.assertEqual(caught.exception.code, owner_claim_redemption.UNKNOWN_TOKEN)
+
+    def test_the_service_refuses_a_credential_requirement_disagreement(self):
+        """
+        §8 of the transaction. The request was shaped against the pre-lock snapshot; if
+        the LOCKED identity disagrees, the service refuses rather than guessing —
+        supplying a password for an established owner would rewrite a credential this
+        operation has no business touching.
+        """
+        User.objects.filter(pk=self.owner.pk).update(
+            customer_access_state=CUSTOMER_ACCESS_ESTABLISHED,
+            password=make_password('Pre-Existing-Passw0rd!'),
+        )
+        with self.assertRaises(owner_claim_redemption.RedemptionRefused) as caught:
+            self.redeem_directly(password=GOOD_PASSWORD)
+        self.assertEqual(
+            caught.exception.code,
+            owner_claim_redemption.CREDENTIAL_REQUIREMENT_CHANGED,
+        )
+        self.assertTrue(
+            self.fresh_owner().check_password('Pre-Existing-Passw0rd!'),
+        )
+
+    def test_the_service_refuses_a_missing_password_for_a_pending_owner(self):
+        with self.assertRaises(owner_claim_redemption.RedemptionRefused) as caught:
+            self.redeem_directly(password=None)
+        self.assertEqual(
+            caught.exception.code,
+            owner_claim_redemption.CREDENTIAL_REQUIREMENT_CHANGED,
+        )
+        self.assertNothingHappened()
