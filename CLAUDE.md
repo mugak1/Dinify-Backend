@@ -2910,8 +2910,18 @@ invitation exists · `onboarding.source == admin_created` · restaurant exists a
 not soft-deleted · invitation UNRESOLVED · not EXPIRED · it IS the head
 (`onboarding_reads.select_head_invitation`, the ONE definition of "the current
 invitation") · `invited_user == Restaurant.owner` NOW · `assert_owner_consistency`
-passes · invited user exists, is active, is `restaurant_user`, and has a canonical
-phone. Legacy-adopted tenants never enter this flow.
+passes · invited user exists, is active, is `restaurant_user`, and its stored phone is
+already CANONICAL. Legacy-adopted tenants never enter this flow.
+
+**CANONICAL, not merely non-blank.** `make_otp(user=...)` with no `msisdn` argument
+canonicalises only a msisdn it was PASSED and then falls back to `user.phone_number`
+VERBATIM as the SMS destination, so whatever is stored is what the gateway is handed.
+A non-canonical value is reachable: the `users_app/0008` backfill deliberately SKIPS
+invalid / unsupported / diverged / colliding rows, and `mode=existing` attaches such an
+account without modifying it. The check compares `normalise_msisdn(stored)` against the
+STORED value — parsing alone is not enough, since `+256772000000` parses and would still
+be sent with the `+`. Without it the code goes to a malformed destination, or delivery
+fails and this endpoint answers 500 where every other unclaimable state answers 400.
 
 The token is hashed with `platform_admin_app.sessions.hash_token` — **the same
 primitive the invitation was minted with**; there is no second implementation.

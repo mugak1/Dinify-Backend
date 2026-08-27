@@ -66,6 +66,7 @@ from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_RESTAURANT_USER,
     CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
 )
+from misc_app.controllers.msisdn import MsisdnError, normalise_msisdn
 from platform_admin_app import sessions
 from platform_admin_app.models import (
     ONBOARDING_SOURCE_ADMIN_CREATED, OwnerInvitation,
@@ -99,6 +100,7 @@ OWNER_RELATIONSHIP_INCONSISTENT = 'owner_relationship_inconsistent'
 INVITED_USER_INACTIVE = 'invited_user_inactive'
 INVITED_USER_NOT_RESTAURANT_USER = 'invited_user_not_restaurant_user'
 INVITED_USER_HAS_NO_PHONE = 'invited_user_has_no_phone'
+INVITED_USER_PHONE_NOT_CANONICAL = 'invited_user_phone_not_canonical'
 
 
 class ClaimRefused(Exception):
@@ -230,11 +232,38 @@ def resolve_claim_token(raw_token: Optional[str]) -> ClaimPreflight:
         raise ClaimRefused(INVITED_USER_INACTIVE)
     if invited_user.account_type != ACCOUNT_TYPE_RESTAURANT_USER:
         raise ClaimRefused(INVITED_USER_NOT_RESTAURANT_USER)
-    if not (invited_user.phone_number or '').strip():
+    stored_phone = (invited_user.phone_number or '').strip()
+    if not stored_phone:
         # The second factor is delivered by SMS to the canonical MSISDN. Without one
         # there is no factor to deliver, so this is a refusal rather than a silent
         # single-factor claim.
         raise ClaimRefused(INVITED_USER_HAS_NO_PHONE)
+
+    # ...AND IT MUST ALREADY BE CANONICAL — not merely parseable, and not merely
+    # non-blank. `make_otp(user=...)` with no `msisdn` argument does NOT normalise:
+    # it canonicalises only a msisdn it was PASSED, then falls back to
+    # `user.phone_number` VERBATIM as the SMS destination. So whatever is stored is
+    # what the gateway is handed.
+    #
+    # A non-canonical stored value is reachable rather than theoretical. The
+    # `users_app/0008` backfill is collision-safe and deliberately SKIPS four buckets
+    # — invalid, unsupported-country, diverged and colliding — leaving those rows as
+    # they were; and an `admin_created` restaurant may be attached to such an account,
+    # because `mode=existing` resolves an EXISTING user by UUID and never modifies
+    # them. (`mode=new` canonicalises at creation, so only the existing-owner path
+    # carries this.)
+    #
+    # Two consequences, both bad: the code goes to a malformed or wrong destination,
+    # or delivery fails and this endpoint answers 500 where every other unclaimable
+    # state answers the uniform 400. Comparing against the STORED value rather than
+    # just parsing is the point — `+256772000000` parses to `256772000000` but would
+    # still be SENT with the `+`.
+    try:
+        canonical_phone = normalise_msisdn(stored_phone)
+    except MsisdnError:
+        raise ClaimRefused(INVITED_USER_PHONE_NOT_CANONICAL)
+    if canonical_phone != invited_user.phone_number:
+        raise ClaimRefused(INVITED_USER_PHONE_NOT_CANONICAL)
 
     return ClaimPreflight(
         invitation=invitation,

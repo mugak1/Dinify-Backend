@@ -47,6 +47,7 @@ from dinify_backend.configss.string_definitions import (
     RESTAURANT_MANAGER,
     RESTAURANT_OWNER,
 )
+from misc_app.controllers.msisdn import normalise_msisdn
 from platform_admin_app import onboarding_adoption, onboarding_creation, owner_claim
 from platform_admin_app.endpoints.owner_claim import (
     CLAIM_TOKEN_HEADER, OWNER_CLAIM_OTP_PURPOSE, REFUSAL_MESSAGE,
@@ -350,6 +351,54 @@ class UnclaimableStateTests(_ClaimTestCase):
         # so this refuses rather than quietly becoming a single-factor claim.
         User.objects.filter(pk=self.owner.pk).update(phone_number=None)
         self.assertRefused(self.challenge(token=self.token))
+
+    def test_a_blank_phone_is_refused(self):
+        User.objects.filter(pk=self.owner.pk).update(phone_number='   ')
+        self.assertRefused(self.challenge(token=self.token))
+
+    def test_a_non_canonical_stored_phone_is_refused(self):
+        """
+        NON-BLANK IS NOT ENOUGH (Codex P2 on this PR).
+
+        ``make_otp(user=...)`` with no ``msisdn`` argument canonicalises only a msisdn
+        it was PASSED; it then falls back to ``user.phone_number`` VERBATIM as the SMS
+        destination. So a stored ``+256…`` parses fine and would still be handed to
+        the gateway with the ``+``.
+
+        Reachable, not theoretical: the ``users_app/0008`` backfill deliberately skips
+        invalid / unsupported / diverged / colliding rows, and ``mode=existing``
+        attaches such an account without modifying it.
+        """
+        User.objects.filter(pk=self.owner.pk).update(
+            phone_number=f'+{self.owner.phone_number}',
+        )
+        self.assertRefused(self.challenge(token=self.token))
+
+    def test_a_malformed_stored_phone_is_refused(self):
+        User.objects.filter(pk=self.owner.pk).update(phone_number='not-a-number')
+        self.assertRefused(self.challenge(token=self.token))
+
+    def test_an_unsupported_country_stored_phone_is_refused(self):
+        # Kenya. `normalise_msisdn` is Uganda-only and raises UnsupportedCountry,
+        # which must land on the same uniform refusal rather than escaping as a 500.
+        User.objects.filter(pk=self.owner.pk).update(phone_number='254712345678')
+        self.assertRefused(self.challenge(token=self.token))
+
+    def test_a_locally_formatted_stored_phone_is_refused(self):
+        # `0772…` is what a human types and what the backfill converts. An account it
+        # skipped still holds it, and it is NOT what the canonical column should say.
+        local = f'0{self.owner.phone_number[3:]}'
+        User.objects.filter(pk=self.owner.pk).update(phone_number=local)
+        self.assertRefused(self.challenge(token=self.token))
+
+    def test_a_canonical_phone_is_accepted(self):
+        # The negative control for the four above: the fixture's own canonical phone
+        # must still pass, or the check would be refusing everybody.
+        self.assertEqual(
+            self.owner.phone_number,
+            normalise_msisdn(self.owner.phone_number),
+        )
+        self.assertEqual(self.challenge(token=self.token).status_code, 200)
 
     # -- the shape itself ----------------------------------------------------
 
