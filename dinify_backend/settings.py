@@ -114,6 +114,11 @@ CORS_ALLOW_HEADERS = (
     # entries above exist to avoid.
     'x-delegation-session',   # the delegated session credential
     'x-delegation-code',      # the one-time exchange code, presented once
+    # Owner-invitation claim (Step 2F.1). Same reasoning as the two entries above:
+    # the raw claim token is accepted HEADER-ONLY, so without this the browser's
+    # preflight strips it and the challenge fails in-browser while every endpoint
+    # test and every curl call keeps passing.
+    'x-owner-claim-token',    # the raw owner-invitation claim credential
 )
 
 # --- Diner table-session capability ----------------------------------------

@@ -2899,6 +2899,14 @@ channel. A credential in a URL lands in access logs, `Referer` headers and histo
 one in a body is captured by ordinary request logging. It is never logged, echoed,
 returned, or placed in an exception.
 
+`x-owner-claim-token` is in `settings.CORS_ALLOW_HEADERS` beside the diner and
+delegation credentials, and it has to be: a custom header absent from that allowlist
+is stripped by the browser at preflight, so the feature fails ONLY in-browser while
+every endpoint test and every curl call keeps passing. Permitting a request HEADER is
+not a widening of CORS — `CORS_ALLOWED_ORIGINS` is untouched. Pinned by a real OPTIONS
+preflight in `dinify_backend/tests_cors_preflight.py` (CORS-HEADER-00), which asserts
+against the production allowlist rather than restating the setting.
+
 ### NO AMBIENT AUTHENTICATION
 `authentication_classes = []`, not merely `AllowAny`. A customer JWT, a delegated
 session and an admin cookie all have ZERO influence on which invitation or which owner
