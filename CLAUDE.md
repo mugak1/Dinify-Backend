@@ -1106,11 +1106,14 @@ so keep it current when conventions change.
 - `api/v1/reviews/` → reviews_app endpoints (`reviews_app/urls.py`):
   `submit/`, `summary/`, `analytics/`, `<int:review_id>/resolution/`,
   `` (root) — separate app
-- `api/v1/users/owner-claim/challenge/` → the Step-2F.1 owner-claim challenge
+- `api/v1/users/owner-claim/challenge/` + `api/v1/users/owner-claim/redeem/` → the
+  two halves of owner claim, Steps 2F.1 and 2F.2
   (`platform_admin_app/endpoints/owner_claim.py`, mounted from `users_app/urls.py`).
-  `authentication_classes = []` + `AllowAny`; the raw claim token travels ONLY in the
-  `X-Owner-Claim-Token` header. EXPLICIT, never `owner-claim/<str:action>/` — the
-  Step-2F.2 redemption route will be its own named path
+  Both are `authentication_classes = []` + `AllowAny`, and the raw claim token travels
+  ONLY in the `X-Owner-Claim-Token` header. TWO EXPLICIT ROUTES, never
+  `owner-claim/<str:action>/`: requesting a verification code and exercising a claim
+  credential are different decisions with different consequences, and which one a
+  request made should be readable from the path rather than from a body
 - `api/v1/delegation/` → the CUSTOMER-plane half of delegated admin access
   (`platform_admin_app/urls_delegation.py`, served by the customer urlconf even
   though it lives in the admin app): `exchange/` (redeem a one-time code — NOT on
@@ -3012,18 +3015,266 @@ tests: DRF binds `SimpleRateThrottle.THROTTLE_RATES` as a CLASS attribute at imp
 `override_settings(REST_FRAMEWORK=...)` does NOT reach it and a test written the obvious
 way silently exercises the real rate. Patch the attribute (`claim_rate()` in the suite).
 
-### STEP 2F.2 — THE CONTRACT, DOCUMENTED AND NOT BUILT
-In ONE transaction: `Restaurant` lock (the same barrier Step 2E.1 gave the customer
-plane) → `RestaurantOnboarding` → the exact `OwnerInvitation` → current owner
-consistency → the purpose-bound `owner-claim` OTP → identity state → consume the
-invitation → for a PENDING owner establish the chosen password and move
-`pending_initial_claim -> established` → for an ESTABLISHED owner rewrite NEITHER →
-mint customer tokens through `issue_customer_tokens`.
+### STEP 2F.2 HAS LANDED — see "Owner Claim Redemption" below
+The contract this section used to describe as future work is implemented. Two things
+stated here changed as a consequence, and both are load-bearing rather than cosmetic:
 
-**For a NEW owner these must be atomic: invitation consumed + `customer_access_state`
-established + chosen password persisted.** No state may say one happened without the
-others. Nothing from the challenge may be trusted — every fact above is re-checked
-under the lock.
+- **the challenge now passes the canonical destination to `make_otp` explicitly**, so
+  `UserOtp.msisdn` records where the code actually went. Without a stored destination,
+  redemption could not tell a factor delivered to the CURRENT phone from one delivered
+  to a number the account no longer has;
+- **the challenge refuses an invitation whose claim budget is spent**
+  (`verification_locked`), which is what makes that budget survive OTP re-issuance.
+
+`verify_otp` now takes optional `expected_purpose` / `expected_msisdn`, so the gap
+recorded above — "verify_otp does not purpose-bind" — is closed.
+
+## Owner Claim Redemption — Phase 1, Step 2F.2
+
+The AUTHORITY TRANSACTION. One customer-plane route turns the two claim credentials
+into durable owner-control evidence:
+
+```
+POST /api/v1/users/owner-claim/redeem/
+X-Owner-Claim-Token: <raw token>
+{"otp": "1234", "new_password": "<chosen>"}     # password only when required
+-> 200 {"status":200,"message":"Owner claim completed.",
+        "data":{"token":..., "refresh":..., "restaurant_id":"<uuid>"}}
+```
+
+`platform_admin_app/owner_claim_redemption.py` (the domain) + the same
+`endpoints/owner_claim.py` adapter as the challenge, mounted from `users_app/urls.py`.
+**MIGRATION: `platform_admin_app/0010_owner_invitation_claim_attempts`** — one
+`AddField` plus its bounding `AddConstraint`, additive, no `RunPython`, no backfill.
+
+### TWO TRANSITIONS, AND THE SECOND IS THE FALSE POSITIVE TO AVOID
+A **BRAND-NEW OWNER** (`customer_access_state == pending_initial_claim`) completes
+their first claim, and FOUR FACTS MOVE TOGETHER OR NONE DO: the invitation is consumed,
+the chosen password is persisted, `pending_initial_claim -> established`, and
+`prompt_password_change` is cleared. A customer session is then minted. There must never
+be a committed state saying *invitation consumed but access still pending*, *access
+established but invitation not consumed*, *access established but the password is still
+unusable*, or *a new password persisted while the invitation stays pending*.
+
+An **ESTABLISHED OWNER** claiming an ADDITIONAL restaurant is a different operation that
+shares a route. `OwnerInvitation` and `RestaurantOnboarding` are RESTAURANT-scoped and
+one `User` may own several restaurants, so redemption consumes THIS restaurant's
+credential and mints a session, and touches the identity's password,
+`prompt_password_change`, `customer_access_state`, email, phone, `account_type`,
+`is_active` and `roles` NOT AT ALL. **An established account with an unusable password
+stays an established account with an unusable password** — repairing it during a
+restaurant claim would reinterpret a restaurant-scoped fact as global account
+onboarding, which is the exact mistake `users_app/customer_access.py` exists to prevent.
+Their access to their OTHER restaurants is likewise untouched.
+
+### THE REQUEST CONTRACT
+`otp` is always required and is a STRING — never parsed as an integer (a leading zero is
+significant) and never `.strip()`ped. `new_password` is required exactly when the
+identity is pending and **REFUSED otherwise**, rather than ignored: silently dropping it
+would leave a caller believing they had changed their password. It is not `.strip()`ped
+either — whitespace can be part of a password. Owner id, restaurant id, invitation id,
+phone, email, `customer_access_state`, `roles` and `account_type` are NOT accepted from
+the body; they are authoritative server facts.
+
+### PASSWORD POLICY, AND WHY THE HASHING HAPPENS BEFORE THE TRANSACTION
+`django.contrib.auth.password_validation.validate_password(new_password, user=<owner>)`
+— the CONFIGURED validators are the policy and there is no second one. Validation runs
+only AFTER the claim token has resolved to a real eligible pending claim, so a random
+token cannot become an oracle by submitting a weak password and reading the response.
+A password-validation failure spends nothing: no OTP consumed, no OTP attempt, no
+invitation attempt, no state change.
+
+**THE HASH IS COMPUTED OUTSIDE THE TRANSACTION AND ASSIGNED INSIDE IT.** PBKDF2 at
+Django 5.2's iteration count is ~258ms of CPU, and the transaction holds the
+`Restaurant` row — which is simultaneously the PR #306 membership barrier and a row the
+lifecycle transition waits on WHILE HOLDING the exclusive order-admission advisory lock.
+A quarter-second of hashing under it would stall every diner order at that restaurant
+for no benefit; hashing needs no tenant serialization. Assigning a pre-computed hash
+skips `AbstractBaseUser.save`'s `password_changed` dispatch, which is safe ONLY while no
+configured validator implements that hook — a test asserts none does, so adding one that
+does fails the build rather than silently bypassing it.
+
+### THE OTP IS BOUND THREE WAYS
+`verify_otp` gained optional `expected_purpose` and `expected_msisdn`, which **NARROW
+the locked query** rather than filtering after it — so a challenge issued for something
+else is never selected and is left completely untouched (not consumed, attempt counter
+unmoved). Redemption passes `expected_purpose='owner-claim'` and the LOCKED owner's
+canonical phone. Both default to `None` and change nothing for the four pre-existing
+callers (`self_register`, `reset_password`, the `verify-otp` endpoint,
+`create_employee`), which is pinned by exercising the primitive rather than by reading
+its signature.
+
+Purpose binding is load-bearing under `ENV=dev`, where every code is `1234`: the digits
+cannot distinguish a login code from a claim code, so the row must.
+
+**DESTINATION BINDING** is what makes "the OTP proves CURRENT control" true. The
+challenge now stores the delivery destination (`UserOtp.msisdn`), so a code delivered to
+a phone the account no longer has cannot be spent. Note there is **NO production writer
+that mutates an existing `User.phone_number`** — `self_update_user_profile` refuses a
+change with a 400 and every other site is a CREATE — so the race is pinned with a direct
+`UPDATE`, which is the only way a phone can move today. The binding compares against the
+`users` row the transaction LOCKS, so it holds whatever a future writer turns out to be.
+
+**A STALE DESTINATION COSTS NO ATTEMPT BUDGET.** It is its own refusal
+(`otp_destination_stale`), decided before verification: the claimant did not cause the
+phone change and five such attempts must not lock a good credential. The condition is
+narrow — *something is outstanding for this identity, and none of it went where it
+should go now* — because `make_otp` deletes by `(user, msisdn)`, so a fresh challenge to
+a new number leaves the old row live beside it. It is not an oracle (the response is
+identical either way) and not probeable (issuing a challenge always binds to the CURRENT
+canonical phone).
+
+### THE INVITATION-LEVEL ATTEMPT BUDGET
+`OwnerInvitation.claim_failed_attempts`, capped by
+`OWNER_CLAIM_MAX_FAILED_ATTEMPTS = 5`. **`UserOtp.attempts` was not sufficient**:
+`make_otp` deletes the old row and inserts a fresh one with `attempts=0`, so
+re-requesting the second factor resets that budget — fine for login UX, and wrong for
+turning a stolen bearer token into restaurant authority (five guesses, request another
+code, five more, and a four-digit space is walked). This counter lives on the CREDENTIAL.
+Nothing else about an attempt is stored: no submitted code, no IP, no timestamp.
+
+**`verification_locked` IS DERIVED, exactly as expiry is** — there is no `claim_locked_at`,
+no status column and no sweeper, because nothing in this repository runs on a schedule.
+An exhausted invitation is STILL UNRESOLVED: it holds the per-onboarding slot, it is
+reissuable and it is cancellable; it simply cannot be challenged or redeemed.
+`onboarding_reads` publishes it with EXPLICIT precedence — `verification_locked` beats
+`expired` beats `pending` — because both are unclaimable and both are remedied by a
+reissue, but only one of them says somebody sat there guessing; reporting `expired`
+would file a security event as a clock problem. The numeric count is NOT exposed: the
+status is enough for the UI, and a count is progress reporting for an attacker.
+**The challenge route refuses an exhausted invitation and sends no OTP**, under the same
+uniform 400 — that is what makes the budget survive OTP re-issuance. **Reissue resets it
+by MINTING A NEW INVITATION, never by mutating history**: the locked row is superseded
+with its count intact and the replacement starts at zero.
+
+### THE AUTHORITATIVE TRANSACTION
+```
+Restaurant -> RestaurantOnboarding -> head OwnerInvitation -> owner User -> UserOtp
+```
+A tail extension of the documented global order, all `select_for_update(of=('self',))`
+where a join could otherwise widen the lock. `Restaurant -> RestaurantOnboarding ->
+OwnerInvitation` is what `onboarding_invitations` already takes; `UserOtp` is locked by
+nothing except `verify_otp`; `User` is taken AFTER `Restaurant`, the same direction as
+the lifecycle transition. The one service that locks `User` FIRST — `onboarding_creation`
+— goes on to INSERT a `Restaurant` and never waits on an existing one, so it cannot close
+a cycle. **NO ADMISSION ADVISORY LOCK**: the order path reads no invitation, OTP or
+customer-access fact, and taking it after the row would invert `advisory -> Restaurant`.
+
+A pre-lock hash lookup discovers WHICH restaurant to lock and grants no authority —
+every fact, the token's identity included, is re-queried under the lock. Redemption asks
+the canonical `select_head_invitation` rather than `objects.get(token_hash=…)`, which is
+what makes a superseded or cancelled credential genuinely dead rather than merely
+expected to be.
+
+**IT CONSUMES THE PR #306 BARRIER RATHER THAN REBUILDING IT.** Taking the `Restaurant`
+row is what stops a customer-plane role removal, deactivation, soft-delete, insert or
+REACTIVATION committing between `assert_owner_consistency` and the consume it guards.
+One measured consequence, stated rather than discovered later: while redemption runs,
+any INSERT with a foreign key to the owner's `users` row waits (RI takes `FOR KEY SHARE`
+on the parent) — realistically that owner logging in concurrently. The wait is bounded
+by a transaction that performs no I/O at all.
+
+### TWO DIFFERENT TRANSACTION SEMANTICS, ON PURPOSE
+A **WRONG OTP** is a failed security attempt and its evidence must SURVIVE, so the
+service RETURNS a result rather than raising and the transaction COMMITS both counters.
+Raising out of `transaction.atomic()` would let an attacker erase their own attempt
+count by definition.
+
+A **FAILURE AFTER A CORRECT OTP** is the opposite: the invitation save, the identity
+save and the token mint all roll back EVERYTHING, the OTP's consumption included — so a
+legitimate claimant does not lose a valid second factor to a server-side database error
+and can retry with the same code. Fault injection at each stage proves it, with guard
+assertions showing the earlier stages really had run.
+
+### THE SESSION, AND WHAT THE RESPONSE CARRIES
+`customer_access.issue_customer_tokens` — the ONE sanctioned mint, enforced by the
+repo-wide AST scan. For a pending owner it is reached only after the transition is both
+applied in memory and persisted. `RefreshToken.for_user` INSERTs an `OutstandingToken`,
+so minting is a real database write INSIDE the transaction: a persistence failure there
+unwinds the whole redemption rather than leaving a consumed invitation with no session.
+
+The 200 carries `token`, `refresh` and `restaurant_id` and nothing else — no claim
+token, no token hash, no OTP, no password, no invitation id, no owner PII, no admin
+actor, no `require_otp` (the claim-specific second factor has just been consumed) and no
+profile. Every response — success, refusal, password error and throttle alike — is
+`no-store, private` + `Pragma: no-cache` + `Expires: 0`, with no cookie, no `Location`
+and no fabricated claim URL.
+
+### ONE PUBLIC REFUSAL
+Unknown token, expired, cancelled, superseded, consumed/replayed, verification locked,
+owner changed, ownership drifted, inactive or wrong-type account, stale phone, no
+matching OTP, wrong OTP and wrong purpose all render
+`400 {"status":400,"message":"This owner claim or verification code is invalid or no
+longer available."}` — exactly two keys. Password-policy errors are the narrow exception,
+because a claimant holding a valid pending claim needs actionable guidance, and they are
+reachable only behind a resolved eligible claim. Internal codes go to the log, never to a
+response, and no PII enters an exception.
+
+### REPLAY AND THE LOST SUCCESS RESPONSE
+After success the token is DEAD: the same token, code and password render the generic
+refusal, the consume timestamp does not move, no second session is minted and the
+password is not rewritten. **A lost 200 does NOT roll authority back** — the durable
+claim succeeded, and no plaintext customer JWT is stored for replay. Recovery is
+ORDINARY LOGIN: a new owner now has established access and the password they chose; an
+established owner already had credentials.
+
+### OWNER CONTROL MOVES TRUTHFULLY, AND NOTHING ELSE IS WRITTEN
+Immediately after commit, `onboarding_summary` derives `owner_relationship: consistent`,
+`owner_control: invitation_redeemed` with `evidence_at` equal to the exact `consumed_at`,
+and `invitation: consumed`. **THE CONSUMED INVITATION IS THE EVIDENCE** — no `claimed`
+boolean, no `owner_control` column, no approval row.
+
+**NO `AdminAuditLog` ROW, and that is deliberate.** That log records PLATFORM-STAFF
+decisions and its actor is a platform staff member; a row naming a restaurant owner as
+the actor of an admin action would corrupt what the log means and drop a
+tenant-initiated event into the operator's activity strip. A future unified Activity
+surface may project the consumed invitation separately.
+
+**NO EXTERNAL I/O AT ALL** — no SMS, email, `Notification` (MongoDB), legacy
+`save_action` or network call — which is why redemption establishes the credential
+itself instead of reusing `change_password` or `reset_password`, both of which perform
+synchronous MongoDB I/O. Patching each channel to explode leaves redemption succeeding.
+No lifecycle change (the restaurant stays `onboarding`), no readiness change
+(`check_go_live_readiness` still fails closed with `readiness_not_configured`), no
+commercial row, no membership or owner-of-record write, no attestation.
+
+### STRUCTURAL RATCHETS
+`OWNER-CLAIM-REDEEM-SAFE-00` AST-scans both modules: no forbidden assignment (identity
+facts, ownership, membership, other invitation stamps, provenance, lifecycle,
+classification, commercial), no direct `for_user`, no credential in a logging argument,
+no admission advisory lock, no membership writer, no result object carrying credential
+material. The Step-2F.1 token-source scan was NARROWED rather than dropped — redemption
+legitimately reads a body, so the rule now says what it means: every literal key read
+out of a mapping must be in `BODY_KEYS` (`otp`, `new_password`), and the token still has
+exactly one entry point.
+
+**The customer-access writer ratchet now sanctions EXACTLY TWO production modules** —
+`onboarding_creation` (writes `pending_initial_claim`) and `owner_claim_redemption`
+(writes `established`) — as an inventory rather than a count, so a third writer is a
+deliberate edit. There is still no public `establish_customer_access(user)` helper.
+
+### CURRENT OTP REPLACEMENT SEMANTICS — CHANGED, AND STATED HONESTLY
+Passing an explicit `msisdn` moves the owner-claim row out of the `msisdn IS NULL`
+bucket that `login` and `reset-password` share, so the cross-purpose collision recorded
+under Step 2F.1 changed in BOTH directions and improved in both: an owner-claim
+challenge no longer destroys a live login or reset code, and a login or reset attempt no
+longer destroys a live owner-claim challenge (the load-bearing direction — otherwise
+requesting a login code would kill the claim challenge mid-flow). **The purpose-blind
+delete itself is UNCHANGED**: `login` and `reset-password` still share the NULL bucket
+and still replace one another. This is not the broad purpose-scoped migration.
+
+One interaction survives and is not a regression: two live rows for one identity can now
+coexist, and a purpose-BLIND `verify_otp` still picks the most recent, so a newer
+owner-claim challenge shadows an older login code at the generic verify endpoint. That
+is the same user-visible outcome as before (the row used to be deleted outright), and
+coexistence already occurred on `origin/main` via `resend_otp`, which has always passed
+`msisdn=user.phone_number`. Redemption is immune — it binds purpose AND destination.
+
+### NOT BUILT BY THIS STEP
+Invitation delivery of any kind, the Admin creation UI, the restaurant-portal claim UI,
+readiness and owner go-live approval. **Step 2 is still incomplete.** The known races
+recorded under "Admin Restaurant Creation" — non-atomic `User.email` uniqueness and
+cross-owner same-name+location duplication — are UNCHANGED and still open.
 
 ## Owner-Membership Serialization — Phase 1, Step 2E.1
 
