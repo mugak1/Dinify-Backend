@@ -57,6 +57,7 @@ import logging
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from rest_framework.exceptions import ParseError, UnsupportedMediaType
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
@@ -98,6 +99,8 @@ PASSWORD_NOT_REQUIRED_MESSAGE = (
     'This account already has a password. Remove new_password and try again.'
 )
 OTP_REQUIRED_MESSAGE = 'Please provide the verification code that was sent to you.'
+MALFORMED_BODY_MESSAGE = 'The request body could not be read as JSON.'
+UNSUPPORTED_MEDIA_TYPE_MESSAGE = 'Send the request body as JSON.'
 DELIVERY_FAILURE_MESSAGE = (
     "We couldn't send your verification code. Please try again."
 )
@@ -323,7 +326,28 @@ class OwnerClaimRedeemView(APIView):
             logger.info('owner-claim redemption refused: %s', refusal.code)
             return self._refused()
 
-        data = request.data if isinstance(request.data, dict) else {}
+        # `request.data` PARSES ON ACCESS, so that access is guarded — otherwise DRF
+        # answers an unreadable body with its own bare `{"detail": …}`, a different shape
+        # from every other error this route produces.
+        #
+        # TWO DISTINCT EXCEPTIONS reach here and catching only the first is the easy
+        # mistake: malformed JSON raises `ParseError`, while a Content-Type with no
+        # parser raises `UnsupportedMediaType`, which is NOT a subclass of it. They keep
+        # different statuses because the status IS the caller's remedy — 400 says the
+        # body was wrong, 415 says send JSON.
+        #
+        # Both are reachable only BEHIND a resolved eligible claim (the preflight above
+        # already refused everyone else), so neither is an oracle.
+        try:
+            body = request.data
+        except UnsupportedMediaType:
+            return Response(
+                {'status': 415, 'message': UNSUPPORTED_MEDIA_TYPE_MESSAGE}, status=415,
+            )
+        except ParseError:
+            return self._bad_request(MALFORMED_BODY_MESSAGE)
+
+        data = body if isinstance(body, dict) else {}
 
         # NOT parsed as an integer and not coerced: a leading zero is significant, and
         # `int('01234')` would silently make a different code. Not `.strip()`ped either —

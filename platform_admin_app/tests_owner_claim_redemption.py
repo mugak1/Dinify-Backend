@@ -2527,3 +2527,83 @@ class ServiceRechecksEverythingTests(RedemptionTestCase):
             owner_claim_redemption.CREDENTIAL_REQUIREMENT_CHANGED,
         )
         self.assertNothingHappened()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# The guarded body parse
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@_UNTHROTTLED
+class BodyParseTests(RedemptionTestCase):
+    """
+    ``request.data`` parses ON ACCESS, so that access is guarded.
+
+    Unguarded, DRF answers an unreadable body with its own bare ``{"detail": …}`` — a
+    different shape from every other error this route produces. TWO DISTINCT EXCEPTIONS
+    reach the guard and catching only the first is the easy mistake: malformed JSON
+    raises ``ParseError``, while a ``Content-Type`` with no parser raises
+    ``UnsupportedMediaType``, which is NOT a subclass of it.
+
+    Both are reachable only BEHIND a resolved eligible claim, so neither is an oracle —
+    which is checked below rather than asserted.
+    """
+
+    def post_raw(self, body, content_type, token=None):
+        headers = {} if token is ... else {CLAIM_TOKEN_HEADER: token or self.token}
+        return self.client.post(
+            REDEEM_PATH, body, content_type=content_type, headers=headers,
+        )
+
+    def test_malformed_json_is_a_shaped_400(self):
+        response = self.post_raw('{not json', 'application/json')
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(set(response.data), {'status', 'message'})
+        self.assertEqual(response.data['status'], 400)
+        self.assertNothingHappened()
+
+    def test_an_unparseable_content_type_is_a_shaped_415(self):
+        response = self.post_raw('otp=1234', 'application/x-toml')
+        self.assertEqual(response.status_code, 415, response.content)
+        self.assertEqual(set(response.data), {'status', 'message'})
+        self.assertEqual(response.data['status'], 415)
+        self.assertNothingHappened()
+
+    def test_the_two_keep_different_statuses(self):
+        """The status IS the caller's remedy; folding one into the other deletes it."""
+        self.assertNotEqual(
+            self.post_raw('{not json', 'application/json').status_code,
+            self.post_raw('otp=1234', 'application/x-toml').status_code,
+        )
+
+    def test_neither_is_an_oracle_without_a_valid_token(self):
+        """
+        THE ORDERING THAT MATTERS. The preflight runs FIRST, so a caller without a valid
+        claim gets the uniform refusal whatever they send — they cannot learn that their
+        token was real by observing a parse error.
+        """
+        for body, content_type in (
+            ('{not json', 'application/json'), ('otp=1234', 'application/x-toml'),
+        ):
+            with self.subTest(content_type=content_type):
+                self.assertRefused(
+                    self.post_raw(body, content_type, token='not-a-real-token'),
+                )
+
+    def test_both_responses_are_still_no_store(self):
+        for body, content_type in (
+            ('{not json', 'application/json'), ('otp=1234', 'application/x-toml'),
+        ):
+            with self.subTest(content_type=content_type):
+                response = self.post_raw(body, content_type)
+                self.assertEqual(response['Cache-Control'], 'no-store, private')
+                self.assertEqual(response['Pragma'], 'no-cache')
+                self.assertEqual(response['Expires'], '0')
+
+    def test_an_empty_body_is_an_ordinary_validation_failure(self):
+        """DRF invokes a parser only when there IS content, so this reaches neither."""
+        response = self.client.post(
+            REDEEM_PATH, '', content_type='text/plain',
+            headers={CLAIM_TOKEN_HEADER: self.token},
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertNothingHappened()
