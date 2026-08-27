@@ -293,6 +293,12 @@ REST_FRAMEWORK = {
         'delegation_exchange': config(
             'THROTTLE_DELEGATION_EXCHANGE', default='10/min'
         ),
+        # Owner-claim challenge. Not the security boundary — the claim token is
+        # ~288 bits and the OTP verifier has its own attempt cap — but each attempt
+        # can cost an SMS, so a flood should not be free.
+        'owner_claim_challenge': config(
+            'THROTTLE_OWNER_CLAIM_CHALLENGE', default='5/min'
+        ),
     },
 }
 

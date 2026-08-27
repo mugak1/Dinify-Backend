@@ -4,6 +4,12 @@ from users_app.endpoints.token_refresh import GatedTokenRefreshView
 from users_app.endpoints.user_lookup import UserLookupEndpoint, MsisdnLookupEndpoint
 from users_app.endpoints.user_profile import UserProfileEndpoint
 
+# The owner-claim challenge lives in `platform_admin_app` with every other line of
+# invitation state, but is MOUNTED here on the customer plane: the owner is claiming
+# their own restaurant identity and an AdminSession has no authority in it. Same
+# arrangement as the customer-plane half of delegation.
+from platform_admin_app.endpoints.owner_claim import OwnerClaimChallengeView
+
 
 urlpatterns = [
     path('auth/<str:action>/', UsersAuthenticationEndpoint.as_view()),
@@ -14,4 +20,11 @@ urlpatterns = [
     path('user-lookup/', UserLookupEndpoint.as_view()),
     path('msisdn-lookup/', MsisdnLookupEndpoint.as_view()),
     path('user-profile/', UserProfileEndpoint.as_view()),
+    # EXPLICIT, never `owner-claim/<str:action>/`. Redemption will be its own named
+    # route for the same reason: what a request did should be readable from the path.
+    path(
+        'owner-claim/challenge/',
+        OwnerClaimChallengeView.as_view(),
+        name='owner-claim-challenge',
+    ),
 ]
