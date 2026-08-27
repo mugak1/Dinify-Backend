@@ -462,10 +462,6 @@ def redeem_owner_claim(
         # so an unknown token cannot be used to probe for lock contention either.
         raise RedemptionRefused(UNKNOWN_TOKEN)
 
-    # ONE captured instant for the whole decision: the expiry comparison, the
-    # invitation's `consumed_at`, and therefore `owner_control.evidence_at`.
-    now = timezone.now()
-
     with transaction.atomic():
         # 1. THE SERIALIZATION POINT. `.filter(pk=…)` with no `select_related`, so this
         #    locks the `restaurants` row and nothing else.
@@ -475,7 +471,26 @@ def redeem_owner_claim(
         if restaurant is None or restaurant.deleted:
             raise RedemptionRefused(RESTAURANT_GONE)
 
-        # 2. The onboarding row, locked. Provenance re-checked here: a legacy-adopted
+        # 2. ONE captured instant for the whole decision — the expiry comparison, the
+        #    UserOtp liveness read, the invitation's `consumed_at`, and therefore
+        #    `owner_control.evidence_at`.
+        #
+        #    CAPTURED AFTER THE LOCK, and that placement is the point. `select_for_update`
+        #    BLOCKS while a competing redemption, reissue or cancel holds this row, so a
+        #    `now` read before it is stale by the whole wait. Two things would follow: an
+        #    invitation whose `expires_at` fell inside that wait would still compare as
+        #    live and could be redeemed, and `consumed_at` would be stamped earlier than
+        #    the moment the claim actually happened — putting `evidence_at` before the
+        #    event it is evidence of.
+        #
+        #    This is the same rule the rest of the transaction follows for every other
+        #    fact: authoritative values are read once the serialization point is held.
+        #    The clock is a fact like any other. Nothing between the two acquisitions
+        #    below can contend, because everything that locks the onboarding row or an
+        #    invitation takes this restaurant row first.
+        now = timezone.now()
+
+        # 3. The onboarding row, locked. Provenance re-checked here: a legacy-adopted
         #    tenant never entered Dinify through a claim flow and has no credential to
         #    redeem, and converting provenance to make one possible would replace a true
         #    statement about the tenant's origin with a false one.
@@ -490,20 +505,20 @@ def redeem_owner_claim(
         if onboarding.source != ONBOARDING_SOURCE_ADMIN_CREATED:
             raise RedemptionRefused(NOT_ADMIN_CREATED)
 
-        # 3. The head invitation, locked, and proved to be this token's.
+        # 4. The head invitation, locked, and proved to be this token's.
         invitation = _authoritative_head(onboarding, restaurant, token_hash, now)
 
-        # 4. The owner, locked. Taken BEFORE the consistency assertion so the row the
+        # 5. The owner, locked. Taken BEFORE the consistency assertion so the row the
         #    assertion agrees with cannot move underneath the rest of the transaction.
         owner = _lock_owner(restaurant)
 
-        # 5. The invitation must name the person who owns this restaurant NOW. An
+        # 6. The invitation must name the person who owns this restaurant NOW. An
         #    invitation instructs one specific person to take control; if ownership has
         #    moved since it was minted, that person is no longer the one it belongs to.
         if invitation.invited_user_id != owner.pk:
             raise RedemptionRefused(INVITED_USER_NOT_OWNER)
 
-        # 6. ...and the owner of record must agree with the owner AUTHORITY, which is
+        # 7. ...and the owner of record must agree with the owner AUTHORITY, which is
         #    what the customer plane actually resolves permissions from. Establishing
         #    control while the two answers disagree would grant authority on whichever
         #    answer happened to be read. Validation only — a drifted tenant is refused
@@ -517,10 +532,10 @@ def redeem_owner_claim(
         except OwnerConsistencyError:
             raise RedemptionRefused(OWNER_RELATIONSHIP_INCONSISTENT)
 
-        # 7. The destination the second factor must have been delivered to.
+        # 8. The destination the second factor must have been delivered to.
         canonical_phone = _canonical_phone(owner)
 
-        # 8. Which transition this is, decided from the LOCKED identity — never from the
+        # 9. Which transition this is, decided from the LOCKED identity — never from the
         #    pre-lock snapshot the request was shaped against. A disagreement is a
         #    generic refusal rather than a guess: supplying a password for an established
         #    owner would rewrite a credential this operation has no business touching,
@@ -532,12 +547,12 @@ def redeem_owner_claim(
         if needs_credential != (encoded_password is not None):
             raise RedemptionRefused(CREDENTIAL_REQUIREMENT_CHANGED)
 
-        # 9. A FACTOR DELIVERED SOMEWHERE ELSE is refused before it can cost anything.
+        # 10. A FACTOR DELIVERED SOMEWHERE ELSE is refused before it can cost anything.
         #    The binding below would reject it anyway — this is about not charging the
         #    claimant an attempt for a phone change they did not make. See the helper.
         _refuse_stale_destination(owner, canonical_phone, now)
 
-        # 10. THE SECOND FACTOR, bound three ways: to this identity, to the `owner-claim`
+        # 11. THE SECOND FACTOR, bound three ways: to this identity, to the `owner-claim`
         #    purpose, and to the destination the code was actually delivered to.
         #
         #    The bindings NARROW the locked query, so a login or reset code for the same
@@ -561,12 +576,12 @@ def redeem_owner_claim(
             # by definition. The transaction commits and the caller renders the refusal.
             return _record_failed_attempt(invitation)
 
-        # 11. CONSUME THE CREDENTIAL. Single-use, stamped with the shared `now`, so
+        # 12. CONSUME THE CREDENTIAL. Single-use, stamped with the shared `now`, so
         #     `owner_control.evidence_at` is exactly this instant. ONE COLUMN.
         invitation.consumed_at = now
         invitation.save(update_fields=['consumed_at'])
 
-        # 12. THE IDENTITY TRANSITION — for a brand-new owner only.
+        # 13. THE IDENTITY TRANSITION — for a brand-new owner only.
         if needs_credential:
             # The pre-computed hash is ASSIGNED rather than re-derived: calling
             # `set_password` here would redo the ~258ms hash under the `Restaurant` lock,
@@ -590,7 +605,7 @@ def redeem_owner_claim(
         # An ESTABLISHED owner is not modified at all — see the module docstring. There
         # is deliberately no `else` branch to read.
 
-        # 13. THE SESSION, through the one sanctioned mint. For a pending owner this is
+        # 14. THE SESSION, through the one sanctioned mint. For a pending owner this is
         #     reached only after the transition above has been both applied in memory and
         #     persisted, so the chokepoint's own refusal cannot fire — and if a future
         #     change reordered these, it would fire loudly rather than mint quietly.

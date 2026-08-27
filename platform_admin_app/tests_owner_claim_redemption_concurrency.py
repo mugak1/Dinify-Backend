@@ -33,11 +33,13 @@ window between the check and the consume it guards, which is the window
 spend.
 """
 import threading
+from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.hashers import make_password
 from django.db import OperationalError, connections
 from django.test import TransactionTestCase
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -60,6 +62,11 @@ from users_app.models import User, UserOtp
 
 WAIT = 30
 LOCK_TIMEOUT_MS = 1500
+# How long an invitation stays live in the decision-clock tests, and how far past that
+# the row is held. Small enough to keep the suite quick, large enough that a pre-lock and
+# a post-lock clock land on opposite sides of the deadline on a loaded CI runner.
+EXPIRY_WINDOW = 1.5
+LOCK_HOLD_MARGIN = 1.0
 DEV_OTP = '1234'
 GOOD_PASSWORD = 'Kabalagala-Sunrise-7'
 REASON = 'Acting on this credential while a redemption is in flight.'
@@ -725,4 +732,180 @@ class RedeemVsPhoneChangeTests(RedemptionRaceBase):
 
         self.assertIsInstance(
             self.redeem(), owner_claim_redemption.RedemptionResult,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# The decision clock is captured AFTER the serialization lock
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class DecisionClockTests(RedemptionRaceBase):
+    """
+    ``now`` is read once the ``Restaurant`` row is HELD, not before reaching for it.
+
+    ━━ THE DEFECT THIS CLOSES (Codex P2 on PR #309) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    ``select_for_update`` BLOCKS while a competing redemption, reissue or cancel holds
+    the row. A ``now`` captured before that call is stale by the entire wait, and two
+    things follow:
+
+      * an invitation whose ``expires_at`` falls INSIDE the wait still compares as live,
+        so an expired credential is redeemed;
+      * ``consumed_at`` is stamped earlier than the moment the claim actually happened,
+        putting ``owner_control.evidence_at`` before the event it is evidence of.
+
+    It is the same rule the rest of the transaction already follows for every other fact
+    — authoritative values are read once the serialization point is held. The clock is a
+    fact like any other.
+
+    ━━ WHY THESE ARE NOT VACUOUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    Both drive a REAL lock wait from a second connection rather than patching
+    ``timezone.now``: a mocked clock would prove only that the mock was applied. The
+    blocker holds the row, the test moves the clock-relevant state while redemption is
+    parked in ``select_for_update``, and then releases.
+    """
+
+    def hold_the_restaurant_row(self, during):
+        """
+        Hold the ``Restaurant`` row on a second connection, run ``during()`` while a
+        redemption is blocked on it, then release and return the redemption's outcome.
+        """
+        holding, mutate_done = threading.Event(), threading.Event()
+        outcome = {}
+
+        def blocker():
+            try:
+                from django.db import transaction as tx
+                with tx.atomic():
+                    # Take the row this redemption will queue behind.
+                    list(
+                        type(self.restaurant).objects
+                        .select_for_update().filter(pk=self.restaurant.pk)
+                    )
+                    holding.set()
+                    assert mutate_done.wait(timeout=WAIT), 'mutation never ran'
+                    # ...and release by leaving the block.
+            finally:
+                connections.close_all()
+
+        def redeemer():
+            try:
+                assert holding.wait(timeout=WAIT), 'the blocker never took the row'
+                # The mutation lands while THIS call is parked inside select_for_update.
+                outcome['result'] = ('ok', self.redeem())
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                outcome['result'] = ('error', exc)
+            finally:
+                connections.close_all()
+
+        blocker_thread = threading.Thread(target=blocker)
+        redeem_thread = threading.Thread(target=redeemer)
+        blocker_thread.start()
+        self.assertTrue(holding.wait(timeout=WAIT), 'the blocker never took the row')
+        redeem_thread.start()
+
+        during()
+        mutate_done.set()
+
+        for thread in (blocker_thread, redeem_thread):
+            thread.join(timeout=WAIT)
+            self.assertFalse(thread.is_alive(), 'a thread deadlocked')
+        return outcome.get('result')
+
+    def test_an_invitation_that_expires_during_the_lock_wait_cannot_redeem(self):
+        """
+        THE ONE THE FIX EXISTS FOR. The invitation is live when the redemption starts
+        queueing and expired by the time it holds the row.
+
+        THE WINDOW HAS TO STRADDLE THE WAIT, and getting that wrong is how this test
+        first passed against the buggy code: expiring the invitation RETROACTIVELY makes
+        it already expired at the pre-lock instant too, so both readings refuse and the
+        test proves nothing. ``expires_at`` is therefore set into the near FUTURE before
+        the redeemer starts, and the row is then held past it — so a pre-lock clock sees
+        a live credential and a post-lock clock sees an expired one.
+        """
+        import time
+
+        # Live when the redeemer captures a pre-lock clock...
+        deadline = timezone.now() + timedelta(seconds=EXPIRY_WINDOW)
+        OwnerInvitation.objects.filter(pk=self.invitation.pk).update(
+            issued_at=timezone.now() - timedelta(days=1), expires_at=deadline,
+        )
+
+        # ...and expired by the time the lock is released.
+        result = self.hold_the_restaurant_row(
+            lambda: time.sleep(EXPIRY_WINDOW + LOCK_HOLD_MARGIN),
+        )
+
+        self.assertIsNotNone(result, 'the redemption thread produced no outcome')
+        kind, value = result
+        self.assertEqual(
+            kind, 'error',
+            f'an invitation that expired during the lock wait was redeemed: {value!r}',
+        )
+        self.assertIsInstance(value, owner_claim_redemption.RedemptionRefused)
+        self.assertEqual(value.code, owner_claim_redemption.INVITATION_EXPIRED)
+        self.assertIsNone(self.fresh().consumed_at)
+        self.assertEqual(
+            self.fresh_owner().customer_access_state,
+            CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
+        )
+
+    def test_the_same_invitation_redeems_when_the_wait_is_short(self):
+        """
+        THE CONTROL. Same fixture, same lock wait mechanics, but released well inside the
+        window — so the refusal above is the expiry and not the blocking.
+        """
+        import time
+
+        OwnerInvitation.objects.filter(pk=self.invitation.pk).update(
+            issued_at=timezone.now() - timedelta(days=1),
+            expires_at=timezone.now() + timedelta(seconds=EXPIRY_WINDOW * 6),
+        )
+
+        result = self.hold_the_restaurant_row(lambda: time.sleep(0.2))
+
+        self.assertEqual(result[0], 'ok', repr(result[1]))
+        self.assertIsNotNone(self.fresh().consumed_at)
+
+    def test_consumed_at_is_the_moment_the_claim_actually_happened(self):
+        """
+        The evidence timestamp must not predate the redemption. Measured across a REAL
+        lock wait: `consumed_at` has to land after the blocker released the row, not
+        before the redemption started queuing for it.
+        """
+        started = timezone.now()
+        released = {}
+
+        def pause():
+            # Long enough that a pre-lock clock would be visibly stale.
+            import time
+            time.sleep(1.0)
+            released['at'] = timezone.now()
+
+        result = self.hold_the_restaurant_row(pause)
+
+        kind, value = result
+        self.assertEqual(kind, 'ok', f'expected success, got {value!r}')
+        consumed_at = self.fresh().consumed_at
+        self.assertIsNotNone(consumed_at)
+        self.assertGreaterEqual(
+            consumed_at, released['at'],
+            'consumed_at predates the moment the lock was released, so the decision '
+            'clock was read before the serialization point was held',
+        )
+        self.assertGreater(consumed_at, started)
+
+    def test_owner_control_evidence_at_matches_the_consume(self):
+        """The projection reads `consumed_at`, so the two move together by construction."""
+        import time
+
+        result = self.hold_the_restaurant_row(lambda: time.sleep(0.5))
+        self.assertEqual(result[0], 'ok', repr(result[1]))
+
+        summary = onboarding_summary(self.restaurant)
+        self.assertEqual(
+            summary['owner_control']['evidence_at'],
+            self.fresh().consumed_at.isoformat(),
         )

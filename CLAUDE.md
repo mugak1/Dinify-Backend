@@ -3166,6 +3166,15 @@ the canonical `select_head_invitation` rather than `objects.get(token_hash=…)`
 what makes a superseded or cancelled credential genuinely dead rather than merely
 expected to be.
 
+**THE DECISION CLOCK IS ALSO READ UNDER THE LOCK.** `now` is captured AFTER the
+`Restaurant` row is held, not before reaching for it — `select_for_update` BLOCKS while a
+competing redemption, reissue or cancel holds that row, so a `now` read before it is
+stale by the whole wait. Two things would follow: an invitation whose `expires_at` fell
+inside the wait would still compare as live and could be redeemed, and `consumed_at`
+would be stamped earlier than the claim actually happened, putting
+`owner_control.evidence_at` before the event it is evidence of. The clock is a fact like
+any other, and authoritative facts are read once the serialization point is held.
+
 **IT CONSUMES THE PR #306 BARRIER RATHER THAN REBUILDING IT.** Taking the `Restaurant`
 row is what stops a customer-plane role removal, deactivation, soft-delete, insert or
 REACTIVATION committing between `assert_owner_consistency` and the consume it guards.
