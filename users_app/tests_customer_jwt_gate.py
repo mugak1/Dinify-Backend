@@ -158,9 +158,11 @@ class PlatformStaffJWTRefusedTests(TestCase):
         token = self._access_token(self.user)
 
         # It authenticates while the account is still a customer. Asserted as
-        # "not 401" rather than "200": the route answers 405 to this verb, and
-        # reaching method dispatch at all is precisely the proof that
-        # authentication succeeded.
+        # "not 401" rather than "200" because what is under test is the
+        # AUTHENTICATION outcome, not this route's body: reaching method dispatch
+        # at all is the proof. (Step 2F.3 gave the route a GET handler, so it now
+        # answers 200 here where it used to answer 405 — the gate assertion is
+        # deliberately indifferent to which, and must stay that way.)
         response = self.client.get(
             '/api/v1/users/user-profile/', HTTP_AUTHORIZATION=f'Bearer {token}',
         )
