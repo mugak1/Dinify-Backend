@@ -658,9 +658,42 @@ so keep it current when conventions change.
   `credential_setup_required` boolean read from `customer_access_state` and nothing
   else. **It is a PREFLIGHT: no lock, no transaction, nothing durable written** — the
   invitation, the access state and the password are all untouched, and `owner_control`
-  stays `not_established`. Step 2F.2 (the atomic consume) is NOT BUILT and must
-  re-check every fact under the `Restaurant` lock; it must also purpose-bind the OTP,
-  which `verify_otp` does not do today. See the "Owner Claim" section
+  stays `not_established`. Step 2F.2 (the atomic consume) HAS SINCE LANDED — see the
+  next bullet — so two things this bullet used to describe as future work are now
+  facts: `verify_otp` purpose-binds, and the challenge passes the canonical
+  destination explicitly so `UserOtp.msisdn` records where the code went. See the
+  "Owner Claim" section
+- Owner claim redemption: ✅ BACKEND-COMPLETE (Phase 1, Step 2F.2) — the AUTHORITY
+  TRANSACTION. `POST api/v1/users/owner-claim/redeem/` turns the claim token
+  (possession) and an `owner-claim` OTP (current control) into durable owner-control
+  evidence in ONE transaction: for a brand-new owner the invitation is consumed, the
+  chosen password persisted, `pending_initial_claim -> established` and
+  `prompt_password_change` cleared, all or none, then a customer session is minted; for
+  an ESTABLISHED owner claiming an additional restaurant the invitation is consumed and
+  a session minted while the identity is not modified at all. Migration
+  `platform_admin_app/0010` adds the invitation-level `claim_failed_attempts` budget.
+  The response is `token + refresh + restaurant_id` and DELIBERATELY carries no profile
+  — see the next bullet for how the client hydrates one. Details in the "Owner Claim
+  Redemption" section
+- Customer profile bootstrap: ✅ (Phase 1, Step 2F.3) — `GET
+  api/v1/users/user-profile/`, the canonical authenticated read that makes the
+  redemption handoff usable. Added to the EXISTING user-profile resource (PUT is its
+  write side) rather than as a new route, with NO MIGRATION and no new serializer,
+  model or session concept. Authority is the default customer stack —
+  `CustomerJWTAuthentication` + `IsAuthenticated` — so platform staff on a customer
+  token, a `pending_initial_claim` identity and a deactivated user are all refused
+  inside `get_user` before a handler runs, and none of that is restated in the view.
+  It returns the canonical `SerGetUserProfile`, which with no context delegates to
+  `get_any_restaurant_roles` — the SAME call `login` makes — so login and bootstrap
+  cannot disagree about the principal they hydrate. **The owner-claim UI must hydrate
+  through this read and must NEVER invent `restaurant_roles` or permissions from the
+  `restaurant_id` redemption returned**: that id is CONTEXT, the membership resolver is
+  authority, and an owner may hold several memberships. **No extra OTP is required to
+  bootstrap after a successful claim** — that is the whole reason the claimant is not
+  sent back through ordinary login, which sets `require_otp` for an owner membership.
+  Genuinely read-only (no `last_login`, no token mint or rotation, no OTP, no
+  invitation or `customer_access_state` write, no action log, no audit row) and
+  `no-store`. See the "Customer Profile Bootstrap" section
 - Pre-claim customer-access gate: ✅ (Phase 1, Step 2D.1) — the follow-up that makes
   Step 2D's central claim TRUE rather than aspirational. A new owner had an unusable
   password, and generic password reset needed only their phone number to replace one
@@ -1106,6 +1139,13 @@ so keep it current when conventions change.
 - `api/v1/reviews/` → reviews_app endpoints (`reviews_app/urls.py`):
   `submit/`, `summary/`, `analytics/`, `<int:review_id>/resolution/`,
   `` (root) — separate app
+- `api/v1/users/user-profile/` → `UserProfileEndpoint` (`users_app/endpoints/`) — ONE
+  resource, two verbs: **GET** is the Step-2F.3 canonical authenticated profile
+  bootstrap and **PUT** the self-service update. Both run on the default customer
+  authentication stack; neither is on the delegated `ALLOWED_ROUTES` allowlist, which
+  excludes this route by name because it acts on `request.user` and so has no
+  restaurant dimension to scope. Do NOT add a `/session-bootstrap/`, `/me/` or
+  `/owner-claim/profile/` alias — there is one user-profile resource
 - `api/v1/users/owner-claim/challenge/` + `api/v1/users/owner-claim/redeem/` → the
   two halves of owner claim, Steps 2F.1 and 2F.2
   (`platform_admin_app/endpoints/owner_claim.py`, mounted from `users_app/urls.py`).
@@ -3284,6 +3324,114 @@ Invitation delivery of any kind, the Admin creation UI, the restaurant-portal cl
 readiness and owner go-live approval. **Step 2 is still incomplete.** The known races
 recorded under "Admin Restaurant Creation" — non-atomic `User.email` uniqueness and
 cross-owner same-name+location duplication — are UNCHANGED and still open.
+
+The deliberate absence of a profile from the 200 above is not a gap the client fills
+itself: Step 2F.3 added `GET api/v1/users/user-profile/` as the canonical bootstrap
+read, and the token this response returns is what authenticates it. See the next
+section.
+
+## Customer Profile Bootstrap — Phase 1, Step 2F.3
+
+`GET /api/v1/users/user-profile/` — the canonical authenticated customer profile read,
+and the half of the redemption handoff that lives outside the claim flow.
+
+```
+GET /api/v1/users/user-profile/
+Authorization: Bearer <customer access token>
+-> 200 {"status":200,"message":"Profile retrieved.",
+        "data":{"profile": { ...SerGetUserProfile... }}}
+```
+
+**NO MIGRATION**, no new model, no new serializer, no session or bootstrap concept, no
+profile cache, no second membership projection. `User` + JWT + `SerGetUserProfile`
+already held every fact.
+
+### WHY IT EXISTS
+Redemption returns `token + refresh + restaurant_id` and no profile, which is correct —
+a claim transaction is not a profile endpoint. But the restaurant portal persists a
+principal containing a profile and its route guard reads `profile.restaurant_roles`, so
+a session alone cannot bootstrap it. **The client must not close that gap itself.**
+Deriving `restaurant_roles` from the single `restaurant_id` would be a guess about
+tenant authority: an owner may hold several memberships, the one just claimed carries a
+resolved permissions map no client can compute, and a fabricated partial profile would
+put a second, wrong source of truth in front of the real one.
+
+**Nor can the claimant simply log in again.** An owner membership sets `require_otp` in
+`users_app.controllers.login`, so ordinary login would demand a SECOND verification code
+moments after the claim transaction consumed its own — asking a user to prove themselves
+twice for one act. **No extra OTP is required merely to bootstrap after a successful
+owner claim.**
+
+### IT EXTENDS THE EXISTING RESOURCE
+There is ONE user-profile resource and one route. `PUT` is its self-update; `GET` is its
+read side. There is deliberately no `/session-bootstrap/`, `/me/`, `/owner-claim/profile/`
+or `/auth/profile/` — a claim-specific profile endpoint would be a second profile
+contract, which is the drift this step exists to prevent.
+
+### AUTHORITY IS THE EXISTING CUSTOMER STACK, AND NOTHING IS RESTATED
+`CustomerJWTAuthentication` + `IsAuthenticated` from `settings.REST_FRAMEWORK`. The view
+adds **no** `authentication_classes = []`, no `AllowAny`, no admin-session authority, no
+delegated-owner authority and no claim-token authority. That is what makes the three
+refusals true without a second copy of any gate: platform staff on a customer token, a
+`pending_initial_claim` identity and a deactivated user are all refused inside
+`get_user` before a handler runs. **Do NOT weaken `CustomerJWTAuthentication` to make a
+bootstrap work** — the correct ordering is redemption establishes the identity, THEN
+mints, THEN the profile reads; before redemption even a fabricated token stays refused.
+
+A delegated administrator reaches neither verb: `users/user-profile/` is deliberately
+absent from `platform_admin_app.configs.delegation_scopes.ALLOWED_ROUTES` (it acts on
+`request.user`, i.e. on the administrator's OWN records), and the allowlist is keyed on
+`(route, method)`, so adding `GET` did not widen it.
+
+### THE CANONICAL SERIALIZER, AND WHY THAT IS THE POINT
+`SerGetUserProfile(request.user)` with **no** `restaurant_roles` context, so
+`get_restaurant_roles` delegates to `get_any_restaurant_roles` — the same call `login`
+makes and feeds in through context. Login and bootstrap therefore cannot disagree about
+which tenants a principal holds or what it may do there, which is the architectural
+reason for the endpoint: owner claim and ordinary login must bootstrap the SAME frontend
+principal. A regression pins their two profiles equal for the same database state, on
+both the token branch and the OTP branch.
+
+**The membership resolver is authoritative.** Nothing infers membership from the
+`restaurant_id` redemption returned — that is CONTEXT for the UI. Eligibility follows
+the existing resolver semantics unchanged: active, non-deleted memberships at
+restaurants in `portal_access_states()` (`onboarding` + `live`). Step 2F.3 widened
+nothing.
+
+### WHAT THE RESPONSE MAY NOT CARRY
+No access or refresh token, no `require_otp`, no `account_type`, no
+`customer_access_state`, no invitation state, no claim token or hash, no OTP, no
+password, no Admin state. This is PROFILE BOOTSTRAP, not another authentication
+operation. `prompt_password_change` is already a field of the canonical profile and does
+not get a second source of truth.
+
+### NO SIDE EFFECTS
+No `last_login` stamp, no token mint or rotation, no current-restaurant write, no action
+log, no `AdminAuditLog` row, no OTP consumed, no `OwnerInvitation` or
+`customer_access_state` touched, no profile field repaired. Pinned generally rather than
+table by table: a test asserts every statement the request issues is a `SELECT`, so a
+write to a table nobody thought of fails too.
+
+### NO-STORE, ON THE VIEW
+`Cache-Control: no-store, private` + `Pragma: no-cache` + `Expires: 0`, plus
+`Vary: Authorization`, set in `finalize_response` so no branch can forget them. No
+cookie. **PUT's response is stamped by the same override, which is deliberate and
+additive** — it answers with the same canonical profile — and changes no status code,
+body, request contract or error semantics; it is the only way PUT differs from before.
+
+### QUERY BUDGET
+`get_any_restaurant_roles` reads the memberships in ONE query and every override row
+across those restaurants in a second, so the cost does not grow with membership count.
+A flatness test compares one membership against twelve and asserts the counts are
+EQUAL; a second proves seeded `RestaurantRolePermission` rows add no per-restaurant
+query. The absolute number is incidental and deliberately not asserted.
+
+### NOT BUILT BY THIS STEP
+No frontend of any kind. Invitation delivery, the Admin creation UI, the
+restaurant-portal claim UI, readiness and owner go-live approval remain unbuilt, and
+**Step 2 customer-facing and Admin UI is still incomplete.** Step 2F.2's authority
+semantics are untouched — this step changed no claim, invitation, OTP or
+customer-access rule.
 
 ## Owner-Membership Serialization — Phase 1, Step 2E.1
 
