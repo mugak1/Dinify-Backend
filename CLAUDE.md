@@ -646,6 +646,21 @@ so keep it current when conventions change.
   and invitation reissue INHERIT the guarantee with no change of their own; cancellation
   stays independent of owner consistency; Step 2F may rely on the same barrier and is
   still unbuilt. See the "Owner-Membership Serialization" section
+- Owner claim challenge: ✅ (Phase 1, Step 2F.1) — the FIRST HALF of owner-invitation
+  redemption, and the first thing that consumes a claim token. `POST
+  api/v1/users/owner-claim/challenge/` with the raw token in `X-Owner-Claim-Token`
+  resolves the invitation and sends the invited owner an OTP under the new
+  `owner-claim` purpose. NO MIGRATION. Claim is TWO-FACTOR — the token proves
+  POSSESSION, the OTP proves CURRENT CONTROL — so the token alone never establishes
+  customer access. The endpoint is `authentication_classes = []` (an ambient JWT,
+  delegated session or admin cookie has zero influence on who is resolved), every
+  unclaimable state collapses to ONE public 400, and the success body carries a single
+  `credential_setup_required` boolean read from `customer_access_state` and nothing
+  else. **It is a PREFLIGHT: no lock, no transaction, nothing durable written** — the
+  invitation, the access state and the password are all untouched, and `owner_control`
+  stays `not_established`. Step 2F.2 (the atomic consume) is NOT BUILT and must
+  re-check every fact under the `Restaurant` lock; it must also purpose-bind the OTP,
+  which `verify_otp` does not do today. See the "Owner Claim" section
 - Pre-claim customer-access gate: ✅ (Phase 1, Step 2D.1) — the follow-up that makes
   Step 2D's central claim TRUE rather than aspirational. A new owner had an unusable
   password, and generic password reset needed only their phone number to replace one
@@ -1091,6 +1106,11 @@ so keep it current when conventions change.
 - `api/v1/reviews/` → reviews_app endpoints (`reviews_app/urls.py`):
   `submit/`, `summary/`, `analytics/`, `<int:review_id>/resolution/`,
   `` (root) — separate app
+- `api/v1/users/owner-claim/challenge/` → the Step-2F.1 owner-claim challenge
+  (`platform_admin_app/endpoints/owner_claim.py`, mounted from `users_app/urls.py`).
+  `authentication_classes = []` + `AllowAny`; the raw claim token travels ONLY in the
+  `X-Owner-Claim-Token` header. EXPLICIT, never `owner-claim/<str:action>/` — the
+  Step-2F.2 redemption route will be its own named path
 - `api/v1/delegation/` → the CUSTOMER-plane half of delegated admin access
   (`platform_admin_app/urls_delegation.py`, served by the customer urlconf even
   though it lives in the admin app): `exchange/` (redeem a one-time code — NOT on
@@ -2832,6 +2852,160 @@ the Angular Admin UI, readiness and owner go-live approval. **Step 2 is still
 incomplete.** The two known races recorded under "Admin Restaurant Creation" —
 non-atomic `User.email` uniqueness and cross-owner same-name+location duplication — are
 UNCHANGED and still open; neither is touched here.
+
+## Owner Claim — Phase 1, Step 2F.1 (challenge only)
+
+The FIRST HALF of owner-invitation redemption. One route, on the CUSTOMER plane:
+
+```
+POST /api/v1/users/owner-claim/challenge/
+X-Owner-Claim-Token: <raw token>
+-> 200 {"status":200,"message":"Verification code sent.",
+        "data":{"credential_setup_required": true|false}}
+```
+
+`platform_admin_app/owner_claim.py` (the domain) + `endpoints/owner_claim.py` (the
+adapter), MOUNTED from `users_app/urls.py`. **NO MIGRATION** — `OwnerInvitation`,
+`UserOtp` and `customer_access_state` already hold every fact this needs.
+
+### CLAIM IS TWO-FACTOR, AND THAT IS WHY REDEMPTION IS SPLIT
+The high-entropy `OwnerInvitation` token proves POSSESSION of the credential Dinify
+issued; an OTP to the invited identity's canonical phone proves CURRENT CONTROL of
+that identity. **The token alone must never establish customer access** — it is a
+bearer credential handed over out of band (operator-mediated today), so anyone who
+intercepted it would otherwise become the owner. Splitting the flow means the second
+factor is delivered before anything irreversible happens.
+
+### WHAT THIS STEP DOES NOT DO
+It does not consume the invitation, move `customer_access_state`, set a password, mint
+a customer token, create a session, or establish owner control. **Step 2F.2 does all
+of that atomically and is NOT BUILT.**
+
+### THE ROUTE IS ON THE CUSTOMER PLANE, DELIBERATELY
+The owner is claiming THEIR OWN restaurant identity; an `AdminSession` has no
+authority in it. The admin plane ISSUES the credential (2D/2E) and the owner REDEEMS
+it — putting redemption on `/api/admin/v1` would mean the platform could complete an
+owner's claim on their behalf, which is the exact fact `owner_control` exists to
+record honestly. The domain still lives in `platform_admin_app`, where every other
+line of invitation state is; the same arrangement `delegated_exchange` uses. **Do not
+move `OwnerInvitation` into `users_app`.** The route is EXPLICIT — never
+`owner-claim/<str:action>/`; redemption will get its own named route.
+
+### HEADER-ONLY TOKEN TRANSPORT
+`X-Owner-Claim-Token` and nowhere else — not a query parameter, not the path, not the
+JSON or form body, not a cookie. One canonical extractor
+(`claim_token_from_request`), mirroring the delegation code and the diner capability
+channel. A credential in a URL lands in access logs, `Referer` headers and history;
+one in a body is captured by ordinary request logging. It is never logged, echoed,
+returned, or placed in an exception.
+
+### NO AMBIENT AUTHENTICATION
+`authentication_classes = []`, not merely `AllowAny`. A customer JWT, a delegated
+session and an admin cookie all have ZERO influence on which invitation or which owner
+is resolved; `request.user` is never consulted. The invited identity comes from the
+STORED invitation.
+
+### ELIGIBILITY — ALL OF IT, OR ONE REFUSAL
+invitation exists · `onboarding.source == admin_created` · restaurant exists and is
+not soft-deleted · invitation UNRESOLVED · not EXPIRED · it IS the head
+(`onboarding_reads.select_head_invitation`, the ONE definition of "the current
+invitation") · `invited_user == Restaurant.owner` NOW · `assert_owner_consistency`
+passes · invited user exists, is active, is `restaurant_user`, and has a canonical
+phone. Legacy-adopted tenants never enter this flow.
+
+The token is hashed with `platform_admin_app.sessions.hash_token` — **the same
+primitive the invitation was minted with**; there is no second implementation.
+
+### THIS IS A PREFLIGHT, NOT THE CLAIM BOUNDARY
+**It takes NO lock and opens NO transaction.** The challenge grants no durable
+authority, so a snapshot is enough for it. If the invitation is reissued, cancelled,
+expires or ownership drifts a millisecond later, the only consequence is an OTP that
+Step 2F.2 will refuse to honour — harmless.
+
+Holding the `Restaurant` row across delivery would not be. PR #306 measured the cost:
+a lifecycle transition waiting on that row holds the EXCLUSIVE admission advisory lock
+while it waits, and every diner order at the restaurant queues behind it. **A harmless
+stale OTP is always preferable to external I/O under the ownership serialization
+lock.** Pinned structurally, not by timing: `no transaction is open when the OTP is
+sent` (and no open transaction means no held row lock — a `select_for_update` in
+autocommit is released by the statement that took it), no `FOR UPDATE` in any query,
+and the membership barrier is never acquired.
+
+### THE `owner-claim` OTP PURPOSE
+Exactly that spelling. **NOT in `CUSTOMER_AUTH_OTP_PURPOSES`** (`login`,
+`reset-password`) — those are the two flows that can end in a customer session or
+password, and a `pending_initial_claim` identity is refused them. This purpose must
+REACH a pending identity: that is the one identity it exists for, as
+`otp_manager`'s own docstring anticipated. `login`/`reset-password` gating is
+unchanged, and a verified owner-claim code mints nothing — `verify_otp` mints only
+for `purpose == 'login'`. It is EVIDENCE Step 2F.2 will consume.
+
+### CURRENT CROSS-PURPOSE OTP SEMANTICS — RECORDED, NOT CHANGED
+`make_otp` deletes prior challenges with
+`UserOtp.objects.filter(user=user, msisdn=msisdn).delete()` — **purpose-blind**. Both
+generic callers (`login.py:202`, `reset_password.py:43`) pass NO `msisdn`, so their
+rows store `msisdn=NULL` and that filter matches them.
+
+**CONSEQUENCE, in both directions:** an owner-claim challenge destroys a live login or
+reset code for that identity, and a login attempt destroys a live owner-claim
+challenge. NOT FIXED HERE: the complete fix is purpose-scoped deletion, which changes
+what a login OTP does to a reset OTP — two shipped authentication flows, with their own
+blast radius. A half-measure making only `owner-claim` polite would leave the likelier
+direction (a login wiping a claim challenge) open while looking closed. Pinned by tests
+in both directions so the behaviour is visible and any future change is deliberate.
+
+**`verify_otp` DOES NOT PURPOSE-BIND.** It selects the most recent live challenge for
+the identity and reads `purpose` OFF THE ROW; it takes no expected purpose. So "the
+code was correct" does not today mean "the code was an owner-claim code". Harmless for
+a surface that only ISSUES — but **Step 2F.2 must either extend `verify_otp` with an
+explicit expected-purpose filter or check `UserOtp.purpose` itself under its own
+lock.** This is the single most important thing 2F.2 inherits.
+
+### ONE PUBLIC FAILURE
+Unknown token, expired, cancelled, superseded, consumed, legacy tenant, deleted
+restaurant, owner moved, ownership drifted, inactive account, wrong account type,
+missing phone — all render `400 {"status":400,"message":"This owner claim is invalid
+or no longer available."}`, exactly two keys. Anything else is an oracle: an anonymous
+caller who could tell "wrong token" from "right token, wrong tenant state" learns which
+guess was closest and learns facts about a restaurant they have no relationship with.
+A short reason CODE goes to the server log; never to a response. `ClaimRefused` carries
+no `details` at all, and `ClaimPreflight` carries no token and no hash.
+
+### SUCCESS CARRIES ONE BOOLEAN
+`credential_setup_required` is `customer_access_state == pending_initial_claim` and
+**nothing else** — never inferred from password usability, `prompt_password_change`,
+`last_login` or the invitation's age. It is safe to give because the caller already
+holds the claim credential for this invitation. No owner PII, no invitation id, no
+restaurant identity, no token, no session. Responses (success, refusal and throttle
+alike) are `no-store, private` + `Pragma: no-cache` + `Expires: 0`; no cookie, no
+`Location`, no fabricated claim URL.
+
+### DELIVERY FAILURE FAILS CLOSED
+A falsy `make_otp` is a 500 ("We couldn't send your verification code. Please try
+again."), exactly as login and password reset do. The invitation, the access state and
+the password are all untouched.
+
+### THROTTLE
+`owner_claim_challenge`, default `5/min` per IP (`THROTTLE_OWNER_CLAIM_CHALLENGE`).
+**Not the security boundary** — the token is ~288 bits and the OTP verifier has its own
+attempt cap — but each attempt can cost an SMS. Keyed on the client IP, never on the
+token: DRF throttle cache keys surface in diagnostics. NOTE for anyone writing throttle
+tests: DRF binds `SimpleRateThrottle.THROTTLE_RATES` as a CLASS attribute at import, so
+`override_settings(REST_FRAMEWORK=...)` does NOT reach it and a test written the obvious
+way silently exercises the real rate. Patch the attribute (`claim_rate()` in the suite).
+
+### STEP 2F.2 — THE CONTRACT, DOCUMENTED AND NOT BUILT
+In ONE transaction: `Restaurant` lock (the same barrier Step 2E.1 gave the customer
+plane) → `RestaurantOnboarding` → the exact `OwnerInvitation` → current owner
+consistency → the purpose-bound `owner-claim` OTP → identity state → consume the
+invitation → for a PENDING owner establish the chosen password and move
+`pending_initial_claim -> established` → for an ESTABLISHED owner rewrite NEITHER →
+mint customer tokens through `issue_customer_tokens`.
+
+**For a NEW owner these must be atomic: invitation consumed + `customer_access_state`
+established + chosen password persisted.** No state may say one happened without the
+others. Nothing from the challenge may be trusted — every fact above is re-checked
+under the lock.
 
 ## Owner-Membership Serialization — Phase 1, Step 2E.1
 
