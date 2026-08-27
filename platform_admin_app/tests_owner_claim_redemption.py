@@ -814,10 +814,57 @@ class InvitationAttemptBudgetTests(RedemptionTestCase):
         )
         self.assertNothingHappened()
 
-    def test_a_sixth_attempt_cannot_push_past_the_cap(self):
+    def test_a_sixth_request_never_reaches_verification(self):
+        """
+        RENAMED, because the original name claimed something this does not prove.
+
+        Once the budget is spent the invitation reads ``verification_locked`` and
+        redemption refuses BEFORE the OTP is looked at — so the counter does not move
+        because the increment is never reached, NOT because it is capped. Discovered by
+        red-teaming: removing the ``min()`` cap left this passing, which is exactly the
+        false positive it would have shipped.
+
+        The cap itself is a BACKSTOP and is tested where it is actually reachable, in
+        ``test_the_increment_is_capped_at_the_policy`` below.
+        """
         self._exhaust()
         self.challenge(token=self.token)
         self.assertRefused(self.wrong())
+        self.assertEqual(self.attempts(), OWNER_CLAIM_MAX_FAILED_ATTEMPTS)
+
+    def test_the_increment_is_capped_at_the_policy(self):
+        """
+        THE CAP, exercised directly — the only way to reach it.
+
+        ``_record_failed_attempt`` is unreachable at the cap through HTTP (the
+        verification lock refuses first), so this drives the primitive. It is not
+        ceremony: without the cap the counter would exceed the policy the moment any
+        future change let a request past the lock check, and
+        ``owner_invitation_claim_attempts_bounded`` would turn that into an
+        ``IntegrityError`` — a 500 on the one route whose whole job is to refuse
+        cleanly.
+        """
+        OwnerInvitation.objects.filter(pk=self.invitation.pk).update(
+            claim_failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS,
+        )
+        invitation = self.fresh_invitation()
+
+        result = owner_claim_redemption._record_failed_attempt(invitation)
+
+        self.assertEqual(
+            self.attempts(), OWNER_CLAIM_MAX_FAILED_ATTEMPTS,
+            'the increment exceeded the policy the database constraint enforces',
+        )
+        self.assertEqual(result.remaining, 0)
+
+    def test_the_cap_keeps_the_counter_inside_the_database_constraint(self):
+        """
+        The consequence spelled out: an uncapped increment would violate
+        ``owner_invitation_claim_attempts_bounded`` and raise instead of refusing.
+        """
+        invitation = self.fresh_invitation()
+        for _ in range(OWNER_CLAIM_MAX_FAILED_ATTEMPTS + 3):
+            owner_claim_redemption._record_failed_attempt(invitation)
         self.assertEqual(self.attempts(), OWNER_CLAIM_MAX_FAILED_ATTEMPTS)
 
     def test_owner_control_never_moved(self):
