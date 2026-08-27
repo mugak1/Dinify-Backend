@@ -8,7 +8,9 @@ from users_app.endpoints.user_profile import UserProfileEndpoint
 # invitation state, but is MOUNTED here on the customer plane: the owner is claiming
 # their own restaurant identity and an AdminSession has no authority in it. Same
 # arrangement as the customer-plane half of delegation.
-from platform_admin_app.endpoints.owner_claim import OwnerClaimChallengeView
+from platform_admin_app.endpoints.owner_claim import (
+    OwnerClaimChallengeView, OwnerClaimRedeemView,
+)
 
 
 urlpatterns = [
@@ -20,11 +22,18 @@ urlpatterns = [
     path('user-lookup/', UserLookupEndpoint.as_view()),
     path('msisdn-lookup/', MsisdnLookupEndpoint.as_view()),
     path('user-profile/', UserProfileEndpoint.as_view()),
-    # EXPLICIT, never `owner-claim/<str:action>/`. Redemption will be its own named
-    # route for the same reason: what a request did should be readable from the path.
+    # TWO EXPLICIT ROUTES, never `owner-claim/<str:action>/`. Requesting a
+    # verification code and exercising a claim credential are different decisions with
+    # different consequences, and which one a request made should be readable from the
+    # path rather than from a body.
     path(
         'owner-claim/challenge/',
         OwnerClaimChallengeView.as_view(),
         name='owner-claim-challenge',
+    ),
+    path(
+        'owner-claim/redeem/',
+        OwnerClaimRedeemView.as_view(),
+        name='owner-claim-redeem',
     ),
 ]

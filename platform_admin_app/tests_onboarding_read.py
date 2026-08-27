@@ -54,6 +54,7 @@ from dinify_backend.configss.string_definitions import (
 from platform_admin_app import onboarding_reads, sessions
 from platform_admin_app.cookies import cookie_name
 from platform_admin_app.models import (
+    OWNER_CLAIM_MAX_FAILED_ATTEMPTS,
     ONBOARDING_SOURCE_ADMIN_CREATED,
     ONBOARDING_SOURCE_LEGACY_ADOPTED,
     AdminAuditLog,
@@ -78,6 +79,7 @@ from platform_admin_app.onboarding_reads import (
     INVITATION_NOT_APPLICABLE,
     INVITATION_NOT_ISSUED,
     INVITATION_PENDING,
+    INVITATION_VERIFICATION_LOCKED,
     INVITATION_SUPERSEDED,
     RELATIONSHIP_CONSISTENT,
     STATUS_UNAVAILABLE,
@@ -176,7 +178,8 @@ def _admin_create(restaurant, actor):
 
 
 def _invite(onboarding, user, issuer, *, consumed=False, cancelled_by=None,
-            superseded=False, expires_in=timedelta(days=7), issued_at=None):
+            superseded=False, expires_in=timedelta(days=7), issued_at=None,
+            failed_attempts=0):
     """One ``OwnerInvitation`` in the requested terminal (or live) state."""
     now = timezone.now()
     issued = issued_at or now
@@ -187,6 +190,7 @@ def _invite(onboarding, user, issuer, *, consumed=False, cancelled_by=None,
         token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
         issued_at=issued,
         expires_at=issued + expires_in,
+        claim_failed_attempts=failed_attempts,
     )
     if consumed:
         invitation.consumed_at = now
@@ -1101,3 +1105,104 @@ class ProjectionIsPureTests(TestCase):
         owner = serialize_owner(self.restaurant.owner)
         self.assertIs(owner['claim_tracked'], False)
         self.assertIsNone(owner['claim_status'])
+
+
+@override_settings(**_ADMIN_OVERRIDES)
+class VerificationLockedTests(_ReadTestCase):
+    """
+    §10. ``verification_locked`` — an UNRESOLVED invitation that has spent its guess
+    budget (Step 2F.2).
+
+    Analogous to ``expired``, one axis over: the credential has not been consumed,
+    cancelled or superseded, so it still holds the per-onboarding slot and is still
+    reissuable and cancellable — it simply cannot be challenged or redeemed any more.
+
+    DERIVED, NEVER STORED. There is no ``claim_locked_at`` and no status column, for
+    exactly the reason there is no stored ``expired``: nothing in this repository runs on
+    a schedule to maintain one.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.restaurant = _make_restaurant('Locked Out Ltd')
+        self.onboarding_row = _admin_create(self.restaurant, self.admin)
+
+    def invite(self, **kwargs):
+        return _invite(
+            self.onboarding_row, self.restaurant.owner, self.admin, **kwargs,
+        )
+
+    def invitation(self):
+        return self.onboarding(self.restaurant)['invitation']
+
+    def test_below_the_cap_still_reads_pending(self):
+        self.invite(failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS - 1)
+        self.assertEqual(self.invitation()['status'], INVITATION_PENDING)
+
+    def test_at_the_cap_reads_verification_locked(self):
+        self.invite(failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS)
+        self.assertEqual(
+            self.invitation()['status'], INVITATION_VERIFICATION_LOCKED,
+        )
+
+    def test_the_lock_takes_precedence_over_expiry(self):
+        """
+        EXPLICIT PRECEDENCE. Both states are unclaimable and both are remedied by a
+        reissue, so an invitation that is simultaneously locked and expired could
+        honestly be reported either way — but only one of them tells the operator that
+        somebody sat there guessing. Reporting ``expired`` would file a security event
+        as a clock problem.
+        """
+        self.invite(
+            failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS,
+            issued_at=timezone.now() - timedelta(days=30),
+            expires_in=timedelta(days=1),
+        )
+        self.assertEqual(
+            self.invitation()['status'], INVITATION_VERIFICATION_LOCKED,
+        )
+
+    def test_a_resolved_invitation_is_never_reported_as_locked(self):
+        """A consumed or cancelled row reports what actually happened to it."""
+        self.invite(failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS, consumed=True)
+        self.assertEqual(self.invitation()['status'], INVITATION_CONSUMED)
+
+    def test_a_cancelled_invitation_keeps_its_own_word(self):
+        self.invite(
+            failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS, cancelled_by=self.admin,
+        )
+        self.assertEqual(self.invitation()['status'], INVITATION_CANCELLED)
+
+    def test_a_locked_invitation_establishes_no_owner_control(self):
+        self.invite(failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS)
+        self.assertControl(self.restaurant, CONTROL_NOT_ESTABLISHED)
+
+    def test_the_metadata_is_still_published(self):
+        """
+        An operator needs the id to reissue it, and the window to understand it. The
+        numeric attempt count is deliberately NOT exposed: the status is enough for the
+        UI to know a reissue is required, and a count is progress reporting.
+        """
+        invitation = self.invite(failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS)
+        projected = self.invitation()
+        self.assertEqual(projected['id'], str(invitation.pk))
+        self.assertEqual(projected['issued_at'], invitation.issued_at.isoformat())
+        self.assertEqual(projected['expires_at'], invitation.expires_at.isoformat())
+        self.assertEqual(
+            set(projected), {'status', 'id', 'issued_at', 'expires_at'},
+            'the invitation projection must not grow an attempt count',
+        )
+
+    def test_no_credential_or_counter_leaks(self):
+        invitation = self.invite(failed_attempts=OWNER_CLAIM_MAX_FAILED_ATTEMPTS)
+        blob = self.client.get(_detail_url(self.restaurant)).content.decode()
+        self.assertNotIn(invitation.token_hash, blob)
+        self.assertNotIn('claim_failed_attempts', blob)
+        self.assertNotIn('failed_attempts', blob)
+
+    def test_the_read_never_writes_the_counter(self):
+        invitation = self.invite(failed_attempts=3)
+        for _ in range(3):
+            self.onboarding(self.restaurant)
+        invitation.refresh_from_db()
+        self.assertEqual(invitation.claim_failed_attempts, 3)

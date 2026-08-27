@@ -93,6 +93,7 @@ NOT_ADMIN_CREATED = 'not_admin_created'
 RESTAURANT_DELETED = 'restaurant_deleted'
 INVITATION_RESOLVED = 'invitation_resolved'
 INVITATION_EXPIRED = 'invitation_expired'
+INVITATION_VERIFICATION_LOCKED = 'invitation_verification_locked'
 NOT_THE_HEAD_INVITATION = 'not_the_head_invitation'
 INVITED_USER_MISSING = 'invited_user_missing'
 INVITED_USER_NOT_OWNER = 'invited_user_not_owner'
@@ -142,6 +143,16 @@ class ClaimPreflight:
     restaurant: 'Restaurant'
     invited_user: 'User'
     credential_setup_required: bool
+    # The CANONICAL MSISDN this claim's second factor must be delivered to, already
+    # validated to equal the stored `invited_user.phone_number` byte for byte.
+    #
+    # Surfaced so the caller can pass it to `make_otp` EXPLICITLY rather than relying on
+    # its `user.phone_number` fallback. That fallback sends to the same number but leaves
+    # `UserOtp.msisdn` NULL, so the row does not record where the code actually went —
+    # and Step 2F.2 has to compare the factor against the CURRENT owner's phone to know
+    # that a code delivered to an old number cannot redeem. A destination that is not
+    # stored cannot be compared.
+    canonical_phone: str
 
 
 def resolve_claim_token(raw_token: Optional[str]) -> ClaimPreflight:
@@ -194,6 +205,24 @@ def resolve_claim_token(raw_token: Optional[str]) -> ClaimPreflight:
         raise ClaimRefused(INVITATION_RESOLVED)
     if invitation.is_expired:
         raise ClaimRefused(INVITATION_EXPIRED)
+    # THE INVITATION-LEVEL GUESS BUDGET (Step 2F.2), enforced HERE as well as at
+    # redemption — and that is the whole point of putting the counter on the credential.
+    #
+    # `UserOtp.attempts` caps guesses per OTP ROW, and `make_otp` deletes the old row and
+    # inserts a fresh one with `attempts=0`. If this endpoint kept issuing codes, an
+    # attacker holding a stolen claim token would get five guesses, request another
+    # challenge, get five more, and walk a four-digit space. Refusing here is what makes
+    # the budget survive OTP re-issuance.
+    #
+    # NO OTP IS SENT, and the caller is told nothing: the same uniform 400 as every other
+    # unclaimable state. "Five failed attempts" to an anonymous caller would confirm the
+    # token is real and report progress on the attack. The log gets the code.
+    #
+    # An exhausted invitation is still UNRESOLVED — it holds the slot, and an
+    # administrator reissues (which mints a fresh credential with a fresh budget) or
+    # cancels it.
+    if invitation.is_verification_locked:
+        raise ClaimRefused(INVITATION_VERIFICATION_LOCKED)
 
     # THE ONE DEFINITION OF "THE CURRENT INVITATION". `select_head_invitation` is what
     # the Admin read publishes and what Step 2E's reissue and cancel act on; deciding
@@ -274,4 +303,5 @@ def resolve_claim_token(raw_token: Optional[str]) -> ClaimPreflight:
             invited_user.customer_access_state
             == CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM
         ),
+        canonical_phone=canonical_phone,
     )

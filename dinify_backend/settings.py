@@ -304,6 +304,15 @@ REST_FRAMEWORK = {
         'owner_claim_challenge': config(
             'THROTTLE_OWNER_CLAIM_CHALLENGE', default='5/min'
         ),
+        # Owner-claim redemption. Defence in depth only, and it must not be described
+        # as the lockout: DRF's counters are per-worker LocMemCache and are bypassed by
+        # rotating IPs. The DURABLE boundary is OwnerInvitation.claim_failed_attempts —
+        # five failed verifications for the whole life of the credential, in PostgreSQL.
+        # Matched to the challenge rather than the looser 10/min siblings because an
+        # honest claimant has five attempts in total anyway.
+        'owner_claim_redeem': config(
+            'THROTTLE_OWNER_CLAIM_REDEEM', default='5/min'
+        ),
     },
 }
 
