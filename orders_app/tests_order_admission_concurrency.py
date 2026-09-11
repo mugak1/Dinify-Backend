@@ -56,6 +56,7 @@ from dinify_backend.configss.string_definitions import (
     RestaurantStatus_Suspended,
 )
 from orders_app.controllers import manage_order
+from orders_app.controllers.services.order_quote import quote_ref
 from orders_app.controllers.services.create_order import _create_order
 from orders_app.models import Order
 from restaurants_app.controllers import lifecycle
@@ -137,7 +138,7 @@ def _submit(ids, results, key='submit', phases=2, barrier=None):
         order = Order.objects.get(pk=ids['order'])
         _sync(barrier, phases)
         results[key] = manage_order.update_order_status(
-            order, OrderStatus_Pending, None,
+            order, OrderStatus_Pending, None, quote_ref=quote_ref(order),
         )
     except Exception as exc:                       # pragma: no cover - defensive
         results[key] = f'error:{exc!r}'
@@ -400,7 +401,9 @@ class OrderAdmissionConcurrencyTests(TransactionTestCase):
         draft = self._draft()
         self._at(RestaurantStatus_Suspended)
 
-        result = manage_order.update_order_status(draft, OrderStatus_Pending, None)
+        result = manage_order.update_order_status(
+            draft, OrderStatus_Pending, None, quote_ref=quote_ref(draft),
+        )
 
         self.assertEqual(result.get('status'), 400, result)
         draft.refresh_from_db()
@@ -410,7 +413,9 @@ class OrderAdmissionConcurrencyTests(TransactionTestCase):
         """The gate refuses suspension, not submission — the happy path is intact."""
         draft = self._draft()
 
-        result = manage_order.update_order_status(draft, OrderStatus_Pending, None)
+        result = manage_order.update_order_status(
+            draft, OrderStatus_Pending, None, quote_ref=quote_ref(draft),
+        )
 
         self.assertEqual(result.get('status'), 200, result)
         draft.refresh_from_db()
@@ -428,7 +433,9 @@ class OrderAdmissionConcurrencyTests(TransactionTestCase):
         draft = self._draft()
         self._at(RestaurantStatus_Onboarding)
 
-        result = manage_order.update_order_status(draft, OrderStatus_Pending, self.owner)
+        result = manage_order.update_order_status(
+            draft, OrderStatus_Pending, self.owner, quote_ref=quote_ref(draft),
+        )
 
         self.assertEqual(result.get('status'), 400, result)
         draft.refresh_from_db()
@@ -446,7 +453,7 @@ class OrderAdmissionConcurrencyTests(TransactionTestCase):
         draft = self._draft()
         self.assertEqual(
             manage_order.update_order_status(
-                draft, OrderStatus_Pending, None,
+                draft, OrderStatus_Pending, None, quote_ref=quote_ref(draft),
             ).get('status'),
             200,
         )

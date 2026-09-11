@@ -37,6 +37,10 @@ from orders_app.controllers.services.order_input import (
     client_order_id_rejection, validate_order_items,
     validate_service_client_order_id,
 )
+from orders_app.controllers.services.catalogue_snapshot import build_snapshot
+from orders_app.controllers.services.order_pricing import (
+    PRICING_VERSION_CORRECTED,
+)
 from restaurants_app.controllers.lifecycle_policy import orders_are_commercial
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated,
@@ -236,9 +240,27 @@ def _create_order(*, restaurant, table, items,
             from restaurants_app.controllers.menu_publication import (
                 validate_order_selections,
             )
+            # ONE COHERENT CATALOGUE READ AND ONE PRICING INSTANT (D02).
+            #
+            # The instant is captured HERE — after the blocking admission and the
+            # table lock — so an order is priced at the moment it was actually
+            # admitted, not at one sampled before the request waited. The rows
+            # come from a single restaurant-scoped statement (plus one batched
+            # allergen-label read; see catalogue_snapshot for why that second
+            # statement cannot make anything disagree).
+            #
+            # It replaces THREE independent reads of the same rows inside this
+            # transaction — publication's batch, canonicalisation's batch and
+            # add_order_item's per-line guard — each of which took its own
+            # database snapshot under READ COMMITTED, and 28 separate clock
+            # readings for a four-line order. No lock is taken on menu_items: see
+            # that module for why one would decide which valid instant wins
+            # rather than make the read more correct.
+            snapshot = build_snapshot(restaurant, items, timezone.localtime())
             selection = validate_order_selections(
-                restaurant, items, timezone.localtime(),
+                restaurant, items, snapshot.now,
                 enforce_publication=(created_by is None),
+                resolved=snapshot.as_map(),
             )
             if selection.get('status') != 200:
                 raise OrderItemRejected(selection)
@@ -261,7 +283,9 @@ def _create_order(*, restaurant, table, items,
             #     new submissions only — a replay returns at step 1 before this point,
             #     exactly like publication — and applies to every caller (staff
             #     included; it is NOT gated on created_by).
-            normalization = ConOrder.normalize_order_items(restaurant, items)
+            normalization = ConOrder.normalize_order_items(
+                restaurant, items, snapshot=snapshot,
+            )
             if normalization.get('status') != 200:
                 raise OrderItemRejected(normalization)
             items = normalization['items']
@@ -337,6 +361,15 @@ def _create_order(*, restaurant, table, items,
                             verdict.restaurant_is_test
                             or not orders_are_commercial(verdict.status)
                         ),
+
+                        # The corrected calculation convention (D02). Written
+                        # HERE, by the service that actually performs it, inside
+                        # the same atomic operation that persists the corrected
+                        # parent and child values — so an order is certified
+                        # corrected only if its rows really were. It is never
+                        # accepted from a client and is absent from every
+                        # serializer and from EDIT_INFORMATION.
+                        pricing_version=PRICING_VERSION_CORRECTED,
                     )
             except IntegrityError:
                 # concurrent double-tap: a racing request with the same
@@ -363,9 +396,18 @@ def _create_order(*, restaurant, table, items,
             #    (and then lazily load its restaurant) once per line. The instance is
             #    the same one every line would have fetched — it was created in this
             #    transaction and nothing has written to it since.
+            # The per-order line index (D03). On this path the order was created
+            # moments ago in this very transaction, so the index starts EMPTY and
+            # is filled from the rows written below — the merge lookup therefore
+            # costs NO query at all, where the pre-fix path issued a candidate
+            # fetch plus an extras fetch per repeated line. add_order_item keeps
+            # its bounded database fallback for every caller that has no index,
+            # so this is an optimisation and never a trust boundary.
+            line_index = {}
             for item in items:
                 item_result = ConOrder.add_order_item(
                     item=item, order_id=str(order.id), order=order,
+                    snapshot=snapshot, index=line_index,
                 )
                 if item_result.get('status') != 200:
                     raise OrderItemRejected(item_result)

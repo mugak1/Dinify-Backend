@@ -34,6 +34,7 @@ from platform_admin_app.testing import give_legacy_platform_role
 from restaurants_app.models import (
     Restaurant, Table, MenuItem, MenuSection, SectionGroup, RestaurantEmployee,
 )
+from orders_app.controllers.services.order_quote import quote_ref
 from dinify_backend.configss.messages import OK_ORDER_UPDATED
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated, OrderStatus_Pending,
@@ -274,35 +275,31 @@ class TestOrderFunctions(TestCase):
         order = Order.objects.get(table=Table.objects.get(number=TEST_TABLE_NUMBER3))
         options_item = MenuItem.objects.get(name=TEST_OPTION_MENU_ITEM_NAME)
 
-        line_defaults = dict(
-            quantity=1,
-            unit_price=Decimal('10.00'),
-            discounted_price=Decimal('10.00'),
-            unit_cost_of_options=Decimal('0.00'),
-            total_cost=Decimal('10.00'),
-            discounted_cost=Decimal('10.00'),
-            savings=Decimal('0.00'),
-            cost_of_options=Decimal('0.00'),
-            actual_cost=Decimal('10.00'),
-        )
-        small_line = OrderItem.objects.create(
-            order=order, item=options_item,
+        # Both lines are written by the REAL writer, so their immutable unit and
+        # preparation snapshots are the ones the pricer actually produces. A
+        # hand-built row with invented amounts is a DIFFERENT line under the D02
+        # identity rule (same selections, incompatible pricing snapshot) and
+        # would not — and should not — merge.
+        for choice in (TEST_OPTION_CHOICE_SMALL_ID, TEST_OPTION_CHOICE_LARGE_ID):
+            created = ConOrder.add_order_item(
+                item={
+                    'item': str(options_item.pk), 'quantity': 1,
+                    'selected_modifiers': {TEST_OPTION_GROUP_ID: [choice]},
+                },
+                order_id=str(order.pk),
+            )
+            self.assertEqual(created['status'], 200, created)
+        small_line = OrderItem.objects.get(
+            order__id=order.pk, item=options_item, deleted=False,
             selected_modifiers={TEST_OPTION_GROUP_ID: [TEST_OPTION_CHOICE_SMALL_ID]},
-            **line_defaults,
         )
-        large_line = OrderItem.objects.create(
-            order=order, item=options_item,
+        large_line = OrderItem.objects.get(
+            order__id=order.pk, item=options_item, deleted=False,
             selected_modifiers={TEST_OPTION_GROUP_ID: [TEST_OPTION_CHOICE_LARGE_ID]},
-            **line_defaults,
         )
-        # The matcher inspects existing_items[0], ordered by '-time_created'. Pin
-        # the Small line as the most recent so it is deterministically [0] — the
-        # row the incoming Small selection must merge onto.
-        now = timezone.now()
-        OrderItem.objects.filter(pk=large_line.pk).update(
-            time_created=now - timedelta(minutes=1)
-        )
-        OrderItem.objects.filter(pk=small_line.pk).update(time_created=now)
+        # The Large line is the most recent, so a matcher that examined only the
+        # newest candidate would miss the Small one entirely — which is the D03
+        # defect this now also covers, alongside the original crash.
         self.assertEqual(
             OrderItem.objects.filter(
                 order__id=order.pk, item=options_item, deleted=False
@@ -453,7 +450,7 @@ class TestAnonymousOrderPaths(TestCase):
 
         response = self.client.put(
             '/api/v1/orders/submit/',
-            {'order': order_id},
+            {'order': order_id, 'quote_ref': quote_ref(Order.objects.get(id=order_id))},
             format='json',
             HTTP_X_DINER_SESSION=self._diner_session(),
         )
@@ -873,10 +870,13 @@ class TestOrderTenantConsistency(TestCase):
             order__id=order_id, item=self.extra_a, parent_item__isnull=False
         )
         self.assertEqual(child.parent_item_id, parent.pk)
-        self.assertEqual(child.quantity, 1)
+        # D02 (P1): ONE selected extra PER UNIT of its parent dish. The parent is
+        # quantity 2, so two of this extra are charged and two are prepared. It
+        # was hardcoded to 1 however many dishes it was attached to.
+        self.assertEqual(child.quantity, 2)
         # priced server-side from A's menu item, never from client input
         self.assertEqual(child.unit_price, Decimal('1000.00'))
-        self.assertEqual(child.actual_cost, Decimal('1000.00'))
+        self.assertEqual(child.actual_cost, Decimal('2000.00'))
 
     def test_a_foreign_extra_rejects_the_whole_order_before_any_write(self):
         # Renamed and re-described: the old name and comment claimed the

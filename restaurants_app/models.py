@@ -555,84 +555,46 @@ class MenuItem(BaseModel):
                     for tid in unique_ids
                 ])
 
-    def is_discount_active(self):
-        """Single, timezone-aware (EAT) source of truth for whether this item's
-        discount is live right now. Read purely from the canonical post-0042
-        ``discount_details`` shape — the stored ``discounted_price`` column is
-        deliberately NOT consulted. Active requires ALL of:
-          (a) a real magnitude: discount_percentage > 0 OR discount_amount > 0
-          (b) today within [start_date, end_date] INCLUSIVE ('' = unbounded)
-          (c) today's ISO weekday in recurring_days ([] = every day)
-          (d) now within [start_time, end_time] ('' = unbounded)
+    def price_verdict(self, now=None):
+        """THE reading of this item's stored price configuration.
+
+        Delegates to the shared policy in
+        ``restaurants_app.controllers.pricing_policy`` so the public menu read
+        and the order path cannot resolve the same row differently. NEVER
+        raises: an unreadable configuration comes back as an unusable verdict
+        for the caller to act on (the menu omits the item; checkout refuses the
+        line). Pass ``now`` to price a whole order at one captured instant.
         """
-        details = self.discount_details if isinstance(self.discount_details, dict) else {}
-        pct = Decimal(str(details.get('discount_percentage', 0) or 0))
-        amt = Decimal(str(details.get('discount_amount', 0) or 0))
-        if pct <= 0 and amt <= 0:
-            return False
+        from restaurants_app.controllers.pricing_policy import resolve_price
+        return resolve_price(self.primary_price, self.discount_details, now)
 
-        today = timezone.localdate()
-        start_date = details.get('start_date') or ''
-        end_date = details.get('end_date') or ''
-        if start_date:
-            try:
-                if today < datetime.strptime(start_date, '%Y-%m-%d').date():
-                    return False
-            except (ValueError, TypeError):
-                pass  # malformed = treat as no lower bound (never suppress)
-        if end_date:
-            try:
-                # end_date is INCLUSIVE — the last day the discount is valid.
-                if today > datetime.strptime(end_date, '%Y-%m-%d').date():
-                    return False
-            except (ValueError, TypeError):
-                pass
+    def is_discount_active(self, now=None):
+        """Is this item's discount live at ``now`` (default: now, in EAT)?
 
-        recurring_days = details.get('recurring_days') or []
-        # DECISION LEVER: empty recurring_days == "every day" (no day filter).
-        # To make empty == "never", replace the guard below with:
-        #     if not recurring_days: return False
-        if isinstance(recurring_days, (list, tuple)) and len(recurring_days) > 0:
-            if today.isoweekday() not in recurring_days:
-                return False
-
-        now_time = timezone.localtime().time()
-        start_time = details.get('start_time') or ''
-        end_time = details.get('end_time') or ''
-        if start_time:
-            try:
-                if now_time < datetime.strptime(f'{start_time}:00', '%H:%M:%S').time():
-                    return False
-            except (ValueError, TypeError):
-                pass  # malformed/empty = no lower bound
-        if end_time:
-            try:
-                if now_time > datetime.strptime(f'{end_time}:00', '%H:%M:%S').time():
-                    return False
-            except (ValueError, TypeError):
-                pass
-
-        return True
-
-    def effective_base_price(self):
-        """Per-unit BASE price (no modifiers): the discounted price when the
-        discount is active, else ``primary_price``. Decimal, never negative.
-        Shares ``is_discount_active`` / ``discount_details`` as its source of
-        truth so the diner-displayed price and the order-charged price agree.
+        NOT a price-validity check — it answers False both for "no discount" and
+        for "this item cannot be priced". Anything that needs to tell those
+        apart must ask :meth:`price_verdict`, which is why every production
+        caller does.
         """
-        primary = Decimal(str(self.primary_price or 0))
-        if not self.is_discount_active():
-            return primary
-        details = self.discount_details if isinstance(self.discount_details, dict) else {}
-        pct = Decimal(str(details.get('discount_percentage', 0) or 0))
-        amt = Decimal(str(details.get('discount_amount', 0) or 0))
-        if pct > 0:
-            price = primary - (primary * pct / Decimal('100'))
-        elif amt > 0:
-            price = primary - amt
-        else:
-            price = primary
-        return price if price > 0 else Decimal('0')
+        return self.price_verdict(now).discount_active
+
+    def effective_base_price(self, now=None):
+        """Per-unit BASE price (no modifiers), as a canonical 2dp Decimal.
+
+        RAISES ``MoneyConfigError`` when the stored configuration cannot be
+        priced. That is deliberate and is the D02 correction: the pre-fix method
+        ended in ``price if price > 0 else Decimal('0')``, so a discount larger
+        than the price CLAMPED TO ZERO and the dish silently became free. There
+        is no safe fallback here — zero is a real price and the undiscounted
+        price is an unearned charge — so an unpriceable item must stop the
+        caller rather than be given a number. Callers that must not raise ask
+        :meth:`price_verdict` instead.
+        """
+        from misc_app.controllers.money import MoneyConfigError
+        verdict = self.price_verdict(now)
+        if not verdict.usable:
+            raise MoneyConfigError(verdict.reason, 'effective_base_price')
+        return verdict.effective_base
 
 
 TAG_CATEGORY_CHOICES = (

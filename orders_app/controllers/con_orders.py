@@ -33,6 +33,11 @@ from orders_app.controllers.services.order_admission import (
     STAGE_CREATE,
     evaluate,
 )
+from orders_app.controllers.services.order_pricing import (
+    PricingRefused, extend, line_identity, modifier_adjustment, price_unit,
+    unit_from_row,
+)
+from misc_app.controllers.money import MoneyConfigError, quantize_money
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +198,7 @@ class ConOrder:
         return text[:64]
 
     @staticmethod
-    def normalize_order_items(restaurant, order_items: list) -> dict:
+    def normalize_order_items(restaurant, order_items: list, snapshot=None) -> dict:
         """
         Batch counterpart of ``normalize_selected_modifiers`` for the authoritative
         order-creation transaction. For each line it resolves the MenuItem
@@ -201,16 +206,16 @@ class ConOrder:
         of shallow-copied items whose ``selected_modifiers`` is the canonical form —
         the caller's original items are never mutated in place.
 
+        ``snapshot`` is the order's single coherent catalogue read (D02). When it is
+        supplied this issues NO query of its own: it was one of THREE separate reads
+        of the same rows inside the transaction, and under READ COMMITTED each of
+        those took its own database snapshot, so validation, canonicalisation and
+        pricing could each see a different committed version of one row. The
+        restaurant-scoped fallback is preserved for every other caller.
+
         Returns ``{'status': 200, 'items': [<normalized copies>]}`` or the first
         controlled ``{'status': 400, 'message': ...}`` rejection.
         """
-        # Shape-check and parse every id first, then resolve them in ONE
-        # restaurant-scoped query instead of a .get() per line. Same rows, same
-        # scoping, same opaque rejection — only the number of round trips changes.
-        # Ids are parsed to UUID and the map keyed by pk (a UUID) so lookup
-        # normalizes case and format exactly as `pk=` did; this mirrors
-        # menu_publication._parse_selection, which runs immediately before this on
-        # the same id set and already rejects in the same two-pass order.
         wanted = []
         for item in order_items:
             if not isinstance(item, dict) or item.get('item') is None:
@@ -223,12 +228,19 @@ class ConOrder:
             except (ValueError, TypeError):
                 return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}
 
-        fetched = {
-            menu_item.pk: menu_item
-            for menu_item in MenuItem.objects.filter(
-                pk__in=set(wanted), section__restaurant=restaurant,
-            )
-        }
+        if snapshot is None:
+            fetched = {
+                menu_item.pk: menu_item
+                for menu_item in MenuItem.objects.filter(
+                    pk__in=set(wanted), section__restaurant=restaurant,
+                )
+            }
+        else:
+            fetched = {
+                item_id: snapshot.menu_item(item_id)
+                for item_id in set(wanted)
+                if snapshot.menu_item(item_id) is not None
+            }
 
         normalized = []
         for item, item_id in zip(order_items, wanted):
@@ -292,50 +304,119 @@ class ConOrder:
         return {'status': 200}
 
     @staticmethod
-    def construct_option_items(item: dict, menu_item=None) -> list:
-        # `menu_item` comes from add_order_item's restaurant-scoped resolve; the
-        # fallback keeps any other caller working. This function only reads
-        # `.options`, so the passed instance and the row this used to re-fetch are
-        # the same read taken once instead of twice.
-        if menu_item is None:
-            menu_item = MenuItem.objects.get(pk=item['item'])
-        selected_modifiers = item.get('selected_modifiers') or {}
-        # Resolve through the SAME structural reading validation uses. This used
-        # to build `{g.get('id'): g ...}`, i.e. LAST-wins, while the normalizer
-        # resolved duplicate ids FIRST-wins — so a duplicated id was validated
-        # against one definition and labelled/priced against another. Duplicates
-        # are now refused outright, and both sites read one unambiguous map.
+    def option_breakdown(menu_item, selected_modifiers):
+        """ONE traversal of a line's modifier selection (D02 §4.2).
+
+        Canonicalises each selected choice's adjustment EXACTLY ONCE and returns
+        both the canonical adjustments (which price the line) and the display
+        options (which label it), so the cost a diner is shown for a group and
+        the cost they are charged for it are the same number by construction.
+        Before this they were computed separately — the label path summed into a
+        ``float``, the pricing path into a ``Decimal`` — and a repeated or
+        malformed value could make them disagree.
+
+        Returns ``{'status': 200, 'adjustments': [...], 'options': [...]}`` or a
+        controlled 400. Never raises on stored data.
+        """
+        selected_modifiers = selected_modifiers or {}
         definition = inspect_modifier_definition(menu_item.options)
+        if definition.is_invalid:
+            return {
+                'status': 400,
+                'message': MODIFIER_CONFIG_MESSAGE.format(name=menu_item.name),
+            }
         if not definition.is_active or not selected_modifiers:
-            return []
+            return {'status': 200, 'adjustments': [], 'options': []}
 
         groups_by_id = {group.group_id: group for group in definition.groups}
-        selected_options = []
+        adjustments = []
+        options = []
         for group_id, choice_ids in selected_modifiers.items():
             group = groups_by_id.get(group_id)
-            if group is None or not choice_ids:
+            if group is None:
+                return {
+                    'status': 400,
+                    'message': f'Invalid modifier group for item, {menu_item.name}'
+                }
+            # An unusable member is REFUSED, never dropped: silently ignoring it
+            # would price a selection the diner did not make. Checked before the
+            # hash the de-duplication below would otherwise raise on.
+            if any(not usable_identifier(c) for c in (choice_ids or [])):
+                return {
+                    'status': 400,
+                    'message': f'Invalid modifier choice for item, {menu_item.name}'
+                }
+            # De-dupe per group: a repeated choice is validated, labelled and
+            # charged exactly once.
+            resolved_choices = []
+            for choice_id in dict.fromkeys(choice_ids or []):
+                choice = group.choices_by_id.get(choice_id)
+                if choice is None:
+                    return {
+                        'status': 400,
+                        'message': f'Invalid modifier choice for item, {menu_item.name}'
+                    }
+                resolved_choices.append(choice)
+
+            group_total = Decimal('0')
+            for choice in resolved_choices:
+                try:
+                    adjustment = modifier_adjustment(choice.get('additionalCost', 0))
+                except PricingRefused as refused:
+                    # A malformed stored adjustment used to raise
+                    # decimal.InvalidOperation straight out of checkout as a 500
+                    # ('abc', None, True, [], {}, 'NaN', 'Infinity', '1e400' all
+                    # did). It is now a controlled refusal, and it is NEVER
+                    # defaulted to zero — that would make a paid option free.
+                    logger.warning(
+                        'Unreadable modifier cost refused at checkout '
+                        '(menu_item_id=%s, reason=%s, group_id=%s)',
+                        menu_item.pk, refused.detail,
+                        ConOrder._safe_identifier_for_log(group_id),
+                    )
+                    return {
+                        'status': 400,
+                        'message': MODIFIER_CONFIG_MESSAGE.format(
+                            name=menu_item.name),
+                    }
+                adjustments.append(adjustment)
+                group_total += adjustment
+
+            if not resolved_choices:
                 continue
-            # De-dupe so the displayed option cost matches the charged cost
-            # (determine_effective_unit_price also charges each choice once).
-            # Members are already identifier-safe by the time a selection is
-            # canonical; guard anyway so a direct caller cannot raise here.
-            resolved_choices = [
-                group.choices_by_id[cid]
-                for cid in dict.fromkeys(
-                    c for c in choice_ids if usable_identifier(c)
-                )
-                if cid in group.choices_by_id
-            ]
-            names_of_choices = ', '.join(c.get('name', '') for c in resolved_choices)
-            cost_total = float(sum(
-                Decimal(str(c.get('additionalCost', 0))) for c in resolved_choices
-            ))
-            selected_options.append({
+            group_total = quantize_money(group_total)
+            options.append({
                 'name': group.raw.get('name'),
-                'cost': cost_total,
-                'choices': names_of_choices,
+                # LEGACY SHAPE, DELIBERATELY KEPT: `cost` stays a JSON number so
+                # any existing reader of this persisted blob is unaffected. It is
+                # now derived from an already-canonical 2dp Decimal rather than
+                # summed as floats, so it can no longer carry a binary artefact.
+                # Nothing prices from it.
+                'cost': float(group_total),
+                # ADDITIVE and canonical: the exact decimal string. This is the
+                # value to read; `cost` is compatibility.
+                'cost_amount': str(group_total),
+                'choices': ', '.join(c.get('name', '') for c in resolved_choices),
             })
-        return selected_options
+        return {'status': 200, 'adjustments': adjustments, 'options': options}
+
+    @staticmethod
+    def construct_option_items(item: dict, menu_item=None) -> list:
+        """Display options for one line. Thin wrapper over ``option_breakdown``
+        so labels and pricing can never come from two traversals.
+
+        Kept for its existing callers; it returns ``[]` for a configuration the
+        breakdown refuses, because a label list has no way to report one. The
+        pricing path calls ``option_breakdown`` directly and DOES fail closed.
+        """
+        if menu_item is None:
+            menu_item = MenuItem.objects.get(pk=item['item'])
+        breakdown = ConOrder.option_breakdown(
+            menu_item, item.get('selected_modifiers') or {},
+        )
+        if breakdown.get('status') != 200:
+            return []
+        return breakdown['options']
 
     @staticmethod
     def any_present_ongoing_order(table: Table) -> dict:
@@ -368,463 +449,603 @@ class ConOrder:
         return {'present': False}
 
     @staticmethod
-    def find_existing_order_item(item: dict, order_id: str, menu_item=None):
-        # Returns the matching OrderItem line (so the caller can bump it directly)
-        # or None. Returning the resolved row — instead of a bare bool — is what
-        # lets update_item_quantity avoid a non-unique re-lookup: the same menu
-        # item can sit on an order as several lines (different modifiers/extras),
-        # so an OrderItem.objects.get(order, item) would raise
-        # MultipleObjectsReturned. The `existing_item` binding stays on the parent
-        # line throughout (the extras loops iterate a separate `extra` variable) so
-        # every match path returns that parent line, never a child-extra row.
-        #
-        # `menu_item` is passed in by add_order_item, which has already resolved it
-        # RESTAURANT-SCOPED one line earlier; re-fetching it here (unscoped, by pk)
-        # read the same row a second time to no purpose. The fallback keeps every
-        # other caller working unchanged.
+    def line_identity_for(menu_item, item, unit, deliverable, name_snapshot,
+                          option_labels):
+        """The canonical D03 identity of the parent line this request describes."""
+        return line_identity(
+            item_id=menu_item.pk,
+            selected_modifiers=item.get('selected_modifiers') or {},
+            extra_ids=item.get('extras') or [],
+            reference_unit=unit.reference_unit,
+            effective_unit=unit.effective_unit,
+            deliverable=deliverable,
+            name_snapshot=name_snapshot,
+            modifiers_snapshot=option_labels,
+        )
+
+    @staticmethod
+    def row_identity(row, children=None):
+        """The canonical identity of a PERSISTED parent line.
+
+        Computed from the row's own stored values, so an existing line and an
+        incoming request are compared on exactly the same key.
+        """
+        if children is None:
+            children = list(
+                OrderItem.objects.filter(parent_item=row, deleted=False)
+            )
+        return line_identity(
+            item_id=row.item_id,
+            selected_modifiers=row.selected_modifiers or {},
+            extra_ids=[child.item_id for child in children],
+            reference_unit=row.unit_price,
+            effective_unit=row.discounted_price,
+            deliverable=bool(row.available),
+            name_snapshot=row.item_name_snapshot,
+            modifiers_snapshot=row.modifiers_snapshot or [],
+        )
+
+    @staticmethod
+    def find_existing_order_item(item: dict, order_id: str, menu_item=None,
+                                 identity=None):
+        """Find the line on this order that this request is the SAME line as.
+
+        D03. Four defects lived in the version this replaces, and each one is
+        closed by construction here rather than by another branch:
+
+        * **Absence was a wildcard.** ``has_modifiers`` was derived from the
+          INCOMING selection only, so the first branch returned on ``not
+          has_modifiers`` without comparing anything: a plain dish merged into a
+          modified one (and the diner was served two of the modified version),
+          while the reverse order correctly produced two lines. Identity is now
+          symmetric — an empty selection matches only another empty selection.
+        * **``.first()`` examined ONE candidate.** Submitting A, B, A left three
+          lines because the newest candidate (B) was compared and the match (A)
+          never looked at. Every undeleted candidate is now compared.
+        * **Child-extra rows were candidates.** The filter had no
+          ``parent_item__isnull=True``, and ``Meta.ordering`` is ``-time_created``
+          — so a dish that is ALSO an extra of an earlier line matched its own
+          child row, and an independent top-level dish was merged into an extra.
+        * **``len(extras)`` on ``None``.** An incoming line with no extras,
+          against an existing line that had some, raised ``TypeError`` — an
+          uncaught HTTP 500. There is no length comparison left to raise.
+
+        ``identity`` is passed by ``add_order_item``, which has already computed
+        it. The fallback recomputes the request's identity so any other caller
+        gets the same rule.
+        """
         if menu_item is None:
             menu_item = MenuItem.objects.get(pk=item['item'])
-        # One read, not a COUNT followed by a fetch. `.first()` compiles to the same
-        # SQL as `[0]` here because OrderItem carries Meta.ordering, so Django does
-        # not inject an ordering of its own.
-        existing_item = OrderItem.objects.filter(
-            order__id=order_id,
-            item=menu_item,
-            deleted=False
-        ).first()
-        if existing_item is not None:
-            extras = item.get('extras')
-            # Evaluated ONCE. The four `if` sites below each called .count() on this
-            # queryset — all four ran, since they are independent `if`s and the count
-            # sits left of the `and` — a fifth ran inside the branch, and the loops
-            # then issued a further SELECT. Up to six statements for one unchanging
-            # set of rows.
-            existing_item_extras = list(
-                OrderItem.objects.filter(parent_item=existing_item)
+        if identity is None:
+            # The request's OWN selections must be priced here — an identity
+            # computed without them would describe a different line.
+            resolved = ConOrder._resolve_for_pricing(
+                menu_item, item.get('selected_modifiers') or {},
             )
-            extras_count = len(existing_item_extras)
-            incoming_modifiers = item.get('selected_modifiers') or {}
-            existing_modifiers = existing_item.selected_modifiers or {}
-            # Compare on the order- and duplicate-independent SEMANTIC key, not raw
-            # client JSON. The incoming selection is already canonical (normalized in
-            # the order-creation transaction); keying the existing row the same way
-            # keeps line-merge tolerant of any harmless legacy pre-canonical row
-            # (duplicate/reordered choice ids) while genuinely different selections
-            # stay distinct.
-            incoming_key = ConOrder._modifier_compare_key(incoming_modifiers)
-            existing_key = ConOrder._modifier_compare_key(existing_modifiers)
-            has_modifiers = bool(incoming_key)
-
-            # no extras and no options
-            if extras_count == 0 and not has_modifiers:
-                return existing_item
-
-            # only extras but no item_options
-            if extras_count > 0 and not has_modifiers:
-                logger.debug("checking only extras with no items")
-                if len(extras) == extras_count:
-                    for extra in existing_item_extras:
-                        # item_id, not item.pk — the same value, off the row already
-                        # loaded, instead of a fresh SELECT per extra.
-                        if str(extra.item_id) not in extras:
-                            return None
-                    return existing_item
-
-            # only options but no extras
-            if extras_count == 0 and has_modifiers:
-                if existing_key == incoming_key:
-                    return existing_item
+            if resolved.get('status') != 200:
                 return None
+            identity = ConOrder.line_identity_for(
+                menu_item, item, resolved['unit'], resolved['deliverable'],
+                menu_item.name,
+                [f"{o['name']}: {o['choices']}" for o in resolved['options']],
+            )
 
-            # both extras and options
-            if extras_count > 0 and has_modifiers:
-                if len(extras) == extras_count:
-                    for extra in existing_item_extras:
-                        if str(extra.item_id) not in extras:
-                            return None
-                    if existing_key == incoming_key:
-                        return existing_item
+        candidates = list(
+            OrderItem.objects.filter(
+                order__id=order_id,
+                item=menu_item,
+                deleted=False,
+                # PARENT ROWS ONLY. A top-level dish must never merge into a
+                # child-extra row, and an extra row must never be bumped by an
+                # unrelated top-level line.
+                parent_item__isnull=True,
+            )
+        )
+        if not candidates:
+            return None
+        children_by_parent = {}
+        for child in OrderItem.objects.filter(
+            parent_item__in=candidates, deleted=False,
+        ):
+            children_by_parent.setdefault(child.parent_item_id, []).append(child)
 
+        for candidate in candidates:
+            if ConOrder.row_identity(
+                candidate, children_by_parent.get(candidate.pk, []),
+            ) == identity:
+                return candidate
         return None
 
     @staticmethod
-    def _modifier_compare_key(selected_modifiers) -> dict:
+    def _resolve_for_pricing(menu_item, selected_modifiers=None, now=None,
+                             verdict=None):
+        """Price ONE line's units from a resolved catalogue row.
+
+        Returns ``{'status': 200, 'unit': PricedUnit, 'options': [...],
+        'deliverable': bool}`` or a controlled 400.
         """
-        Build an order- and duplicate-independent semantic key for comparing two
-        modifier selections when merging order lines. Incoming selections are already
-        canonical (normalized in the order-creation transaction); keying the EXISTING
-        row the same way keeps line-merge tolerant of any harmless legacy
-        pre-canonical row (duplicate/reordered choice ids) so it still merges with the
-        canonical incoming selection, while genuinely different selections stay
-        distinct. Empty groups are dropped so ``{"g": []}`` compares as no selection.
-        """
-        return {
-            str(group_id): frozenset(str(choice_id) for choice_id in (choice_ids or []))
-            for group_id, choice_ids in (selected_modifiers or {}).items()
-            if choice_ids
-        }
-
-    @staticmethod
-    def determine_effective_unit_price(menu_item: MenuItem, selected_modifiers: dict = None) -> dict:
-        # Discount activation and the effective base price come from the single,
-        # timezone-aware (EAT) predicate on the model — the SAME one the diner
-        # menu serializer uses — so the diner-displayed price and the charged
-        # price agree. An expired / out-of-window / wrong-day / zero-value
-        # discount charges primary_price even when running_discount and
-        # discounted_price are set. The client still cannot inject a price: the
-        # effective base is recomputed server-side from the MenuItem here.
-        effective_unit_price = menu_item.effective_base_price()
-
-        # add the cost of the grouped modifier selections
-        cost_of_options = Decimal('0')
-        if selected_modifiers:
-            # Same single structural reading as validation and label building —
-            # see construct_option_items for why the old per-site dict
-            # comprehension was a divergence rather than a duplication.
-            definition = inspect_modifier_definition(menu_item.options)
-            if definition.is_invalid:
-                return {
-                    'status': 400,
-                    'message': MODIFIER_CONFIG_MESSAGE.format(name=menu_item.name),
-                }
-            groups_by_id = {group.group_id: group for group in definition.groups}
-            for group_id, choice_ids in selected_modifiers.items():
-                group = groups_by_id.get(group_id)
-                if group is None:
-                    return {
-                        'status': 400,
-                        'message': f'Invalid modifier group for item, {menu_item.name}'
-                    }
-                choices_by_id = group.choices_by_id
-                # De-dupe choice ids per group (dict.fromkeys preserves order):
-                # a repeated choice must be validated and charged exactly ONCE, so
-                # a duplicate cannot inflate the per-unit cost. A foreign/unknown id
-                # is still caught because it survives de-duping into the set below.
-                # An unusable member (a nested object/list) is REFUSED, never
-                # dropped: silently ignoring it would price a selection the
-                # diner did not make. Checked before the hash, which is what
-                # the de-duplication below would otherwise raise on.
-                if any(not usable_identifier(c) for c in (choice_ids or [])):
-                    return {
-                        'status': 400,
-                        'message': f'Invalid modifier choice for item, {menu_item.name}'
-                    }
-                for choice_id in dict.fromkeys(choice_ids or []):
-                    choice = choices_by_id.get(choice_id)
-                    if choice is None:
-                        return {
-                            'status': 400,
-                            'message': f'Invalid modifier choice for item, {menu_item.name}'
-                        }
-                    cost_of_options += Decimal(str(choice.get('additionalCost', 0)))
-
-        effective_unit_price += cost_of_options
+        if verdict is None:
+            verdict = menu_item.price_verdict(now)
+        if not verdict.usable:
+            logger.warning(
+                'Unpriceable item refused at checkout (menu_item_id=%s, reason=%s)',
+                menu_item.pk, verdict.reason,
+            )
+            return {
+                'status': 400,
+                'message': MODIFIER_CONFIG_MESSAGE.format(name=menu_item.name),
+            }
+        breakdown = ConOrder.option_breakdown(menu_item, selected_modifiers or {})
+        if breakdown.get('status') != 200:
+            return breakdown
+        try:
+            unit = price_unit(verdict, breakdown['adjustments'])
+        except PricingRefused as refused:
+            logger.warning(
+                'Refused line pricing (menu_item_id=%s, code=%s)',
+                menu_item.pk, refused.code,
+            )
+            return {
+                'status': 400,
+                'message': MODIFIER_CONFIG_MESSAGE.format(name=menu_item.name),
+            }
         return {
             'status': 200,
-            'price': effective_unit_price.quantize(Decimal('0.01')),
-            'cost_of_options': cost_of_options.quantize(Decimal('0.01'))
+            'unit': unit,
+            'options': breakdown['options'],
+            'deliverable': bool(menu_item.available and menu_item.in_stock),
         }
 
     @staticmethod
-    def process_item_extras(item: dict, order_id: str, order_item_id: str,
-                            restaurant: Restaurant) -> dict:
-        # `restaurant` is required and comes already-resolved from the caller
-        # (add_order_item passes order.restaurant), so every extra is fetched
-        # restaurant-scoped — a caller cannot forget the tenant boundary.
-        # Always returns a status dict; callers must propagate any non-200.
-        extras = item.get('extras', None)
+    def determine_effective_unit_price(menu_item: MenuItem,
+                                       selected_modifiers: dict = None,
+                                       now=None, verdict=None) -> dict:
+        """Effective per-unit price for one line.
 
-        if extras is None:
-            return {'status': 200}
-
-        if not isinstance(extras, list):
-            return {
-                'status': 400,
-                'message': NOT_ON_MENU_MESSAGE
-            }
-
-        for extra in extras:
-            # defense-in-depth mirror of add_order_item's parent-item guard:
-            # the scoped fetch proves ownership, and the exception tuple turns
-            # a foreign / nonexistent / malformed id into a 400 dict instead
-            # of an uncaught 500 (initiate_order's batch gate already rejects
-            # these on the live path; this holds for any other caller).
-            try:
-                extra_item = MenuItem.objects.get(
-                    pk=extra, section__restaurant=restaurant
-                )
-            except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
-                return {
-                    'status': 400,
-                    'message': NOT_ON_MENU_MESSAGE
-                }
-            unit_price = extra_item.primary_price
-            quantity = 1  # extra['quantity']
-
-            price_selection = ConOrder.determine_effective_unit_price(menu_item=extra_item)
-            if price_selection.get('status') != 200:
-                return price_selection
-
-            effective_unit_price = price_selection.get('price')
-            total_cost = unit_price * quantity
-            discounted_cost = effective_unit_price * quantity
-            savings = total_cost - discounted_cost
-            actual_cost = discounted_cost
-
-            extra = {
-                'item_name': extra_item.name,
-                'quantity': quantity,
-
-                # kitchen snapshots (extras carry no modifiers)
-                'item_name_snapshot': extra_item.name,
-                'modifiers_snapshot': [],
-                'allergen_tags_snapshot': [
-                    {'name': t.name, 'icon': t.icon, 'colour': t.colour}
-                    for t in extra_item.tags.filter(category='allergen')
-                ],
-
-                'unit_price': unit_price,
-                'discounted_price': effective_unit_price,
-                'actual_price': effective_unit_price,
-                # Truthful only when the discount is actually live (same predicate
-                # that set the price above), not merely when the flag is on.
-                'discounted': extra_item.is_discount_active(),
-                'unit_cost_of_options': 0,
-
-                'total_cost': total_cost,
-                'discounted_cost': discounted_cost,
-                'savings': savings,
-                'actual_cost': actual_cost,
-                'cost_of_options': 0,
-
-                'available': extra_item.available,
-                'status': 'initiated'
-            }
-
-            # Mirror the parent-item guard: an out-of-stock extra (in_stock=false)
-            # is zeroed and flagged unavailable so it is neither prepared nor
-            # charged and is surfaced by the existing reconciliation gate.
-            if not extra_item.available or not extra_item.in_stock:
-                extra['quantity'] = 0
-                extra['total_cost'] = 0
-                extra['discounted_cost'] = 0
-                extra['savings'] = 0
-                extra['actual_cost'] = 0
-                extra['available'] = False
-                extra['status'] = 'unavailable'
-
-            # save the item to the menu items
-            extra_record = SerializerPutOrderItem(data=extra)
-            if not extra_record.is_valid():
-                raise Exception(extra_record.errors)
-            # order / parent_item / item are server-resolved, tenant-scoped
-            # objects passed through the trusted save() channel — never client
-            # input (the fields are read_only on the serializer).
-            extra_record.save(
-                order_id=order_id,
-                parent_item_id=order_item_id,
-                item=extra_item,
-            )
-
-        return {'status': 200}
+        Keeps its established keys (``price``, ``cost_of_options``) and adds
+        ``reference_price`` and ``unit``. Discount activation and the effective
+        base come from the ONE shared price policy, so the diner-displayed price
+        and the charged price cannot diverge; the modifier adjustments come from
+        the ONE breakdown that also produced the labels. The client still cannot
+        inject a price — nothing here reads a client amount.
+        """
+        resolved = ConOrder._resolve_for_pricing(
+            menu_item, selected_modifiers, now=now, verdict=verdict,
+        )
+        if resolved.get('status') != 200:
+            return resolved
+        unit = resolved['unit']
+        return {
+            'status': 200,
+            'price': unit.effective_unit,
+            'reference_price': unit.reference_unit,
+            'cost_of_options': unit.modifier_unit,
+            'unit': unit,
+        }
 
     @staticmethod
-    def update_item_quantity(order_item, item: dict) -> dict:
-        # The caller (find_existing_order_item) already resolved the exact matching
-        # line, so bump it directly. Do NOT re-fetch it via
-        # OrderItem.objects.get(order, item): that filter is non-unique once the
-        # same menu item is on the order as more than one line and raises
-        # MultipleObjectsReturned (BUG-P2-5). The recompute is left exactly as
-        # before (per-unit unit_price/discounted_price scaled to the new quantity;
-        # cost_of_options carried verbatim) — this is a crash-only fix, not a
-        # pricing change.
-        #
-        # SELF-GUARDING, through the SHARED rule (D01). This helper is not
-        # protected merely by who calls it today: it takes a client-supplied
-        # increment straight into arithmetic and then into an UPDATE. The
-        # database constraint cannot stand in for this — an existing 5 plus an
-        # incoming -1 yields 4, which satisfies `quantity >= 0` perfectly while
-        # halving what the diner is charged for. Rejecting BEFORE any arithmetic
-        # or mutation is the only place that can be caught.
-        #
-        # The per-line ceiling bounds the INCREMENT, never the merged row: two
-        # legitimate lines of 60 may merge to 120, bounded order-wide by
-        # MAX_TOTAL_UNITS at the request boundary, and no upper bound is imposed
-        # on the stored value.
-        if quantity_error(item.get('quantity') if isinstance(item, dict) else None):
+    def extended_values(unit, quantity) -> dict:
+        """Every monetary field of one line, from immutable units and a quantity.
+
+        The ONE place a line's money is computed, used by both the creation path
+        (through the serializer) and the recalculation path. Every field moves
+        TOGETHER — the pre-fix merge updated five of them and left
+        ``actual_cost`` holding its pre-merge value, which is the figure the
+        diner's order-detail read renders and the figure the Popular Items and
+        Menu-performance reports aggregate.
+        """
+        line = extend(unit, quantity)
+        return {
+            'quantity': line.quantity,
+            'unit_price': line.reference_unit,
+            'discounted_price': line.effective_unit,
+            'unit_cost_of_options': line.modifier_unit,
+            'total_cost': line.total_cost,
+            'discounted_cost': line.discounted_cost,
+            'cost_of_options': line.cost_of_options,
+            'savings': line.savings,
+            'actual_cost': line.actual_cost,
+        }
+
+    @staticmethod
+    def _extend_row(row, unit, quantity):
+        """Apply :meth:`extended_values` to a persisted row, in place."""
+        values = ConOrder.extended_values(unit, quantity)
+        for field, value in values.items():
+            setattr(row, field, value)
+        return values
+
+    @staticmethod
+    def rebuild_line(order_item, new_quantity, children=None):
+        """Recompute a persisted parent line, and its extras, for a new quantity.
+
+        RECALCULATION, not reinterpretation: every amount comes from the row's
+        own saved canonical UNIT components (``unit_from_row``) multiplied by the
+        new quantity. The pre-fix path did ``order_item.cost_of_options *
+        new_quantity`` on an ALREADY-EXTENDED value, so merging 2 + 1 charged
+        9 000 of options where 4 500 were due, and it never touched
+        ``actual_cost`` at all.
+
+        A line that is not deliverable STAYS at quantity 0 with zero amounts. The
+        pre-fix merge added the incoming quantity to the stored 0 and multiplied
+        the unit price by it, so a sold-out dish submitted twice came back
+        payable — flagged unavailable and charged 10 000 at the same time.
+
+        Children are rescaled to the parent's quantity (one selected extra per
+        dish) from their own saved units, so a merge can neither drop an extra
+        nor leave one at the quantity it was first written with.
+        """
+        deliverable = bool(order_item.available)
+        effective_quantity = new_quantity if deliverable else 0
+        try:
+            ConOrder._extend_row(
+                order_item, unit_from_row(order_item), effective_quantity,
+            )
+        except (PricingRefused, MoneyConfigError):
             return {
                 'status': 400,
-                'message': 'Each item must include a valid quantity.',
+                'message': 'This item cannot be ordered right now. '
+                           'Please choose another item.',
             }
-
-        new_quantity = order_item.quantity + item['quantity']
-        new_total_cost = order_item.unit_price * new_quantity
-        new_cost_of_options = order_item.cost_of_options * new_quantity
-        new_discounted_cost = order_item.discounted_price * new_quantity
-        new_savings = new_total_cost - new_discounted_cost
-
-        order_item.quantity = new_quantity
-        order_item.total_cost = new_total_cost
-        order_item.discounted_cost = new_discounted_cost
-        order_item.cost_of_options = new_cost_of_options
-        order_item.savings = new_savings
-
         order_item.save()
 
+        if children is None:
+            children = list(
+                OrderItem.objects.filter(parent_item=order_item, deleted=False)
+            )
+        for child in children:
+            child_deliverable = bool(child.available) and deliverable
+            try:
+                ConOrder._extend_row(
+                    child, unit_from_row(child),
+                    effective_quantity if child_deliverable else 0,
+                )
+            except (PricingRefused, MoneyConfigError):
+                return {
+                    'status': 400,
+                    'message': 'This item cannot be ordered right now. '
+                               'Please choose another item.',
+                }
+            child.save()
         return {
             'status': 200,
             'message': 'Order item quantity has been updated successfully.'
         }
 
     @staticmethod
-    def add_order_item(item: dict, order_id: str, order: Order = None):
-        # defense-in-depth: this chokepoint self-guards for every caller. A
-        # malformed payload or an item that does not belong to the order's
-        # restaurant returns a 400 dict instead of raising 500 downstream.
+    def update_item_quantity(order_item, item: dict) -> dict:
+        """Increase a matched line's quantity by the incoming line's quantity.
+
+        SELF-GUARDING through the SHARED D01 rule: this helper takes a
+        client-supplied increment into arithmetic and then into an UPDATE, and
+        the database constraint cannot stand in for the check — an existing 5
+        plus an incoming -1 yields 4, which satisfies ``quantity >= 0`` perfectly
+        while halving what the diner is charged.
+
+        The per-line ceiling bounds the INCREMENT, never the merged row: two
+        legitimate lines of 60 may merge to 120, bounded order-wide by
+        MAX_TOTAL_UNITS at the request boundary.
+        """
+        if quantity_error(item.get('quantity') if isinstance(item, dict) else None):
+            return {
+                'status': 400,
+                'message': 'Each item must include a valid quantity.',
+            }
+        return ConOrder.rebuild_line(
+            order_item, order_item.quantity + item['quantity'],
+        )
+
+    @staticmethod
+    def process_item_extras(item: dict, order_id: str, order_item_id: str,
+                            restaurant: Restaurant, parent_quantity: int = 1,
+                            parent_deliverable: bool = True, snapshot=None,
+                            now=None) -> dict:
+        """Persist one line's selected extras, each at the parent's quantity.
+
+        D02 (P1): an extra is ONE PER UNIT OF ITS PARENT DISH — the rule the
+        diner app's basket arithmetic has always used. It was hardcoded
+        ``quantity = 1`` here, so three burgers with cheese were charged, and
+        prepared, with one cheese.
+
+        D02 (P5): when the PARENT is not deliverable its extras are zeroed and
+        flagged too. They were previously priced on their own availability
+        alone, so a sold-out dish left its cheese payable and on the kitchen
+        board with no dish to put it on.
+
+        Returns ``{'status': 200, 'deliverable_extras': n}`` or a controlled 400
+        the caller must propagate.
+        """
+        extras = item.get('extras', None)
+        if extras is None:
+            return {'status': 200, 'deliverable_extras': 0, 'rows': []}
+        if not isinstance(extras, list):
+            return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}
+
+        deliverable_extras = 0
+        created_rows = []
+        for extra_id in extras:
+            resolved = snapshot.get(extra_id) if snapshot is not None else None
+            if resolved is not None:
+                extra_item = resolved.menu_item
+                verdict = resolved.verdict
+                allergen_tags = resolved.allergen_tags
+            else:
+                # Fallback for any caller without a snapshot: the scoped fetch
+                # proves tenant ownership, and the exception tuple turns a
+                # foreign / nonexistent / malformed id into a 400 rather than an
+                # uncaught 500.
+                try:
+                    extra_item = MenuItem.objects.get(
+                        pk=extra_id, section__restaurant=restaurant,
+                    )
+                except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+                    return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}
+                verdict = extra_item.price_verdict(now)
+                allergen_tags = [
+                    {'name': t.name, 'icon': t.icon, 'colour': t.colour}
+                    for t in extra_item.tags.filter(category='allergen')
+                ]
+
+            priced = ConOrder._resolve_for_pricing(
+                extra_item, None, now=now, verdict=verdict,
+            )
+            if priced.get('status') != 200:
+                return priced
+
+            extra_deliverable = priced['deliverable'] and parent_deliverable
+            if extra_deliverable:
+                deliverable_extras += 1
+
+            try:
+                amounts = ConOrder.extended_values(
+                    priced['unit'],
+                    parent_quantity if extra_deliverable else 0,
+                )
+            except (PricingRefused, MoneyConfigError):
+                return {
+                    'status': 400,
+                    'message': MODIFIER_CONFIG_MESSAGE.format(name=extra_item.name),
+                }
+
+            extra_data = {
+                'item_name': extra_item.name,
+                # kitchen snapshots (extras carry no modifiers)
+                'item_name_snapshot': extra_item.name,
+                'modifiers_snapshot': [],
+                'allergen_tags_snapshot': allergen_tags,
+                'options': [],
+                'selected_modifiers': {},
+                'discounted': priced['unit'].discount_active,
+                'available': extra_deliverable,
+                'status': 'initiated' if extra_deliverable else 'unavailable',
+                **amounts,
+            }
+            extra_record = SerializerPutOrderItem(data=extra_data)
+            if not extra_record.is_valid():
+                raise Exception(extra_record.errors)
+            # order / parent_item / item are server-resolved, tenant-scoped
+            # objects passed through the trusted save() channel — never client
+            # input (the fields are read_only on the serializer).
+            created_rows.append(extra_record.save(
+                order_id=order_id,
+                parent_item_id=order_item_id,
+                item=extra_item,
+            ))
+
+        # The caller gets the rows back so it never has to re-SELECT the children
+        # it just wrote — that re-read was one query PER LINE.
+        return {
+            'status': 200,
+            'deliverable_extras': deliverable_extras,
+            'rows': created_rows,
+        }
+
+    @staticmethod
+    def add_order_item(item: dict, order_id: str, order: Order = None,
+                       snapshot=None, index=None):
+        """Add ONE submitted line to an order, merging it into the line it is
+        genuinely identical to.
+
+        This chokepoint SELF-GUARDS for every caller — shape, quantity, tenant
+        ownership and priceability are all checked here, so a caller that skips
+        the endpoint cannot bypass them. ``snapshot`` and ``index`` are
+        optimisations, never trust boundaries: without them the same rules run
+        against a scoped query and a bounded database lookup.
+        """
         if (
             not isinstance(item, dict)
             or item.get('item') is None
             or quantity_error(item.get('quantity')) is not None
         ):
-            # The quantity rule is the SHARED one (D01) rather than a second
-            # presence-only check: this chokepoint feeds Decimal arithmetic and
-            # then a persisted row, so `is None` was never enough — a float, a
-            # numeric string or a container raised a TypeError out of the
-            # multiplication, and zero or a negative persisted intact.
             return {
                 'status': 400,
                 'message': 'Each order item must include an item and a quantity.'
             }
 
-        # `order` is supplied by _create_order, which is holding the very row it
-        # created moments earlier — with its `restaurant` FK already cached by
-        # Order.objects.create(restaurant=...), so `order.restaurant` below is free
-        # too. Re-fetching per line cost one SELECT for the order plus one lazy FK
-        # load for the restaurant, on every line of every order. The `order_id`
-        # path remains the default and keeps the self-guard for every other caller.
         if order is None:
             try:
                 order = Order.objects.get(pk=order_id)
             except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
-                return {
-                    'status': 400,
-                    'message': 'Invalid order selected'
-                }
+                return {'status': 400, 'message': 'Invalid order selected'}
 
-        try:
-            menu_item = MenuItem.objects.get(
-                pk=item['item'], section__restaurant=order.restaurant
+        now = snapshot.now if snapshot is not None else None
+        resolved_row = snapshot.get(item['item']) if snapshot is not None else None
+        if resolved_row is not None:
+            menu_item = resolved_row.menu_item
+            verdict = resolved_row.verdict
+            allergen_tags = resolved_row.allergen_tags
+        else:
+            try:
+                menu_item = MenuItem.objects.get(
+                    pk=item['item'], section__restaurant=order.restaurant,
+                )
+            except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
+                return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}
+            verdict = menu_item.price_verdict(now)
+            allergen_tags = [
+                {'name': t.name, 'icon': t.icon, 'colour': t.colour}
+                for t in menu_item.tags.filter(category='allergen')
+            ]
+
+        priced = ConOrder._resolve_for_pricing(
+            menu_item, item.get('selected_modifiers') or {}, now=now,
+            verdict=verdict,
+        )
+        if priced.get('status') != 200:
+            return priced
+
+        unit = priced['unit']
+        selected_options = priced['options']
+        deliverable = priced['deliverable']
+        modifiers_snapshot = [f"{o['name']}: {o['choices']}" for o in selected_options]
+
+        identity = ConOrder.line_identity_for(
+            menu_item, item, unit, deliverable, menu_item.name,
+            modifiers_snapshot,
+        )
+
+        existing_item = (
+            index.get(identity) if index is not None
+            else ConOrder.find_existing_order_item(
+                item=item, order_id=order_id, menu_item=menu_item,
+                identity=identity,
             )
-        except (ObjectDoesNotExist, ValidationError, ValueError, TypeError):
-            return {
-                'status': 400,
-                'message': NOT_ON_MENU_MESSAGE
-            }
-
-        unit_price = menu_item.primary_price
-
-        # check if the item already exists in the order so that we just update the quantity
-        existing_item = ConOrder.find_existing_order_item(
-            item=item, order_id=order_id, menu_item=menu_item,
         )
         if existing_item is not None:
-            return ConOrder.update_item_quantity(order_item=existing_item, item=item)
+            return ConOrder.update_item_quantity(
+                order_item=existing_item, item=item,
+            )
 
-        # handling modifiers
-        selected_modifiers = item.get('selected_modifiers') or {}
-        selected_options = ConOrder.construct_option_items(
-            item=item, menu_item=menu_item,
-        )
-
-        price_selection = ConOrder.determine_effective_unit_price(
-            menu_item=menu_item,
-            selected_modifiers=selected_modifiers
-        )
-        if price_selection.get('status') != 200:
-            return price_selection
-
-        effective_unit_price = price_selection.get('price')
-        unit_cost_of_options = price_selection.get('cost_of_options')
-
-        total_cost = unit_price * item['quantity']
-        discounted_cost = effective_unit_price * item['quantity']
-        savings = total_cost - discounted_cost
-        actual_cost = discounted_cost
-        cost_of_options = unit_cost_of_options * item['quantity']
+        try:
+            # A line whose item is unavailable or sold out is written at
+            # quantity 0 with zero amounts: neither prepared nor charged, while
+            # its unit and name snapshots survive for the diner's
+            # reconciliation. `available` means "this LINE is fulfillable", not
+            # a mirror of menu_item.available.
+            amounts = ConOrder.extended_values(
+                unit, item['quantity'] if deliverable else 0,
+            )
+        except (PricingRefused, MoneyConfigError):
+            return {
+                'status': 400,
+                'message': MODIFIER_CONFIG_MESSAGE.format(name=menu_item.name),
+            }
 
         item_data = {
             'item_name': menu_item.name,
-            'quantity': item['quantity'],
-
             # kitchen snapshots: resolved once at creation, immutable thereafter
             'item_name_snapshot': menu_item.name,
-            'modifiers_snapshot': [f"{o['name']}: {o['choices']}" for o in selected_options],
-            'allergen_tags_snapshot': [
-                {'name': t.name, 'icon': t.icon, 'colour': t.colour}
-                for t in menu_item.tags.filter(category='allergen')
-            ],
-
+            'modifiers_snapshot': modifiers_snapshot,
+            'allergen_tags_snapshot': allergen_tags,
             'options': selected_options,
-            'selected_modifiers': selected_modifiers,
-
-            'unit_price': unit_price,
-            'discounted_price': effective_unit_price,
-            'actual_price': effective_unit_price,
-            # Truthful only when the discount is actually live (same predicate
-            # that set the price above), not merely when the flag is on.
-            'discounted': menu_item.is_discount_active(),
-            'unit_cost_of_options': unit_cost_of_options,
-
-            'total_cost': total_cost,
-            'discounted_cost': discounted_cost,
-            'savings': savings,
-            'actual_cost': actual_cost,
-            'cost_of_options': cost_of_options,
-
-            'available': menu_item.available,
-            'status': 'initiated'
+            'selected_modifiers': item.get('selected_modifiers') or {},
+            'discounted': unit.discount_active,
+            'available': deliverable,
+            'status': 'initiated' if deliverable else 'unavailable',
+            **amounts,
         }
-
-        # in_stock=false (sold out) routes through the same zero-and-flag path
-        # as a genuinely unavailable item: the order item's `available` flag
-        # means "this line is fulfillable", not a mirror of menu_item.available.
-        # Flagging it here stops it being prepared/charged and makes it count in
-        # no_unavailable_items so the existing frontend reconciliation gate
-        # surfaces it before submit. Do not "fix" this back to only `available`.
-        if not menu_item.available or not menu_item.in_stock:
-            item_data['quantity'] = 0
-            item_data['total_cost'] = 0
-            item_data['discounted_cost'] = 0
-            item_data['savings'] = 0
-            item_data['actual_cost'] = 0
-            item_data['available'] = False
-            item_data['status'] = 'unavailable'
-
-        # save the item to the menu items
         item_record = SerializerPutOrderItem(data=item_data)
         if not item_record.is_valid():
             raise Exception(item_record.errors)
         # order + item are server-resolved, tenant-scoped objects passed through
         # the trusted save() channel — never accepted as client input (the fields
         # are read_only on the serializer).
-        item_record.save(order=order, item=menu_item)
+        row = item_record.save(order=order, item=menu_item)
 
-        # process the item extras — capture and propagate: a rejected extra
-        # rejects the whole item so the service chokepoint (_create_order)
-        # can abort the whole order instead of silently dropping the failure.
         extras_result = ConOrder.process_item_extras(
             item=item,
             order_id=order_id,
-            order_item_id=str(item_record.data['id']),
+            order_item_id=str(row.pk),
             restaurant=order.restaurant,
+            parent_quantity=row.quantity,
+            parent_deliverable=deliverable,
+            snapshot=snapshot,
+            now=now,
         )
         if extras_result.get('status') != 200:
             return extras_result
 
+        # P4: a dish whose REQUIRED extras minimum cannot be met by the extras
+        # that actually survived is not deliverable. It counts the surviving
+        # ELIGIBLE CHOSEN extras — one unavailable extra does not condemn a dish
+        # whose remaining selections still satisfy the minimum — and it never
+        # substitutes an extra the diner did not choose. Before this the
+        # publication gate counted SUBMITTED extras, so a dish with a required
+        # sauce that had just sold out shipped available, payable and
+        # unmakeable.
+        children = extras_result.get('rows') or []
+
+        minimum = menu_item.extras_min_selections or 0
+        if deliverable and menu_item.has_extras and minimum > 0:
+            if extras_result.get('deliverable_extras', 0) < minimum:
+                unmet = ConOrder._mark_line_undeliverable(row, children=children)
+                if unmet.get('status') != 200:
+                    return unmet
+                deliverable = False
+
+        if index is not None:
+            # Re-key on the row as persisted: a line that has just been flipped
+            # undeliverable is no longer the same line as a deliverable one, and
+            # P3 keeps those apart. The children are the rows just written, so
+            # keying costs no query.
+            index[ConOrder.row_identity(row, children)] = row
         return {'status': 200, 'message': 'Order item added successfully.'}
 
     @staticmethod
+    def _mark_line_undeliverable(row, children=None):
+        """Zero a parent line and everything that depends on it.
+
+        P5: dependent extras are zeroed and flagged with the parent, so an
+        undeliverable dish can never leave a payable, preparable extra behind.
+        The diner's reconciliation presents this as ONE loss — the dish — rather
+        than the dish and each of its extras separately; that partition lives in
+        ``serialize_order_details``.
+        """
+        row.available = False
+        row.status = 'unavailable'
+        try:
+            ConOrder._extend_row(row, unit_from_row(row), 0)
+        except (PricingRefused, MoneyConfigError):
+            return {
+                'status': 400,
+                'message': 'This item cannot be ordered right now. '
+                           'Please choose another item.',
+            }
+        row.save()
+        if children is None:
+            children = list(
+                OrderItem.objects.filter(parent_item=row, deleted=False)
+            )
+        for child in children:
+            child.available = False
+            child.status = 'unavailable'
+            try:
+                ConOrder._extend_row(child, unit_from_row(child), 0)
+            except (PricingRefused, MoneyConfigError):
+                return {
+                    'status': 400,
+                    'message': 'This item cannot be ordered right now. '
+                               'Please choose another item.',
+                }
+            child.save()
+        return {'status': 200}
+
+    @staticmethod
     def update_order_amounts(order: Order) -> dict:
+        """Reconcile the order from its persisted rows.
+
+        EVERY PAYABLE COMPONENT IS COUNTED EXACTLY ONCE: a parent row's amounts
+        cover the dish and its modifiers, each extra is its own row, and the sum
+        walks the rows. A parent's amounts deliberately do NOT include its
+        extras, so there is no path on which a child is added twice — the
+        parent-plus-extras figure a diner sees is derived for display and
+        labelled as such, never stored on the parent.
+
+        ``savings`` is comparable reference minus comparable effective and is
+        non-negative by construction. Before this the reference excluded
+        modifiers while the effective included them, so any paid modifier
+        produced a NEGATIVE order-level saving and a net that exceeded its gross.
+        """
         order_items = OrderItem.objects.select_for_update().filter(
             deleted=False,
             order=order
@@ -834,7 +1055,8 @@ class ConOrder:
         savings = total_cost - discounted_cost
         actual_cost = discounted_cost
 
-        # get the total payments done on the order
+        # Payment state stays derived from verified transactions. Nothing here
+        # marks an order paid, collected, settled or refunded.
         order_payments = DinifyTransaction.objects.filter(
             order=order,
             transaction_status=TransactionStatus_Success
@@ -852,6 +1074,18 @@ class ConOrder:
         order.total_paid = total_paid
         order.balance_payable = balance_payable
         order.save()
+
+    @staticmethod
+    def deliverable_parent_count(order) -> int:
+        """Parent lines that will actually reach the kitchen.
+
+        Deliverability AND quantity, deliberately NOT a payable amount: a
+        legitimately free dish (0.00) is orderable and must still count.
+        """
+        return OrderItem.objects.filter(
+            order=order, deleted=False, parent_item__isnull=True,
+            available=True, quantity__gt=0,
+        ).count()
 
     @staticmethod
     def initiate_order(
@@ -1052,6 +1286,12 @@ class ConOrder:
                 'unavailable_items': order_details.get('unavailable_items'),
                 'extras': order_details.get('extras'),
                 'available_extras': order_details.get('available_extras'),
-                'unavailable_extras': order_details.get('unavailable_extras')
+                'unavailable_extras': order_details.get('unavailable_extras'),
+                # THE authoritative quote the diner confirms. Without it the
+                # review screen has nothing to show but the client's own
+                # arithmetic, which is the whole defect this path closes — so
+                # forward it here rather than leaving the serializer's work
+                # stranded one layer down.
+                'quote': order_details.get('quote'),
             }
         }

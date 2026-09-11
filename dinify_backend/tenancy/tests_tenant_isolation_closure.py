@@ -973,28 +973,83 @@ class ModifierIntegrityClosureTests(ClosureFixtureBase):
         self.assertEqual(lines.count(), 2)
 
     def test_legacy_duplicate_representation_tolerated(self):
-        # A pre-canonical row (duplicate ids) still MERGES with a canonical incoming
-        # selection — the tolerance that lets us ship WITHOUT a data migration.
+        """A pre-canonical DUPLICATE selection still compares equal.
+
+        This is the D01 tolerance that let canonicalisation ship without a data
+        migration, and it survives D02 intact: ``{'g-req': ['c1','c1']}`` and
+        ``{'g-req': ['c1']}`` produce the same identity key, so the row merges.
+
+        The row below carries the CORRECTED pricing and preparation snapshots —
+        only its stored SELECTION is pre-canonical. That separation is
+        deliberate, and the next test states the other half.
+        """
         order = self._make_order(self.restaurant_a, self.table_a,
                                  status=OrderStatus_Initiated)
+        incoming = self._line(
+            self.item_mod,
+            selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1']},
+        )
+        resolved = ConOrder._resolve_for_pricing(
+            self.item_mod, incoming['selected_modifiers'],
+        )
+        self.assertEqual(resolved.get('status'), 200, resolved)
+        unit = resolved['unit']
         legacy = OrderItem.objects.create(
             order=order, item=self.item_mod, quantity=1,
-            unit_price=Decimal('1000'), discounted_price=Decimal('1500'),
-            cost_of_options=Decimal('500'), unit_cost_of_options=Decimal('500'),
-            total_cost=Decimal('1000'), discounted_cost=Decimal('1500'),
-            savings=Decimal('0'), actual_cost=Decimal('1500'),
+            unit_price=unit.reference_unit,
+            discounted_price=unit.effective_unit,
+            cost_of_options=unit.modifier_unit,
+            unit_cost_of_options=unit.modifier_unit,
+            total_cost=unit.reference_unit,
+            discounted_cost=unit.effective_unit,
+            savings=unit.reference_unit - unit.effective_unit,
+            actual_cost=unit.effective_unit,
+            item_name_snapshot=self.item_mod.name,
+            modifiers_snapshot=[
+                f"{o['name']}: {o['choices']}" for o in resolved['options']
+            ],
+            # PRE-CANONICAL: duplicate choice ids, exactly as an older row holds.
             selected_modifiers={'g-req': ['c1', 'c1'], 'g-multi': ['m1', 'm1']},
         )
-        merged = ConOrder.add_order_item(
-            item=self._line(self.item_mod,
-                            selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1']}),
-            order_id=str(order.id),
-        )
+        merged = ConOrder.add_order_item(item=incoming, order_id=str(order.id))
         self.assertEqual(merged.get('status'), 200, merged)
         self.assertEqual(
             OrderItem.objects.filter(order=order, item=self.item_mod).count(), 1)
         legacy.refresh_from_db()
         self.assertEqual(legacy.quantity, 2)
+
+    def test_an_incompatible_pricing_snapshot_does_not_merge(self):
+        """D02 (P3): equal selections with UNEQUAL immutable pricing stay apart.
+
+        A row whose stored unit price says something different from what this
+        request resolves to is a different line, and merging the two would put
+        two calculation conventions into one stored amount — which is precisely
+        what ``Order.pricing_version`` exists to keep separable. A legacy-priced
+        row (``unit_price`` = the base alone, with no modifier component) is the
+        concrete case.
+        """
+        order = self._make_order(self.restaurant_a, self.table_a,
+                                 status=OrderStatus_Initiated)
+        stale = OrderItem.objects.create(
+            order=order, item=self.item_mod, quantity=1,
+            # The pre-D02 meaning: base only, modifiers excluded.
+            unit_price=Decimal('1000'), discounted_price=Decimal('1500'),
+            cost_of_options=Decimal('500'), unit_cost_of_options=Decimal('500'),
+            total_cost=Decimal('1000'), discounted_cost=Decimal('1500'),
+            savings=Decimal('-500'), actual_cost=Decimal('1500'),
+            item_name_snapshot=self.item_mod.name,
+            selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1']},
+        )
+        result = ConOrder.add_order_item(
+            item=self._line(self.item_mod,
+                            selected_modifiers={'g-req': ['c1'], 'g-multi': ['m1']}),
+            order_id=str(order.id),
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(
+            OrderItem.objects.filter(order=order, item=self.item_mod).count(), 2)
+        stale.refresh_from_db()
+        self.assertEqual(stale.quantity, 1, 'the legacy row was not bumped')
 
     # -- service-level enforcement + rejection unwinds (proofs 17-20) ------
     def test_direct_service_call_normalizes(self):

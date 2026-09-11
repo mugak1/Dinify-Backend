@@ -90,10 +90,23 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                     return Response({'status': 404, 'message': 'Not found'}, status=404)
                 user = request.user
 
+            # THE QUOTE ACKNOWLEDGEMENT (D02/P9). The submission must name the
+            # exact server-priced draft it is accepting; the transition validates
+            # it under the order lock. It is read here and passed through — it is
+            # NOT authority (the diner-session / staff-module checks above are,
+            # and they are unchanged) and there is no staff bypass: a trusted
+            # caller is not a reason to accept an amount nobody reviewed.
+            #
+            # An older client that sends no `quote_ref` is refused with a usable
+            # message and a stable reason code. That is deliberate compatibility
+            # handling, not seamless backward compatibility: auto-submitting a
+            # freshly calculated amount such a client never displayed is exactly
+            # what this contract exists to stop.
             response = update_order_status(
                 order=order,
                 new_status=OrderStatus_Pending,
                 user=user,
+                quote_ref=data.get('quote_ref'),
             )
             return Response(response, status=response.get('status', 200))
 

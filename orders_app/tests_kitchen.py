@@ -21,6 +21,10 @@ from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
 from orders_app.controllers.con_orders import ConOrder
 from orders_app.controllers.initiate_order import any_present_ongoing_order
 from orders_app.controllers.manage_order import update_order_status
+from orders_app.controllers.services.order_quote import quote_ref
+from orders_app.controllers.services.order_pricing import (
+    PRICING_VERSION_CORRECTED,
+)
 from orders_app.controllers.services.create_order import (
     _create_order,
     allocate_daily_order_number,
@@ -97,6 +101,9 @@ class KitchenTestBase(TestCase):
         self.waiter_user = self._make_member('256900000004', [RESTAURANT_WAITER])
         self.outsider_user = self._make_member('256900000005', None)
 
+        # One published item to hang a deliverable line on (see _make_order).
+        self.item1 = MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME)
+
         self.client = APIClient()
 
     def _make_member(self, phone, restaurant_roles):
@@ -114,6 +121,14 @@ class KitchenTestBase(TestCase):
         return user
 
     def _make_order(self, table=None, **overrides):
+        """A kitchen fixture that satisfies the D02 acceptance invariants.
+
+        `pricing_version=CORRECTED` and one deliverable parent line, because a
+        submit now refuses a legacy-priced draft and refuses an order with
+        nothing to prepare. These tests are about the kitchen board, not about
+        pricing, so the fixture states both explicitly rather than letting an
+        unrelated invariant decide their outcome.
+        """
         defaults = dict(
             restaurant=self.restaurant,
             table=table or self.table1,
@@ -122,9 +137,17 @@ class KitchenTestBase(TestCase):
             payment_status=PaymentStatus_Pending,
             fulfilment_status='new',
             order_date=timezone.localdate(),
+            pricing_version=PRICING_VERSION_CORRECTED,
         )
         defaults.update(overrides)
-        return Order.objects.create(**defaults)
+        order = Order.objects.create(**defaults)
+        OrderItem.objects.create(
+            order=order, item=self.item1, quantity=1, available=True,
+            unit_price=0, discounted_price=0, unit_cost_of_options=0,
+            total_cost=0, discounted_cost=0, savings=0, cost_of_options=0,
+            actual_cost=0, item_name_snapshot=self.item1.name,
+        )
+        return order
 
 
 class KitchenNumberingTests(KitchenTestBase):
@@ -342,8 +365,10 @@ class KitchenActiveEndpointTests(KitchenTestBase):
 
         # A draft is invisible to the kitchen — submit it so the ticket reaches
         # the board (order_status initiated -> pending; fulfilment stays 'new').
+        submit_target = Order.objects.get(pk=order_id)
         submitted = update_order_status(
-            Order.objects.get(pk=order_id), OrderStatus_Pending, None,
+            submit_target, OrderStatus_Pending, None,
+            quote_ref=quote_ref(submit_target),
         )
         self.assertEqual(submitted['status'], 200)
 
@@ -741,7 +766,8 @@ class TableLockTests(KitchenTestBase):
         self.assertFalse(first['idempotent'])
         # submit the first order so it claims the table
         self.assertEqual(
-            update_order_status(first['order'], OrderStatus_Pending, None)['status'],
+            update_order_status(first['order'], OrderStatus_Pending, None,
+                                quote_ref=quote_ref(first['order']))['status'],
             200,
         )
 
@@ -842,7 +868,8 @@ class SubmitClaimsTableTests(KitchenTestBase):
         return result
 
     def _submit(self, order):
-        return update_order_status(order, OrderStatus_Pending, None)
+        return update_order_status(order, OrderStatus_Pending, None,
+                                   quote_ref=quote_ref(order))
 
     def _assert_free(self, table):
         # both copies of the occupancy gate must agree the table is free
@@ -1404,7 +1431,10 @@ class KitchenClockTests(KitchenTestBase):
         order = self._make_order(order_status=OrderStatus_Initiated)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            result = update_order_status(order, OrderStatus_Pending, self.owner_user)
+            result = update_order_status(
+                order, OrderStatus_Pending, self.owner_user,
+                quote_ref=quote_ref(order),
+            )
         self.assertEqual(result['status'], 200)
         order.refresh_from_db()
         self.assertEqual(order.order_status, OrderStatus_Pending)

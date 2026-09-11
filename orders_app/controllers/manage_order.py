@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 def update_order_status(
     order: Order,
     new_status: str,
-    user: Union[User, None]
+    user: Union[User, None],
+    quote_ref: Union[str, None] = None,
 ) -> dict:
     """
     update an order
@@ -32,7 +33,7 @@ def update_order_status(
         # It is handled by its own transactional helper; every other status
         # change below is left exactly as it was (no new locking/transaction).
         if new_status == OrderStatus_Pending:
-            return _submit_order(order, user)
+            return _submit_order(order, user, quote_ref)
         # an unauthenticated diner arrives as AnonymousUser (not None); never
         # assign it to a User FK — normalise to None so attribution stays null.
         if user is not None and user.is_anonymous:
@@ -65,7 +66,100 @@ def update_order_status(
         }
 
 
-def _submit_order(order: Order, user: Union[User, None]) -> dict:
+# --- acceptance invariants (D02 / P9 / P10) ---------------------------------
+#
+# Stable reason codes. A client uses these to decide what to DO; the messages are
+# what a diner reads. Neither is ever a silent reprice, a second order or a fake
+# success.
+REASON_LEGACY_PRICING = 'legacy_pricing_version'
+REASON_QUOTE_REQUIRED = 'quote_ref_required'
+REASON_QUOTE_STALE = 'quote_ref_stale'
+REASON_NOTHING_TO_PREPARE = 'no_deliverable_items'
+
+MESSAGE_LEGACY_PRICING = (
+    'This order was prepared before a pricing update and cannot be placed as it '
+    'is. Please review the updated order and place it again.'
+)
+MESSAGE_QUOTE_REQUIRED = (
+    'Please review your order total before placing it.'
+)
+MESSAGE_QUOTE_STALE = (
+    'Your order changed since you reviewed it. Please review the updated order '
+    'and place it again.'
+)
+MESSAGE_NOTHING_TO_PREPARE = (
+    'None of the items on this order are available right now, so there is '
+    'nothing to send to the kitchen.'
+)
+
+
+def _acceptance_refusal(order, supplied_quote_ref):
+    """The three invariants that must hold to ACCEPT a draft, or ``None``.
+
+    Runs inside ``_submit_order``'s transaction, on the row re-read under the
+    table lock — so what is checked is what is about to be accepted, not a
+    possibly-stale instance the caller handed in.
+
+    1. **PRICING VERSION.** A draft priced by the LEGACY convention must not
+       enter the corrected acceptance path, however few such drafts a rollout
+       happens to leave behind. It is refused with an actionable code; it is NOT
+       silently recalculated (that would accept an amount nobody reviewed) and
+       NOT deleted (it is the diner's own draft).
+    2. **QUOTE ACKNOWLEDGEMENT.** The submission must name the exact saved quote
+       it is accepting. There is deliberately NO staff or internal bypass: being
+       a trusted caller is not a reason to accept an amount no one reviewed, and
+       a bare "confirmed" boolean would say nothing about WHICH quote.
+    3. **SOMETHING TO PREPARE.** An order whose every parent line is
+       undeliverable must not become an empty kitchen ticket. The test is
+       DELIVERABILITY AND QUANTITY, never a payable amount — a legitimately free
+       dish (0.00) is orderable and still counts.
+
+    A refusal changes nothing: no reprice, no replacement order, no partial
+    acceptance.
+    """
+    # Local imports keep this off the module import graph and dodge the
+    # con_orders <-> create_order cycle, as _submit_order already does.
+    from orders_app.controllers.con_orders import ConOrder
+    from orders_app.controllers.services.order_pricing import (
+        PRICING_VERSION_CORRECTED,
+    )
+    from orders_app.controllers.services import order_quote
+
+    if order.pricing_version != PRICING_VERSION_CORRECTED:
+        logger.info(
+            'Order submission refused (order_id=%s, reason=%s, version=%s)',
+            order.pk, REASON_LEGACY_PRICING, order.pricing_version,
+        )
+        return {
+            'status': 400,
+            'message': MESSAGE_LEGACY_PRICING,
+            'reason': REASON_LEGACY_PRICING,
+        }
+
+    if not isinstance(supplied_quote_ref, str) or not supplied_quote_ref:
+        return {
+            'status': 400,
+            'message': MESSAGE_QUOTE_REQUIRED,
+            'reason': REASON_QUOTE_REQUIRED,
+        }
+    if not order_quote.matches(order, supplied_quote_ref):
+        return {
+            'status': 400,
+            'message': MESSAGE_QUOTE_STALE,
+            'reason': REASON_QUOTE_STALE,
+        }
+
+    if ConOrder.deliverable_parent_count(order) < 1:
+        return {
+            'status': 400,
+            'message': MESSAGE_NOTHING_TO_PREPARE,
+            'reason': REASON_NOTHING_TO_PREPARE,
+        }
+    return None
+
+
+def _submit_order(order: Order, user: Union[User, None],
+                  supplied_quote_ref: Union[str, None] = None) -> dict:
     """
     Submit a draft order (order_status 'initiated' -> 'pending').
 
@@ -148,6 +242,10 @@ def _submit_order(order: Order, user: Union[User, None]) -> dict:
                     'status': 400,
                     'message': 'The table has an ongoing order'
                 }
+
+            acceptance = _acceptance_refusal(order, supplied_quote_ref)
+            if acceptance is not None:
+                return acceptance
         else:
             # No table to claim (defensive — Order.table is non-nullable today,
             # so this branch is currently unreachable). Re-read and flip.
@@ -157,6 +255,10 @@ def _submit_order(order: Order, user: Union[User, None]) -> dict:
                     'status': 400,
                     'message': 'This order cannot be submitted.'
                 }
+
+            acceptance = _acceptance_refusal(order, supplied_quote_ref)
+            if acceptance is not None:
+                return acceptance
 
         order.order_status = OrderStatus_Pending
         if user is not None:

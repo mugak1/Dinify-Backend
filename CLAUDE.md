@@ -171,6 +171,62 @@ so keep it current when conventions change.
   the read-only preflight (see Existing Management Commands); a staged
   `NOT VALID` + `VALIDATE CONSTRAINT` alternative is documented in the migration and
   should be adopted only against a measured row count
+- Order pricing and line identity (D02/D03): ✅ ONE arithmetic contract for checkout
+  money, and ONE canonical identity for an order line. Three new modules, layered so
+  nothing above them can hold a second opinion:
+  - `misc_app/controllers/money.py` — THE monetary parsing and rounding rule. It sits
+    BELOW both the catalogue and the order services deliberately: either would
+    otherwise have to import the other. `parse_money` is the only reader of a stored
+    monetary value and it FAILS rather than guesses — a malformed, non-finite,
+    over-long or out-of-range figure is a named refusal, never a coerced `0`, which is
+    the difference between refusing to sell an item and selling it for nothing.
+    **Rounding is `ROUND_HALF_EVEN`, applied per UNIT COMPONENT, and the extension to
+    a line is then EXACT INTEGER arithmetic** — round-then-multiply, never
+    multiply-then-round, so a line of 3 is exactly three times the unit the diner was
+    shown. `MAX_MONEY_DIGITS`/`MAX_MONEY_TEXT_LENGTH` bound the work BEFORE parsing;
+    `working_context()` gives the wide precision the intermediate arithmetic needs.
+    **IT IS NOT OPTIONAL DECORATION, and it belongs around EVERY composite Decimal
+    step on money** — the process default is 28 significant digits, under the 50 the
+    columns hold, so ambient arithmetic decides the fate of a schema-valid figure by
+    a limit nothing here chose: `quantize` RAISES (a 29-digit price was reported
+    `out_of_range`, hiding an item the database stores happily and refusing it at
+    checkout) while `*`, `+` and `-` ROUND SILENTLY, which is worse — an inexact
+    product the range check then waves through. `quantize_money` and `extend_money`
+    now carry it internally; `price_unit` and `extend` wrap their own sums
+  - `restaurants_app/controllers/pricing_policy.py` — `resolve_price` is THE answer to
+    *what does this item cost right now*, returning a `PriceVerdict` that both the
+    public menu read and the order path consume. **The discount WINDOW is checked
+    BEFORE the magnitude is parsed**, so only a currently-scheduled broken discount
+    makes an item unpriceable; an expired one with unreadable figures is simply not
+    applied. `MenuItem.effective_base_price()` now RAISES on an unusable price rather
+    than clamping to zero, and `item_priceable` joins `item_visible_in_menu` /
+    `item_orderable`, so an item the server cannot price is neither shown nor sold
+  - `orders_app/controllers/services/order_pricing.py` — `PricedUnit`/`PricedLine`,
+    the modifier adjustment, and **`line_identity`**: `(item, modifiers, extras,
+    reference_unit, effective_unit, deliverable, name_snapshot, modifiers_snapshot)`.
+    Two lines merge only when ALL of that agrees, so a plain dish never merges into a
+    modified one (absence used to be a WILDCARD), a line priced under a discount never
+    merges into one priced without it, and an unavailable line is never resurrected by
+    a merge. `modifier_identity` DE-DUPLICATES choices (canonicalisation already
+    collapses a repeat, and legacy rows shipped without a migration) while
+    `extras_identity` keeps its multiset shape (duplicate extras are REFUSED upstream,
+    not collapsed) — the asymmetry is deliberate and spelled out at both declarations
+  `catalogue_snapshot.py` resolves the whole order's catalogue in **exactly two
+  statements** — one restaurant-scoped `MenuItem` read and one batched allergen-tag
+  read — under one captured `now`, so every line of an order is priced against the
+  same menu and the same clock. It is what makes a concurrent operator edit either
+  wholly before or wholly after an order, never halfway through one
+- Order acceptance is bound to the reviewed quote (D02): ✅ `Order.pricing_version`
+  (migration `orders_app/0037`, additive, `db_default` LEGACY) plus an opaque
+  `quote_ref` derived from the PERSISTED lines and totals (`order_quote.py`, SHA-256
+  over a canonical fingerprint). `PUT orders/submit/` requires it and refuses on
+  `quote_ref_required` / `quote_ref_stale` / `legacy_pricing_version` /
+  `nothing_to_prepare`, checked INSIDE the locked transaction against the re-read row.
+  **There is no staff or internal bypass** — a path that skipped it would be a path on
+  which the diner's agreement was never established. The acknowledgement authorises
+  NOTHING: the diner table session remains the sole authority for whose order this is.
+  A LEGACY draft is never repriced or deleted, only refused, and the client re-prices
+  the unchanged basket. See `BREAKING_CHANGES.md` §13
 - Order-path READ BUDGET: ✅ (PR-H §4) — the per-line cost inside `_create_order`'s
   transaction is **4 queries** (the chokepoint's restaurant-scoped `MenuItem` guard,
   the merge lookup, the allergen-tag read, the INSERT); a 4-line order runs 35
@@ -4302,10 +4358,15 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
   "Restaurant Lifecycle"; 0057 adds the platform-owned `Restaurant.is_test` flag,
   additive with NO backfill — see "Canonical Data Shapes"),
-  `orders_app/migrations/0036_orderitem_quantity_non_negative.py` (0034 removed the
+  `orders_app/migrations/0037_order_pricing_version.py` (0034 removed the
   inline review fields; 0035 adds the launch-boundary `Order.is_test` flag; 0036
   adds the D01 `quantity >= 0` CHECK constraint, additive and reversible with NO
-  `RunPython` — see the D01 bullets in Current Implementation Status),
+  `RunPython`; 0037 adds `Order.pricing_version`, one `AddField` carrying BOTH
+  `default` and `db_default` so an INSERT from rolled-back code stays valid, plus an
+  index — the index build is proportional to the table's row count, which this
+  repository cannot observe, so do not describe the deploy as instantaneous; the
+  migration documents the `AddIndexConcurrently` alternative — see the D01/D02 bullets
+  in Current Implementation Status),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
   `users_app/migrations/0014_customer_access_state.py` (0010 adds
