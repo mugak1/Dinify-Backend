@@ -878,10 +878,19 @@ class TestOrderTenantConsistency(TestCase):
         self.assertEqual(child.unit_price, Decimal('1000.00'))
         self.assertEqual(child.actual_cost, Decimal('1000.00'))
 
-    def test_chokepoint_rolls_back_whole_transaction(self):
-        # Drive the service directly (bypassing initiate_order's batch gate)
-        # so the rejection fires INSIDE the transaction at the SECOND item's
-        # extras: the first, valid item's already-written rows must unwind too.
+    def test_a_foreign_extra_rejects_the_whole_order_before_any_write(self):
+        # Renamed and re-described: the old name and comment claimed the
+        # rejection fired at the SECOND item's extras so that "the first, valid
+        # item's already-written rows must unwind too". Instrumenting the
+        # service shows otherwise — `validate_order_selections` at step 2b
+        # resolves parents AND extras in one restaurant-scoped query, so the
+        # foreign extra is refused with counter_allocated=False and
+        # add_order_item_calls=0. Nothing is ever written, so nothing unwinds.
+        #
+        # The assertions below were always correct; only the story was wrong.
+        # This is a tenant-boundary test over the extras axis. Genuine
+        # late-rollback evidence is in
+        # orders_app/tests_order_input.py::D01LateRollbackTests.
         orders_before = Order.objects.count()
         result = _create_order(
             restaurant=self.restaurant_a,

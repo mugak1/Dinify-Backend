@@ -26,7 +26,8 @@ from restaurants_app.controllers.modifier_definition import (
     inspect_modifier_definition, usable_identifier,
 )
 from orders_app.controllers.services.order_input import (
-    quantity_error, validate_order_items,
+    client_order_id_rejection, quantity_error, validate_order_items,
+    validate_service_client_order_id,
 )
 from orders_app.controllers.services.order_admission import (
     STAGE_CREATE,
@@ -934,6 +935,22 @@ class ConOrder:
             return static_input
         items = static_input['items']
 
+        # The OPTIONAL IDEMPOTENCY KEY is validated here too — before the replay
+        # lookup below, which is the first thing that consumes it. The endpoint
+        # already validates it, but this service is a supported entrypoint in
+        # its own right and must not depend on its caller having done so: an
+        # unvalidated key reached an ORM filter on a `UUIDField`, where a
+        # malformed value raised `ValidationError` out of the service and an
+        # integer or boolean was COERCED by `uuid.UUID(int=...)` into a
+        # fabricated key (0 and False both becoming the nil UUID).
+        #
+        # The canonical STRING is what the rest of this function uses, and it is
+        # what is handed to `_create_order` — the raw argument is not carried on
+        # beside it.
+        client_order_id, key_ok = validate_service_client_order_id(client_order_id)
+        if not key_ok:
+            return client_order_id_rejection()
+
         # Canonical selection validation (preflight, FAST FEEDBACK): one authority
         # for tenant ownership, diner publication (anonymous only), and extra
         # applicability — is_extra + membership in the parent's extras_applicable +
@@ -957,7 +974,7 @@ class ConOrder:
         # (after the idempotency lookup and the table lock), which is the
         # load-bearing enforcement.
         is_replay = bool(
-            client_order_id
+            client_order_id is not None
             and Order.objects.filter(
                 restaurant=restaurant, client_order_id=client_order_id,
             ).exists()
