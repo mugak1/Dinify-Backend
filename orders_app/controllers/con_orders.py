@@ -22,12 +22,25 @@ from orders_app.controllers.services.create_order import _create_order
 from restaurants_app.controllers.menu_publication import (
     NOT_ON_MENU_MESSAGE, validate_order_selections,
 )
+from restaurants_app.controllers.modifier_definition import (
+    inspect_modifier_definition, usable_identifier,
+)
+from orders_app.controllers.services.order_input import (
+    quantity_error, validate_order_items,
+)
 from orders_app.controllers.services.order_admission import (
     STAGE_CREATE,
     evaluate,
 )
 
 logger = logging.getLogger(__name__)
+
+# One controlled diner-facing refusal for an item whose STORED modifier
+# definition is malformed. It says what the diner can act on and nothing about
+# the catalogue; the classification and the offending identifier go to the log.
+MODIFIER_CONFIG_MESSAGE = (
+    'Item {name} cannot be ordered right now. Please choose another item.'
+)
 
 # NOT_ON_MENU_MESSAGE is the canonical opaque menu-rejection string, now owned by
 # the menu-publication policy (restaurants_app/controllers/menu_publication.py) and
@@ -66,26 +79,41 @@ class ConOrder:
                 'message': f'Invalid modifier selections for item, {menu_item.name}'
             }
 
-        modifier_data = menu_item.options if isinstance(menu_item.options, dict) else {}
-        has_modifiers = bool(modifier_data.get('hasModifiers'))
-        raw_groups = modifier_data.get('groups') if has_modifiers else []
-        if not isinstance(raw_groups, list):
-            raw_groups = []
-        groups = [g for g in raw_groups if isinstance(g, dict) and g.get('id') is not None]
-        groups_by_id = {}
-        for group in groups:
-            groups_by_id.setdefault(group.get('id'), group)
+        # ONE structural reading of the stored definition, shared with the
+        # read-only preflight command so the two can never disagree about what
+        # a catalogue row means.
+        definition = inspect_modifier_definition(menu_item.options)
 
-        # Item with no active modifiers: an absent/null/empty selection normalizes to
-        # {}, but a non-empty modifier object is rejected rather than silently
+        if definition.is_invalid:
+            # FAIL CLOSED. A malformed ACTIVE definition is refused, never
+            # downgraded to "no modifiers required" — that would delete a
+            # required selection to make a broken item orderable. Log a bounded
+            # classification and the offending identifier only; never the
+            # catalogue JSON.
+            logger.warning(
+                'Malformed modifier definition refused at checkout '
+                '(menu_item_id=%s, reason=%s, group_id=%s)',
+                menu_item.pk, definition.reason,
+                ConOrder._safe_identifier_for_log(definition.group_id),
+            )
+            return {
+                'status': 400,
+                'message': MODIFIER_CONFIG_MESSAGE.format(name=menu_item.name),
+            }
+
+        # Item with no active modifiers: an absent/null/empty selection normalizes
+        # to {}, but a non-empty modifier object is rejected rather than silently
         # persisted as unrelated client data.
-        if not has_modifiers or not groups_by_id:
+        if not definition.is_active:
             if not selected_modifiers:
                 return {'status': 200, 'selected_modifiers': {}}
             return {
                 'status': 400,
                 'message': f'Item {menu_item.name} does not accept modifier selections.'
             }
+
+        # Unique by construction: duplicate group ids are refused above.
+        groups_by_id = {group.group_id: group for group in definition.groups}
 
         # Reject any submitted group that is not defined on THIS item's options.
         for submitted_group_id in selected_modifiers.keys():
@@ -99,23 +127,25 @@ class ConOrder:
         # Iterate the item's OWN group order so (a) a minimum is enforced even for an
         # omitted required group and (b) the canonical dict is deterministically
         # ordered by menu definition.
-        for group in groups:
-            group_id = group.get('id')
-            submitted = selected_modifiers.get(group_id, [])
-            if group_id in selected_modifiers and not isinstance(submitted, list):
+        for group in definition.groups:
+            submitted = selected_modifiers.get(group.group_id, [])
+            if group.group_id in selected_modifiers and not isinstance(submitted, list):
                 return {
                     'status': 400,
                     'message': f'Invalid modifier selection for item, {menu_item.name}'
                 }
             choice_ids = submitted if isinstance(submitted, list) else []
 
-            raw_choices = group.get('choices')
-            if not isinstance(raw_choices, list):
-                raw_choices = []
-            defined_choice_ids = [
-                choice.get('id') for choice in raw_choices
-                if isinstance(choice, dict) and choice.get('id') is not None
-            ]
+            # Every submitted member must be usable AS an identifier BEFORE it
+            # reaches a hashing operation. This is the guard that stops a nested
+            # object or list raising out of the de-duplication below.
+            if any(not usable_identifier(choice) for choice in choice_ids):
+                return {
+                    'status': 400,
+                    'message': f'Invalid modifier choice for item, {menu_item.name}'
+                }
+
+            defined_choice_ids = group.choice_ids
             defined_choice_set = set(defined_choice_ids)
 
             # De-dupe submitted choices (dict.fromkeys preserves first-seen order only
@@ -134,25 +164,32 @@ class ConOrder:
             ]
 
             # min/max enforced on the UNIQUE selected count (0 for an omitted group).
-            min_selections = group.get('minSelections') or 0
-            max_selections = group.get('maxSelections') or 0
             selected_count = len(canonical_choice_ids)
-            if selected_count < min_selections:
+            if selected_count < group.min_selections:
                 return {
                     'status': 400,
-                    'message': f"Item {menu_item.name} requires at least {min_selections} option selections."
+                    'message': f"Item {menu_item.name} requires at least {group.min_selections} option selections."
                 }
-            if max_selections and selected_count > max_selections:
+            if group.max_selections and selected_count > group.max_selections:
                 return {
                     'status': 400,
-                    'message': f"Item {menu_item.name} allows a maximum of {max_selections} option selections."
+                    'message': f"Item {menu_item.name} allows a maximum of {group.max_selections} option selections."
                 }
 
             # Omit empty optional groups from the canonical form.
             if canonical_choice_ids:
-                canonical[group_id] = canonical_choice_ids
+                canonical[group.group_id] = canonical_choice_ids
 
         return {'status': 200, 'selected_modifiers': canonical}
+
+    @staticmethod
+    def _safe_identifier_for_log(value):
+        """Bounded, printable rendering of an operator-supplied identifier for a
+        log line. Never the catalogue JSON."""
+        if value is None:
+            return None
+        text = value if isinstance(value, str) else repr(value)
+        return text[:64]
 
     @staticmethod
     def normalize_order_items(restaurant, order_items: list) -> dict:
@@ -262,28 +299,38 @@ class ConOrder:
         if menu_item is None:
             menu_item = MenuItem.objects.get(pk=item['item'])
         selected_modifiers = item.get('selected_modifiers') or {}
-        modifier_data = menu_item.options or {}
-        if not modifier_data.get('hasModifiers') or not selected_modifiers:
+        # Resolve through the SAME structural reading validation uses. This used
+        # to build `{g.get('id'): g ...}`, i.e. LAST-wins, while the normalizer
+        # resolved duplicate ids FIRST-wins — so a duplicated id was validated
+        # against one definition and labelled/priced against another. Duplicates
+        # are now refused outright, and both sites read one unambiguous map.
+        definition = inspect_modifier_definition(menu_item.options)
+        if not definition.is_active or not selected_modifiers:
             return []
 
-        groups_by_id = {g.get('id'): g for g in modifier_data.get('groups', [])}
+        groups_by_id = {group.group_id: group for group in definition.groups}
         selected_options = []
         for group_id, choice_ids in selected_modifiers.items():
             group = groups_by_id.get(group_id)
             if group is None or not choice_ids:
                 continue
-            choices_by_id = {c.get('id'): c for c in group.get('choices', [])}
             # De-dupe so the displayed option cost matches the charged cost
             # (determine_effective_unit_price also charges each choice once).
+            # Members are already identifier-safe by the time a selection is
+            # canonical; guard anyway so a direct caller cannot raise here.
             resolved_choices = [
-                choices_by_id[cid] for cid in dict.fromkeys(choice_ids) if cid in choices_by_id
+                group.choices_by_id[cid]
+                for cid in dict.fromkeys(
+                    c for c in choice_ids if usable_identifier(c)
+                )
+                if cid in group.choices_by_id
             ]
             names_of_choices = ', '.join(c.get('name', '') for c in resolved_choices)
             cost_total = float(sum(
                 Decimal(str(c.get('additionalCost', 0))) for c in resolved_choices
             ))
             selected_options.append({
-                'name': group.get('name'),
+                'name': group.raw.get('name'),
                 'cost': cost_total,
                 'choices': names_of_choices,
             })
@@ -430,8 +477,16 @@ class ConOrder:
         # add the cost of the grouped modifier selections
         cost_of_options = Decimal('0')
         if selected_modifiers:
-            modifier_data = menu_item.options or {}
-            groups_by_id = {g.get('id'): g for g in modifier_data.get('groups', [])}
+            # Same single structural reading as validation and label building —
+            # see construct_option_items for why the old per-site dict
+            # comprehension was a divergence rather than a duplication.
+            definition = inspect_modifier_definition(menu_item.options)
+            if definition.is_invalid:
+                return {
+                    'status': 400,
+                    'message': MODIFIER_CONFIG_MESSAGE.format(name=menu_item.name),
+                }
+            groups_by_id = {group.group_id: group for group in definition.groups}
             for group_id, choice_ids in selected_modifiers.items():
                 group = groups_by_id.get(group_id)
                 if group is None:
@@ -439,11 +494,20 @@ class ConOrder:
                         'status': 400,
                         'message': f'Invalid modifier group for item, {menu_item.name}'
                     }
-                choices_by_id = {c.get('id'): c for c in group.get('choices', [])}
+                choices_by_id = group.choices_by_id
                 # De-dupe choice ids per group (dict.fromkeys preserves order):
                 # a repeated choice must be validated and charged exactly ONCE, so
                 # a duplicate cannot inflate the per-unit cost. A foreign/unknown id
                 # is still caught because it survives de-duping into the set below.
+                # An unusable member (a nested object/list) is REFUSED, never
+                # dropped: silently ignoring it would price a selection the
+                # diner did not make. Checked before the hash, which is what
+                # the de-duplication below would otherwise raise on.
+                if any(not usable_identifier(c) for c in (choice_ids or [])):
+                    return {
+                        'status': 400,
+                        'message': f'Invalid modifier choice for item, {menu_item.name}'
+                    }
                 for choice_id in dict.fromkeys(choice_ids or []):
                     choice = choices_by_id.get(choice_id)
                     if choice is None:
@@ -573,6 +637,25 @@ class ConOrder:
         # before (per-unit unit_price/discounted_price scaled to the new quantity;
         # cost_of_options carried verbatim) — this is a crash-only fix, not a
         # pricing change.
+        #
+        # SELF-GUARDING, through the SHARED rule (D01). This helper is not
+        # protected merely by who calls it today: it takes a client-supplied
+        # increment straight into arithmetic and then into an UPDATE. The
+        # database constraint cannot stand in for this — an existing 5 plus an
+        # incoming -1 yields 4, which satisfies `quantity >= 0` perfectly while
+        # halving what the diner is charged for. Rejecting BEFORE any arithmetic
+        # or mutation is the only place that can be caught.
+        #
+        # The per-line ceiling bounds the INCREMENT, never the merged row: two
+        # legitimate lines of 60 may merge to 120, bounded order-wide by
+        # MAX_TOTAL_UNITS at the request boundary, and no upper bound is imposed
+        # on the stored value.
+        if quantity_error(item.get('quantity') if isinstance(item, dict) else None):
+            return {
+                'status': 400,
+                'message': 'Each item must include a valid quantity.',
+            }
+
         new_quantity = order_item.quantity + item['quantity']
         new_total_cost = order_item.unit_price * new_quantity
         new_cost_of_options = order_item.cost_of_options * new_quantity
@@ -600,8 +683,13 @@ class ConOrder:
         if (
             not isinstance(item, dict)
             or item.get('item') is None
-            or item.get('quantity') is None
+            or quantity_error(item.get('quantity')) is not None
         ):
+            # The quantity rule is the SHARED one (D01) rather than a second
+            # presence-only check: this chokepoint feeds Decimal arithmetic and
+            # then a persisted row, so `is None` was never enough — a float, a
+            # numeric string or a container raised a TypeError out of the
+            # multiplication, and zero or a negative persisted intact.
             return {
                 'status': 400,
                 'message': 'Each order item must include an item and a quantity.'
@@ -820,18 +908,31 @@ class ConOrder:
                 'message': 'This restaurant is not currently accepting orders'
             }
 
-        # check that order items are provided
-        if items is None:
-            return {
-                'status': 400,
-                'message': MESSAGES.get('NO_ORDER_ITEMS')
-            }
-
-        if len(items) < 1:
-            return {
-                'status': 400,
-                'message': MESSAGES.get('NO_ORDER_ITEMS')
-            }
+        # STATIC INPUT VALIDATION (D01). One pure, database-free rule for the
+        # request's SHAPE: a non-empty list of object lines, each with a real
+        # UUID item id and a real positive integer quantity inside the request
+        # ceilings, with structurally sound nested selections. It replaces the
+        # old `items is None` / `len(items) < 1` pair, which let `items` be any
+        # sized object (`len(5)` raised) and checked a quantity only for
+        # presence — so 0, -3, 2.0, "3", True and a nested object all travelled
+        # on into Decimal arithmetic and a persisted row.
+        #
+        # It runs BEFORE the replay lookup below, deliberately: these checks are
+        # static and menu-independent, so they cannot be invalidated by anything
+        # that happens to the catalogue, and a body that is not a well-formed
+        # order is not a well-formed order whether or not it repeats a key. A
+        # CORRECTLY SHAPED replay is unaffected — it reaches the lookup exactly
+        # as before, and is still never re-validated against mutable menu state.
+        # Request forms that are newly invalid or over the ceilings are
+        # intentionally refused; no compatibility is promised for a previously
+        # accepted malformed body.
+        #
+        # The VALIDATED lines are consumed downstream — raw input is not passed
+        # onward beside them.
+        static_input = validate_order_items(items)
+        if static_input.get('status') != 200:
+            return static_input
+        items = static_input['items']
 
         # Canonical selection validation (preflight, FAST FEEDBACK): one authority
         # for tenant ownership, diner publication (anonymous only), and extra

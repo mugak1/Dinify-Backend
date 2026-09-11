@@ -33,6 +33,7 @@ from orders_app.controllers.services.order_admission import (
     STAGE_CREATE,
     admit,
 )
+from orders_app.controllers.services.order_input import validate_order_items
 from restaurants_app.controllers.lifecycle_policy import orders_are_commercial
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated,
@@ -115,6 +116,25 @@ def _create_order(*, restaurant, table, items,
     """
     # imported lazily to avoid a circular import (con_orders imports this module)
     from orders_app.controllers.con_orders import ConOrder
+
+    # 0. STATIC INPUT VALIDATION (D01) — the AUTHORITATIVE shape/quantity gate.
+    #    `initiate_order` runs the same rule above, but this service is a
+    #    supported entrypoint in its own right and must not depend on its caller
+    #    having validated. The rule is the SAME function, so the two can never
+    #    disagree, and it is PURE — no query, so the pinned per-line order-path
+    #    query budget is unchanged.
+    #
+    #    Deliberately OUTSIDE the transaction and BEFORE the replay lookup: it
+    #    is deterministic and menu-independent, so it needs no lock and nothing
+    #    it decides can go stale, and running it here means a malformed request
+    #    can never allocate a daily order number, touch Decimal arithmetic or
+    #    write a row. A correctly shaped replay is untouched by it.
+    #
+    #    The VALIDATED lines are what the rest of this function consumes.
+    static_input = validate_order_items(items)
+    if static_input.get('status') != 200:
+        return static_input
+    items = static_input['items']
 
     # The try/except sits AROUND the atomic block (the same idiom as the two
     # nested savepoints inside it): OrderItemRejected must unwind through

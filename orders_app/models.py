@@ -200,6 +200,27 @@ class OrderItem(BaseModel):
     class Meta:
         db_table = 'order_items'
         ordering = ['-time_created', 'item__name']
+        constraints = [
+            # D01 backstop. NOT a claim that the database validates the incoming
+            # JSON request — it validates ONE persisted fact: a stored line
+            # quantity is never negative. It exists because the request
+            # validator cannot reach a direct ORM write, a bulk `update()` or a
+            # future writer, and a negative quantity silently reduces what a
+            # diner is charged.
+            #
+            # `>= 0`, NEVER `> 0`: zero is a legitimate, load-bearing internal
+            # representation — `add_order_item` and `process_item_extras` zero a
+            # line whose item is unavailable or sold out so it is neither
+            # prepared nor charged while still surfacing in the diner's
+            # reconciliation. A positive-only constraint would break that.
+            #
+            # No UPPER bound: the per-line request ceiling bounds what a caller
+            # may SUBMIT, not what legitimate merging may accumulate in a row.
+            models.CheckConstraint(
+                condition=models.Q(quantity__gte=0),
+                name='orderitem_quantity_non_negative',
+            ),
+        ]
 
 
 class RestaurantDailyOrderCounter(BaseModel):
