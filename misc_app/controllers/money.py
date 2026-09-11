@@ -161,11 +161,22 @@ def quantize_money(value, *, field=''):
     then an exact multiplication of an already-canonical unit by an integer
     quantity, so they need no further rounding and recomputing twice is
     identical by construction.
+
+    THE CONTEXT IS EXPLICIT, AND THAT IS LOAD-BEARING. ``quantize`` raises when
+    the RESULT needs more digits than the active context's precision, and the
+    process default is 28 — well under the 50 the column holds. Left ambient, a
+    perfectly schema-valid 29-digit price (``9999999999999999999999999999.99``)
+    raised ``InvalidOperation`` here and was reported ``OUT_OF_RANGE``, so an
+    item the database can store was called unpriceable: hidden from the menu and
+    refused at checkout for exceeding a default nobody chose. What decides
+    validity is ``MAX_MONEY_MAGNITUDE``, checked before this is reached; this
+    function's job is to canonicalize, not to re-adjudicate the range.
     """
-    try:
-        return value.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_EVEN)
-    except (InvalidOperation, ArithmeticError):
-        raise MoneyConfigError(OUT_OF_RANGE, field) from None
+    with working_context():
+        try:
+            return value.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_EVEN)
+        except (InvalidOperation, ArithmeticError):
+            raise MoneyConfigError(OUT_OF_RANGE, field) from None
 
 
 def extend_money(unit, quantity, *, field=''):
@@ -180,17 +191,32 @@ def extend_money(unit, quantity, *, field=''):
         raise MoneyConfigError(NOT_A_NUMBER, field or 'quantity')
     if quantity < 0:
         raise MoneyConfigError(NEGATIVE_NOT_ALLOWED, field or 'quantity')
-    result = unit * Decimal(quantity)
+    # The same explicit context, and here the ambient default would be WORSE
+    # than a refusal: multiplication ROUNDS to the context precision instead of
+    # raising, so a large unit times a quantity would silently return an inexact
+    # product — and the range check below would then wave it through as a
+    # perfectly ordinary amount.
+    with working_context():
+        result = unit * Decimal(quantity)
     if result.copy_abs() >= MAX_MONEY_MAGNITUDE:
         raise MoneyConfigError(OUT_OF_RANGE, field)
     return quantize_money(result, field=field)
 
 
 def working_context():
-    """A local decimal context for multi-step arithmetic (the discount formula).
+    """THE local decimal context for every monetary computation in the tree.
 
-    Used so the intermediate of a percentage calculation carries full precision
-    and is quantized ONCE at the end, instead of being rounded at each step.
+    Two jobs, and the second is easy to overlook. It keeps a multi-step
+    intermediate (the discount formula) at full precision so it is quantized
+    ONCE at the end rather than rounded at each step; and it makes the precision
+    a property of THIS module rather than of whatever the process default
+    happens to be. The default is 28 significant digits, under the 50 the
+    monetary columns hold, so ambient arithmetic on a schema-valid figure can
+    raise (``quantize``) or silently round (``*``, ``+``, ``-``) — deciding the
+    fate of a price by a limit nothing here chose.
+
+    Reach for it around any composite Decimal arithmetic on money, not only the
+    discount formula.
     """
     return localcontext(Context(
         prec=MONEY_WORKING_PRECISION, rounding=ROUND_HALF_EVEN,

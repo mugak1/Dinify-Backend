@@ -53,7 +53,7 @@ always agree. Accepted historical orders are untouched, and the boundary is
 identifiable from ``Order.pricing_version``.
 """
 from misc_app.controllers.money import (
-    MoneyConfigError, extend_money, parse_money, quantize_money,
+    MoneyConfigError, extend_money, parse_money, quantize_money, working_context,
 )
 
 #: Named pricing conventions. LEGACY is the pre-D02 calculation; it is the model
@@ -140,17 +140,22 @@ def price_unit(verdict, modifier_adjustments):
     ``verdict`` is a ``pricing_policy.PriceVerdict`` the caller has already
     confirmed usable.
     """
-    modifier_unit = _ZERO
-    for adjustment in modifier_adjustments:
-        modifier_unit += adjustment
-    modifier_unit = quantize_money(modifier_unit, field='cost_of_options')
+    # Under the module's own precision, not the process default's 28 digits —
+    # addition ROUNDS silently rather than raising, so a sum of schema-valid
+    # amounts could quietly come back inexact and be quantized into a number
+    # nothing could trace. See money.working_context.
+    with working_context():
+        modifier_unit = _ZERO
+        for adjustment in modifier_adjustments:
+            modifier_unit += adjustment
+        modifier_unit = quantize_money(modifier_unit, field='cost_of_options')
 
-    reference_unit = quantize_money(
-        verdict.reference_base + modifier_unit, field='unit_price',
-    )
-    effective_unit = quantize_money(
-        verdict.effective_base + modifier_unit, field='discounted_price',
-    )
+        reference_unit = quantize_money(
+            verdict.reference_base + modifier_unit, field='unit_price',
+        )
+        effective_unit = quantize_money(
+            verdict.effective_base + modifier_unit, field='discounted_price',
+        )
 
     # A genuinely free unit (0.00) is legal and stays orderable. A NEGATIVE
     # payable unit is an invalid configuration and is refused — never rounded or
@@ -188,7 +193,8 @@ def extend(unit, quantity):
     # construction — both sides carry the identical modifier component and the
     # effective base can never exceed the reference base — so this is a
     # subtraction, not a clamp.
-    savings = quantize_money(total_cost - discounted_cost, field='savings')
+    with working_context():
+        savings = quantize_money(total_cost - discounted_cost, field='savings')
 
     return PricedLine(
         unit=unit, quantity=quantity,

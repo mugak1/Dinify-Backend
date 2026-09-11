@@ -75,6 +75,31 @@ class MoneyContractTests(TestCase):
             with self.assertRaises(MoneyConfigError):
                 extend_money(D('1.00'), bad)
 
+    # WHAT THE COLUMN CAN HOLD IS WHAT DECIDES THE RANGE — never the process's
+    # ambient decimal precision, which is 28 significant digits and nothing to do
+    # with this domain. Read ambiently, a schema-valid figure with more than 28
+    # digits raised out of `quantize` and was reported OUT_OF_RANGE, so an item
+    # the database stores happily was called unpriceable: hidden from the menu
+    # and refused at checkout.
+    def test_a_schema_valid_figure_wider_than_the_ambient_precision_parses(self):
+        wide = '9' * 28 + '.99'                       # 30 significant digits
+        self.assertEqual(parse_money(wide), D(wide))
+        # ...and the refusal boundary is still the column's, not the context's.
+        with self.assertRaises(MoneyConfigError):
+            parse_money('1' + '0' * 48)              # == MAX_MONEY_MAGNITUDE
+
+    def test_extending_a_wide_unit_is_exact_rather_than_silently_rounded(self):
+        # Multiplication under the ambient context ROUNDS instead of raising, so
+        # this is the worse half of the same defect: an inexact product that the
+        # range check would then wave through as an ordinary amount.
+        #
+        # THE EXPECTED VALUE IS WRITTEN OUT, not computed. A bare `unit * 3`
+        # here is itself evaluated ambiently and comes back as
+        # 3.000000000000000000000000000E+30 — the precise rounding this asserts
+        # against, which would have made the test agree with the defect.
+        unit = parse_money('1' + '0' * 30 + '.01')
+        self.assertEqual(extend_money(unit, 3), D('3' + '0' * 30 + '.03'))
+
 
 class DiscountPolicyTests(TestCase):
     """The shared price verdict — supported absence vs unreadable."""

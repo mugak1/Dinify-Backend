@@ -184,7 +184,15 @@ so keep it current when conventions change.
     a line is then EXACT INTEGER arithmetic** — round-then-multiply, never
     multiply-then-round, so a line of 3 is exactly three times the unit the diner was
     shown. `MAX_MONEY_DIGITS`/`MAX_MONEY_TEXT_LENGTH` bound the work BEFORE parsing;
-    `working_context()` gives the wide precision the intermediate arithmetic needs
+    `working_context()` gives the wide precision the intermediate arithmetic needs.
+    **IT IS NOT OPTIONAL DECORATION, and it belongs around EVERY composite Decimal
+    step on money** — the process default is 28 significant digits, under the 50 the
+    columns hold, so ambient arithmetic decides the fate of a schema-valid figure by
+    a limit nothing here chose: `quantize` RAISES (a 29-digit price was reported
+    `out_of_range`, hiding an item the database stores happily and refusing it at
+    checkout) while `*`, `+` and `-` ROUND SILENTLY, which is worse — an inexact
+    product the range check then waves through. `quantize_money` and `extend_money`
+    now carry it internally; `price_unit` and `extend` wrap their own sums
   - `restaurants_app/controllers/pricing_policy.py` — `resolve_price` is THE answer to
     *what does this item cost right now*, returning a `PriceVerdict` that both the
     public menu read and the order path consume. **The discount WINDOW is checked
