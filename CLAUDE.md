@@ -64,6 +64,96 @@ so keep it current when conventions change.
   true DRAFT that neither occupies its table nor reaches the kitchen board — the
   table is claimed only at `submit` (BUG-P2-2), whose transition is transactional
   and race-safe. Preserve these invariants in any future order-create work
+- Order-input integrity (D01): ✅ ONE contract for customer-supplied order input,
+  `orders_app/controllers/services/order_input.py` — PURE and DATABASE-FREE, so it
+  adds ZERO queries and the pinned order-path budget below is unchanged. It answers
+  only *is this request structurally a well-formed order?*; the catalogue, tenant,
+  publication and price questions stay with `validate_order_selections` and the
+  in-transaction re-check, which still run after it. Enforced at THREE boundaries
+  that all call the SAME functions: the endpoint (a root-must-be-a-mapping guard
+  BEFORE any `.get()`, then full validation AFTER authority resolution, so no
+  catalogue-shaped feedback precedes authorization), `ConOrder.initiate_order`, and
+  `_create_order` — which is AUTHORITATIVE and self-guards a direct caller rather
+  than trusting its caller. Each consumes the VALIDATED lines; raw input is not
+  passed onward beside them. What it closed: `quantity` was checked only for
+  PRESENCE (`is None`) at both `menu_publication._parse_selection` and
+  `add_order_item`, so **0 and -3 persisted at HTTP 200** — a valid positive line
+  and an invalid negative line combined into a reduced payable amount — while
+  `True` / `2.5` / `2.0` / `"3"` / `[1]` / `{}` / `10**20` each produced a 500 out
+  of Decimal arithmetic or the serializer; a non-object body reached `.get()`
+  (`AttributeError`) and a non-sized `items` reached `len()`; and a malformed
+  `client_order_id` reached a `UUIDField` ORM filter. **`quantity_error` is THE
+  rule** — a real positive `int` (never `bool`), no floating representation
+  coerced, within the per-line ceiling — and the request validator, `add_order_item`
+  AND `update_item_quantity` all call it. `update_item_quantity` guards ITSELF
+  rather than relying on its caller: an existing 5 plus an incoming -1 yields 4,
+  which satisfies the database constraint perfectly while halving the charge, so
+  rejecting before the arithmetic is the only place it can be caught.
+  **VALIDATION IS IDEMPOTENT AND NON-MUTATING**: `item` and `extras` come back as
+  canonical lowercase UUID **strings** (never `uuid.UUID` objects, which the next
+  boundary would reject as non-strings), modifier group/choice ids are returned
+  EXACTLY as submitted, absent keys stay absent and `None` stays `None`, and every
+  line is a new dict. **An id-shaped failure keeps `NOT_ON_MENU_MESSAGE`**, imported
+  rather than restated: answering a malformed id differently would have created
+  exactly the malformed-vs-foreign distinction that opaque message exists to remove.
+  Static checks sit BEFORE the replay lookup at both service boundaries — they are
+  menu-independent, so nothing they decide can go stale, and a correctly shaped
+  replay is unaffected; a malformed one is refused, and no compatibility is promised
+  for a previously accepted malformed body. **REQUEST CEILINGS (new D01 application
+  safety limits — NOT prior Dinify policy, not payment-provider limits, and not a
+  statement about menu size):** quantity/line 99, lines/order 100, total units 500,
+  modifier groups/line 32, raw choices/group 64, raw extras/line 64, opaque modifier
+  id 128 chars, total raw choice+extra entries 2,048. Collection ceilings count RAW
+  entries BEFORE de-duplication (a group of 64 repeats of one id is at the ceiling),
+  and the per-line quantity ceiling bounds what may be SUBMITTED — never the merged
+  row, which may legitimately exceed it. This is POST-PARSE APPLICATION validation:
+  it does not replace an HTTP body-size limit, edge rate limiting or any other DoS
+  control, and claims nothing about them
+- Stored modifier definitions (D01): ✅ `restaurants_app/controllers/modifier_definition.py`
+  is the ONE structural reading of a `MenuItem.options` row, shared by
+  `ConOrder.normalize_selected_modifiers` and the read-only preflight so the two
+  cannot drift into a second opinion. `options` is an unvalidated `JSONField`, and
+  six stored shapes used to raise out of checkout as a 500: an unhashable group or
+  choice id (`dict.fromkeys` / `set()`), and a non-integer `minSelections` /
+  `maxSelections` (`int < str`). Three outcomes, deliberately apart — **inactive**
+  (`hasModifiers` falsy, `groups` absent/`None`/`[]`, or a non-mapping `options`:
+  legal and unchanged), **valid**, and **invalid** (FAIL CLOSED: checkout refuses
+  the line, and it is NEVER downgraded to "no modifiers required", which would
+  delete a required selection to make a broken item orderable). A non-list `groups`
+  with `hasModifiers: true` is INVALID where it used to return `200 {}` — that was
+  the required-selection bypass — while an absent `groups` stays inactive, because
+  then there are no requirements to lose. Bounds must be real non-negative `int`s
+  (`bool` refused), `maxSelections` 0 still means unlimited, and a positive maximum
+  below the minimum is refused rather than defaulted. **DUPLICATE group ids, and
+  duplicate choice ids within one group, are REFUSED** — validation resolved them
+  first-wins (`setdefault`) while `determine_effective_unit_price` and
+  `construct_option_items` resolved them last-wins, so one id was validated against
+  one definition and priced against another; both now read the one unambiguous map.
+  The same choice id in DIFFERENT groups stays legal. Ids are OPAQUE — the operator
+  UI mints UUIDs but the column is unvalidated and the repo's own fixtures use
+  `'g-req'`/`'c1'`, so they are never parsed as UUIDs, trimmed or case-folded.
+  **CAPACITY IS NOT VALIDITY**: a 400-choice optional group is ordinary capacity and
+  stays orderable; only an unsatisfiable REQUIREMENT is reported, as a compatibility
+  concern rather than a definition error. Checkout returns one controlled diner
+  message and logs a bounded classification plus a truncated identifier — never the
+  catalogue JSON. This validates NO monetary configuration; D02 stays separate
+- `OrderItem.quantity >= 0` (D01): ✅ migration `orders_app/0036`, one additive
+  reversible `AddConstraint` named `orderitem_quantity_non_negative`. A BACKSTOP for
+  the paths the request validator cannot reach (a direct ORM `save()`, a bulk
+  `update()`, a future writer) — **not** a claim that the database validates the
+  incoming JSON. **`>= 0`, never `> 0`**: zero is load-bearing, the server-set state
+  of a line whose item is unavailable or sold out, pinned by `tests_checkout_policy`
+  and `tests_tenant_isolation_closure`. **No upper bound**, so legitimate merging
+  stays legal. Adding it takes `ACCESS EXCLUSIVE` and validates every row, including
+  soft-deleted/archived/vacuumed ones; **the duration is proportional to the target
+  table's row count, which this repository cannot observe** — do not describe it as
+  brief. A violation ABORTS the migration and changes nothing; historical negatives
+  are real under-charged orders needing an explicit remediation decision, never a
+  clamp or a delete. The reverse operation drops the rule and RESTORES NOTHING,
+  because nothing was ever altered. `manage.py check_order_input_compatibility` is
+  the read-only preflight (see Existing Management Commands); a staged
+  `NOT VALID` + `VALIDATE CONSTRAINT` alternative is documented in the migration and
+  should be adopted only against a measured row count
 - Order-path READ BUDGET: ✅ (PR-H §4) — the per-line cost inside `_create_order`'s
   transaction is **4 queries** (the chokepoint's restaurant-scoped `MenuItem` guard,
   the merge lookup, the allergen-tag read, the INSERT); a 4-line order runs 35
@@ -4122,6 +4212,26 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `OwnerInvitation`, attests no owner control, sends no email/SMS and never modifies
   the restaurant. There is no admin-plane endpoint and no Admin UI for adoption, and
   no restaurant has been adopted with the command yet
+- `check_order_input_compatibility` in `orders_app/management/commands/` — the D01
+  READ-ONLY preflight. Answers two separate questions: will `orders_app/0036` apply
+  (any persisted `OrderItem.quantity < 0`, across ALL rows — soft-deleted, archived
+  and vacuumed included, because a CHECK constraint covers them too), and will the
+  catalogue still be orderable (stored modifier definitions the new normaliser
+  refuses, plus requirements that cannot be met within the request ceilings). It
+  reuses `inspect_modifier_definition` — the SAME pure function checkout uses — so
+  it cannot hold a different opinion; definitions are inspected in Python rather
+  than by a JSON expression in SQL for exactly that reason, and a
+  `max(array_length)` aggregate would answer a question nobody asked. It separates
+  **blockers** from **compatibility concerns** from **informational capacity**, says
+  whether an affected item is orderable or a draft, streams rows in chunks so memory
+  does not grow with the catalogue, and reports counts plus bounded samples of ids
+  and stable reason codes — never catalogue JSON, order contents or personal data.
+  Exit codes: 0 clean, 1 blocker, 2 concerns only, 3 INSPECTION INCOMPLETE (never
+  reported as clean). It has NO fix/repair mode and performs no save, audit write,
+  notification or provider call, and it runs against the PRE-migration schema so it
+  can inform the deploy decision rather than only confirm it. A preflight is a
+  point-in-time observation, not a substitute for the constraint. Invocation:
+  `python manage.py check_order_input_compatibility [--sample-size N] [--chunk-size N]`
 - `unlock_platform_admin` in `platform_admin_app/management/commands/` — clears
   `failed_attempts`/`locked_until` for a platform-staff account under a row lock and
   audits `ADMIN_AUTH_LOCKOUT_CLEARED`. Does NOT touch the password, TOTP secret or
@@ -4164,8 +4274,10 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
   "Restaurant Lifecycle"; 0057 adds the platform-owned `Restaurant.is_test` flag,
   additive with NO backfill — see "Canonical Data Shapes"),
-  `orders_app/migrations/0035_order_is_test.py` (0034 removed the inline review
-  fields; 0035 adds the launch-boundary `Order.is_test` flag),
+  `orders_app/migrations/0036_orderitem_quantity_non_negative.py` (0034 removed the
+  inline review fields; 0035 adds the launch-boundary `Order.is_test` flag; 0036
+  adds the D01 `quantity >= 0` CHECK constraint, additive and reversible with NO
+  `RunPython` — see the D01 bullets in Current Implementation Status),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
   `users_app/migrations/0014_customer_access_state.py` (0010 adds

@@ -9,6 +9,7 @@ from orders_app.models import Order
 from orders_app.controllers.manage_order import update_order_status
 from dinify_backend.configss.string_definitions import OrderStatus_Pending, MODULE_TABLES
 from orders_app.controllers.con_orders import ConOrder
+from orders_app.controllers.services.order_input import validate_order_request
 from users_app.controllers.permissions_check import can_user_access_module
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from misc_app.controllers.http import NoStoreResponseMixin
@@ -109,7 +110,19 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
 
     def post(self, request, action):
         if action == 'initiate':
+            # OUTER SHAPE FIRST (D01). `request.data` is whatever the client
+            # sent: a JSON array or a bare string arrives as a list/str, and
+            # every `.get()` below raised AttributeError -> 500. This one pure
+            # guard is allowed to precede authority resolution precisely because
+            # it reads no catalogue and discloses nothing — it only establishes
+            # that there is a mapping to read at all.
             data = request.data
+            if not isinstance(data, dict):
+                return Response(
+                    {'status': 400,
+                     'message': 'The order request is not valid. Please try again.'},
+                    status=400,
+                )
             source = data.get('source')
             try:
                 user = request.user.pk
@@ -118,9 +131,6 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
 
             customer = None
             created_by = None
-            items = data.get('items')
-            # idempotency key supplied by the diner app (Phase 3); absent today
-            client_order_id = data.get('client_order_id')
 
             if source == 'admin':
                 if user is None:
@@ -179,13 +189,23 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                         status=400,
                     )
 
+            # FULL INPUT VALIDATION, after authority is resolved. Placed here
+            # so no catalogue-shaped feedback ever precedes authorization; the
+            # rule itself is pure and reads nothing, so the ordering costs
+            # nothing. The endpoint validates to give the caller useful
+            # feedback — it is NOT what makes the order safe: `initiate_order`
+            # and `_create_order` each run the same rule themselves.
+            validated = validate_order_request(data)
+            if validated.get('status') != 200:
+                return Response(validated, status=400)
+
             response = ConOrder.initiate_order(
                 restaurant_id=restaurant_id,
                 table_id=table_id,
-                items=items,
+                items=validated['items'],
                 customer=customer,
                 created_by=created_by,
-                client_order_id=client_order_id,
+                client_order_id=validated['client_order_id'],
             )
             return Response(response, status=response.get('status', 200))
 
