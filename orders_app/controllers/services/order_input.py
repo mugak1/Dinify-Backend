@@ -169,6 +169,18 @@ def _reject(message, errors):
     return {'status': 400, 'message': message, 'errors': trimmed}
 
 
+def is_submittable_identifier(value):
+    """Can a client actually put this identifier in a request?
+
+    Exposed so the catalogue inspector can be handed THE request contract
+    instead of restating it. A stored id that fails this is unreachable: no
+    well-formed request can name it, so a group or choice that REQUIRES one
+    cannot be ordered at all — which is a compatibility fact the preflight has
+    to be able to see.
+    """
+    return _opaque_id_error(value) is None
+
+
 def _opaque_id_error(value):
     """Opaque catalogue identifier rule: a non-empty string within the length
     ceiling. Identity is preserved exactly — no trim, no case fold, no UUID

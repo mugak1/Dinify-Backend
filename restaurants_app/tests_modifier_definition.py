@@ -15,6 +15,7 @@ from django.test import SimpleTestCase, TestCase
 
 from dinify_backend.configss.string_definitions import RestaurantStatus_Live
 from orders_app.controllers.con_orders import ConOrder
+from orders_app.controllers.services import order_input
 from restaurants_app.controllers import modifier_definition as md
 from restaurants_app.models import MenuItem, MenuSection, Restaurant
 from users_app.models import User
@@ -304,3 +305,79 @@ class CheckoutReachesTheSameVerdictTests(TestCase):
             item, {'g1': [{'a': 1}]},
         )
         self.assertEqual(priced.get('status'), 400, priced)
+
+
+class UnsubmittableRequiredIdentifierTests(SimpleTestCase):
+    """`usable_identifier` is deliberately broader than the request contract, so
+    a stored id can be usable HERE and still be one no client can name. That
+    only makes an item unorderable when the id is REQUIRED — which is a
+    compatibility concern, never a definition error."""
+
+    def _concerns(self, groups):
+        return md.inspect_modifier_definition(
+            _options(groups),
+            identifier_predicate=order_input.is_submittable_identifier,
+        ).concerns
+
+    def test_a_required_group_nobody_can_name_is_a_concern(self):
+        for group_id in (1, True, 'g' * (order_input.MAX_MODIFIER_ID_LENGTH + 1)):
+            with self.subTest(group_id=repr(group_id)[:20]):
+                concerns = self._concerns(
+                    [_group(group_id, ('c1',), minSelections=1)],
+                )
+                self.assertIn(
+                    (md.REQUIRED_GROUP_ID_NOT_SUBMITTABLE, group_id), concerns,
+                )
+
+    def test_an_OPTIONAL_group_nobody_can_name_is_NOT_a_concern(self):
+        # The item is orderable: the diner simply never names that group.
+        # Refusing it would break a working item.
+        self.assertEqual(self._concerns([_group(1, ('c1',))]), ())
+
+    def test_too_few_nameable_choices_to_meet_a_minimum_is_a_concern(self):
+        concerns = self._concerns([{
+            'id': 'g1', 'minSelections': 2,
+            'choices': [{'id': 1}, {'id': 2}, {'id': 'c3'}],
+        }])
+        self.assertIn((md.REQUIRED_CHOICES_NOT_SUBMITTABLE, 'g1'), concerns)
+
+    def test_enough_nameable_choices_is_not_a_concern(self):
+        concerns = self._concerns([{
+            'id': 'g1', 'minSelections': 2,
+            'choices': [{'id': 1}, {'id': 'c2'}, {'id': 'c3'}],
+        }])
+        self.assertEqual(concerns, ())
+
+    def test_the_reporting_is_off_without_a_predicate(self):
+        verdict = md.inspect_modifier_definition(
+            _options([_group(1, ('c1',), minSelections=1)]),
+        )
+        self.assertEqual(verdict.kind, md.KIND_VALID)
+        self.assertEqual(verdict.concerns, ())
+
+    def test_none_of_this_makes_a_definition_invalid(self):
+        verdict = md.inspect_modifier_definition(
+            _options([_group(1, ('c1',), minSelections=1)]),
+            identifier_predicate=order_input.is_submittable_identifier,
+        )
+        self.assertEqual(verdict.kind, md.KIND_VALID)
+
+
+class RequiredSelectionEntriesTests(SimpleTestCase):
+    """The verdict reports the fewest choice entries any satisfying request must
+    carry, so a caller that also knows the extras axis can compare the COMBINED
+    minimum against the whole-request ceiling."""
+
+    def test_it_sums_only_the_minimums(self):
+        verdict = md.inspect_modifier_definition(_options([
+            _group('g1', ('a', 'b', 'c'), minSelections=2),
+            _group('g2', ('d', 'e'), minSelections=1),
+            _group('g3', ('f', 'g')),  # optional — contributes nothing
+        ]))
+        self.assertEqual(verdict.required_selection_entries, 3)
+
+    def test_an_all_optional_item_requires_nothing(self):
+        verdict = md.inspect_modifier_definition(
+            _options([_group('g1', tuple(f'c{i}' for i in range(100)))]),
+        )
+        self.assertEqual(verdict.required_selection_entries, 0)

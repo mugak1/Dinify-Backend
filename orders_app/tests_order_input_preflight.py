@@ -30,6 +30,7 @@ from django.test import TestCase, TransactionTestCase
 
 from dinify_backend.configss.string_definitions import RestaurantStatus_Live
 from orders_app.management.commands import check_order_input_compatibility as pre
+from orders_app.controllers.services import order_input
 from orders_app.models import Order, OrderItem
 from restaurants_app.models import MenuItem, MenuSection, Restaurant, Table
 from users_app.models import User
@@ -477,3 +478,92 @@ class MigrationShapeTests(TestCase):
         for forbidden in ('RunPython', 'RunSQL', 'savings', 'actual_cost',
                           'unit_price', 'quantity__gt,'):
             self.assertNotIn(forbidden, body)
+
+
+class PreflightUnorderableIdentifierTests(_PreflightBase):
+    """A stored id no client can name makes a REQUIRED selection unsatisfiable.
+    The preflight must not call such a catalogue clean (Codex P2)."""
+
+    def test_a_required_group_with_a_numeric_id(self):
+        item = self.item({'hasModifiers': True, 'groups': [
+            {'id': 1, 'minSelections': 1, 'choices': [{'id': 'c1'}]},
+        ]})
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CONCERNS, output)
+        self.assertIn('required option groups no request can name', output)
+        self.assertIn(str(item.pk), output)
+
+    def test_a_required_group_with_an_overlong_id(self):
+        self.item({'hasModifiers': True, 'groups': [
+            {'id': 'g' * (order_input.MAX_MODIFIER_ID_LENGTH + 1),
+             'minSelections': 1, 'choices': [{'id': 'c1'}]},
+        ]})
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CONCERNS, output)
+        self.assertIn('required option groups no request can name', output)
+
+    def test_too_few_nameable_choices_for_the_minimum(self):
+        item = self.item({'hasModifiers': True, 'groups': [
+            {'id': 'g1', 'minSelections': 2,
+             'choices': [{'id': 1}, {'id': 2}, {'id': 'c3'}]},
+        ]})
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CONCERNS, output)
+        self.assertIn('choices no request can name', output)
+        self.assertIn(str(item.pk), output)
+
+    def test_an_optional_group_with_a_numeric_id_stays_clean(self):
+        # Orderable today — the diner never names it. Reporting it would
+        # manufacture work that does not exist.
+        self.item({'hasModifiers': True, 'groups': [
+            {'id': 1, 'minSelections': 0, 'choices': [{'id': 'c1'}]},
+        ]})
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CLEAN, output)
+
+    def test_the_preflight_uses_THE_request_contract_not_a_copy(self):
+        # Identity, so the two cannot drift into disagreeing about what a
+        # client may send.
+        self.assertIs(pre.is_submittable_identifier,
+                      order_input.is_submittable_identifier)
+
+
+class PreflightCombinedCeilingTests(_PreflightBase):
+    """Modifier and extra minimums share ONE whole-request ceiling, so checking
+    each axis alone is not enough (Codex P2)."""
+
+    def _max_required_groups(self, extras_min):
+        groups = order_input.MAX_MODIFIER_GROUPS_PER_LINE
+        per_group = order_input.MAX_CHOICES_PER_GROUP
+        return self.item(
+            {'hasModifiers': True, 'groups': [
+                {'id': f'g{i}', 'minSelections': per_group,
+                 'choices': [{'id': f'g{i}c{j}'} for j in range(per_group)]}
+                for i in range(groups)
+            ]},
+            has_extras=True, extras_min_selections=extras_min,
+        )
+
+    def test_exactly_at_the_combined_ceiling_is_clean(self):
+        # 32 * 64 = 2048 required entries, and no required extra.
+        self._max_required_groups(extras_min=0)
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CLEAN, output)
+
+    def test_one_entry_over_the_combined_ceiling_is_a_concern(self):
+        # 32 * 64 + 1 = 2049: each axis passes its own check, the combination
+        # does not, and no request can ever satisfy the item.
+        item = self._max_required_groups(extras_min=1)
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CONCERNS, output)
+        self.assertIn('combined required options + extras', output)
+        self.assertIn(str(item.pk), output)
+        self.assertIn('2049 required entries', output)
+
+    def test_the_combined_check_changes_nothing_about_ordinary_items(self):
+        self.item({'hasModifiers': True, 'groups': [
+            {'id': 'g1', 'minSelections': 1,
+             'choices': [{'id': 'c1'}, {'id': 'c2'}]},
+        ]}, has_extras=True, extras_min_selections=1)
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CLEAN, output)

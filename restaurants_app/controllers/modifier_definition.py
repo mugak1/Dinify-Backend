@@ -65,6 +65,10 @@ MAX_BELOW_MIN = 'max_below_min'
 MIN_EXCEEDS_DEFINED_CHOICES = 'min_exceeds_defined_choices'
 MIN_EXCEEDS_CHOICE_CEILING = 'min_exceeds_choice_ceiling'
 REQUIRED_GROUPS_EXCEED_CEILING = 'required_groups_exceed_ceiling'
+#: A REQUIRED group whose id no request can name — see `identifier_predicate`.
+REQUIRED_GROUP_ID_NOT_SUBMITTABLE = 'required_group_id_not_submittable'
+#: A REQUIRED group with too few choices a request could actually name.
+REQUIRED_CHOICES_NOT_SUBMITTABLE = 'required_choices_not_submittable'
 
 
 class DefinitionVerdict:
@@ -72,11 +76,12 @@ class DefinitionVerdict:
     module stays dependency-free."""
 
     __slots__ = ('kind', 'reason', 'group_id', 'groups', 'concerns',
-                 'group_count', 'required_group_count', 'max_choices_in_a_group')
+                 'group_count', 'required_group_count', 'max_choices_in_a_group',
+                 'required_selection_entries')
 
     def __init__(self, kind, reason=None, group_id=None, groups=(), concerns=(),
                  group_count=0, required_group_count=0,
-                 max_choices_in_a_group=0):
+                 max_choices_in_a_group=0, required_selection_entries=0):
         self.kind = kind
         #: invalid-definition reason code, or None
         self.reason = reason
@@ -89,6 +94,10 @@ class DefinitionVerdict:
         self.group_count = group_count
         self.required_group_count = required_group_count
         self.max_choices_in_a_group = max_choices_in_a_group
+        #: Smallest number of choice entries any satisfying request must carry.
+        #: A caller that also knows the extras axis adds to this before
+        #: comparing against a whole-request ceiling.
+        self.required_selection_entries = required_selection_entries
 
     @property
     def is_invalid(self):
@@ -156,14 +165,26 @@ def usable_identifier(value):
 
 
 def inspect_modifier_definition(options, max_choices_per_group=None,
-                                max_groups_per_line=None):
+                                max_groups_per_line=None,
+                                identifier_predicate=None):
     """
     Classify a stored ``MenuItem.options`` value.
 
-    ``max_choices_per_group`` / ``max_groups_per_line`` are the REQUEST ceilings.
-    They are used ONLY to report compatibility concerns about requirements that
-    cannot be satisfied; they never make a definition invalid and never restrict
-    how large a catalogue may be. Pass ``None`` to skip that reporting.
+    ``max_choices_per_group`` / ``max_groups_per_line`` are the REQUEST ceilings
+    and ``identifier_predicate`` is the request contract for an identifier
+    (passed in rather than restated here, so the two cannot drift). All three
+    are used ONLY to report compatibility concerns about requirements that
+    cannot be satisfied; none of them makes a definition invalid, and none
+    restricts how large a catalogue may be. Pass ``None`` to skip that
+    reporting.
+
+    WHY AN UNSUBMITTABLE ID IS A CONCERN AND NOT AN ERROR. ``usable_identifier``
+    is deliberately broader than the request contract: an id only has to work as
+    an identifier HERE. An OPTIONAL group keyed by the integer ``1`` is
+    perfectly orderable — the diner simply never names it — so refusing the
+    definition would break a working item. It is only when such an id is
+    REQUIRED that the item becomes unorderable, because no well-formed request
+    can name it. That is a fact about compatibility, not about validity.
     """
     if not isinstance(options, dict):
         # A non-mapping (including the legacy JSON-string form) carries no
@@ -192,6 +213,7 @@ def inspect_modifier_definition(options, max_choices_per_group=None,
     concerns = []
     seen_group_ids = set()
     required_group_count = 0
+    required_selection_entries = 0
     max_choices_in_a_group = 0
 
     for raw_group in raw_groups:
@@ -254,11 +276,23 @@ def inspect_modifier_definition(options, max_choices_per_group=None,
 
         if minimum:
             required_group_count += 1
+            required_selection_entries += minimum
             if minimum > len(choice_ids):
                 concerns.append((MIN_EXCEEDS_DEFINED_CHOICES, group_id))
             if (max_choices_per_group is not None
                     and minimum > max_choices_per_group):
                 concerns.append((MIN_EXCEEDS_CHOICE_CEILING, group_id))
+            if identifier_predicate is not None:
+                # A required group nobody can name, or too few choices anyone
+                # can name to reach its minimum.
+                if not identifier_predicate(group_id):
+                    concerns.append((REQUIRED_GROUP_ID_NOT_SUBMITTABLE, group_id))
+                submittable = sum(
+                    1 for choice_id in choice_ids
+                    if identifier_predicate(choice_id)
+                )
+                if submittable < minimum:
+                    concerns.append((REQUIRED_CHOICES_NOT_SUBMITTABLE, group_id))
 
         max_choices_in_a_group = max(max_choices_in_a_group, len(choice_ids))
         groups.append(GroupSpec(
@@ -278,4 +312,5 @@ def inspect_modifier_definition(options, max_choices_per_group=None,
         group_count=len(groups),
         required_group_count=required_group_count,
         max_choices_in_a_group=max_choices_in_a_group,
+        required_selection_entries=required_selection_entries,
     )

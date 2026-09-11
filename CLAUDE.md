@@ -4221,7 +4221,18 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   reuses `inspect_modifier_definition` — the SAME pure function checkout uses — so
   it cannot hold a different opinion; definitions are inspected in Python rather
   than by a JSON expression in SQL for exactly that reason, and a
-  `max(array_length)` aggregate would answer a question nobody asked. It separates
+  `max(array_length)` aggregate would answer a question nobody asked. Two
+  unsatisfiability classes are easy to miss and are reported explicitly: a
+  REQUIRED group or choice whose stored id **no request can name** (the inspector's
+  `usable_identifier` is deliberately broader than the request contract — an id
+  only has to work as an id there — so an OPTIONAL group keyed by the integer `1`
+  stays perfectly orderable and must NOT be flagged, while a REQUIRED one can never
+  be submitted), and the **COMBINED** modifier + extras minimum against the single
+  whole-request `MAX_SELECTION_ENTRIES_PER_REQUEST` ceiling — 32 groups requiring 64
+  choices each sits exactly at it, so one required extra beside them puts the only
+  satisfying request one entry over while each axis passes its own check. The
+  identifier contract is PASSED IN (`is_submittable_identifier`, asserted by
+  identity) rather than restated, so the preflight and the validator cannot drift. It separates
   **blockers** from **compatibility concerns** from **informational capacity**, says
   whether an affected item is orderable or a draft, streams rows in chunks so memory
   does not grow with the catalogue, and reports counts plus bounded samples of ids

@@ -65,6 +65,8 @@ from orders_app.controllers.services.order_input import (
     MAX_CHOICES_PER_GROUP,
     MAX_EXTRAS_PER_LINE,
     MAX_MODIFIER_GROUPS_PER_LINE,
+    MAX_SELECTION_ENTRIES_PER_REQUEST,
+    is_submittable_identifier,
 )
 from orders_app.models import OrderItem
 from restaurants_app.controllers.menu_publication import (
@@ -73,6 +75,8 @@ from restaurants_app.controllers.menu_publication import (
 from restaurants_app.controllers.modifier_definition import (
     MIN_EXCEEDS_CHOICE_CEILING,
     MIN_EXCEEDS_DEFINED_CHOICES,
+    REQUIRED_CHOICES_NOT_SUBMITTABLE,
+    REQUIRED_GROUP_ID_NOT_SUBMITTABLE,
     REQUIRED_GROUPS_EXCEED_CEILING,
     inspect_modifier_definition,
 )
@@ -282,7 +286,10 @@ class Command(BaseCommand):
         min_over_choices = _Bucket(sample_size)
         min_over_ceiling = _Bucket(sample_size)
         required_groups_over = _Bucket(sample_size)
+        unnameable_group = _Bucket(sample_size)
+        unnameable_choices = _Bucket(sample_size)
         extras_min_over = _Bucket(sample_size)
+        combined_over = _Bucket(sample_size)
         wide_groups = _Bucket(sample_size)
         wide_choices = _Bucket(sample_size)
 
@@ -305,6 +312,8 @@ class Command(BaseCommand):
                 item.options,
                 max_choices_per_group=MAX_CHOICES_PER_GROUP,
                 max_groups_per_line=MAX_MODIFIER_GROUPS_PER_LINE,
+                # THE request contract itself, not a restatement of it.
+                identifier_predicate=is_submittable_identifier,
             )
 
             if verdict.is_invalid:
@@ -319,6 +328,10 @@ class Command(BaseCommand):
                         min_over_ceiling.add(item.pk, detail)
                     elif code == REQUIRED_GROUPS_EXCEED_CEILING:
                         required_groups_over.add(item.pk, detail)
+                    elif code == REQUIRED_GROUP_ID_NOT_SUBMITTABLE:
+                        unnameable_group.add(item.pk, detail)
+                    elif code == REQUIRED_CHOICES_NOT_SUBMITTABLE:
+                        unnameable_choices.add(item.pk, detail)
                 if verdict.group_count > MAX_MODIFIER_GROUPS_PER_LINE:
                     wide_groups.add(item.pk, f'{verdict.group_count} groups')
                 if verdict.max_choices_in_a_group > MAX_CHOICES_PER_GROUP:
@@ -329,8 +342,20 @@ class Command(BaseCommand):
 
             # Extras are a separate axis from modifier groups.
             minimum = item.extras_min_selections or 0
+            required_extras = minimum if item.has_extras else 0
             if item.has_extras and minimum > MAX_EXTRAS_PER_LINE:
                 extras_min_over.add(item.pk, state)
+
+            # THE TWO AXES SHARE ONE WHOLE-REQUEST CEILING, so checking them
+            # separately is not enough: 32 groups each requiring 64 choices is
+            # exactly at the limit, and a single required extra beside it puts
+            # the only satisfying request one entry over. Compare the COMBINED
+            # minimum — the fewest entries any satisfying request could carry.
+            combined_required = verdict.required_selection_entries + required_extras
+            if combined_required > MAX_SELECTION_ENTRIES_PER_REQUEST:
+                combined_over.add(
+                    item.pk, f'{combined_required} required entries, {state}',
+                )
 
         concerns = [
             ('active definitions checkout will now REFUSE', invalid),
@@ -349,6 +374,19 @@ class Command(BaseCommand):
                 'required extras above the per-line request ceiling '
                 f'({MAX_EXTRAS_PER_LINE})',
                 extras_min_over,
+            ),
+            (
+                'required option groups no request can name',
+                unnameable_group,
+            ),
+            (
+                'required groups whose choices no request can name',
+                unnameable_choices,
+            ),
+            (
+                'combined required options + extras above the whole-request '
+                f'ceiling ({MAX_SELECTION_ENTRIES_PER_REQUEST})',
+                combined_over,
             ),
         ]
         informational = [
