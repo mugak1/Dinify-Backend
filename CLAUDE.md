@@ -75,7 +75,24 @@ so keep it current when conventions change.
   catalogue-shaped feedback precedes authorization), `ConOrder.initiate_order`, and
   `_create_order` — which is AUTHORITATIVE and self-guards a direct caller rather
   than trusting its caller. Each consumes the VALIDATED lines; raw input is not
-  passed onward beside them. What it closed: `quantity` was checked only for
+  passed onward beside them. **The optional `client_order_id` is validated at all
+  three too** (completed after the merge of PR #312, which validated it only at
+  the endpoint): both services consume it in ORM operations — the replay lookup,
+  the INSERT and the insert-race recovery — so an unvalidated key reached a
+  `UUIDField` filter, where a malformed value raised `ValidationError` OUT of the
+  service and an **integer or boolean was silently COERCED by `uuid.UUID(int=...)`
+  into a fabricated key** (`5` → `…-000000000005`; `0` and `False` both → the nil
+  UUID, colliding two unrelated callers onto one idempotency key). `validate_
+  service_client_order_id` is the shared rule: **absence is `value is None`, never
+  falsiness** — the old `if client_order_id:` gate let a falsy key skip the replay
+  lookup, persist the nil UUID, and then skip the race recovery too, so a second
+  attempt surfaced an uncaught `IntegrityError`. It accepts the public form (a
+  UUID string) plus ONE widened internal form, an actual `uuid.UUID` object, which
+  in-process callers legitimately pass (`tests_kitchen.py` throughout); both
+  canonicalise to the same lowercase STRING before any key-dependent operation.
+  The HTTP contract is unchanged — `validate_public_client_order_id` still refuses
+  a `uuid.UUID` object — and there is deliberately no trusted/skip-validation
+  switch: both take exactly one argument, pinned by a test. What it closed: `quantity` was checked only for
   PRESENCE (`is None`) at both `menu_publication._parse_selection` and
   `add_order_item`, so **0 and -3 persisted at HTTP 200** — a valid positive line
   and an invalid negative line combined into a reduced payable amount — while

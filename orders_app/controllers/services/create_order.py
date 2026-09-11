@@ -33,7 +33,10 @@ from orders_app.controllers.services.order_admission import (
     STAGE_CREATE,
     admit,
 )
-from orders_app.controllers.services.order_input import validate_order_items
+from orders_app.controllers.services.order_input import (
+    client_order_id_rejection, validate_order_items,
+    validate_service_client_order_id,
+)
 from restaurants_app.controllers.lifecycle_policy import orders_are_commercial
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated,
@@ -136,6 +139,21 @@ def _create_order(*, restaurant, table, items,
         return static_input
     items = static_input['items']
 
+    #    The OPTIONAL IDEMPOTENCY KEY is validated on the same terms, and for
+    #    the same reason: this service consumes it in THREE key-dependent
+    #    database operations below — the step-1 replay lookup, the INSERT, and
+    #    the insert-race recovery — and it must not rely on a caller having
+    #    checked it. Validated here, before the transaction opens, so a bad key
+    #    can never take a lock or allocate a daily order number.
+    #
+    #    Canonicalising to ONE representation is what makes those three
+    #    operations agree: a caller may legitimately pass a `uuid.UUID` object
+    #    (several in-process callers do) or a UUID string, and both become the
+    #    same canonical string before any of them runs.
+    client_order_id, key_ok = validate_service_client_order_id(client_order_id)
+    if not key_ok:
+        return client_order_id_rejection()
+
     # The try/except sits AROUND the atomic block (the same idiom as the two
     # nested savepoints inside it): OrderItemRejected must unwind through
     # atomic.__exit__ so the whole transaction rolls back BEFORE it is
@@ -143,7 +161,11 @@ def _create_order(*, restaurant, table, items,
     try:
         with transaction.atomic():
             # 1. idempotency FIRST — before gating or creation
-            if client_order_id:
+            #    `is not None`, never truthiness: after validation the key is
+            #    either absent or a canonical string, and stating that
+            #    explicitly is what stops a falsy value ever being read as
+            #    "no key" and skipping both this lookup and the recovery below.
+            if client_order_id is not None:
                 existing = Order.objects.filter(
                     restaurant=restaurant,
                     client_order_id=client_order_id,
@@ -321,7 +343,7 @@ def _create_order(*, restaurant, table, items,
                 # client_order_id committed between our step-1 lookup and this INSERT.
                 # Return the winner as the idempotent result — the SAME shape step 1
                 # returns.
-                if client_order_id:
+                if client_order_id is not None:
                     existing = Order.objects.filter(
                         restaurant=restaurant,
                         client_order_id=client_order_id,

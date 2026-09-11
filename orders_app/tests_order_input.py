@@ -22,9 +22,10 @@ import copy
 import inspect
 import json
 import uuid
+from unittest import mock
 
 from django.db import IntegrityError, transaction
-from django.test import Client, TestCase
+from django.test import Client, TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -775,9 +776,19 @@ class D01NoPartialOrderTests(_D01Base):
         self.assert_rejected({'items': self._invalid_at(0)})
         self.assertEqual(DinifyTransaction.objects.count(), 0)
 
-    def test_a_late_rejection_unwinds_earlier_writes(self):
-        # The FIRST line is valid and genuinely reaches persistence; the second
-        # is refused by the in-transaction chokepoint. Nothing may survive.
+    def test_a_foreign_item_rejects_the_whole_order_before_any_write(self):
+        # EARLY rejection, and named for what it is. `validate_order_selections`
+        # is a BATCH gate at step 2b of `_create_order`: it resolves every id in
+        # ONE restaurant-scoped query, so the foreign second item is refused
+        # before the daily counter is allocated, before the Order row exists and
+        # before `add_order_item` is called even once. Instrumenting the service
+        # confirms it — counter_allocated=False, add_order_item_calls=0.
+        #
+        # That makes this a tenant-boundary test, not a rollback test: it proves
+        # one foreign id rejects the whole basket and leaves nothing behind,
+        # which is worth keeping, but it exercises no unwinding because there is
+        # nothing yet to unwind. Genuine late-rollback evidence lives in
+        # `D01LateRollbackTests` below.
         foreign_owner = User.objects.create_user(
             first_name='F', last_name='O', email='d01-foreign@test.com',
             phone_number='256700031099', username='256700031099',
@@ -1012,3 +1023,404 @@ class D01ReplayTests(_D01Base):
         )
         self.assertEqual(replay.status_code, 400, replay.content[:200])
         self.assertEqual(Order.objects.count(), orders_before)
+
+
+class D01LateRollbackTests(TransactionTestCase):
+    """
+    GENUINE late-rollback evidence: writes that really happened, then a failure
+    after them, then proof they are gone.
+
+    WHY THIS NEEDED A SPY. The service's earlier gates are thorough — static
+    input validation, then `validate_order_selections` and
+    `normalize_order_items` inside the transaction — so on correct production
+    code almost every bad basket is refused BEFORE the counter is allocated.
+    Instrumenting the two scenarios that previously claimed to test rollback
+    showed both were rejected early (counter_allocated=False,
+    add_order_item_calls=0). A test-only spy on `ConOrder.add_order_item` is
+    therefore the only way to reach the late path; it DELEGATES the first call
+    to the real writer and injects a controlled non-200 on the second.
+
+    Nothing real is faked: `transaction.atomic`, the ORM, rollback, the
+    catalogue checks and the admission check all run for real, and the
+    production code carries no fault-injection hook.
+
+    `TransactionTestCase`, deliberately. `TestCase` wraps the whole test in a
+    transaction it rolls back at teardown, which would make framework cleanup
+    indistinguishable from the service's own rollback — and would make an
+    `in_atomic_block` assertion meaningless. Here each statement commits, so a
+    post-return query reads genuinely committed state, and every assertion is
+    made BEFORE teardown.
+    """
+
+    reset_sequences = True
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            first_name='LR', last_name='Owner', email='d01-lr@test.com',
+            phone_number='256700061001', username='256700061001',
+            country='Uganda', password='password', roles=[],
+        )
+        self.restaurant = Restaurant.objects.create(
+            name='LR R', location='lr', owner=self.owner,
+            status=RestaurantStatus_Live, accepting_orders=True,
+        )
+        self.section = MenuSection.objects.create(
+            name='LR Section', restaurant=self.restaurant, approved=True,
+            enabled=True, available=True, availability='always',
+        )
+        self.first_item = MenuItem.objects.create(
+            name='LR First', section=self.section, primary_price=10000,
+            approved=True, enabled=True, available=True, in_stock=True,
+        )
+        self.second_item = MenuItem.objects.create(
+            name='LR Second', section=self.section, primary_price=4000,
+            approved=True, enabled=True, available=True, in_stock=True,
+        )
+        self.table = Table.objects.create(
+            number=1, str_number='1', restaurant=self.restaurant,
+            qr_mode='order_pay',
+        )
+        self.spare_table = Table.objects.create(
+            number=2, str_number='2', restaurant=self.restaurant,
+            qr_mode='order_pay',
+        )
+
+    # -- helpers ---------------------------------------------------------
+    def _items(self):
+        return [
+            {'item': str(self.first_item.id), 'quantity': 2},
+            {'item': str(self.second_item.id), 'quantity': 1},
+        ]
+
+    def _counter(self):
+        return (
+            RestaurantDailyOrderCounter.objects
+            .filter(restaurant=self.restaurant)
+            .values_list('next_number', flat=True)
+            .first()
+        )
+
+    def _run_with_failure_on_the_second_item(self, table=None):
+        """Delegate the first item to the real writer, capture what is visible
+        inside the transaction, then inject a controlled rejection."""
+        real_add = ConOrder.add_order_item
+        seen = {'calls': 0, 'inside': None}
+
+        def spy(item, order_id, order=None):
+            seen['calls'] += 1
+            if seen['calls'] == 1:
+                result = real_add(item=item, order_id=order_id, order=order)
+                # The REAL writer has just run. Prove its rows exist right now,
+                # inside the open transaction, before anything fails.
+                seen['inside'] = {
+                    'orders': Order.objects.filter(pk=order_id).count(),
+                    'items': OrderItem.objects.filter(order_id=order_id).count(),
+                    'counter': self._counter(),
+                    'quantity': OrderItem.objects.filter(
+                        order_id=order_id,
+                    ).values_list('quantity', flat=True).first(),
+                }
+                return result
+            return {'status': 400, 'message': 'injected failure on item 2'}
+
+        with mock.patch.object(ConOrder, 'add_order_item', staticmethod(spy)):
+            result = _create_order(
+                restaurant=self.restaurant, table=table or self.table,
+                items=self._items(),
+            )
+        return result, seen
+
+    # -- the evidence ----------------------------------------------------
+    def test_a_late_failure_unwinds_writes_that_really_happened(self):
+        self.assertIsNone(self._counter(), 'precondition: no counter yet')
+        orders_before = Order.objects.count()
+
+        result, seen = self._run_with_failure_on_the_second_item()
+
+        # (2)+(3) the first item was persisted by the REAL writer, and those
+        # writes were visible inside the transaction immediately before the
+        # injected failure.
+        self.assertEqual(seen['calls'], 2, 'the second item was never attempted')
+        self.assertIsNotNone(seen['inside'], 'the first item never persisted')
+        self.assertEqual(seen['inside']['orders'], 1)
+        self.assertEqual(seen['inside']['items'], 1)
+        self.assertEqual(seen['inside']['quantity'], 2)
+        self.assertEqual(seen['inside']['counter'], 2,
+                         'the counter was allocated and advanced')
+
+        # (4) a controlled rejection, not an exception
+        self.assertEqual(result.get('status'), 400, result)
+        self.assertIn('message', result)
+
+        # (5) and after the service returned, none of it survives.
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), 0)
+        self.assertIsNone(self._counter(),
+                          'the daily counter row survived the rollback')
+        self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+    def test_it_restores_a_pre_existing_counter_rather_than_removing_it(self):
+        # A counter row that predates the failed attempt must come back to its
+        # ORIGINAL value, not vanish and not stay advanced.
+        first = _create_order(
+            restaurant=self.restaurant, table=self.spare_table,
+            items=[{'item': str(self.first_item.id), 'quantity': 1}],
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        counter_before = self._counter()
+        self.assertIsNotNone(counter_before)
+        orders_before = Order.objects.count()
+        items_before = OrderItem.objects.count()
+
+        result, seen = self._run_with_failure_on_the_second_item()
+
+        self.assertEqual(seen['inside']['counter'], counter_before + 1,
+                         'the attempt did not advance the counter')
+        self.assertEqual(result.get('status'), 400, result)
+        self.assertEqual(self._counter(), counter_before,
+                         'the counter was not restored to its original value')
+        # (unrelated data preserved)
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), items_before)
+        self.assertTrue(Order.objects.filter(pk=first['order'].pk).exists(),
+                        'the earlier, unrelated order was destroyed')
+
+    def test_success_control_writes_everything_and_advances_the_counter(self):
+        # The same input WITHOUT the injected failure must write the records and
+        # advance the counter — so the test above is evidence of rollback, not
+        # of the basket never being writable in the first place.
+        self.assertIsNone(self._counter())
+        result = _create_order(
+            restaurant=self.restaurant, table=self.table, items=self._items(),
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(Order.objects.count(), 1)
+        self.assertEqual(OrderItem.objects.count(), 2)
+        self.assertEqual(self._counter(), 2)
+        self.assertEqual(
+            sorted(OrderItem.objects.values_list('quantity', flat=True)),
+            [1, 2],
+        )
+        self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+
+class D01ServiceClientOrderIdTests(_D01Base):
+    """
+    The optional idempotency key, enforced at the SERVICE boundaries.
+
+    The endpoint already validated it; these services did not, and each consumes
+    it in ORM operations — the replay lookup, the INSERT, and the insert-race
+    recovery. Before this, a malformed value raised `ValidationError` OUT of the
+    service, and an integer or boolean was silently COERCED by
+    `uuid.UUID(int=...)` into a key no caller ever issued.
+
+    The two failure classes are asserted separately on purpose: "it errors
+    somehow" would have been satisfied by the coercion cases too, and those were
+    the dangerous ones.
+    """
+
+    # Values a client may legitimately send, or an in-process caller may pass.
+    def _valid_forms(self):
+        generated = uuid.uuid4()
+        return [
+            ('absent', None),
+            ('canonical string', str(uuid.uuid4())),
+            ('UPPERCASE string', str(uuid.uuid4()).upper()),
+            ('uuid.UUID object (internal)', generated),
+        ]
+
+    # Everything else. Split by how it used to fail.
+    def _coerced_forms(self):
+        # These were the silent ones: uuid.UUID(int=...) accepted them and
+        # manufactured a key. 0 and False both became the nil UUID, so two
+        # unrelated callers collided on one idempotency key.
+        return [('integer 5', 5), ('integer 0', 0),
+                ('True', True), ('False', False)]
+
+    def _raising_forms(self):
+        return [('malformed string', 'not-a-uuid'), ('blank string', ''),
+                ('float', 2.5), ('empty list', []),
+                ('list of uuid', [str(uuid.uuid4())]),
+                ('empty dict', {}), ('dict', {'a': 1})]
+
+    def _invalid_forms(self):
+        return self._coerced_forms() + self._raising_forms()
+
+    def _assert_nothing_written(self):
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertEqual(OrderItem.objects.count(), 0)
+        self.assertEqual(RestaurantDailyOrderCounter.objects.count(), 0)
+        self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+    # -- ConOrder.initiate_order -----------------------------------------
+    def test_initiate_order_refuses_every_invalid_key(self):
+        for label, key in self._invalid_forms():
+            with self.subTest(key=label):
+                result = ConOrder.initiate_order(
+                    restaurant_id=str(self.restaurant.pk),
+                    table_id=str(self.table.pk),
+                    items=[self.line(quantity=1)],
+                    client_order_id=key,
+                )
+                self.assertEqual(result.get('status'), 400, result)
+                self.assertTrue(str(result.get('message', '')).strip())
+                self.assertEqual(result.get('errors', {}).get('client_order_id'),
+                                 ['A valid client_order_id is required.'])
+                self._assert_nothing_written()
+
+    def test_initiate_order_accepts_every_valid_form(self):
+        for label, key in self._valid_forms():
+            with self.subTest(key=label):
+                result = ConOrder.initiate_order(
+                    restaurant_id=str(self.restaurant.pk),
+                    table_id=str(self.table.pk),
+                    items=[self.line(quantity=1)],
+                    client_order_id=key,
+                )
+                self.assertEqual(result.get('status'), 200, result)
+                Order.objects.all().delete()
+                OrderItem.objects.all().delete()
+                RestaurantDailyOrderCounter.objects.all().delete()
+
+    # -- _create_order ----------------------------------------------------
+    def test_create_order_refuses_every_invalid_key(self):
+        for label, key in self._invalid_forms():
+            with self.subTest(key=label):
+                result = _create_order(
+                    restaurant=self.restaurant, table=self.table,
+                    items=[self.line(quantity=1)], client_order_id=key,
+                )
+                self.assertEqual(result.get('status'), 400, result)
+                self.assertTrue(str(result.get('message', '')).strip())
+                self._assert_nothing_written()
+
+    def test_create_order_accepts_every_valid_form(self):
+        for label, key in self._valid_forms():
+            with self.subTest(key=label):
+                result = _create_order(
+                    restaurant=self.restaurant, table=self.table,
+                    items=[self.line(quantity=1)], client_order_id=key,
+                )
+                self.assertEqual(result.get('status'), 200, result)
+                Order.objects.all().delete()
+                OrderItem.objects.all().delete()
+                RestaurantDailyOrderCounter.objects.all().delete()
+
+    # -- the specific hazards --------------------------------------------
+    def test_an_integer_never_becomes_a_key_through_uuid_int(self):
+        # uuid.UUID(int=5) is a well-formed identifier no caller ever issued.
+        for key in (5, 0, True, False):
+            with self.subTest(key=repr(key)):
+                result = _create_order(
+                    restaurant=self.restaurant, table=self.table,
+                    items=[self.line(quantity=1)], client_order_id=key,
+                )
+                self.assertEqual(result.get('status'), 400, result)
+        self.assertFalse(
+            Order.objects.exclude(client_order_id=None).exists(),
+            'a fabricated client_order_id was persisted',
+        )
+
+    def test_a_falsy_key_is_refused_rather_than_read_as_absent(self):
+        # The old truthiness gate treated 0/False/''/[] as "no key": they
+        # skipped the replay lookup, persisted the nil UUID, and then skipped
+        # the insert-race recovery too, so a second attempt surfaced an
+        # uncaught IntegrityError.
+        for key in (0, False, '', []):
+            with self.subTest(key=repr(key)):
+                result = _create_order(
+                    restaurant=self.restaurant, table=self.table,
+                    items=[self.line(quantity=1)], client_order_id=key,
+                )
+                self.assertEqual(result.get('status'), 400, result)
+                self._assert_nothing_written()
+
+    def test_only_None_means_absent(self):
+        result = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[self.line(quantity=1)], client_order_id=None,
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertIsNone(Order.objects.get().client_order_id)
+
+    # -- canonicalisation and stability -----------------------------------
+    def test_both_supported_forms_canonicalise_to_the_same_stored_key(self):
+        generated = uuid.uuid4()
+        typed = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[self.line(quantity=1)], client_order_id=generated,
+        )
+        self.assertEqual(typed.get('status'), 200, typed)
+        # The SAME key as an UPPERCASE string is the same order, not a new one.
+        replay = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[self.line(quantity=1)],
+            client_order_id=str(generated).upper(),
+        )
+        self.assertEqual(replay.get('status'), 200, replay)
+        self.assertTrue(replay.get('idempotent'))
+        self.assertEqual(replay['order'].pk, typed['order'].pk)
+        self.assertEqual(Order.objects.count(), 1)
+
+    def test_validating_the_canonical_output_again_is_stable(self):
+        once, ok = order_input.validate_service_client_order_id(uuid.uuid4())
+        self.assertTrue(ok)
+        twice, ok2 = order_input.validate_service_client_order_id(once)
+        self.assertTrue(ok2)
+        self.assertEqual(once, twice)
+        self.assertIsInstance(twice, str)
+
+    def test_the_public_rule_is_not_loosened_by_the_service_rule(self):
+        # An HTTP caller may not send a uuid.UUID object — only a string.
+        self.assertEqual(
+            order_input.validate_public_client_order_id(uuid.uuid4()),
+            (None, False),
+        )
+        # ...and the service rule reuses the public one for strings, so there
+        # is one notion of what a UUID is.
+        self.assertEqual(
+            order_input.validate_service_client_order_id('not-a-uuid'),
+            (None, False),
+        )
+
+    def test_there_is_no_trusted_or_skip_validation_switch(self):
+        for function in (order_input.validate_public_client_order_id,
+                         order_input.validate_service_client_order_id):
+            parameters = set(inspect.signature(function).parameters)
+            self.assertEqual(parameters, {'value'})
+
+    # -- replay behaviour preserved ---------------------------------------
+    def test_a_same_key_replay_still_returns_the_original_after_a_menu_change(self):
+        key = uuid.uuid4()
+        first = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[self.line(quantity=2)], client_order_id=key,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        orders_before = Order.objects.count()
+        items_before = OrderItem.objects.count()
+
+        self.item.available = False
+        self.item.enabled = False
+        self.item.save(update_fields=['available', 'enabled'])
+
+        replay = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[self.line(quantity=2)], client_order_id=key,
+        )
+        self.assertEqual(replay.get('status'), 200, replay)
+        self.assertTrue(replay.get('idempotent'))
+        self.assertEqual(replay['order'].pk, first['order'].pk)
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), items_before)
+
+    # -- the endpoint is unchanged ----------------------------------------
+    def test_the_endpoint_still_refuses_a_malformed_key(self):
+        self.assert_rejected(
+            {'items': [self.line(quantity=1)], 'client_order_id': 'not-a-uuid'},
+        )
+
+    def test_the_endpoint_still_refuses_an_integer_key(self):
+        self.assert_rejected(
+            {'items': [self.line(quantity=1)], 'client_order_id': 5},
+        )

@@ -162,6 +162,70 @@ def canonical_uuid(value):
         return None
 
 
+def validate_public_client_order_id(value):
+    """
+    THE PUBLIC optional-key contract: absent/``None``, or a UUID STRING.
+
+    Returns ``(canonical_or_None, ok)``. ``ok`` is False only for a value that
+    was supplied and is not acceptable — absence is never an error.
+    """
+    if value is None:
+        return None, True
+    canonical = canonical_uuid(value)
+    return (canonical, True) if canonical is not None else (None, False)
+
+
+def validate_service_client_order_id(value):
+    """
+    THE SERVICE optional-key contract, and the reason it is a separate name.
+
+    It is the public rule PLUS one narrowly widened form: an actual
+    ``uuid.UUID`` object, which supported in-process callers legitimately pass
+    (``orders_app/tests_kitchen.py`` does so throughout). That is a TYPE domain,
+    not a trust level — there is deliberately no flag a caller can set to skip
+    or soften validation, and this never loosens the HTTP contract, which keeps
+    using ``validate_public_client_order_id``.
+
+    Returns ``(canonical_or_None, ok)``. The canonical form is a lowercase UUID
+    STRING in every accepted case, so the value that reaches the replay lookup,
+    the INSERT and the insert-race recovery is one stable representation
+    regardless of which form the caller used — and re-validating that output
+    yields it unchanged.
+
+    TWO RULES THAT LOOK LIKE DETAILS AND ARE NOT:
+
+    * **ABSENCE IS ``value is None``, never falsiness.** ``0``, ``False``, ``''``
+      and ``[]`` are supplied values that are not valid keys, so they are
+      REFUSED rather than quietly read as "no key". Reading them as absence is
+      what let a falsy key skip the replay lookup, persist a fabricated
+      identifier, and then skip the insert-race recovery too — turning the
+      caller's second attempt into an uncaught ``IntegrityError``.
+    * **An integer NEVER becomes a key.** ``uuid.UUID(int=...)`` accepts one
+      happily — ``5`` becomes ``…-000000000005`` and ``0`` and ``False`` both
+      become the nil UUID — manufacturing an identifier no caller ever issued
+      and silently colliding two unrelated callers onto one idempotency key.
+      Recognising a genuine ``uuid.UUID`` instance is not licence to stringify
+      anything else, so every other type falls through to the refusal below.
+    """
+    if value is None:
+        return None, True
+    if isinstance(value, uuid.UUID):
+        # The supported internal typed form. `str()` is applied ONLY here, to a
+        # value that is already a UUID — never to an arbitrary object.
+        return str(value), True
+    # Everything else must satisfy the PUBLIC rule, through the same core
+    # parser — no second regex, no second notion of what a UUID is.
+    return validate_public_client_order_id(value)
+
+
+def client_order_id_rejection():
+    """The controlled envelope for a refused key, in the established shape:
+    a usable top-level message plus one bounded field error."""
+    return _reject(INVALID_REQUEST_MESSAGE, {
+        'client_order_id': ['A valid client_order_id is required.'],
+    })
+
+
 def _reject(message, errors):
     """Bounded 400 envelope. ``message`` stays a usable top-level string for
     clients that read only that; ``errors`` is additive and capped."""
@@ -363,13 +427,11 @@ def validate_order_request(payload):
             '__all__': ['The request body must be an object.'],
         })
 
-    client_order_id = payload.get('client_order_id')
-    if client_order_id is not None:
-        client_order_id = canonical_uuid(client_order_id)
-        if client_order_id is None:
-            return _reject(INVALID_REQUEST_MESSAGE, {
-                'client_order_id': ['A valid client_order_id is required.'],
-            })
+    client_order_id, ok = validate_public_client_order_id(
+        payload.get('client_order_id'),
+    )
+    if not ok:
+        return client_order_id_rejection()
 
     result = validate_order_items(payload.get('items'))
     if result.get('status') != 200:
