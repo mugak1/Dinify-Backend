@@ -143,6 +143,29 @@ def group_operationally_visible(group, now) -> bool:
 
 # --- top-level item visibility ---------------------------------------------
 
+def item_priceable(item, now) -> bool:
+    """Can this item's stored price configuration actually be read at ``now``?
+
+    D02/R22. ``primary_price`` and ``discount_details`` are unvalidated columns,
+    and a malformed value used to raise ``InvalidOperation`` out of
+    ``MenuItem.is_discount_active`` — which the PUBLIC MENU serializer calls — so
+    ONE bad row returned HTTP 500 for an entire restaurant's menu. Making
+    priceability part of publication contains the failure to its own item: every
+    valid neighbour stays readable, and the affected item is simply not published
+    and not orderable.
+
+    It is time-dependent on purpose. Only an ACTIVE incoherent discount makes an
+    item unpriceable; the same item outside that discount's window prices
+    normally from ``primary_price`` and stays on the menu.
+
+    There is deliberately NO fallback price. Showing the undiscounted price for
+    an item whose discount cannot be read presents an unearned charge as valid,
+    and showing zero makes it free — the pre-fix ``price if price > 0 else
+    Decimal('0')`` clamp did exactly that for a discount larger than the price.
+    """
+    return item.price_verdict(now).usable
+
+
 def item_visible_in_menu(item, now) -> bool:
     """
     READ path: a normal top-level item is shown only when it is structurally
@@ -153,6 +176,8 @@ def item_visible_in_menu(item, now) -> bool:
     if not item_structurally_published(item):
         return False
     if not item.available:
+        return False
+    if not item_priceable(item, now):
         return False
     if not section_operationally_visible(item.section, now):
         return False
@@ -173,6 +198,8 @@ def item_orderable(item, now) -> bool:
     publication rejection.
     """
     if not item_structurally_published(item):
+        return False
+    if not item_priceable(item, now):
         return False
     if not section_operationally_visible(item.section, now):
         return False
@@ -322,7 +349,8 @@ def _parse_selection(items):
     return per_item, all_ids, None
 
 
-def validate_order_selections(restaurant, items, now, *, enforce_publication):
+def validate_order_selections(restaurant, items, now, *, enforce_publication,
+                              resolved=None):
     """
     Authoritative validation of an order's parent + extra selections against the
     canonical policy at a single captured ``now``. Returns ``{'status': 200}`` or a
@@ -343,6 +371,15 @@ def validate_order_selections(restaurant, items, now, *, enforce_publication):
     (who already passed module authorization). Tenant + all extras-integrity checks
     apply to EVERY caller — management authorization is not license to create a
     structurally invalid order graph.
+
+    ``resolved`` is the order's single coherent catalogue read (D02): a mapping of
+    ``pk -> MenuItem`` already fetched restaurant-scoped, with ``section`` /
+    ``section_group`` / the group's own section joined in. Supplying it means this
+    function issues NO query and decides publication from the SAME row versions
+    that price the order — it was one of three independent reads of the same rows
+    inside one transaction. The batch fetch below is preserved for every caller
+    that has no snapshot, and the tenant gate is identical either way: an id that
+    is not in the mapping did not resolve inside this restaurant.
     """
     per_item, all_ids, parse_error = _parse_selection(items)
     if parse_error is not None:
@@ -354,14 +391,21 @@ def validate_order_selections(restaurant, items, now, *, enforce_publication):
     if not all_ids:
         return {'status': 200}
 
-    fetched = {
-        item.pk: item
-        for item in (
-            MenuItem.objects
-            .filter(pk__in=all_ids, section__restaurant=restaurant)
-            .select_related('section', 'section_group')
-        )
-    }
+    if resolved is None:
+        fetched = {
+            item.pk: item
+            for item in (
+                MenuItem.objects
+                .filter(pk__in=all_ids, section__restaurant=restaurant)
+                .select_related('section', 'section_group',
+                                'section_group__section')
+            )
+        }
+    else:
+        fetched = {
+            item_id: resolved[item_id]
+            for item_id in all_ids if item_id in resolved
+        }
     # Tenant gate (every caller): a foreign / nonexistent id resolves to nothing.
     if any(_id not in fetched for _id in all_ids):
         return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}

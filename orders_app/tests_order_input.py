@@ -21,9 +21,11 @@ or publication reason and mask the behaviour under test.
 import copy
 import inspect
 import json
+import pathlib
 import uuid
 from unittest import mock
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.test import Client, TestCase, TransactionTestCase
 from rest_framework.test import APIClient
@@ -1085,11 +1087,28 @@ class D01LateRollbackTests(TransactionTestCase):
             qr_mode='order_pay',
         )
 
+        # A published extra both lines may carry, for the child-work case.
+        self.extra_item = MenuItem.objects.create(
+            name='LR Extra', section=self.section, primary_price=700,
+            approved=True, enabled=True, available=True, in_stock=True,
+            is_extra=True,
+        )
+        for parent in (self.first_item, self.second_item):
+            parent.has_extras = True
+            parent.extras_applicable = [str(self.extra_item.id)]
+            parent.save(update_fields=['has_extras', 'extras_applicable'])
+
     # -- helpers ---------------------------------------------------------
     def _items(self):
         return [
             {'item': str(self.first_item.id), 'quantity': 2},
             {'item': str(self.second_item.id), 'quantity': 1},
+        ]
+
+    def _items_with_extras(self):
+        return [
+            dict(line, extras=[str(self.extra_item.id)])
+            for line in self._items()
         ]
 
     def _counter(self):
@@ -1106,10 +1125,15 @@ class D01LateRollbackTests(TransactionTestCase):
         real_add = ConOrder.add_order_item
         seen = {'calls': 0, 'inside': None}
 
-        def spy(item, order_id, order=None):
+        def spy(item, order_id, order=None, **kwargs):
+            # **kwargs so the spy keeps delegating faithfully as the writer's
+            # optional plumbing (the catalogue snapshot, the line index) evolves.
+            # It forwards them untouched, so what runs on call 1 is the REAL
+            # writer on the REAL path — which is what makes this evidence.
             seen['calls'] += 1
             if seen['calls'] == 1:
-                result = real_add(item=item, order_id=order_id, order=order)
+                result = real_add(item=item, order_id=order_id, order=order,
+                                  **kwargs)
                 # The REAL writer has just run. Prove its rows exist right now,
                 # inside the open transaction, before anything fails.
                 seen['inside'] = {
@@ -1129,6 +1153,66 @@ class D01LateRollbackTests(TransactionTestCase):
                 items=self._items(),
             )
         return result, seen
+
+    def _run_with_failure_in_child_work(self, table=None):
+        """D02: fail DURING an extra's own pricing, after the PARENT row of that
+        same line has genuinely been written.
+
+        This is a strictly later failure point than the one above: the parent
+        line exists, and so does at least one child of the previous line, when
+        the rejection happens. If the transaction did not unwind completely,
+        an order would survive holding a parent with no extras and a stale
+        roll-up.
+        """
+        from orders_app.controllers.con_orders import ConOrder as Con
+        real_extras = Con.process_item_extras
+        seen = {'calls': 0, 'inside': None}
+
+        def spy(item, order_id, order_item_id, restaurant, **kwargs):
+            seen['calls'] += 1
+            if seen['calls'] == 1:
+                result = real_extras(
+                    item=item, order_id=order_id, order_item_id=order_item_id,
+                    restaurant=restaurant, **kwargs,
+                )
+                seen['inside'] = {
+                    'orders': Order.objects.filter(pk=order_id).count(),
+                    'parents': OrderItem.objects.filter(
+                        order_id=order_id, parent_item__isnull=True,
+                    ).count(),
+                    'children': OrderItem.objects.filter(
+                        order_id=order_id, parent_item__isnull=False,
+                    ).count(),
+                    'counter': self._counter(),
+                }
+                return result
+            return {'status': 400, 'message': 'injected failure in child work'}
+
+        with mock.patch.object(Con, 'process_item_extras', staticmethod(spy)):
+            result = _create_order(
+                restaurant=self.restaurant, table=table or self.table,
+                items=self._items_with_extras(),
+            )
+        return result, seen
+
+    def test_a_failure_during_child_work_unwinds_the_whole_order(self):
+        orders_before = Order.objects.count()
+        items_before = OrderItem.objects.count()
+
+        result, seen = self._run_with_failure_in_child_work()
+
+        # GUARD: the earlier stages really had written by the time it failed.
+        self.assertEqual(seen['calls'], 2, 'the second line was never attempted')
+        self.assertIsNotNone(seen['inside'], 'no line was ever persisted')
+        self.assertEqual(seen['inside']['orders'], 1)
+        self.assertGreaterEqual(seen['inside']['parents'], 1)
+        self.assertGreaterEqual(seen['inside']['children'], 1)
+
+        # ...and none of it survived.
+        self.assertEqual(result.get('status'), 400, result)
+        self.assertEqual(Order.objects.count(), orders_before)
+        self.assertEqual(OrderItem.objects.count(), items_before)
+        self.assertIsNone(self._counter(), 'the daily counter was restored')
 
     # -- the evidence ----------------------------------------------------
     def test_a_late_failure_unwinds_writes_that_really_happened(self):
@@ -1424,3 +1508,101 @@ class D01ServiceClientOrderIdTests(_D01Base):
         self.assert_rejected(
             {'items': [self.line(quantity=1)], 'client_order_id': 5},
         )
+
+
+class CrossRepositoryCeilingContractTests(TestCase):
+    """The diner app must refuse what this module refuses (D01/D02, FE half).
+
+    The ceilings are enforced here, but the browser has to stop a basket
+    REACHING a state this module would refuse — a diner who cannot submit and is
+    not told why simply taps Checkout again. The frontend therefore carries its
+    own copies, and two copies of a number drift.
+
+    The fixture below is the contract between them. Both repositories assert
+    their own constants against THIS FILE's contents, so either side moving
+    fails its own suite rather than surfacing as a rejected order in front of a
+    diner. It is deliberately a static file and not a runtime endpoint: eight
+    integers do not need a network round trip, and a fetched limit would be
+    unavailable exactly when the diner is offline and the basket most needs to
+    behave.
+
+    Its path is the one the frontend imports, named here so a rename on either
+    side fails loudly instead of silently orphaning one copy.
+    """
+
+    #: Repository-relative path in Dinify-Frontend.
+    CONTRACT_PATH = 'src/app/_shared/order/checkout-limits.contract.json'
+
+    PUBLISHED = {
+        'MAX_QUANTITY_PER_LINE': order_input.MAX_QUANTITY_PER_LINE,
+        'MAX_LINES_PER_ORDER': order_input.MAX_LINES_PER_ORDER,
+        'MAX_TOTAL_UNITS': order_input.MAX_TOTAL_UNITS,
+        'MAX_MODIFIER_GROUPS_PER_LINE': order_input.MAX_MODIFIER_GROUPS_PER_LINE,
+        'MAX_CHOICES_PER_GROUP': order_input.MAX_CHOICES_PER_GROUP,
+        'MAX_EXTRAS_PER_LINE': order_input.MAX_EXTRAS_PER_LINE,
+        'MAX_SELECTION_ENTRIES_PER_REQUEST':
+            order_input.MAX_SELECTION_ENTRIES_PER_REQUEST,
+    }
+
+    def test_the_published_ceilings_are_this_module_s_own(self):
+        """No number in the contract is typed twice on this side."""
+        for name, value in self.PUBLISHED.items():
+            with self.subTest(name=name):
+                self.assertEqual(getattr(order_input, name), value)
+
+    #: Bounds this module holds that a BASKET cannot act on, with the reason.
+    #: Publishing these would tell the diner app to enforce something it can
+    #: neither cause nor cure, which is worse than not publishing them.
+    NOT_CLIENT_ACTIONABLE = {
+        # The catalogue mints modifier ids; a basket only ever echoes them back.
+        # An over-long stored id makes the ITEM unorderable however small the
+        # basket is, so there is nothing for a diner to reduce. That condition
+        # is reported by `manage.py check_order_input_compatibility`, against
+        # the catalogue, where it can actually be fixed.
+        'MAX_MODIFIER_ID_LENGTH',
+        # How many problems ONE refusal enumerates. A reporting bound on the
+        # response, not a limit on what may be submitted.
+        'MAX_REPORTED_ERRORS',
+    }
+
+    def test_every_enforced_ceiling_is_classified(self):
+        """A new ceiling cannot ship unclassified.
+
+        Discovered from the module rather than listed, so adding a ``MAX_*``
+        constant forces a decision — publish it to the diner app, or record here
+        why a basket cannot act on it — instead of it reaching a diner as an
+        unexplained refusal.
+        """
+        enforced = {
+            name for name in vars(order_input)
+            if name.startswith('MAX_') and isinstance(
+                getattr(order_input, name), int,
+            )
+        }
+        self.assertEqual(enforced - self.NOT_CLIENT_ACTIONABLE, set(self.PUBLISHED))
+        # And the exclusions must still name something real, so a renamed or
+        # deleted constant cannot sit here forever pretending to be handled.
+        self.assertTrue(self.NOT_CLIENT_ACTIONABLE <= enforced)
+
+    def test_the_frontend_contract_file_matches(self):
+        """The values the diner app compiles against are these values.
+
+        SKIPPED rather than failed when the sibling checkout is absent: CI runs
+        each repository alone, and a test that fails for being run in isolation
+        teaches people to ignore it.
+        """
+        candidates = [
+            pathlib.Path(settings.BASE_DIR).parent / 'Dinify-Frontend'
+            / self.CONTRACT_PATH,
+        ]
+        contract = next((p for p in candidates if p.is_file()), None)
+        if contract is None:
+            self.skipTest(
+                'Dinify-Frontend is not checked out beside this repository; '
+                'the frontend asserts the same file from its own suite.'
+            )
+
+        published = json.loads(contract.read_text())
+        # Keys prefixed '_' are provenance notes for a human reader.
+        values = {k: v for k, v in published.items() if not k.startswith('_')}
+        self.assertEqual(values, self.PUBLISHED)

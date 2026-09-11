@@ -3,6 +3,9 @@ from decimal import Decimal
 from django.db import models
 from users_app.models import User, BaseModel
 from restaurants_app.models import Restaurant, MenuItem, Table
+from orders_app.controllers.services.order_pricing import (
+    PRICING_VERSION_LEGACY,
+)
 from dinify_backend.configss.string_definitions import (
     PaymentStatus_Pending, OrderStatus_Initiated,
     OrderItemStatus_Initiated,
@@ -74,6 +77,32 @@ class Order(BaseModel):
     # field for it, so it cannot be spoofed in either direction — a diner cannot mark
     # a real order as test, and an owner cannot mark a rehearsal as real.
     is_test = models.BooleanField(default=False, db_index=True)
+
+    # === pricing provenance (D02) ===
+    # WHICH CALCULATION CONVENTION produced this order's stored amounts.
+    #
+    # LEGACY (0) is the pre-D02 calculation, under which a line's reference
+    # excluded modifiers while its effective included them (so `savings` could be
+    # negative and a net could exceed its gross), an extra was persisted at
+    # quantity 1 however many dishes it was attached to, and a merged line's
+    # `actual_cost` was never refreshed. CORRECTED (1) is the convention in
+    # orders_app/controllers/services/order_pricing.py.
+    #
+    # BOTH the model default AND the database default are LEGACY, deliberately.
+    # An existing row, an insert from an older application version that omits the
+    # column, and any future writer that forgets to opt in must never be mistaken
+    # for a certified corrected order. Only the corrected creation service writes
+    # CORRECTED, and it does so inside the same atomic operation that persists the
+    # corrected parent and child values.
+    #
+    # SERVER-OWNED: there is no request field for it, it is absent from every
+    # serializer, and it is not in EDIT_INFORMATION. It must never become
+    # client-writable.
+    pricing_version = models.PositiveSmallIntegerField(
+        default=PRICING_VERSION_LEGACY,
+        db_default=PRICING_VERSION_LEGACY,
+        db_index=True,
+    )
 
     # === kitchen-owned fulfilment axis (Phase 2) ===
     # Kitchen writes these fields on every transition. It ALSO writes

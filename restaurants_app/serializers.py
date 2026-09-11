@@ -5,6 +5,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -611,6 +612,13 @@ class SerializerPublicGetMenuItem(ModelSerializer):
                 extra = extras_map.get(extra_id)
                 if extra is None:
                     continue
+                # D02/R22: an extra whose stored price cannot be read is not
+                # published. The diner app resolves an extra's price from the
+                # `primary_price` / `discount_details` handed over here, so
+                # publishing an unreadable one would put a selectable option on
+                # screen with no valid price.
+                if not extra.price_verdict((policy or {}).get('now')).usable:
+                    continue
                 extras.append({
                     'id': extra.id,
                     'name': extra.name,
@@ -651,42 +659,61 @@ class SerializerPublicGetMenuItem(ModelSerializer):
         }
         return [rows[eid] for eid in canonical if eid != parent_id and eid in rows]
 
+    def _price_verdict(self, menu_item):
+        """THE price reading for this item, at the response's captured time.
+
+        One verdict per item per response, taken from the same
+        ``menu_policy['now']`` that decides section/item visibility, so a
+        response can never show an item as discounted by one clock reading and
+        price it by another. Cached on the serializer because three methods
+        below ask the same question.
+        """
+        cache = self.context.setdefault('_price_verdicts', {})
+        key = menu_item.pk
+        if key not in cache:
+            policy = self.context.get('menu_policy') or {}
+            cache[key] = menu_item.price_verdict(policy.get('now'))
+        return cache[key]
+
     def get_discount_percentage(self, menu_item):
-        # Returns the discount magnitude as a non-negative percentage.
-        # Source-of-truth precedence: discount_details.discount_percentage,
-        # then discount_details.discount_amount, then derive from discounted_price.
-        from decimal import Decimal
-        if not menu_item.is_discount_active():
-            return 0
-        primary = Decimal(str(menu_item.primary_price or 0))
-        if primary == 0:
-            return 0
+        """Discount magnitude as a non-negative percentage, derived from the ONE
+        verdict rather than re-reading ``discount_details``.
 
-        details = menu_item.discount_details or {}
-        if isinstance(details, dict):
-            pct = Decimal(str(details.get('discount_percentage', 0) or 0))
-            amt = Decimal(str(details.get('discount_amount', 0) or 0))
-            if pct > 0:
-                return float(round(pct, 2))
-            if amt > 0:
-                return float(round((amt / primary) * Decimal('100'), 2))
-
-        if menu_item.discounted_price is not None:
-            diff = primary - Decimal(str(menu_item.discounted_price))
-            if diff <= 0:
-                return 0
-            return float(round((diff / primary) * Decimal('100'), 2))
-        return 0
+        The pre-fix method held a THIRD independent reading of the discount
+        (percentage, then amount, then a ``discounted_price``-column fallback)
+        with bare ``Decimal(str(...))`` calls that raised on a malformed value.
+        The column fallback was already unreachable — it sat behind
+        ``is_discount_active()``, which is only true when a
+        ``discount_details`` magnitude is positive, and both of those branches
+        return first — so nothing is lost by deriving the figure from the
+        reference/effective pair the verdict already resolved.
+        """
+        verdict = self._price_verdict(menu_item)
+        if not verdict.usable or not verdict.discount_active:
+            return 0
+        reference = verdict.reference_base
+        if reference <= 0:
+            return 0
+        saved = reference - verdict.effective_base
+        if saved <= 0:
+            return 0
+        return float(round((saved / reference) * Decimal('100'), 2))
 
     def get_is_discount_active(self, menu_item):
-        return menu_item.is_discount_active()
+        return self._price_verdict(menu_item).discount_active
 
     def get_current_price(self, menu_item):
-        # Effective BASE price (no modifiers): discounted when the discount is
-        # active, else primary_price. Serialized as a string to match the
-        # Decimal money convention of primary_price/discounted_price here.
-        from decimal import Decimal
-        return str(menu_item.effective_base_price().quantize(Decimal('0.01')))
+        """Effective BASE price (no modifiers) as a Decimal string, or ``null``.
+
+        ``null`` means THIS ITEM HAS NO READABLE PRICE. It is not a fallback and
+        must never be rendered as free: the diner menu already omits such an item
+        through ``item_visible_in_menu``, and this null is the belt-and-braces
+        for any other consumer of the shared serializer.
+        """
+        verdict = self._price_verdict(menu_item)
+        if not verdict.usable:
+            return None
+        return str(verdict.effective_base)
 
 
 class SerializerPutTable(ModelSerializer):

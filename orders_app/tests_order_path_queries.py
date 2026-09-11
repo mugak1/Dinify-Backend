@@ -25,6 +25,38 @@ because no preflight-fetched instance is reused inside the transaction.
 The counts below are exact rather than upper bounds: an exact count is what
 catches a re-introduced N+1, and the flatness cases (1 line vs 4) are what prove
 the saving is per-line rather than a one-off.
+
+D02 REDUCED THEM AGAIN, and every number here moved DOWN. The order's whole
+catalogue is now resolved by ONE coherent read (``catalogue_snapshot``), the
+merge candidate comes from a per-order in-memory index rather than a database
+lookup, allergen labels are one batched statement for the order instead of one
+per line, and ``process_item_extras`` hands its rows back so the caller never
+re-SELECTs the children it just wrote:
+
+    1-line order   23 -> 20
+    4-line order   35 -> 23
+    per line        4 -> 1     (the INSERT, and nothing else)
+    MenuItem reads  1 per line -> 0 per line (one batch for the order)
+
+MEASURED BREAKDOWN of the 20 a one-line order runs — every one of them is a
+distinct, named piece of work rather than a repeat:
+
+    1  SELECT restaurants            resolve the target
+    1  SELECT tables                 scoped table resolve
+    1  SELECT ?                      the admission advisory lock
+    1  SELECT menu_items             THE catalogue snapshot (whole order)
+    1  SELECT menu_item_tags         allergen labels (whole order)
+    1  SELECT restaurant_daily_...   counter row lock
+    1  UPDATE restaurant_daily_...   counter increment
+    1  INSERT orders                 the draft
+    1  INSERT order_items            the line          <- the ONLY per-line cost
+    1  SELECT order_items            the roll-up read
+    2  SELECT orders                 replay lookup + the post-loop re-read
+    1  UPDATE orders                 the roll-up write
+    1  SELECT transactions           payments for the roll-up
+    3  SAVEPOINT / 3 RELEASE         the two nested atomics
+
+A 4-line order is the same list with four INSERTs instead of one.
 """
 from decimal import Decimal
 
@@ -164,46 +196,79 @@ class CreateOrderQueryCountTests(OrderPathBase):
         # Warm any one-off caches (content types, savepoint bookkeeping) on a
         # throwaway order first, as restaurants_app.tests does for the scan read.
         self.measure(self.lines(count=1), table_index=0)
-        self.assertEqual(self.measure(self.lines(count=4), table_index=1), 35)
+        self.assertEqual(self.measure(self.lines(count=4), table_index=1), 23)
 
     def test_single_line_order_query_count(self):
         self.measure(self.lines(count=1), table_index=0)
-        self.assertEqual(self.measure(self.lines(count=1), table_index=1), 23)
+        self.assertEqual(self.measure(self.lines(count=1), table_index=1), 20)
 
-    # Measured on this fixture, before and after: a 4-line order ran 54 queries
-    # and now runs 35; a 1-line order ran 27 and now runs 23. The per-line cost —
-    # the part that grows with the size of the order, and so with how long the
-    # table row lock is held — went from 9 to 4.
-    def test_per_line_cost_is_four_queries(self):
-        # Flatness: the difference between a 1-line and a 4-line order is exactly
-        # three lines' worth, and each line costs four queries — its scoped MenuItem
-        # guard, its merge lookup, its allergen tags and its INSERT.
-        #
-        # The five that went: normalize_order_items' per-line .get() (now one batch
-        # for the whole order), the Order re-fetch, the Restaurant lazy FK load it
-        # dragged behind it, and the two duplicate MenuItem reads in
-        # find_existing_order_item and construct_option_items. The merge lookup's
-        # COUNT(*) became the fetch it used to precede, so that one is a wash here —
-        # it pays off on the repeat-line path, where four to six statements ran.
+    # Measured on this fixture across all three passes: a 4-line order ran 54
+    # queries before D01's collapse, 35 after it, and 23 after D02's; a 1-line
+    # order ran 27, then 23, now 20. The per-line cost — the part that grows with
+    # the size of the order, and so with how long the table row lock is held —
+    # went 9 -> 4 -> 1.
+    def test_per_line_cost_is_one_query(self):
+        """Flatness: an extra line costs exactly its INSERT and nothing else.
+
+        The three that went in D02: the scoped MenuItem guard (now served from
+        the order's ONE catalogue snapshot, with the fallback query preserved for
+        a caller that has no snapshot), the merge lookup (now a per-order
+        in-memory index, whose database fallback is likewise preserved), and the
+        allergen-tag read (now one batched statement for the whole order).
+        """
         self.measure(self.lines(count=1), table_index=0)
         one = self.measure(self.lines(count=1), table_index=1)
         four = self.measure(self.lines(count=4), table_index=2)
-        self.assertEqual((four - one) / 3, 4)
+        self.assertEqual((four - one) / 3, 1)
 
-    def test_each_line_costs_exactly_one_menu_item_read(self):
-        """One scoped read per line, not three.
+    def test_a_complex_basket_does_not_grow_per_line(self):
+        """UPPER-GROWTH CHECK for a realistic basket, not a flat exact count.
 
-        ``find_existing_order_item`` and ``construct_option_items`` each re-fetched
-        the row ``add_order_item`` had just resolved. The ONE that remains is
-        ``add_order_item``'s restaurant-scoped guard, and it is load-bearing: it is
-        what proves the item belongs to the order's restaurant, and the chokepoint
-        may not trust a caller to have checked that. So this asserts a per-line
-        delta of exactly one, not a flat total.
+        Modifiers, extras and a repeated (merging) line all on one order. The
+        exact total is deliberately NOT pinned — it depends on how many extras
+        the fixture attaches — but the SHAPE is: doubling the distinct lines must
+        not more than double the work, and the per-extra cost must stay constant.
+        A re-introduced per-line catalogue read or merge lookup fails this even
+        when the simple flat case still passes.
+        """
+        complex_lines = [
+            {'item': str(self.options_item.id), 'quantity': 2,
+             'selected_modifiers': {OPTION_GROUP_ID: [OPTION_SMALL_ID]}},
+            {'item': str(self.parent.id), 'quantity': 1,
+             'extras': [str(self.extra.id)]},
+            {'item': str(self.options_item.id), 'quantity': 1,
+             'selected_modifiers': {OPTION_GROUP_ID: [OPTION_SMALL_ID]}},
+        ]
+        self.measure(complex_lines, table_index=0)          # warm
+        small = self.measure(complex_lines, table_index=1)
+        doubled = self.measure(complex_lines + [
+            {'item': str(self.options_item.id), 'quantity': 1,
+             'selected_modifiers': {OPTION_GROUP_ID: [OPTION_LARGE_ID]}},
+            {'item': str(self.parent.id), 'quantity': 3,
+             'extras': [str(self.extra.id)]},
+            {'item': str(self.items[0].id), 'quantity': 1},
+        ], table_index=2)
+        # Three more submitted lines, one of which carries an extra: at most one
+        # INSERT each plus the extra's own three statements.
+        self.assertLessEqual(doubled - small, 3 + 3, (small, doubled))
+
+    def test_the_catalogue_is_read_once_per_order_not_per_line(self):
+        """ZERO per-line catalogue reads: one batch resolves the whole order.
+
+        D01 got this down to one scoped read per line and documented that read as
+        load-bearing — it is what proves an item belongs to the order's
+        restaurant, and the chokepoint may not trust its caller. D02 keeps that
+        guarantee and removes the repetition: the ONE snapshot query is itself
+        restaurant-scoped, so every line is still proven in-tenant, and
+        ``add_order_item`` still issues its own scoped query when no snapshot is
+        supplied. A per-line delta of ZERO is therefore the strongest form of the
+        same contract, not a relaxation of it.
         """
         self.menu_item_reads(1, 0)                       # warm
         one = self.menu_item_reads(1, 1)
         four = self.menu_item_reads(4, 2)
-        self.assertEqual(four - one, 3)
+        self.assertEqual(four - one, 0)
+        self.assertEqual(one, 1, 'the order resolves its catalogue in one query')
 
     def test_the_order_row_is_not_re_read_per_line(self):
         with CaptureQueriesContext(connection) as captured:
@@ -300,15 +365,23 @@ class CreateOrderEquivalenceTests(OrderPathBase):
         ])
         self.assertEqual(OrderItem.objects.filter(order=order).count(), 2)
 
-    def test_an_empty_selection_still_merges_into_a_modified_line(self):
-        """PRE-EXISTING behaviour, preserved deliberately.
+    def test_an_empty_selection_does_not_merge_into_a_modified_line(self):
+        """THE INVERTED PIN — this test used to assert the opposite (D03).
 
-        A line carrying no modifiers merges into an existing line for the same item
-        even when that line HAS modifiers: the first branch of
-        ``find_existing_order_item`` returns on ``not has_modifiers`` without
-        comparing keys. Whether that is the right merge rule is a separate
-        question — this change collapses repeated READS and must not alter merge
-        semantics, so the quirk is pinned here rather than quietly fixed.
+        It previously read "an empty selection STILL merges into a modified
+        line", pinning the behaviour as pre-existing and noting that "whether
+        that is the right merge rule is a separate question". This is that
+        question, answered: it is not.
+
+        ``find_existing_order_item`` derived ``has_modifiers`` from the INCOMING
+        selection alone and returned on its first branch without comparing
+        anything, so a plain dish merged into a modified one and the diner was
+        served two of the modified version and charged for two. The reverse
+        submission order produced two lines correctly, which is what made the
+        defect order-dependent and easy to miss.
+
+        ABSENCE IS NOT A WILDCARD: an empty selection matches only another empty
+        selection, in either submission order.
         """
         order = self.assert_paths_agree([
             {'item': str(self.options_item.id), 'quantity': 1,
@@ -316,7 +389,26 @@ class CreateOrderEquivalenceTests(OrderPathBase):
             {'item': str(self.options_item.id), 'quantity': 1,
              'selected_modifiers': {}},
         ])
-        self.assertEqual(OrderItem.objects.filter(order=order).count(), 1)
+        lines = list(OrderItem.objects.filter(order=order))
+        self.assertEqual(len(lines), 2)
+        selections = [line.selected_modifiers or {} for line in lines]
+        self.assertIn({}, selections, 'the plain line survived')
+        self.assertIn({OPTION_GROUP_ID: [OPTION_SMALL_ID]}, selections,
+                      'the modified line survived')
+
+    def test_the_reverse_submission_order_agrees(self):
+        """The same two lines submitted the other way round give the same result.
+
+        Line identity must not depend on which line arrived first — that
+        asymmetry was the whole shape of the D03 defect.
+        """
+        order = self.assert_paths_agree([
+            {'item': str(self.options_item.id), 'quantity': 1,
+             'selected_modifiers': {}},
+            {'item': str(self.options_item.id), 'quantity': 1,
+             'selected_modifiers': {OPTION_GROUP_ID: [OPTION_SMALL_ID]}},
+        ])
+        self.assertEqual(OrderItem.objects.filter(order=order).count(), 2)
 
 
 class NormalizeOrderItemsBatchTests(OrderPathBase):

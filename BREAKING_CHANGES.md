@@ -577,6 +577,72 @@ or parent domain can plant one the admin plane would read back as its own.
 
 ---
 
+## 13. Order acceptance requires the quote the diner reviewed
+
+**This breaks any client that submits an order without echoing the quote.**
+`PUT api/v1/orders/submit/` now requires a `quote_ref` beside `order`, and
+refuses the submission when it is absent, unrecognised, or names a draft priced
+under the superseded rules.
+
+```
+PUT api/v1/orders/submit/   {"order": "<uuid>", "quote_ref": "<opaque>"}
+```
+
+Four refusals, each `HTTP 400` with a machine-readable `reason` beside the
+sentence:
+
+| `reason` | when |
+|---|---|
+| `quote_ref_required` | no acknowledgement was sent |
+| `quote_ref_stale` | the saved quote is not the one named |
+| `legacy_pricing_version` | the draft was priced before this change |
+| `nothing_to_prepare` | no line on the order is still deliverable |
+
+**WHY AN ACKNOWLEDGEMENT AT ALL.** Correct calculation is not agreement to an
+amount. Before this, a client could price an order in the browser, show the
+diner that number, and submit — and the server would accept whatever it had
+saved, which might not be the number anybody saw. `quote_ref` is derived from
+the persisted lines and totals, so it changes the moment they do: echoing it
+back is the client stating *this is the amount I showed and the diner accepted*.
+It is an acknowledgement, not a credential — it authorises nothing on its own,
+and the diner table session remains the sole authority for whose order this is.
+
+**There is no staff or internal bypass, deliberately.** A path that skipped the
+check would be a path on which the diner's agreement was never established, and
+it would be the path every future caller reached for.
+
+**`Order.pricing_version`** (migration `orders_app/0037`, additive, `db_default`
+and `default` both LEGACY) separates drafts priced under the old rules from
+those priced under the corrected ones. A LEGACY draft is never repriced or
+deleted — it is refused at acceptance and the client re-prices the unchanged
+basket. Under the expand-only rule a rollback lands old code on the new schema,
+which reads and writes the column not at all; the `db_default` is what keeps an
+INSERT from older code valid.
+
+### Additive response fields (no consumer breaks)
+
+`POST api/v2/orders/initiate/` gains, all additive:
+
+- `data.quote` — **the authoritative priced order**: one entry per PARENT line,
+  each carrying its extras nested beneath it. `line_actual_cost` is the parent
+  alone; `line_total_with_extras` is the parent plus its extras, i.e. what that
+  row contributes to the payable. The two are deliberately distinct — conflating
+  them double-counts or drops the extras.
+- `data.order_details.quote_ref`, `.pricing_version`, `.reference_total_cost`.
+
+### The `savings` contract changed
+
+`savings` on an order line is now the difference between the **reference** unit
+price (pre-discount, including paid modifiers) and the **effective** one, floored
+at zero, extended by quantity. It can no longer be negative. It previously
+subtracted a figure that included paid modifier costs from one that did not, so a
+line carrying a paid modifier reported a NEGATIVE saving — an item recorded as
+having been discounted into a larger number. Reports sum `savings`
+(`sale_filters.discount_sum()`), so historical totals that included such lines
+were understated; no data is rewritten by this change.
+
+---
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

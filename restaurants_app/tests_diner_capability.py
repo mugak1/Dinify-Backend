@@ -52,7 +52,11 @@ from users_app.models import User
 from restaurants_app.models import (
     Restaurant, RestaurantEmployee, Table, MenuSection, MenuItem,
 )
-from orders_app.models import Order
+from orders_app.models import Order, OrderItem
+from orders_app.controllers.services.order_pricing import (
+    PRICING_VERSION_CORRECTED,
+)
+from orders_app.controllers.services.order_quote import quote_ref
 from reviews_app.models import Review
 from finance_app.models import DinifyTransaction
 from dinify_backend.configss.string_definitions import (
@@ -158,11 +162,32 @@ class DinerCapabilityTestBase(TestCase):
         return {'HTTP_AUTHORIZATION': f'Bearer {token}'}
 
     def _make_order(self, restaurant, table, status=OrderStatus_Served):
-        return Order.objects.create(
+        """A capability fixture that satisfies the D02 acceptance invariants.
+
+        It carries ``pricing_version=CORRECTED`` and ONE deliverable parent line,
+        because submit now refuses a legacy-priced draft and refuses an order
+        with nothing to prepare. Neither is what these tests are about — they are
+        about the capability boundary — so the fixture states them explicitly
+        rather than leaving the boundary tests to fail for an unrelated reason.
+        """
+        order = Order.objects.create(
             restaurant=restaurant, table=table,
             total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
             order_status=status,
+            pricing_version=PRICING_VERSION_CORRECTED,
         )
+        OrderItem.objects.create(
+            order=order, item=self.item_a, quantity=1, available=True,
+            unit_price=1000, discounted_price=1000, unit_cost_of_options=0,
+            total_cost=1000, discounted_cost=1000, savings=0,
+            cost_of_options=0, actual_cost=1000,
+            item_name_snapshot=self.item_a.name,
+        )
+        return order
+
+    def _quote(self, order):
+        """The acknowledgement for this draft exactly as it is saved."""
+        return quote_ref(Order.objects.get(pk=order.pk))
 
 
 class DinerCapabilityModuleTests(DinerCapabilityTestBase):
@@ -515,7 +540,10 @@ class DinerInitiateCapabilityTests(DinerCapabilityTestBase):
 
         def submit(order_id):
             return self.client.put(
-                SUBMIT_URL, data=json.dumps({'order': order_id}),
+                SUBMIT_URL, data=json.dumps({
+                    'order': order_id,
+                    'quote_ref': quote_ref(Order.objects.get(pk=order_id)),
+                }),
                 content_type='application/json',
                 **_header_kw(SESSION_HEADER, self._session(self.table_a)),
             )
@@ -591,7 +619,9 @@ class DinerOrderDetailsCapabilityTests(DinerCapabilityTestBase):
         )
         # Session bound to the order -> submit succeeds (initiated -> pending).
         resp = self.client.put(
-            SUBMIT_URL, data=json.dumps({'order': str(order.id)}),
+            SUBMIT_URL, data=json.dumps({
+                'order': str(order.id), 'quote_ref': self._quote(order),
+            }),
             content_type='application/json',
             **_header_kw(SESSION_HEADER, self._session(self.table_a)),
         )
@@ -622,7 +652,9 @@ class DinerOrderDetailsCapabilityTests(DinerCapabilityTestBase):
             self.restaurant_a, self.table_a, status=OrderStatus_Initiated,
         )
         resp = self.client.put(
-            SUBMIT_URL, data=json.dumps({'order': str(order.id)}),
+            SUBMIT_URL, data=json.dumps({
+                'order': str(order.id), 'quote_ref': self._quote(order),
+            }),
             content_type='application/json', **self._jwt(self.staff_a),
         )
         self.assertEqual(resp.status_code, 200, resp.content)
