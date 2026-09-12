@@ -661,6 +661,114 @@ were understated; no data is rewritten by this change.
 
 ---
 
+## 14. Checkout answers are correlated, and `checkout_protocol` is now 3
+
+**Additive. Nothing is removed, renamed or re-typed.** Every field a level-2
+client reads keeps its exact current meaning and value.
+
+### Why
+
+D04/C made the acceptance fact durable (`OrderAcceptance`) and resolvable by
+intent key. It left three things a recovering client cannot do:
+
+1. **Tell a draft from a pre-D04 acceptance.** `accepted` is a boolean over
+   "is there an evidence row", so a genuine draft and an order accepted before
+   that table existed both read `false`. Those are opposite instructions — the
+   first may still be accepted, the second is already in the kitchen.
+   (Separating them does not turn the second into a verdict; see
+   `evidence_unavailable` below.)
+2. **Validate that an answer belongs to its command.** Both submit successes
+   are `{status, message, idempotent}` and name no order, key, scope or
+   reference.
+3. **See what it actually accepted.** The original `quote_ref` is stored and
+   published nowhere, so a client could only recompute one from the order's
+   CURRENT rows — a different question, with a different answer the moment
+   anything about the order changes.
+
+### What is added
+
+One shared projection, `orders_app.controllers.services.acceptance_result`,
+published identically on both surfaces:
+
+- `PUT api/v1/orders/submit/` success → a new top-level `checkout` object,
+  beside the unchanged `status` / `message` / `idempotent`.
+- `GET api/v1/orders/journey/order-details/` (both `?order=` and `?intent=`) →
+  a new `data.checkout` object, beside the unchanged `accepted` /
+  `accepted_at` / `checkout_protocol`.
+
+```jsonc
+"checkout": {
+  "order_id":   "<uuid>",
+  "intent_key": "<client_order_id>" | null,
+  "scope":      {"restaurant": "<uuid>", "table": "<uuid>"},
+  "acceptance": {
+    "state":       "accepted" | "not_accepted" | "evidence_unavailable",
+    "outcome":     "newly_accepted" | "already_accepted" | null,
+    "quote_ref":   "<the ORIGINAL reference the diner confirmed>" | null,
+    "accepted_at": "<ISO-8601>" | null
+  },
+  "current": {
+    "order_status": "...", "fulfilment_status": "...",
+    "cancelled_at": "<ISO-8601>" | null, "served_at": "<ISO-8601>" | null
+  },
+  "checkout_protocol": 3
+}
+```
+
+- **`acceptance.state` is three-valued, and only TWO of the three are
+  verdicts.** `accepted` and `not_accepted` are DEFINITIVE — an evidence row
+  exists, or the order is still `initiated`.
+  **`evidence_unavailable` is a NON-ANSWER**: the order is not a draft and
+  nothing records an acceptance, so the server CANNOT DETERMINE whether the
+  submission landed. Read it as ignorance, never as acceptance. TWO producers
+  reach it and nothing on the row separates them — an order accepted before
+  the evidence table existed, and a DRAFT a kitchen write cancelled or
+  advanced (the kitchen routes resolve an order by primary key and do not
+  guard on `initiated`). **The client instruction is still the conservative
+  one — do not accept such an order again** — precisely because one producer
+  really is an order in the kitchen. It is never backfilled into an
+  acceptance, and it never carries an invented reference or moment.
+- **`acceptance.quote_ref` is the stored original**, read from
+  `OrderAcceptance` and never recomputed from current rows.
+- **`acceptance.outcome` is `null` on a READ.** A read observes; it is not the
+  result of an acceptance attempt. The key is always present so the shape does
+  not vary.
+- **`current` is labelled apart from `acceptance`.** A cancelled or served
+  order that was accepted still reads `accepted`.
+- Timestamps are explicit ISO-8601 strings on both surfaces, so the submit
+  reply and the read are byte-identical rather than depending on which
+  renderer path produced them.
+- **`acceptance` and `current` describe ONE SNAPSHOT.** The recovery read
+  fetches the order and its evidence in a single statement
+  (`select_related('acceptance')`), so a client can rely on the two halves
+  being consistent with each other. Two statements would not have been: under
+  READ COMMITTED each takes its own snapshot, so a submission committing
+  between them produced `acceptance.state == accepted` beside
+  `current.order_status == initiated` — a correlated answer describing a
+  moment that never existed. (`transaction.atomic()` does not close that;
+  READ COMMITTED re-snapshots per statement inside a transaction too.)
+
+### `checkout_protocol`: 2 → 3
+
+`CHECKOUT_PROTOCOL_CORRELATED = 3` is a NEW level, not a new meaning for 2. A
+client pinned to 2 keeps exactly the promises 2 made; only a client that
+recognises 3 may rely on the correlation fields or the three-state verdict.
+Widening 2 in place would be the #661 mistake again, and worse here — a
+level-2 client reading the old `accepted` boolean is right to treat it as
+two-valued, because for it, it is.
+
+### Frontend action required
+
+- Read `checkout_protocol >= 3` before relying on `checkout`.
+- Migrate off `accepted` / `accepted_at` onto `checkout.acceptance`. The old
+  keys stay, with their old (conflating) meaning, deliberately — but a client
+  that keeps reading them still cannot separate a draft from a legacy
+  acceptance.
+- Validate `order_id`, `intent_key` and `scope` against the command that was
+  issued before acting on the outcome.
+
+---
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

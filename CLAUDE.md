@@ -502,6 +502,124 @@ so keep it current when conventions change.
   it was raised by the change that made BOTH halves of level 2 true at once.
   COST: submit 10 → **12** (one SELECT to ask, one INSERT to write); a replay is
   **7** and returns at the evidence read. Both pinned
+- THE ANSWER IS CORRELATED TO THE COMMAND, AND A LEGACY ACCEPTANCE IS NOT A DRAFT
+  (D04 completion): ✅ ONE shared projection,
+  `orders_app/controllers/services/acceptance_result.py`, read by the acceptance
+  transition AND by the diner's own order read, so a client that lost its submit
+  response and recovers later is told the same facts in the same shape. No
+  migration; no model, endpoint or route added. It closes three gaps D04/C left.
+  **`accepted` IS A BOOLEAN OVER "IS THERE A ROW", AND ITS TWO FALSE CASES ARE
+  OPPOSITE INSTRUCTIONS.** `get_accepted`'s own docstring conceded it: false covers
+  "a genuine draft and an order accepted BEFORE D04 alike". A draft may still be
+  accepted; an order accepted before `OrderAcceptance` existed IS ALREADY IN THE
+  KITCHEN and must never be accepted again — and the deployed client reads that
+  boolean and treats false as reviewable. `acceptance.state` is therefore
+  THREE-VALUED, derived and stored nowhere: a row present → `accepted`; no row and
+  `order_status == 'initiated'` → `not_accepted`, DEFINITIVE; no row and no longer a
+  draft → `evidence_unavailable`. The discriminator is "is this still a draft",
+  because that is the only fact available that can rule never-accepted IN.
+  **ONLY TWO OF THE THREE ARE VERDICTS, AND SAYING OTHERWISE WAS THE FIRST CUT'S
+  ERROR** (Codex P2 on PR #318, valid). `evidence_unavailable` was documented as
+  "the order is NOT a draft, so a submission did land" — on the reasoning that only
+  `_submit_order` leaves `initiated`. FALSE: the kitchen writes resolve an order by
+  primary key through `_get_order_or_none` (which filters only `deleted=False`) and
+  neither guards on `initiated`, so a DRAFT can be cancelled outright
+  (`KitchenOrderCancelView` — a draft's fulfilment status is still `new`, so it takes
+  the free-void branch and needs no manager) or walked
+  `new → preparing → ready → served`, whose completion step also writes
+  `order_status`. Either leaves a non-draft order with no evidence row. So the state
+  has TWO PRODUCERS and **no fact on the row separates them** — no `order_status`
+  value is exclusive to acceptance (cancel yields `cancelled`, serve `served`, recall
+  `pending`, each reachable both ways), `cancelled_by` is written on both paths, and
+  inferring a deploy date is not something this repo does. It is therefore a
+  STATEMENT OF IGNORANCE, and `ACCEPTANCE_EVIDENCE_UNAVAILABLE_MEANING` is that
+  contract, kept as a VALUE so a test can pin it. **The client instruction is
+  UNCHANGED and conservative — never accept such an order again — and it is
+  conservative BECAUSE the server does not know**, since one producer really is an
+  order in the kitchen. **THE KITCHEN-DRAFT PRODUCER IS PRE-EXISTING AND REPORTED,
+  NOT FIXED HERE**: adding an `initiated` guard changes what the kitchen may do to an
+  order, which is a D05 transition decision with its own blast radius.
+  **`evidence_unavailable` IS NEVER BACKFILLED** into an
+  acceptance and carries NO invented moment or reference — a fabricated receipt is
+  indistinguishable from a real one afterwards. A CANCELLED or SERVED order is never
+  pushed back to `not_accepted`: the kitchen's later progress says nothing about
+  whether the submission landed, and reporting it as a draft is exactly what invites
+  a second acceptance.
+  **THE SUCCESS RESULTS NAMED NOTHING.** Both were `{status, message, idempotent}` —
+  no order, key, scope or reference — so a client validating "is this the outcome of
+  MY command?" had nothing to validate against and a late or misrouted 200 was
+  indistinguishable from the right one. The projection names `order_id`,
+  `intent_key` (the `client_order_id`, `null` when there is none) and the
+  SERVER-RESOLVED `scope` (`restaurant` + `table`, off the ORDER, never off the
+  request). It is **NOT AUTHORIZATION** — it discloses scope, so every caller must
+  already have established that this principal may see this order (the diner table
+  session on the read, the session/module gate on the write); it performs no check
+  of its own.
+  **THE ORIGINAL REFERENCE IS PUBLISHED, AND IT IS READ, NEVER RECOMPUTED.**
+  `OrderAcceptance.quote_ref` is the exact figure the diner confirmed and no surface
+  returned it, so a client could only recompute `quote_ref(order)` from the CURRENT
+  rows — a different question that answers differently the moment anything about the
+  order changes. `acceptance.quote_ref` is the stored value verbatim. Pinned from two
+  sides: a sentinel no recomputation could produce, and a real order whose rows move
+  after acceptance so the current reference genuinely differs.
+  **`acceptance.outcome` IS `newly_accepted` / `already_accepted` ON A MUTATION AND
+  `null` ON A READ.** A read OBSERVES; it is not the result of an attempt, and
+  inventing a third word for "I merely looked" would put a claim in the response no
+  caller made. The key is always present so the shape never varies.
+  **`current` IS LABELLED APART FROM `acceptance`** (`order_status`,
+  `fulfilment_status`, `cancelled_at`, `served_at`) — two independent facts, and
+  collapsing them is how a cancelled-but-accepted order reads as never placed.
+  **TIMESTAMPS ARE EXPLICIT ISO-8601 STRINGS**, for the reason `format_money` exists:
+  the value a view BUILDS is not the value a client PARSES. This projection reaches
+  the wire by two paths — a plain dict rendered by DRF's `JSONEncoder` (`.isoformat()`)
+  and a serializer method field rendered through `api_settings.DATETIME_FORMAT` —
+  which can be configured apart, so formatting here is what makes the two
+  byte-identical.
+  **`CHECKOUT_PROTOCOL` IS 3 (`CORRELATED`), A NEW LEVEL AND NOT A NEW MEANING FOR 2.**
+  A client pinned to 2 keeps exactly the promises 2 made; only one that recognises 3
+  may rely on the correlation fields or the three-state verdict. Widening 2 in place
+  would be #661 again and worse — a level-2 client reading the old `accepted` boolean
+  is RIGHT to treat it as two-valued, because for it, it is. **`accepted` /
+  `accepted_at` STAY, with their exact old (conflating) meaning**, because a deployed
+  client reads them and a compatibility key that quietly changed semantics is worse
+  than one that is merely coarse.
+  **THE ANSWER DESCRIBES ONE SNAPSHOT, AND THAT IS A CORRECTNESS RULE RATHER THAN A
+  QUERY-COUNT ONE** (the second Codex P2 on #318, also valid). The recovery read
+  fetched the order in one statement and the serializer looked the evidence up in
+  another; under READ COMMITTED each takes its OWN snapshot, so a submission
+  committing between them published `acceptance.state == accepted` beside
+  `current.order_status == initiated` — a correlated answer describing a moment that
+  never existed, on the one surface whose whole job is to be verifiable.
+  `transaction.atomic()` would NOT have closed it (READ COMMITTED re-snapshots per
+  statement inside a transaction too); folding the reads does, the same lesson
+  `catalogue_snapshot` records. `handle_show_order_details` now fetches with
+  `select_related('acceptance')`, and `acceptance_result.read_evidence` is THE one
+  reading — it prefers the joined relation by plain attribute access, so the
+  preference is automatic rather than something each caller must remember, and the
+  serializer's `_evidence` delegates to it. **THE STALE DIRECTION IS SAFE AND THE
+  FRESH ONE IS NOT**, which is why the unjoined fallback stays tolerable for an
+  ad-hoc caller: reading late can only ADD an acceptance the order row does not
+  reflect (the incoherent pair), while reading early yields at worst
+  `evidence_unavailable` — ignorance the server is entitled to state — or
+  `not_accepted` on a snapshot where the order really was a draft, which the
+  acceptance path's replay protection covers. Pinned from BOTH sides: one spec drives
+  the REAL journey read on both selectors (so dropping the `select_related` fails),
+  another hands the serializer an order IT joined (so reverting `read_evidence` to a
+  second query fails), and a third produces the incoherent pair directly from a stale
+  instance.
+  **IT COSTS NO QUERY.** Both hot callers pass the `OrderAcceptance` row they already
+  hold (`_acceptance_replay`'s lookup, the `create()` return, the serializer's cached
+  `_evidence`). That is not a micro-optimisation: the acceptance path's cost is pinned
+  to exact integers by `WhatTheEvidenceCostsTests` and `tests_order_path_queries`, and
+  both are unchanged (submit **12**, replay **7**). Omitting `evidence=` looks the row
+  up, which is right for an ad-hoc caller and is what those pinned counts catch if a
+  hot path ever starts doing it.
+  **A REFUSAL CARRIES NO `checkout` KEY** — a conflict is not an acceptance and must
+  not look like one. Pinned by `orders_app/tests_acceptance_correlation.py`
+  (37 tests; of the original 29, 27 error on the pre-change tree and the two that
+  pass are the compatibility controls that must NOT change; of the 8 added for the
+  two Codex P2 findings, 4 fail against the head that carried them, and each of the
+  three fixes has its own negative control). See `BREAKING_CHANGES.md` §14
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one

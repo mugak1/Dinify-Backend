@@ -4,11 +4,14 @@ from orders_app.controllers.orders.serializers import _quote_line
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
 )
+from orders_app.controllers.services.acceptance_result import (
+    acceptance_result, read_evidence,
+)
 from orders_app.controllers.services.checkout_protocol import (
     CHECKOUT_PROTOCOL,
 )
 from orders_app.controllers.services.order_quote import group_live_children
-from orders_app.models import Order, OrderAcceptance, OrderItem
+from orders_app.models import Order, OrderItem
 
 
 class SerializerPutOrderItem(ModelSerializer):
@@ -129,6 +132,7 @@ class SerializerPublicOrderDetails(ModelSerializer):
     accepted = SerializerMethodField()
     accepted_at = SerializerMethodField()
     checkout_protocol = SerializerMethodField()
+    checkout = SerializerMethodField()
 
     class Meta:
         model = Order
@@ -144,6 +148,8 @@ class SerializerPublicOrderDetails(ModelSerializer):
             'quote', 'quote_total', 'quote_complete',
             # D04/C — the acceptance fact, and what this server can promise.
             'accepted', 'accepted_at', 'checkout_protocol',
+            # D04 completion — the correlated projection. See `get_checkout`.
+            'checkout',
         )
 
     def _rows(self, order):
@@ -229,11 +235,16 @@ class SerializerPublicOrderDetails(ModelSerializer):
         return not orphaned
 
     def _evidence(self, order):
-        """The acceptance row, fetched once for both keys below."""
+        """The acceptance row, read ONCE for every key below.
+
+        Through `read_evidence`, which prefers a JOINED relation — the same
+        reading `acceptance_result` uses, so the two cannot form different
+        opinions, and a caller that joined (the diner's recovery read does)
+        never re-reads the row from a newer snapshot than the order's.
+        """
         cached = getattr(self, '_acceptance_cache', None)
         if cached is None or cached[0] != order.pk:
-            cached = (order.pk,
-                      OrderAcceptance.objects.filter(order=order).first())
+            cached = (order.pk, read_evidence(order))
             self._acceptance_cache = cached
         return cached[1]
 
@@ -279,3 +290,28 @@ class SerializerPublicOrderDetails(ModelSerializer):
         the money was calculated.
         """
         return CHECKOUT_PROTOCOL
+
+    def get_checkout(self, order):
+        """THE CORRELATED ANSWER, identical to the one the submit result
+        carries.
+
+        `acceptance_result` is THE projection, shared with
+        `manage_order._submit_order`, so a client that lost its acceptance
+        response and recovers through this read is told the same facts in the
+        same shape — rather than having to reconcile two surfaces that each
+        describe an acceptance their own way.
+
+        WHY THE `accepted` / `accepted_at` KEYS ABOVE STAY. They are the
+        level-2 contract and a deployed client reads them; removing them would
+        break it for the width of a deploy, which is precisely the failure
+        #661 and the `quote_total` window taught. They keep their EXACT old
+        meaning — including the draft/legacy conflation `get_accepted`'s own
+        docstring concedes — because a compatibility key that quietly changed
+        semantics would be worse than one that is merely coarse. The
+        distinction lives in `checkout.acceptance.state`, and a client must
+        read `checkout_protocol >= 3` before relying on it.
+
+        IT COSTS NO EXTRA QUERY: `_evidence` has already fetched and cached the
+        acceptance row for the two keys above, and it is passed straight in.
+        """
+        return acceptance_result(order, evidence=self._evidence(order))
