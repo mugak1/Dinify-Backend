@@ -323,17 +323,24 @@ def _submit_order(order: Order, user: Union[User, None],
         # laxer staff one. Passing `user` here would let a diner draft be
         # submitted at a restaurant that has not gone live, simply because a staff
         # member happened to be the one who tapped submit.
+        #
+        # THE LOCK IS TAKEN HERE; THE VERDICT IS APPLIED BELOW, once the request
+        # is known to be NEW WORK. Acquiring the advisory lock and applying a
+        # new-submission policy are different actions, and only the first belongs
+        # at this point in the ordering. Applying it here reported a COMPLETED
+        # acceptance as a failure: accepted while `live`, response lost,
+        # restaurant suspended, diner retries — and the lifecycle 400 fired
+        # before the evidence was ever read, which is the exact
+        # failure-after-success this change exists to remove, over a suspension
+        # the diner neither caused nor can see. The identical split is already
+        # written out in `create_order._create_order` (steps 1a and 1d); this
+        # is the same reasoning, carried across. The lock ORDER
+        # (advisory -> Table -> Order) is unchanged.
         verdict = admit(
             restaurant_id=order.restaurant_id,
             created_by=order.created_by_id,
             stage=STAGE_SUBMIT,
         )
-        if not verdict.allowed:
-            logger.info(
-                "Order submission refused (order_id=%s, code=%s)",
-                order.pk, verdict.code,
-            )
-            return {'status': 400, 'message': verdict.message}
 
         # Table-first lock where there is one, then re-read the order under it.
         # (`Order.table` is non-nullable today, so the None branch is
@@ -353,6 +360,17 @@ def _submit_order(order: Order, user: Union[User, None],
         replay = _acceptance_replay(order, supplied_quote_ref)
         if replay is not None:
             return replay
+
+        # NOW the admission verdict applies: this submission really is new
+        # work, so the rule about new work governs it. A draft that was never
+        # accepted still cannot reach the kitchen at a restaurant that has
+        # stopped trading.
+        if not verdict.allowed:
+            logger.info(
+                "Order submission refused (order_id=%s, code=%s)",
+                order.pk, verdict.code,
+            )
+            return {'status': 400, 'message': verdict.message}
 
         # Status check on the FRESH row: a concurrent double-submit that
         # already flipped this order loses here with the existing 400 — now

@@ -33,6 +33,7 @@ from rest_framework.test import APIRequestFactory
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Cancelled, OrderStatus_Pending, OrderStatus_Preparing,
     OrderStatus_Served, RESTAURANT_OWNER, RestaurantStatus_Live,
+    RestaurantStatus_Suspended,
 )
 from orders_app.controllers.manage_order import (
     REASON_ALREADY_ACCEPTED, REASON_QUOTE_REQUIRED, REASON_QUOTE_STALE,
@@ -321,6 +322,66 @@ class TheReplayOutcomeMatrixTests(AcceptanceFixture):
         self.assertTrue(replay['idempotent'])
         order.refresh_from_db()
         self.assertEqual(order.order_status, OrderStatus_Cancelled)
+
+    def test_a_replay_survives_the_restaurant_being_suspended(self):
+        """THE LIFECYCLE GATE MUST NOT REPORT A COMPLETED ACCEPTANCE AS FAILED.
+
+        Accepted while `live`, response lost, restaurant suspended, diner
+        retries. `admit()` refuses new submissions at a suspended restaurant
+        and rightly so — but this submission is not new, it already happened,
+        and answering the retry with the lifecycle 400 is the exact
+        failure-after-success this whole change exists to remove. The
+        suspension is also not something the diner did or can see.
+
+        THE SAME SPLIT `_create_order` ALREADY MAKES: the advisory lock is
+        taken where the lock ordering requires, and the verdict is APPLIED
+        only once the request is known to be new work. Found by the Codex
+        review of PR #317, and valid — the reasoning was written out in
+        `_create_order`'s step 1d and simply not carried across.
+        """
+        order = self._draft()
+        ref = quote_ref(order)
+        self.assertEqual(self._submit(order, ref).get('status'), 200)
+
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(
+            status=RestaurantStatus_Suspended)
+
+        order.refresh_from_db()
+        replay = self._submit(order, ref)
+        self.assertEqual(replay.get('status'), 200, replay)
+        self.assertTrue(replay['idempotent'])
+        self.assertEqual(OrderAcceptance.objects.filter(order=order).count(), 1)
+
+    def test_a_conflicting_retry_at_a_suspended_restaurant_still_conflicts(self):
+        """And the OTHER outcome the gate was swallowing: a different quote
+        against an already-accepted order is a conflict, not a lifecycle
+        refusal. Both answers describe the order; neither describes the
+        restaurant's trading state."""
+        order = self._draft()
+        self.assertEqual(self._submit(order).get('status'), 200)
+
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(
+            status=RestaurantStatus_Suspended)
+
+        order.refresh_from_db()
+        conflict = self._submit(order, ref='a-different-quote')
+        self.assertEqual(conflict.get('status'), 409, conflict)
+        self.assertEqual(conflict.get('reason'), REASON_ALREADY_ACCEPTED)
+
+    def test_a_FIRST_submission_is_still_refused_when_suspended(self):
+        """The negative control, and the reason the gate stays: deferring WHEN
+        the verdict applies must not stop it applying. A draft that was never
+        accepted cannot reach the kitchen at a suspended restaurant."""
+        order = self._draft()
+        ref = quote_ref(order)
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(
+            status=RestaurantStatus_Suspended)
+
+        refused = self._submit(order, ref)
+        self.assertEqual(refused.get('status'), 400, refused)
+        self.assertFalse(OrderAcceptance.objects.filter(order=order).exists())
+        order.refresh_from_db()
+        self.assertNotEqual(order.order_status, OrderStatus_Pending)
 
     def test_an_order_with_no_evidence_keeps_the_old_refusal(self):
         """The negative control, and the pre-D04 case: nothing recorded that

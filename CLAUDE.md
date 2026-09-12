@@ -464,6 +464,17 @@ so keep it current when conventions change.
   tells a client an order was placed the kitchen never saw. It stores WHEN and the
   exact `quote_ref` the acceptance was bound to, and it NEVER MOVES AGAIN — the
   kitchen advancing, recalling or cancelling the order leaves it untouched.
+  **THE LIFECYCLE VERDICT IS TAKEN WHERE THE LOCK ORDER REQUIRES AND APPLIED AFTER
+  THE REPLAY CHECK** (Codex P1 on PR #317, valid). `admit()` acquires the advisory
+  lock AND decides whether new work is permitted, and applying that decision at the
+  point of acquisition reported a COMPLETED acceptance as a failure: accepted while
+  `live`, response lost, restaurant suspended, diner retries — the lifecycle 400
+  fired before the evidence was ever read. That is the exact failure-after-success
+  this change exists to remove, over a suspension the diner neither caused nor can
+  see, and it swallowed the 409 too. `_create_order` already made this split for
+  the same reason (its steps 1a and 1d); it simply was not carried across. The lock
+  ORDER is unchanged, and a FIRST submission at a suspended restaurant is still
+  refused — pinned as the negative control.
   **THE REPLAY MATRIX.** No evidence → the ordinary invariants decide (which is also
   the pre-D04 case: nothing recorded that acceptance, so nothing may be claimed about
   it). SAME `quote_ref` → **200 `idempotent`**, no second acceptance, no second table
