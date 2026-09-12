@@ -675,6 +675,8 @@ intent key. It left three things a recovering client cannot do:
    "is there an evidence row", so a genuine draft and an order accepted before
    that table existed both read `false`. Those are opposite instructions — the
    first may still be accepted, the second is already in the kitchen.
+   (Separating them does not turn the second into a verdict; see
+   `evidence_unavailable` below.)
 2. **Validate that an answer belongs to its command.** Both submit successes
    are `{status, message, idempotent}` and name no order, key, scope or
    reference.
@@ -713,12 +715,19 @@ published identically on both surfaces:
 }
 ```
 
-- **`acceptance.state` is three-valued and that is the point.**
-  `not_accepted` is DEFINITIVE (the row is still `initiated`).
-  `evidence_unavailable` means the order is not a draft but nothing records
-  its acceptance — the honest answer for an order accepted before D04/C. It is
-  never backfilled into an acceptance, and it never carries an invented
-  reference or moment.
+- **`acceptance.state` is three-valued, and only TWO of the three are
+  verdicts.** `accepted` and `not_accepted` are DEFINITIVE — an evidence row
+  exists, or the order is still `initiated`.
+  **`evidence_unavailable` is a NON-ANSWER**: the order is not a draft and
+  nothing records an acceptance, so the server CANNOT DETERMINE whether the
+  submission landed. Read it as ignorance, never as acceptance. TWO producers
+  reach it and nothing on the row separates them — an order accepted before
+  the evidence table existed, and a DRAFT a kitchen write cancelled or
+  advanced (the kitchen routes resolve an order by primary key and do not
+  guard on `initiated`). **The client instruction is still the conservative
+  one — do not accept such an order again** — precisely because one producer
+  really is an order in the kitchen. It is never backfilled into an
+  acceptance, and it never carries an invented reference or moment.
 - **`acceptance.quote_ref` is the stored original**, read from
   `OrderAcceptance` and never recomputed from current rows.
 - **`acceptance.outcome` is `null` on a READ.** A read observes; it is not the
@@ -729,6 +738,15 @@ published identically on both surfaces:
 - Timestamps are explicit ISO-8601 strings on both surfaces, so the submit
   reply and the read are byte-identical rather than depending on which
   renderer path produced them.
+- **`acceptance` and `current` describe ONE SNAPSHOT.** The recovery read
+  fetches the order and its evidence in a single statement
+  (`select_related('acceptance')`), so a client can rely on the two halves
+  being consistent with each other. Two statements would not have been: under
+  READ COMMITTED each takes its own snapshot, so a submission committing
+  between them produced `acceptance.state == accepted` beside
+  `current.order_status == initiated` — a correlated answer describing a
+  moment that never existed. (`transaction.atomic()` does not close that;
+  READ COMMITTED re-snapshots per statement inside a transaction too.)
 
 ### `checkout_protocol`: 2 → 3
 

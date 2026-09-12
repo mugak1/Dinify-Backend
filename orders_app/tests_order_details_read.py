@@ -335,9 +335,18 @@ class TheReadIsUnchangedInEveryOtherRespectTests(_ReadBase):
         """THE COST CLAIM, PROVED BY COMPARISON rather than by an absolute
         number. Every method field reads ONE shared row fetch, so serializing
         with them must cost exactly what serializing without them costs.
+
+        EACH MEASUREMENT GETS ITS OWN `Order` INSTANCE, and that is required
+        rather than tidy. Django caches a reverse one-to-one on the instance
+        once it is dereferenced, so serializing twice through one object made
+        the SECOND block a query cheaper than the first — a difference owned
+        entirely by measurement order, which the assertion below would then
+        report as a cost claim about the three keys. (It only started to show
+        when `_evidence` began reading `order.acceptance`; the earlier
+        `filter().first()` cached nothing on the instance, so the shared
+        object happened not to matter. Accidentally, not by design.)
         """
         table, order_id = self._one_order()
-        order = Order.objects.get(pk=order_id)
 
         class WithoutTheNewKeys(SerializerPublicOrderDetails):
             class Meta(SerializerPublicOrderDetails.Meta):
@@ -346,10 +355,12 @@ class TheReadIsUnchangedInEveryOtherRespectTests(_ReadBase):
                     if f not in ('quote', 'quote_total', 'quote_complete')
                 )
 
+        bare, joined = (Order.objects.get(pk=order_id),
+                        Order.objects.get(pk=order_id))
         with CaptureQueriesContext(connection) as without:
-            WithoutTheNewKeys(order, many=False).data
+            WithoutTheNewKeys(bare, many=False).data
         with CaptureQueriesContext(connection) as with_them:
-            SerializerPublicOrderDetails(order, many=False).data
+            SerializerPublicOrderDetails(joined, many=False).data
 
         self.assertEqual(
             len(with_them.captured_queries), len(without.captured_queries),

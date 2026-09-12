@@ -196,7 +196,17 @@ def handle_show_order_details(request) -> dict:
         selector = {'client_order_id': canonical}
 
     try:
-        order = Order.objects.get(**selector, **scope)
+        # ONE STATEMENT FOR THE ORDER AND ITS ACCEPTANCE EVIDENCE. Under READ
+        # COMMITTED each statement takes its OWN snapshot, so fetching the
+        # order here and letting the serializer look the evidence up
+        # separately let a submission commit BETWEEN the two: the projection
+        # then published `acceptance.state == accepted` beside
+        # `current.order_status == initiated`, a correlated answer describing
+        # a moment that never existed. `transaction.atomic()` would NOT fix
+        # it — READ COMMITTED re-snapshots per statement inside a transaction
+        # too. The same lesson `catalogue_snapshot` records: fold the reads.
+        order = Order.objects.select_related('acceptance').get(
+            **selector, **scope)
     except (Order.DoesNotExist, ValidationError, ValueError):
         return {'status': 404, 'message': 'Order not found'}
 

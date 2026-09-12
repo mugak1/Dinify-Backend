@@ -5,13 +5,13 @@ from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
 )
 from orders_app.controllers.services.acceptance_result import (
-    acceptance_result,
+    acceptance_result, read_evidence,
 )
 from orders_app.controllers.services.checkout_protocol import (
     CHECKOUT_PROTOCOL,
 )
 from orders_app.controllers.services.order_quote import group_live_children
-from orders_app.models import Order, OrderAcceptance, OrderItem
+from orders_app.models import Order, OrderItem
 
 
 class SerializerPutOrderItem(ModelSerializer):
@@ -235,11 +235,16 @@ class SerializerPublicOrderDetails(ModelSerializer):
         return not orphaned
 
     def _evidence(self, order):
-        """The acceptance row, fetched once for both keys below."""
+        """The acceptance row, read ONCE for every key below.
+
+        Through `read_evidence`, which prefers a JOINED relation — the same
+        reading `acceptance_result` uses, so the two cannot form different
+        opinions, and a caller that joined (the diner's recovery read does)
+        never re-reads the row from a newer snapshot than the order's.
+        """
         cached = getattr(self, '_acceptance_cache', None)
         if cached is None or cached[0] != order.pk:
-            cached = (order.pk,
-                      OrderAcceptance.objects.filter(order=order).first())
+            cached = (order.pk, read_evidence(order))
             self._acceptance_cache = cached
         return cached[1]
 

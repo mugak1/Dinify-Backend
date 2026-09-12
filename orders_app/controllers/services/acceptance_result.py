@@ -14,7 +14,8 @@ the ANSWER verifiable, and it left one pair of states indistinguishable:
     DRAFT and an order accepted BEFORE the evidence table existed both read
     false. Those are opposite instructions: the first must be reviewed and may
     still be accepted, the second is already in the kitchen and must never be
-    accepted again.
+    accepted again. (Separating them does not make the second case a verdict —
+    see ``ACCEPTANCE_EVIDENCE_UNAVAILABLE_MEANING``.)
   * the submit results carry ``{status, message, idempotent}`` and name no
     order, key, scope or reference, so a client has nothing to validate a
     correlation against.
@@ -62,12 +63,52 @@ ACCEPTANCE_ACCEPTED = 'accepted'
 #: and safe to accept.
 ACCEPTANCE_NOT_ACCEPTED = 'not_accepted'
 
-#: The order is NOT a draft, so a submission did land, but nothing records it.
-#: The honest answer for an order accepted before ``OrderAcceptance`` existed.
-#: NEVER accept such an order again on the strength of a missing row, and never
-#: backfill a moment or a reference for it — a fabricated receipt is
-#: indistinguishable from a real one afterwards.
+#: The order is NOT a draft and NOTHING records an acceptance, so THIS SERVER
+#: CANNOT DETERMINE whether the submission landed. See
+#: ``ACCEPTANCE_EVIDENCE_UNAVAILABLE_MEANING`` for the contract; it is a
+#: statement of ignorance, never of acceptance.
 ACCEPTANCE_EVIDENCE_UNAVAILABLE = 'evidence_unavailable'
+
+#: THE CONTRACT FOR THAT STATE, kept as a value rather than only as prose so a
+#: test can pin it and a client contract can quote it.
+#:
+#: IT DOES NOT MEAN "A SUBMISSION LANDED", and an earlier draft of this module
+#: said it did. The reasoning was that only ``_submit_order`` moves an order out
+#: of ``initiated``, so leaving the draft state implied an acceptance. That is
+#: FALSE: the kitchen writes resolve an order by primary key through
+#: ``endpoints_kitchen._get_order_or_none``, which filters only
+#: ``deleted=False``, and neither guards on ``initiated``. So a DRAFT can be
+#: cancelled outright (``KitchenOrderCancelView`` — a draft's fulfilment status
+#: is still ``new``, so it takes the free-void branch and needs no manager) or
+#: walked ``new -> preparing -> ready -> served``
+#: (``KitchenOrderFulfilmentStatusView``, whose completion step also writes
+#: ``order_status``). Either leaves a non-draft order with no evidence row.
+#:
+#: THE STATE THEREFORE HAS TWO PRODUCERS AND NO FACT ON THE ROW SEPARATES THEM:
+#: an order accepted before ``OrderAcceptance`` existed, and a draft a kitchen
+#: write moved on. No ``order_status`` value is exclusive to acceptance (cancel
+#: yields ``cancelled``, serve yields ``served``, recall yields ``pending`` —
+#: each reachable both ways), ``cancelled_by`` is written on both paths, and
+#: inferring a deploy date is not something this repository does.
+#:
+#: SO THE CLIENT INSTRUCTION IS THE CONSERVATIVE ONE, and it is conservative
+#: BECAUSE the server does not know: never accept such an order again on the
+#: strength of a missing row, because one of the two producers really is an
+#: order in the kitchen. And never backfill a moment or a reference for it — a
+#: fabricated receipt is indistinguishable from a real one afterwards.
+#:
+#: THE KITCHEN-DRAFT PRODUCER IS A PRE-EXISTING GAP, REPORTED AND NOT FIXED
+#: HERE. Adding an ``initiated`` guard to the kitchen writes changes what the
+#: kitchen may do to an order, which is a D05 transition decision with its own
+#: blast radius; this module's duty is to stop over-claiming about it.
+ACCEPTANCE_EVIDENCE_UNAVAILABLE_MEANING = (
+    'The order is not a draft and no acceptance evidence exists, so the '
+    'server cannot determine whether the submission landed. Two producers '
+    'reach it and nothing on the row separates them: an order accepted '
+    'before the evidence table existed, and a draft that a kitchen write '
+    'cancelled or advanced. Treat it as not safe to accept again, and never '
+    'backfill a moment or a reference for it.'
+)
 
 #: This response IS the result of an acceptance that just happened.
 OUTCOME_NEWLY_ACCEPTED = 'newly_accepted'
@@ -82,6 +123,43 @@ class _Unset:
 
 
 _UNSET = _Unset()
+
+
+def read_evidence(order):
+    """THE ONE WAY TO READ AN ORDER'S ACCEPTANCE, and it prefers the JOIN.
+
+    This is a CORRECTNESS rule, not a query-count one. Under READ COMMITTED
+    every statement takes its own snapshot, so reading the order in one
+    statement and its evidence in another can observe an acceptance that
+    committed BETWEEN them — publishing ``acceptance.state == accepted``
+    beside ``current.order_status == initiated``, a correlated answer
+    describing a moment that never existed. ``transaction.atomic()`` does NOT
+    close that: READ COMMITTED re-snapshots per statement inside a transaction
+    too. Folding the two reads does, which is the same lesson
+    ``catalogue_snapshot`` records, so the diner's recovery read fetches its
+    order with ``select_related('acceptance')``.
+
+    Attribute access is what makes the preference automatic rather than
+    something each caller has to remember: a JOINED relation answers from the
+    order's own snapshot and issues nothing, and an unjoined one falls back to
+    a query. The fallback is the ORDINARY path for an ad-hoc caller and its
+    window is the pre-existing behaviour, not something introduced here; the
+    two hot callers pass their row in directly and reach neither.
+
+    THE STALE DIRECTION IS SAFE AND THE FRESH ONE IS NOT, which is why the
+    fallback is tolerable at all. Reading late can only ADD an acceptance the
+    order row does not reflect — the incoherent pair. Reading early yields at
+    worst ``evidence_unavailable``, a statement of ignorance the server is
+    entitled to make, or ``not_accepted`` on a snapshot where the order really
+    was still a draft, which the acceptance path's own replay protection
+    covers.
+    """
+    try:
+        return order.acceptance
+    except OrderAcceptance.DoesNotExist:
+        # Joined and absent: Django cached ``None``, so this costs nothing.
+        # Unjoined and absent: one query, which is the fallback above.
+        return None
 
 
 def _moment(value):
@@ -103,12 +181,19 @@ def _moment(value):
 def acceptance_state(order, evidence):
     """THE THREE-STATE VERDICT. Derived; nothing is stored for it.
 
-    The discriminator is whether the row is still a DRAFT, because that is the
-    only fact that can separate "never accepted" from "accepted, unrecorded":
+    The discriminator is whether the row is still a DRAFT, because it is the
+    only fact available that can rule "never accepted" IN:
 
-      evidence row present       -> ``accepted``
-      no row, still ``initiated``-> ``not_accepted``   (definitive)
-      no row, no longer a draft  -> ``evidence_unavailable``
+      evidence row present       -> ``accepted``        (definitive)
+      no row, still ``initiated``-> ``not_accepted``    (definitive)
+      no row, no longer a draft  -> ``evidence_unavailable``  (a non-answer)
+
+    ONLY THE FIRST TWO ARE VERDICTS. The third is the server saying it does not
+    know, and it is DELIBERATELY NOT called "accepted, unrecorded": leaving the
+    draft state does not imply a submission landed, because a kitchen write can
+    cancel or advance a draft with no acceptance. See
+    ``ACCEPTANCE_EVIDENCE_UNAVAILABLE_MEANING`` for both producers and why
+    nothing on the row separates them.
 
     A CANCELLED OR SERVED ORDER IS NOT PUSHED BACK TO ``not_accepted``. The
     kitchen's later progress says nothing about whether the diner's submission
@@ -141,7 +226,7 @@ def acceptance_result(order, *, outcome=None, evidence=_UNSET):
     starts doing it.
     """
     if isinstance(evidence, _Unset):
-        evidence = OrderAcceptance.objects.filter(order=order).first()
+        evidence = read_evidence(order)
 
     return {
         # WHICH order and WHICH keyed intent. A client validates both against

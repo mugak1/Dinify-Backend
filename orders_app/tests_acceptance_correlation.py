@@ -44,11 +44,17 @@ import uuid
 
 from django.utils import timezone
 
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+from rest_framework.test import APIRequestFactory, force_authenticate
+
 from dinify_backend.configss.string_definitions import (
-    OrderStatus_Cancelled, OrderStatus_Pending, OrderStatus_Preparing,
+    CancellationReason_CustomerChangedMind, OrderStatus_Cancelled,
+    OrderStatus_Initiated, OrderStatus_Pending, OrderStatus_Preparing,
     OrderStatus_Served,
 )
 from orders_app.controllers.manage_order import update_order_status
+from orders_app.endpoints_kitchen import KitchenOrderCancelView
 from orders_app.controllers.services import checkout_protocol as protocol
 from orders_app.controllers.services.order_quote import quote_ref
 from orders_app.models import Order, OrderAcceptance, OrderItem
@@ -469,3 +475,170 @@ class TheCapabilityLevelIsExplicitTests(CorrelationFixture):
                          protocol.CHECKOUT_PROTOCOL_CORRELATED)
         self.assertEqual(self._payload(order)['checkout_protocol'],
                          protocol.CHECKOUT_PROTOCOL_CORRELATED)
+
+
+# ---------------------------------------------------------------------------
+# G. LEAVING THE DRAFT STATE IS NOT EVIDENCE OF ACCEPTANCE (Codex P2, #318)
+# ---------------------------------------------------------------------------
+
+class NotEveryNonDraftOrderWasAcceptedTests(CorrelationFixture):
+    """A kitchen write can move an order out of `initiated` WITHOUT an
+    acceptance, so "not a draft" cannot be read as "a submission landed".
+
+    `KitchenOrderCancelView` resolves the order by primary key through
+    `_get_order_or_none`, which filters only `deleted=False` — a DRAFT is
+    reachable, its `fulfilment_status` is still `new`, so it takes the
+    free-void branch and needs no manager. The fulfilment-status view has the
+    same shape. Neither writes an `OrderAcceptance`.
+
+    THE PROJECTION MUST NOT TURN THAT INTO AN ACCEPTANCE CLAIM. `accepted`
+    is reserved for a row of evidence; the third state says the server CANNOT
+    DETERMINE what happened, which is the truth here and the truth for a
+    pre-D04 acceptance alike.
+    """
+
+    def _cancel_through_the_kitchen(self, order):
+        request = APIRequestFactory().put(
+            f'/api/v1/kitchen/orders/{order.pk}/cancel/',
+            {'cancellation_reason': CancellationReason_CustomerChangedMind},
+            format='json',
+        )
+        force_authenticate(request, user=self.owner)
+        request.user = self.owner
+        return KitchenOrderCancelView.as_view()(request, pk=str(order.pk))
+
+    def test_the_kitchen_really_can_cancel_a_draft(self):
+        """The negative control for the whole class: if this ever starts
+        refusing, the misreport below is unreachable and the third state's
+        remaining producer is the pre-D04 one."""
+        order = self._draft()
+        response = self._cancel_through_the_kitchen(order)
+        self.assertEqual(response.status_code, 200, response.data)
+
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, OrderStatus_Cancelled)
+        self.assertFalse(OrderAcceptance.objects.filter(order=order).exists())
+
+    def test_a_cancelled_draft_is_never_reported_as_accepted(self):
+        order = self._draft()
+        self.assertEqual(
+            self._cancel_through_the_kitchen(order).status_code, 200)
+        order.refresh_from_db()
+
+        acceptance = _projection()(order)['acceptance']
+        self.assertNotEqual(acceptance['state'], 'accepted')
+        self.assertIsNone(acceptance['quote_ref'])
+        self.assertIsNone(acceptance['accepted_at'])
+
+    def test_the_third_state_claims_no_submission_landed(self):
+        """THE FINDING, stated as a contract rather than as prose.
+
+        `evidence_unavailable` must mean "this server cannot determine
+        whether the submission landed" — NOT "it landed". The module's own
+        constant docstring is what a client contract is read from, so the
+        over-claim is pinned absent here.
+        """
+        from orders_app.controllers.services import acceptance_result as mod
+        doc = (mod.ACCEPTANCE_EVIDENCE_UNAVAILABLE_MEANING or '').lower()
+        self.assertIn('cannot', doc)
+        self.assertIn('kitchen', doc)
+
+    def test_a_never_submitted_draft_still_reads_not_accepted(self):
+        """The narrowing must not swallow the definitive case."""
+        self.assertEqual(
+            _projection()(self._draft())['acceptance']['state'],
+            'not_accepted')
+
+
+# ---------------------------------------------------------------------------
+# H. ONE SNAPSHOT FOR THE ORDER AND ITS EVIDENCE (Codex P2, #318)
+# ---------------------------------------------------------------------------
+
+class TheProjectionDescribesOneSnapshotTests(CorrelationFixture):
+    """The order and its acceptance must be read TOGETHER.
+
+    Two statements take two snapshots under READ COMMITTED, so a recovery
+    GET racing a submission could read the order while still `initiated` and
+    then find the evidence committed a moment later — publishing
+    `acceptance.state == accepted` beside `current.order_status ==
+    initiated`, a correlated answer describing a moment that never existed.
+    The same lesson `catalogue_snapshot` records: fold the two reads into one.
+    """
+
+    def test_the_journey_read_joins_the_evidence_in_one_query(self):
+        """Structural, not timing-based: if the serializer issues its own
+        second read, these two counts differ and the race is reachable."""
+        key = uuid.uuid4()
+        order = self._accepted(key=key)
+
+        with CaptureQueriesContext(connection) as captured:
+            payload = SerializerPublicOrderDetails(
+                Order.objects.select_related('acceptance').get(pk=order.pk)
+            ).data
+        self.assertEqual(payload['checkout']['acceptance']['state'],
+                         'accepted')
+        # A SEPARATE read, not the JOIN: the join names the table too, so
+        # matching the bare name would fail even once the fix is in.
+        separate = [
+            q['sql'] for q in captured.captured_queries
+            if 'from "order_acceptances"' in q['sql'].lower()
+        ]
+        self.assertEqual(separate, [], separate)
+
+    def test_the_production_read_itself_joins_the_evidence(self):
+        """The half the test above cannot see.
+
+        That one hands the serializer an order IT joined, so it pins the
+        serializer's behaviour and would pass just as happily if
+        `handle_show_order_details` fetched without the join. This drives the
+        REAL journey read, both selectors, and asserts the same thing of it.
+        """
+        key = uuid.uuid4()
+        order = self._accepted(key=key)
+
+        for selector in ({'order': str(order.pk)}, {'intent': str(key)}):
+            with self.subTest(selector=next(iter(selector))):
+                with CaptureQueriesContext(connection) as captured:
+                    answer = self._read(**selector)
+                self.assertEqual(answer.get('status'), 200, answer)
+                self.assertEqual(
+                    answer['data']['checkout']['acceptance']['state'],
+                    'accepted')
+                separate = [
+                    q['sql'] for q in captured.captured_queries
+                    if 'from "order_acceptances"' in q['sql'].lower()
+                ]
+                self.assertEqual(separate, [], separate)
+
+    def test_the_answer_is_never_accepted_beside_a_draft_status(self):
+        """The incoherent pair, produced directly.
+
+        The order instance is read BEFORE the acceptance commits and
+        serialized AFTER — exactly the interleaving the race produces. The
+        projection must describe the snapshot it was handed, not blend two.
+        """
+        order = self._draft()
+        stale = Order.objects.select_related('acceptance').get(pk=order.pk)
+        self.assertEqual(stale.order_status, OrderStatus_Initiated)
+
+        # the acceptance commits while the stale instance is still in hand
+        self.assertEqual(self._submit(order).get('status'), 200)
+        self.assertTrue(OrderAcceptance.objects.filter(order=order).exists())
+
+        checkout = SerializerPublicOrderDetails(stale).data['checkout']
+        self.assertEqual(checkout['current']['order_status'],
+                         OrderStatus_Initiated)
+        self.assertNotEqual(
+            checkout['acceptance']['state'], 'accepted',
+            'accepted beside a draft status is a moment that never existed')
+
+    def test_the_recovery_read_is_still_correct_when_nothing_races(self):
+        """The ordinary path, unchanged."""
+        key = uuid.uuid4()
+        self._accepted(key=key)
+        recovered = self._read(intent=str(key))
+        self.assertEqual(recovered.get('status'), 200, recovered)
+        checkout = recovered['data']['checkout']
+        self.assertEqual(checkout['acceptance']['state'], 'accepted')
+        self.assertEqual(checkout['current']['order_status'],
+                         OrderStatus_Pending)
