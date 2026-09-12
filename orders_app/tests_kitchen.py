@@ -17,7 +17,9 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
+from orders_app.models import (
+    Order, OrderAcceptance, OrderItem, RestaurantDailyOrderCounter,
+)
 from orders_app.controllers.con_orders import ConOrder
 from orders_app.controllers.initiate_order import any_present_ongoing_order
 from orders_app.controllers.manage_order import update_order_status
@@ -29,6 +31,8 @@ from orders_app.controllers.services.create_order import (
     _create_order,
     allocate_daily_order_number,
 )
+from orders_app.controllers.services.order_input import validate_order_items
+from orders_app.controllers.services.order_intent import fingerprint
 from users_app.models import User
 from users_app.tests import seed_user, TEST_PHONE
 from restaurants_app.tests import (
@@ -201,31 +205,55 @@ class KitchenNumberingTests(KitchenTestBase):
         The CREATE-time race (distinct from the step-1 replay): two requests
         carrying the same client_order_id both clear the step-1 lookup before
         either commits, so the loser's INSERT trips
-        uniq_order_restaurant_client_order_id. Simulate the winner appearing
-        between step 1 and step 4 by injecting it at daily-number allocation
-        (step 3 — after the step-1 lookup, before the create). The real create
-        then raises IntegrityError and the catch must re-fetch and return the
-        winner (200, idempotent) — creating no second row and never 500-ing.
+        uniq_order_restaurant_client_order_id. The catch must re-fetch and
+        return the winner (200, idempotent) — creating no second row and never
+        500-ing.
+
+        THE INJECTION SEAM MOVED, and the reason is the D04 fix rather than
+        test convenience. The winner used to be injected at daily-number
+        allocation, which sat OUTSIDE the savepoint wrapping the INSERT; the
+        allocation is now INSIDE that savepoint, precisely so a losing request
+        unwinds the number it took as well as the row it failed to write. A
+        winner created at that seam would therefore be rolled back along with
+        the loser and the re-fetch would find nothing. It is injected at
+        `normalize_order_items` instead — still after the step-1 lookup and
+        the post-lock recheck, still before the INSERT, and now genuinely
+        outside the boundary that unwinds.
+
+        IT ALSO CARRIES THE BINDING. Every return-existing site validates the
+        intent binding now, so a winner with no `request_fingerprint` would be
+        refused as undecidable (which its own test below asserts). This one is
+        the SAME purchase, so it must come back as the idempotent match.
+
+        Worth stating plainly: with the post-lock recheck in place this branch
+        is DEFENCE IN DEPTH for a same-table winner rather than a reachable
+        path — the table lock serialises those, and the recheck returns the
+        winner before any INSERT is attempted. The constraint remains the
+        final protection for races the table lock does not serialise.
         """
         items = [{'item': str(MenuItem.objects.get(name=TEST_MENU_ITEM1_NAME).pk),
                   'quantity': 1}]
         client_order_id = uuid.uuid4()
         winner_box = {}
+        real_normalize = ConOrder.normalize_order_items
 
-        def _inject_concurrent_winner(restaurant, order_date):
-            # a racing request wins the INSERT for this client_order_id; its
-            # order_number stays NULL so ONLY the client_order_id constraint trips
-            winner = self._make_order(
-                table=self.table1,
-                client_order_id=client_order_id,
-                order_number=None,
-                order_date=order_date,
-            )
-            winner_box['id'] = winner.id
-            return 1  # the losing request's (soon-to-conflict) order number
+        def _inject_concurrent_winner(restaurant, order_items, **kwargs):
+            if 'id' not in winner_box:
+                # a racing request wins the INSERT for this client_order_id; its
+                # order_number stays NULL so ONLY the client_order_id constraint
+                # trips.
+                winner = self._make_order(
+                    table=self.table1,
+                    client_order_id=client_order_id,
+                    request_fingerprint=fingerprint(
+                        validate_order_items(items)['items']),
+                    order_number=None,
+                )
+                winner_box['id'] = winner.id
+            return real_normalize(restaurant, order_items, **kwargs)
 
-        with mock.patch(
-            'orders_app.controllers.services.create_order.allocate_daily_order_number',
+        with mock.patch.object(
+            ConOrder, 'normalize_order_items',
             side_effect=_inject_concurrent_winner,
         ):
             result = _create_order(
@@ -959,11 +987,53 @@ class SubmitClaimsTableTests(KitchenTestBase):
         self.assertEqual(result['status'], 200)
         self.assertTrue(spy.called)
 
-    def test_double_submit_same_order_is_rejected(self):
-        # The status is re-checked on the FRESH row under the lock, so a second
-        # submit of an already-submitted order gets today's 400.
+    def test_double_submit_of_the_same_acceptance_is_idempotent(self):
+        """D04 CHANGED THIS ANSWER, and the old one was the defect.
+
+        A second submit of the SAME acceptance used to fall through to the
+        `initiated` re-check and get `This order cannot be submitted.` — a
+        FAILURE reported for an operation that had SUCCEEDED. A diner whose
+        response was lost on the wire read that as "nothing was ordered" while
+        the kitchen was already cooking it.
+
+        The evidence row is what makes the honest answer available: the same
+        quote replays as the acceptance that already happened.
+        """
+        order = self._draft(self.table1)['order']
+        first = self._submit(order)
+        self.assertEqual(first['status'], 200)
+        self.assertFalse(first['idempotent'])
+
+        second = self._submit(order)
+        self.assertEqual(second['status'], 200, second)
+        self.assertTrue(second['idempotent'])
+        # ...and no second acceptance was recorded
+        self.assertEqual(
+            OrderAcceptance.objects.filter(order=order).count(), 1)
+
+    def test_a_second_submit_under_a_different_quote_is_a_conflict(self):
+        """The other half: replaying the key of an accepted order against a
+        DIFFERENT quote is a different acceptance being attempted, not a
+        replay of the one that happened."""
         order = self._draft(self.table1)['order']
         self.assertEqual(self._submit(order)['status'], 200)
+
+        conflict = update_order_status(
+            order, OrderStatus_Pending, None, quote_ref='not-the-one',
+        )
+        self.assertEqual(conflict['status'], 409, conflict)
+        self.assertEqual(conflict['reason'], 'order_already_accepted')
+        self.assertEqual(
+            OrderAcceptance.objects.filter(order=order).count(), 1)
+
+    def test_an_order_never_accepted_still_cannot_be_submitted_twice(self):
+        """The negative control: the `initiated` re-check is unchanged for an
+        order carrying no evidence — which is what a pre-D04 accepted order
+        looks like, and what a cancelled draft looks like."""
+        order = self._draft(self.table1)['order']
+        self.assertEqual(self._submit(order)['status'], 200)
+        OrderAcceptance.objects.filter(order=order).delete()
+
         second = self._submit(order)
         self.assertEqual(second['status'], 400)
         self.assertEqual(second['message'], 'This order cannot be submitted.')

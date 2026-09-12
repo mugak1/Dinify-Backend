@@ -34,6 +34,9 @@ from orders_app.models import Order, OrderItem
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
 )
+from orders_app.controllers.services.checkout_protocol import (
+    CHECKOUT_PROTOCOL,
+)
 from orders_app.controllers.services.order_quote import (
     group_live_children, quote_ref,
 )
@@ -179,6 +182,16 @@ def serialize_order_details(order: Order) -> dict:
         # significant figures. An amount a diner is asked to agree to must not be
         # carried by a type that cannot represent it.
         'quote_total': format_money(order.actual_cost, field='quote_total'),
+
+        # ADDITIVE (D04): WHAT THIS DEPLOYMENT CAN PROMISE about retrying an
+        # uncertain checkout. A LEVEL, not a boolean, because D04's halves
+        # deploy separately and a client must not be told the second exists
+        # when only the first does. It is stated directly because every value
+        # already on the wire answers a different question — `pricing_version`
+        # describes how the MONEY was calculated, and #661 is the standing
+        # lesson about collapsing two contract introductions into one flag.
+        # An ABSENT value means level 0: promise nothing.
+        'checkout_protocol': CHECKOUT_PROTOCOL,
 
         'no_items': len(parent_items),
         'no_unavailable_items': len(unavailable_parent_items),

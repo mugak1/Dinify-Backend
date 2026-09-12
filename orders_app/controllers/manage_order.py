@@ -5,8 +5,9 @@ import logging
 
 from typing import Union
 from django.db import transaction
+from django.utils import timezone
 from users_app.models import User
-from orders_app.models import Order, OrderItem
+from orders_app.models import Order, OrderAcceptance, OrderItem
 from dinify_backend.configss.messages import (
     OK_ORDER_UPDATED, ERR_ORDER_UPDATED
 )
@@ -76,6 +77,10 @@ REASON_QUOTE_REQUIRED = 'quote_ref_required'
 REASON_QUOTE_STALE = 'quote_ref_stale'
 REASON_QUOTE_INCOMPLETE = 'quote_incomplete'
 REASON_NOTHING_TO_PREPARE = 'no_deliverable_items'
+#: D04 — an order that already carries acceptance evidence, replayed with a
+#: DIFFERENT quote. Not a failure of the original acceptance, and never a
+#: second one.
+REASON_ALREADY_ACCEPTED = 'order_already_accepted'
 
 MESSAGE_LEGACY_PRICING = (
     'This order was prepared before a pricing update and cannot be placed as it '
@@ -95,6 +100,10 @@ MESSAGE_QUOTE_INCOMPLETE = (
 MESSAGE_NOTHING_TO_PREPARE = (
     'None of the items on this order are available right now, so there is '
     'nothing to send to the kitchen.'
+)
+MESSAGE_ALREADY_ACCEPTED = (
+    'This order has already been placed. Please check its status rather than '
+    'placing it again.'
 )
 
 
@@ -197,6 +206,75 @@ def _acceptance_refusal(order, supplied_quote_ref):
     return None
 
 
+def _acceptance_replay(order, supplied_quote_ref):
+    """Has this order ALREADY been accepted, and is this the same acceptance?
+
+    D04. Without this, a client whose submit response was lost retried and was
+    told ``This order cannot be submitted.`` — a FAILURE reported for an
+    operation that had SUCCEEDED, which is the single worst answer a checkout
+    can give: the diner believes nothing was ordered, and the kitchen is
+    already cooking it.
+
+    The evidence is a row, not the order's STATE. `order_status` is unusable
+    for this: the kitchen moves it on to `preparing` and `served`, a recall
+    moves it back, and a cancellation moves it somewhere else again — so by
+    the time a retry arrives it says nothing about whether the diner's
+    submission landed. `OrderAcceptance` is written once, by this transition
+    only, and never moves.
+
+    THREE OUTCOMES, and the third is the one worth stating:
+
+      no evidence          -> ``None``; this is a genuine first submission and
+                              the ordinary invariants decide it. An order
+                              accepted BEFORE D04 also lands here, correctly:
+                              nothing recorded its acceptance, so nothing can
+                              be claimed about it.
+      the SAME quote       -> 200, ``idempotent``. The acceptance already
+                              happened and is not repeated; the client reads
+                              current state from the order-details read.
+      anything else        -> 409. A DIFFERENT quote is a different acceptance
+                              being attempted against an order already
+                              accepted, and an ABSENT one cannot prove it is
+                              the same. Neither is a failure of the original
+                              acceptance and neither may produce a second.
+
+    A CANCELLED order that carries evidence still replays as accepted, and
+    that is deliberate: the submission DID land, and the cancellation is a
+    later, separate fact the client reads off the order. Answering "your
+    submission failed" would be false about the only thing this route is
+    asked.
+
+    It comes BEFORE the ``initiated`` check, because that check is exactly
+    what produced the false failure. It changes nothing on any path: no save,
+    no second evidence row, no state flip, no table claim.
+    """
+    evidence = OrderAcceptance.objects.filter(order=order).first()
+    if evidence is None:
+        return None
+
+    if (
+        isinstance(supplied_quote_ref, str)
+        and supplied_quote_ref
+        and supplied_quote_ref == evidence.quote_ref
+    ):
+        return {
+            'status': 200,
+            'message': OK_ORDER_UPDATED,
+            'idempotent': True,
+        }
+
+    logger.info(
+        'Order submission replayed against a different quote '
+        '(order_id=%s, reason=%s)',
+        order.pk, REASON_ALREADY_ACCEPTED,
+    )
+    return {
+        'status': 409,
+        'message': MESSAGE_ALREADY_ACCEPTED,
+        'reason': REASON_ALREADY_ACCEPTED,
+    }
+
+
 def _submit_order(order: Order, user: Union[User, None],
                   supplied_quote_ref: Union[str, None] = None) -> dict:
     """
@@ -245,11 +323,48 @@ def _submit_order(order: Order, user: Union[User, None],
         # laxer staff one. Passing `user` here would let a diner draft be
         # submitted at a restaurant that has not gone live, simply because a staff
         # member happened to be the one who tapped submit.
+        #
+        # THE LOCK IS TAKEN HERE; THE VERDICT IS APPLIED BELOW, once the request
+        # is known to be NEW WORK. Acquiring the advisory lock and applying a
+        # new-submission policy are different actions, and only the first belongs
+        # at this point in the ordering. Applying it here reported a COMPLETED
+        # acceptance as a failure: accepted while `live`, response lost,
+        # restaurant suspended, diner retries — and the lifecycle 400 fired
+        # before the evidence was ever read, which is the exact
+        # failure-after-success this change exists to remove, over a suspension
+        # the diner neither caused nor can see. The identical split is already
+        # written out in `create_order._create_order` (steps 1a and 1d); this
+        # is the same reasoning, carried across. The lock ORDER
+        # (advisory -> Table -> Order) is unchanged.
         verdict = admit(
             restaurant_id=order.restaurant_id,
             created_by=order.created_by_id,
             stage=STAGE_SUBMIT,
         )
+
+        # Table-first lock where there is one, then re-read the order under it.
+        # (`Order.table` is non-nullable today, so the None branch is
+        # defensive.) THE SEQUENCE BELOW IS SHARED rather than duplicated per
+        # branch: it used to be written out twice, which is how an invariant
+        # ends up added to one of them and not the other.
+        locked_table = None
+        if order.table_id is not None:
+            locked_table = (
+                Table.objects.select_for_update().get(pk=order.table_id)
+            )
+        order = Order.objects.select_for_update().get(pk=order.pk)
+
+        # D04: WAS THIS ORDER ALREADY ACCEPTED? Asked FIRST, because the
+        # `initiated` check below is precisely what used to report a lost
+        # response as a failure.
+        replay = _acceptance_replay(order, supplied_quote_ref)
+        if replay is not None:
+            return replay
+
+        # NOW the admission verdict applies: this submission really is new
+        # work, so the rule about new work governs it. A draft that was never
+        # accepted still cannot reach the kitchen at a restaurant that has
+        # stopped trading.
         if not verdict.allowed:
             logger.info(
                 "Order submission refused (order_id=%s, code=%s)",
@@ -257,21 +372,17 @@ def _submit_order(order: Order, user: Union[User, None],
             )
             return {'status': 400, 'message': verdict.message}
 
-        if order.table_id is not None:
-            # Table-first lock, then re-read the order under the same lock.
-            locked_table = (
-                Table.objects.select_for_update().get(pk=order.table_id)
-            )
-            order = Order.objects.select_for_update().get(pk=order.pk)
+        # Status check on the FRESH row: a concurrent double-submit that
+        # already flipped this order loses here with the existing 400 — now
+        # only when there is no evidence to replay, i.e. for an order that was
+        # never accepted through this path at all.
+        if order.order_status != OrderItemStatus_Initiated:
+            return {
+                'status': 400,
+                'message': 'This order cannot be submitted.'
+            }
 
-            # Status check on the FRESH row: a concurrent double-submit that
-            # already flipped this order loses here with the existing 400.
-            if order.order_status != OrderItemStatus_Initiated:
-                return {
-                    'status': 400,
-                    'message': 'This order cannot be submitted.'
-                }
-
+        if locked_table is not None:
             # Re-check occupancy under the lock. After the drafts-are-invisible
             # change this order (still 'initiated') is excluded from the
             # predicate anyway; the not-this-order guard is defense-in-depth.
@@ -282,22 +393,9 @@ def _submit_order(order: Order, user: Union[User, None],
                     'message': 'The table has an ongoing order'
                 }
 
-            acceptance = _acceptance_refusal(order, supplied_quote_ref)
-            if acceptance is not None:
-                return acceptance
-        else:
-            # No table to claim (defensive — Order.table is non-nullable today,
-            # so this branch is currently unreachable). Re-read and flip.
-            order = Order.objects.select_for_update().get(pk=order.pk)
-            if order.order_status != OrderItemStatus_Initiated:
-                return {
-                    'status': 400,
-                    'message': 'This order cannot be submitted.'
-                }
-
-            acceptance = _acceptance_refusal(order, supplied_quote_ref)
-            if acceptance is not None:
-                return acceptance
+        acceptance = _acceptance_refusal(order, supplied_quote_ref)
+        if acceptance is not None:
+            return acceptance
 
         order.order_status = OrderStatus_Pending
         if user is not None:
@@ -305,7 +403,21 @@ def _submit_order(order: Order, user: Union[User, None],
         # time_last_updated is auto_now on BaseModel — the save stamps it.
         order.save()
 
+        # THE EVIDENCE COMMITS WITH THE TRANSITION OR NOT AT ALL. An accepted
+        # order with no record of its acceptance would report a retry as a
+        # failure — the defect this closes — and a record with no transition
+        # would tell a client an order was placed that the kitchen never saw.
+        # `supplied_quote_ref` is what `_acceptance_refusal` has just proved
+        # names this order's saved quote, so the stored value is the exact
+        # figure the diner confirmed rather than one re-derived afterwards.
+        OrderAcceptance.objects.create(
+            order=order,
+            accepted_at=timezone.now(),
+            quote_ref=supplied_quote_ref,
+        )
+
     return {
         'status': 200,
-        'message': OK_ORDER_UPDATED
+        'message': OK_ORDER_UPDATED,
+        'idempotent': False,
     }

@@ -587,6 +587,64 @@ class DinerResourceScopingClosureTests(ClosureFixtureBase):
             )
             self.assertEqual(resp.status_code, 404, f'{order_id}: {resp.content}')
 
+    # -- the D04/C recovery selector (?intent=) is scoped identically -------
+    #
+    # A client whose checkout response was lost holds its `client_order_id`
+    # and no order id, so the diner read resolves that key too. HOLDING A KEY
+    # IS NOT AUTHORITY: the lookup is filtered to the session's restaurant AND
+    # table exactly as the order-id form is, so the selector widened the
+    # anonymous surface by nothing. It rides the EXISTING route, so the diner
+    # capability header contract is untouched — no new allowlist entry, in
+    # either repository.
+
+    def test_session_a_cannot_recover_b_order_by_its_intent_key(self):
+        key = uuid4()
+        b_order = self._make_order(
+            self.restaurant_b, self.table_b, status=OrderStatus_Initiated)
+        Order.objects.filter(pk=b_order.pk).update(client_order_id=key)
+
+        resp = self.client.get(
+            f'{ORDER_DETAILS_URL}?intent={key}',
+            **_header_kw(SESSION_HEADER, self._sess(self.table_a)),
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_a_key_at_another_table_of_the_same_restaurant_is_also_refused(self):
+        """The narrower case, and the one a restaurant-wide key namespace
+        makes reachable: same tenant, different table."""
+        key = uuid4()
+        other = self._make_order(
+            self.restaurant_a, self.table_a2, status=OrderStatus_Initiated)
+        Order.objects.filter(pk=other.pk).update(client_order_id=key)
+
+        resp = self.client.get(
+            f'{ORDER_DETAILS_URL}?intent={key}',
+            **_header_kw(SESSION_HEADER, self._sess(self.table_a)),
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_foreign_unknown_and_malformed_intent_keys_are_indistinguishable(self):
+        session = self._sess(self.table_a)
+        foreign = self._make_order(self.restaurant_b, self.table_b)
+        foreign_key = uuid4()
+        Order.objects.filter(pk=foreign.pk).update(client_order_id=foreign_key)
+
+        for value in (str(foreign_key), str(uuid4()), 'not-a-uuid', '5', ''):
+            resp = self.client.get(
+                f'{ORDER_DETAILS_URL}?intent={value}',
+                **_header_kw(SESSION_HEADER, session),
+            )
+            self.assertEqual(resp.status_code, 404, f'{value!r}: {resp.content}')
+
+    def test_the_recovery_selector_still_requires_a_session(self):
+        own = self._make_order(
+            self.restaurant_a, self.table_a, status=OrderStatus_Initiated)
+        key = uuid4()
+        Order.objects.filter(pk=own.pk).update(client_order_id=key)
+
+        resp = self.client.get(f'{ORDER_DETAILS_URL}?intent={key}')
+        self.assertNotEqual(resp.status_code, 200, resp.content)
+
     def test_diner_source_flag_cannot_enter_staff_branch(self):
         # A body source='admin' from a pure diner (only a session, no JWT) selects
         # the staff branch, which REQUIRES authentication — so the diner is bounced
@@ -1089,22 +1147,77 @@ class ModifierIntegrityClosureTests(ClosureFixtureBase):
 
     # -- idempotency first (proof 22) --------------------------------------
     def test_idempotent_replay_skips_modifier_revalidation(self):
+        """A replay is never re-validated against mutable modifier config.
+
+        THE FIXTURE CHANGED WITH D04, AND THE PROPERTY DID NOT. This used to
+        replay a DIFFERENT selection (`{'g-bogus': ['x']}` against an original
+        of `{'g-req': ['c1']}`) and assert the original order came back — which
+        exercised the property only because the key alone matched and the body
+        was ignored entirely. That is the defect D04 closes: a request naming a
+        different purchase is now a conflict, not a silent hand-back.
+
+        So the INVALIDITY is moved to where the property actually lives — the
+        MENU. The replay sends the SAME purchase while the stored modifier
+        definition becomes one that would now be refused, and it must still
+        return the original order without consulting it.
+        """
+        coid = str(uuid4())
+        selection = {'g-req': ['c1']}
+        first = self._create(
+            [self._line(self.item_mod, selected_modifiers=selection)],
+            client_order_id=coid,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        self.assertFalse(first.get('idempotent'))
+
+        # the choice the original named no longer exists on the menu
+        MenuItem.objects.filter(pk=self.item_mod.pk).update(options={
+            'hasModifiers': True,
+            'groups': [{'id': 'g-req', 'name': 'Base', 'type': 'single',
+                        'minSelections': 1, 'maxSelections': 1,
+                        'choices': [{'id': 'c9', 'name': 'Nine',
+                                     'available': True, 'additionalCost': 0}]}],
+        })
+        # ...and a NEW order carrying it would indeed be refused now
+        fresh = self._create(
+            [self._line(self.item_mod, selected_modifiers=selection)],
+            table=self.table_a2,
+        )
+        self.assertNotEqual(fresh.get('status'), 200, fresh)
+
+        replay = self._create(
+            [self._line(self.item_mod, selected_modifiers=selection)],
+            client_order_id=coid,
+        )
+        self.assertEqual(replay.get('status'), 200, replay)
+        self.assertTrue(replay.get('idempotent'))
+        self.assertEqual(replay['order'].id, first['order'].id)
+
+    def test_a_key_replayed_for_a_different_selection_is_refused(self):
+        """The other half, and the reason the fixture above had to move.
+
+        Two different modifier selections are two different purchases. Reusing
+        one key across them used to return the FIRST order at HTTP 200, with
+        nothing telling the diner the kitchen was preparing something else.
+        """
         coid = str(uuid4())
         first = self._create(
             [self._line(self.item_mod, selected_modifiers={'g-req': ['c1']})],
             client_order_id=coid,
         )
         self.assertEqual(first.get('status'), 200, first)
-        self.assertFalse(first.get('idempotent'))
-        # Replay with a now-INVALID selection: must still return the original order
-        # WITHOUT re-validating current modifier config.
-        replay = self._create(
-            [self._line(self.item_mod, selected_modifiers={'g-bogus': ['x']})],
+
+        conflict = self._create(
+            [self._line(self.item_mod, selected_modifiers={'g-req': ['c2']})],
             client_order_id=coid,
         )
-        self.assertEqual(replay.get('status'), 200, replay)
-        self.assertTrue(replay.get('idempotent'))
-        self.assertEqual(replay['order'].id, first['order'].id)
+        self.assertEqual(conflict.get('status'), 409, conflict)
+        self.assertEqual(conflict.get('reason'), 'checkout_intent_mismatch')
+        self.assertEqual(
+            Order.objects.filter(client_order_id=coid).count(), 1)
+        line = OrderItem.objects.get(
+            order=first['order'], item=self.item_mod, parent_item__isnull=True)
+        self.assertEqual(line.selected_modifiers, {'g-req': ['c1']})
 
     # -- sold-out + extras unchanged (proofs 24-25) ------------------------
     def test_soldout_reconciliation_unchanged_with_modifiers(self):

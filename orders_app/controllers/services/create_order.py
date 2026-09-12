@@ -37,6 +37,9 @@ from orders_app.controllers.services.order_input import (
     client_order_id_rejection, validate_order_items,
     validate_service_client_order_id,
 )
+from orders_app.controllers.services.order_intent import (
+    REFUSALS, fingerprint, resolve_intent,
+)
 from orders_app.controllers.services.catalogue_snapshot import build_snapshot
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
@@ -108,6 +111,102 @@ def allocate_daily_order_number(restaurant, order_date):
     raise IntegrityError("Could not allocate a daily order number after retry")
 
 
+#: The constraint that makes one key one order, restaurant-wide. Named here so
+#: the recovery below can tell THAT conflict from any other IntegrityError
+#: rather than relabelling an unexpected failure an idempotent success.
+INTENT_KEY_CONSTRAINT = 'uniq_order_restaurant_client_order_id'
+
+
+def _is_intent_key_conflict(error):
+    """Did this IntegrityError come from the intent-key uniqueness rule?
+
+    Matched on the constraint NAME, which psycopg surfaces on the diagnostics
+    of the underlying error and repeats in its text. Anything else — a NOT
+    NULL violation, a foreign key, the daily-number constraint — is a
+    different failure and must propagate.
+    """
+    diagnostics = getattr(getattr(error, '__cause__', None), 'diag', None)
+    if getattr(diagnostics, 'constraint_name', None) == INTENT_KEY_CONSTRAINT:
+        return True
+    return INTENT_KEY_CONSTRAINT in str(error)
+
+
+def _insert_order(*, restaurant, table, customer, created_by, order_source,
+                  client_order_id, request_fingerprint, order_number,
+                  order_date, verdict):
+    """The order row itself. Extracted so the allocation and the INSERT can
+    share one savepoint without burying either in a long block."""
+    return Order.objects.create(
+        restaurant=restaurant,
+        table=table,
+
+        total_cost=0,
+        discounted_cost=0,
+        savings=0,
+        actual_cost=0,
+        prepayment_required=table.prepayment_required,
+
+        order_status=OrderStatus_Initiated,
+        payment_status=PaymentStatus_Pending,
+
+        customer=customer,
+        created_by=created_by,
+
+        order_source=order_source,
+        client_order_id=client_order_id,
+
+        # WHAT THAT KEY IS BOUND TO (D04). Written in the same statement as the
+        # key, so an order can never hold one without the other: a row with a
+        # key and no binding would be indistinguishable from a pre-D04 row and
+        # would fall into the undecidable branch forever.
+        request_fingerprint=request_fingerprint,
+
+        order_number=order_number,
+        order_date=order_date,
+        fulfilment_status='new',
+        fulfilment_status_updated_at=timezone.now(),
+
+        # An order is test if EITHER of two independent things is
+        # true, and neither of them is anything the caller sent:
+        #
+        #   TENANT   — the restaurant itself exists for testing
+        #              (`Restaurant.is_test`). Such a tenant never
+        #              produces commerce, whatever its lifecycle
+        #              state, so a test restaurant that has gone
+        #              `live` still writes test orders.
+        #   LIFECYCLE — the order predates go-live, so it is a
+        #              rehearsal: operationally real, commercially
+        #              invisible.
+        #
+        # BOTH values come from `verdict` — the single query the
+        # ADMISSION ran under the advisory lock at step 1a — and not
+        # from `restaurant`, which was loaded in autocommit before
+        # this transaction opened. Those two agreed right up until
+        # they didn't: a go-live committing while this request waited
+        # on the table lock left the instance saying `onboarding`,
+        # and a real commercial order was written `is_test=True` and
+        # vanished from every revenue report. The tenant flag is
+        # read from the same protected moment for exactly the same
+        # reason — an admin could flip it concurrently, and reading
+        # it off the stale instance would reproduce that bug on a
+        # different field. The lock is what makes both values still
+        # true at the INSERT.
+        is_test=(
+            verdict.restaurant_is_test
+            or not orders_are_commercial(verdict.status)
+        ),
+
+        # The corrected calculation convention (D02). Written
+        # HERE, by the service that actually performs it, inside
+        # the same atomic operation that persists the corrected
+        # parent and child values — so an order is certified
+        # corrected only if its rows really were. It is never
+        # accepted from a client and is absent from every
+        # serializer and from EDIT_INFORMATION.
+        pricing_version=PRICING_VERSION_CORRECTED,
+    )
+
+
 def _create_order(*, restaurant, table, items,
                   customer=None, created_by=None,
                   order_source=ORDER_SOURCE_DINER, client_order_id=None):
@@ -158,24 +257,52 @@ def _create_order(*, restaurant, table, items,
     if not key_ok:
         return client_order_id_rejection()
 
+    #    WHAT THAT KEY IS FOR (D04), computed HERE and not accepted from the
+    #    caller — for the same reason the validation above is repeated: this
+    #    service is a supported entrypoint and must not depend on its caller.
+    #    It is the SAME pure function over the SAME validated lines, so the
+    #    controller's preflight and this cannot disagree.
+    #
+    #    THE POSITION IN THIS FUNCTION IS THE CONTRACT. It is taken from the
+    #    D01-validated request and BEFORE `normalize_order_items` at step 2c,
+    #    which reorders choices into menu-definition order against the live
+    #    catalogue. A fingerprint taken after that would change when the MENU
+    #    changed, and a diner recovering a lost response would be told their
+    #    purchase was different because the restaurant edited a dish.
+    request_fingerprint = fingerprint(items)
+
     # The try/except sits AROUND the atomic block (the same idiom as the two
     # nested savepoints inside it): OrderItemRejected must unwind through
     # atomic.__exit__ so the whole transaction rolls back BEFORE it is
     # translated back into the plain-dict error envelope.
     try:
         with transaction.atomic():
-            # 1. idempotency FIRST — before gating or creation
-            #    `is not None`, never truthiness: after validation the key is
-            #    either absent or a canonical string, and stating that
-            #    explicitly is what stops a falsy value ever being read as
-            #    "no key" and skipping both this lookup and the recovery below.
-            if client_order_id is not None:
-                existing = Order.objects.filter(
-                    restaurant=restaurant,
-                    client_order_id=client_order_id,
-                ).first()
-                if existing is not None:
-                    return {'status': 200, 'order': existing, 'idempotent': True}
+            # 1. THE INTENT, FIRST — before gating or creation.
+            #
+            #    It used to be a bare `(restaurant, key)` lookup that returned
+            #    whatever it found, so a request naming three burgers received
+            #    the one-burger order the key had been used for, and a request
+            #    naming another table received the first table's order. The
+            #    binding is now checked by ONE shared policy that every
+            #    return-existing site in this file calls, so they cannot form
+            #    different opinions about the same key.
+            #
+            #    `for_update` locks the row: from here to commit this
+            #    transaction is the one that may act on it.
+            verdict_intent = resolve_intent(
+                restaurant_id=restaurant.pk,
+                client_order_id=client_order_id,
+                table_id=table.pk,
+                request_fingerprint=request_fingerprint,
+                created_by_id=getattr(created_by, 'pk', created_by),
+                customer_id=getattr(customer, 'pk', customer),
+                for_update=True,
+            )
+            if verdict_intent.is_match:
+                return {'status': 200, 'order': verdict_intent.order,
+                        'idempotent': True}
+            if verdict_intent.outcome in REFUSALS:
+                return REFUSALS[verdict_intent.outcome]()
 
             # 1a. AUTHORITATIVE ADMISSION. Take the shared advisory lock on the
             #     restaurant and decide from status re-read UNDER it — the endpoint
@@ -193,17 +320,21 @@ def _create_order(*, restaurant, table, items,
             #     publication follows: a replay is never re-validated, so a
             #     lifecycle change cannot retroactively refuse an order that was
             #     already created and acknowledged.
+            #
+            #     THE LOCK IS TAKEN HERE; THE VERDICT IS APPLIED AT STEP 1d.
+            #     Acquiring the advisory lock and applying a NEW-ORDER policy
+            #     are different actions, and only the first belongs at this
+            #     point in the ordering. A request that has waited behind the
+            #     table lock may turn out to be a replay of an order that
+            #     committed while it waited, and refusing that replay because
+            #     a NEW order would now be disallowed is exactly the
+            #     retroactive refusal D04 exists to stop. The lock order
+            #     (advisory -> Table -> ...) is unchanged.
             verdict = admit(
                 restaurant_id=restaurant.pk,
                 created_by=created_by,
                 stage=STAGE_CREATE,
             )
-            if not verdict.allowed:
-                logger.info(
-                    "Order admission refused (restaurant_id=%s, code=%s)",
-                    restaurant.pk, verdict.code,
-                )
-                return {'status': 400, 'message': verdict.message}
 
             # 1b. Lock the table row so concurrent same-table submissions serialize.
             #     Mirrors allocate_daily_order_number's select_for_update in this file:
@@ -216,6 +347,46 @@ def _create_order(*, restaurant, table, items,
                 table = Table.objects.select_for_update().get(pk=table.pk)
             except Table.DoesNotExist:
                 return {'status': 400, 'message': 'Invalid table for this restaurant'}
+
+            # 1c. THE POST-WAIT RECHECK. The step-1 lookup ran BEFORE the table
+            #     lock, so a competing request carrying the same key may have
+            #     committed while this one waited on that lock. Asking again
+            #     now — under the lock, through the same policy — is what stops
+            #     the loser doing any new-order work at all: no admission
+            #     refusal, no occupancy rejection, no daily number, no INSERT.
+            #
+            #     THE BINDING IS RE-VALIDATED, NOT ASSUMED. A winner that
+            #     appeared during the wait is only this caller's order if it is
+            #     the same purchase at the same scope; same key with different
+            #     contents conflicts here rather than adopting whatever exists.
+            #
+            #     It does NOT replace the rollback boundary at step 3/4. This
+            #     recheck only sees a race the TABLE lock serialised; the
+            #     unique constraint is what covers every other one.
+            if client_order_id is not None:
+                verdict_intent = resolve_intent(
+                    restaurant_id=restaurant.pk,
+                    client_order_id=client_order_id,
+                    table_id=table.pk,
+                    request_fingerprint=request_fingerprint,
+                    created_by_id=getattr(created_by, 'pk', created_by),
+                    customer_id=getattr(customer, 'pk', customer),
+                    for_update=True,
+                )
+                if verdict_intent.is_match:
+                    return {'status': 200, 'order': verdict_intent.order,
+                            'idempotent': True}
+                if verdict_intent.outcome in REFUSALS:
+                    return REFUSALS[verdict_intent.outcome]()
+
+            # 1d. NOW the admission verdict from step 1a applies: this request
+            #     really is new work, so the rule about new work governs it.
+            if not verdict.allowed:
+                logger.info(
+                    "Order admission refused (restaurant_id=%s, code=%s)",
+                    restaurant.pk, verdict.code,
+                )
+                return {'status': 400, 'message': verdict.message}
 
             # 2. table-gating — only for genuinely new submissions
             ongoing = ConOrder.any_present_ongoing_order(table)
@@ -290,101 +461,63 @@ def _create_order(*, restaurant, table, items,
                 raise OrderItemRejected(normalization)
             items = normalization['items']
 
-            # 3. daily numbering (local business date)
-            order_date = timezone.localdate()
-            order_number = allocate_daily_order_number(restaurant, order_date)
-
-            # 4. create the order with the fulfilment axis initialised.
-            #    Kitchen owns fulfilment_status; order_status/payment_status stay
-            #    finance-owned and are only seeded here at creation.
+            # 3 + 4. THE DAILY NUMBER AND THE INSERT SHARE ONE ROLLBACK
+            #        BOUNDARY, and that is the fix rather than an arrangement.
             #
-            #    The INSERT is wrapped in a savepoint (nested atomic) so a concurrent
-            #    double-tap — two requests carrying the same client_order_id, both past
-            #    the step-1 lookup before either committed — degrades to the same
-            #    idempotent replay as the sequential case instead of a raw 500. The
-            #    partial unique constraint uniq_order_restaurant_client_order_id lets
-            #    exactly one INSERT win; the loser catches the IntegrityError below.
-            #    As in allocate_daily_order_number, the try/except deliberately WRAPS
-            #    the atomic block so the failed savepoint is rolled back before the
-            #    re-query, leaving the outer transaction usable.
+            # The allocation used to sit OUTSIDE the savepoint that wraps the
+            # INSERT. So when a racing request carrying the same key committed
+            # between the step-1 lookup and this INSERT, the savepoint rolled
+            # the failed INSERT back — and the number this transaction had
+            # already taken was committed by the outer block on the way out.
+            # One order, two numbers consumed, measured as
+            # `next_number == 3`. A successful replay must produce NO new
+            # creation effect, and the counter is a creation effect.
+            #
+            # Both statements are now inside the same nested atomic, so the
+            # loser unwinds both. As in `allocate_daily_order_number`, the
+            # try/except deliberately WRAPS that block rather than sitting
+            # inside it: the savepoint has to be rolled back before the
+            # re-query, or the connection needs rollback and the recovery
+            # raises `TransactionManagementError` instead.
+            order_date = timezone.localdate()
             try:
                 with transaction.atomic():
-                    order = Order.objects.create(
-                        restaurant=restaurant,
-                        table=table,
-
-                        total_cost=0,
-                        discounted_cost=0,
-                        savings=0,
-                        actual_cost=0,
-                        prepayment_required=table.prepayment_required,
-
-                        order_status=OrderStatus_Initiated,
-                        payment_status=PaymentStatus_Pending,
-
-                        customer=customer,
-                        created_by=created_by,
-
-                        order_source=order_source,
+                    order_number = allocate_daily_order_number(
+                        restaurant, order_date)
+                    order = _insert_order(
+                        restaurant=restaurant, table=table, customer=customer,
+                        created_by=created_by, order_source=order_source,
                         client_order_id=client_order_id,
-                        order_number=order_number,
-                        order_date=order_date,
-                        fulfilment_status='new',
-                        fulfilment_status_updated_at=timezone.now(),
-
-                        # An order is test if EITHER of two independent things is
-                        # true, and neither of them is anything the caller sent:
-                        #
-                        #   TENANT   — the restaurant itself exists for testing
-                        #              (`Restaurant.is_test`). Such a tenant never
-                        #              produces commerce, whatever its lifecycle
-                        #              state, so a test restaurant that has gone
-                        #              `live` still writes test orders.
-                        #   LIFECYCLE — the order predates go-live, so it is a
-                        #              rehearsal: operationally real, commercially
-                        #              invisible.
-                        #
-                        # BOTH values come from `verdict` — the single query the
-                        # ADMISSION ran under the advisory lock at step 1a — and not
-                        # from `restaurant`, which was loaded in autocommit before
-                        # this transaction opened. Those two agreed right up until
-                        # they didn't: a go-live committing while this request waited
-                        # on the table lock left the instance saying `onboarding`,
-                        # and a real commercial order was written `is_test=True` and
-                        # vanished from every revenue report. The tenant flag is
-                        # read from the same protected moment for exactly the same
-                        # reason — an admin could flip it concurrently, and reading
-                        # it off the stale instance would reproduce that bug on a
-                        # different field. The lock is what makes both values still
-                        # true at the INSERT.
-                        is_test=(
-                            verdict.restaurant_is_test
-                            or not orders_are_commercial(verdict.status)
-                        ),
-
-                        # The corrected calculation convention (D02). Written
-                        # HERE, by the service that actually performs it, inside
-                        # the same atomic operation that persists the corrected
-                        # parent and child values — so an order is certified
-                        # corrected only if its rows really were. It is never
-                        # accepted from a client and is absent from every
-                        # serializer and from EDIT_INFORMATION.
-                        pricing_version=PRICING_VERSION_CORRECTED,
+                        request_fingerprint=request_fingerprint,
+                        order_number=order_number, order_date=order_date,
+                        verdict=verdict,
                     )
-            except IntegrityError:
-                # concurrent double-tap: a racing request with the same
-                # client_order_id committed between our step-1 lookup and this INSERT.
-                # Return the winner as the idempotent result — the SAME shape step 1
-                # returns.
-                if client_order_id is not None:
-                    existing = Order.objects.filter(
-                        restaurant=restaurant,
-                        client_order_id=client_order_id,
-                    ).first()
-                    if existing is not None:
-                        return {'status': 200, 'order': existing, 'idempotent': True}
-                # not the client_order_id constraint (no existing row) — re-raise so a
-                # genuinely unexpected IntegrityError is never silently swallowed.
+            except IntegrityError as conflict:
+                # A racing request with the same key committed between the
+                # recheck and this INSERT. ONLY the intent-key constraint is
+                # recoverable: anything else is an unexpected failure and must
+                # surface as one rather than be relabelled an idempotent
+                # success.
+                if not _is_intent_key_conflict(conflict):
+                    raise
+                winner = resolve_intent(
+                    restaurant_id=restaurant.pk,
+                    client_order_id=client_order_id,
+                    table_id=table.pk,
+                    request_fingerprint=request_fingerprint,
+                    created_by_id=getattr(created_by, 'pk', created_by),
+                    customer_id=getattr(customer, 'pk', customer),
+                    for_update=True,
+                )
+                if winner.is_match:
+                    return {'status': 200, 'order': winner.order,
+                            'idempotent': True}
+                if winner.outcome in REFUSALS:
+                    # The SAME policy as every other site: a winner that is a
+                    # different purchase is a conflict, never adopted.
+                    return REFUSALS[winner.outcome]()
+                # The constraint fired but no row explains it. Re-raise rather
+                # than invent an outcome.
                 raise
 
             # 5. items + amount roll-up — FAIL CLOSED: any non-200 from the

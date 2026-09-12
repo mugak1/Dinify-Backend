@@ -17,6 +17,9 @@ from dinify_backend.configss.messages import (
     OK_SCANNED_TABLE, OK_RETRIEVED_FULL_MENU, ERR_TABLE_REFERENCE_REQUIRED,
 )
 from orders_app.models import Order
+from orders_app.controllers.services.order_input import (
+    validate_public_client_order_id,
+)
 from orders_app.serializers import SerializerPublicOrderDetails
 from finance_app.models import DinifyTransaction
 
@@ -131,6 +134,31 @@ def handle_show_menu(restaurant_id: str) -> dict:
 
 
 def handle_show_order_details(request) -> dict:
+    """The diner's read of their own order, by order id OR by intent key.
+
+    D04/C ADDS THE SECOND SELECTOR AND NOTHING ELSE. A client whose checkout
+    response was lost holds no order id — that is precisely what it lost — but
+    it does hold the `client_order_id` it minted before sending. Resolving
+    that key here is what turns an uncertain checkout into a recoverable one.
+
+    ONE READ, TWO SELECTORS, NOT TWO ROUTES. It is the SAME decision ("show me
+    my order") reached by two identifiers, so it gets the same scoping, the
+    same projection and the same `no-store` treatment rather than a second
+    capability surface to keep in step. Reading a resource by an alternative
+    unique key is ordinary; a `/order-by-intent/` route would also have to be
+    added to the diner capability allowlist in both repositories, widening the
+    anonymous surface to say something the existing route already says.
+
+    THE SCOPE IS THE SESSION'S, WHICHEVER SELECTOR IS USED. The lookup is
+    filtered to the session's restaurant AND table exactly as the order-id
+    form is, so an intent key minted at another table resolves to nothing —
+    holding a key is not authority, and the `client_order_id` namespace is
+    restaurant-wide precisely so one cannot be reused elsewhere.
+
+    EXACTLY ONE SELECTOR. Both is a 400: a request naming two identifiers has
+    not said which it means, and silently preferring one would answer a
+    question the caller did not ask. Neither is the existing 400.
+    """
     # Bind the read to the diner SESSION and an order on that session's table —
     # order-UUID knowledge alone is no longer authority (the BOLA fix).
     try:
@@ -139,17 +167,36 @@ def handle_show_order_details(request) -> dict:
         return {'status': exc.status, 'message': exc.message}
 
     order_id = request.GET.get('order')
-    if order_id is None:
+    intent_key = request.GET.get('intent')
+
+    if order_id is not None and intent_key is not None:
+        return {
+            'status': 400,
+            'message': 'Please provide either the order id or the intent key',
+        }
+    if order_id is None and intent_key is None:
         return {'status': 400, 'message': 'Please provide the order id'}
 
     # Scope the lookup to the session's restaurant+table. A foreign / unknown /
     # malformed id all collapse to ONE non-disclosing 404.
+    scope = {
+        'restaurant_id': table.restaurant_id,
+        'table_id': table.id,
+    }
+    if order_id is not None:
+        selector = {'id': order_id}
+    else:
+        # The SAME rule the write path validates the key by, so the read and
+        # the write cannot disagree about what a key is. A malformed one is
+        # never handed to a `UUIDField` filter, where an integer would be
+        # silently coerced into a fabricated key.
+        canonical, key_ok = validate_public_client_order_id(intent_key)
+        if not key_ok:
+            return {'status': 404, 'message': 'Order not found'}
+        selector = {'client_order_id': canonical}
+
     try:
-        order = Order.objects.get(
-            id=order_id,
-            restaurant_id=table.restaurant_id,
-            table_id=table.id,
-        )
+        order = Order.objects.get(**selector, **scope)
     except (Order.DoesNotExist, ValidationError, ValueError):
         return {'status': 404, 'message': 'Order not found'}
 
