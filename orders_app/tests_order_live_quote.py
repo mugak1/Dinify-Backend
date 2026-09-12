@@ -31,11 +31,18 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 
 from dinify_backend.configss.string_definitions import (
-    RESTAURANT_OWNER, RestaurantStatus_Live,
+    OrderStatus_Initiated, OrderStatus_Pending, RESTAURANT_OWNER,
+    RestaurantStatus_Live,
 )
 from misc_app.controllers.money import working_context
+from orders_app.controllers.con_orders import ConOrder
+from orders_app.controllers.manage_order import (
+    REASON_QUOTE_INCOMPLETE, update_order_status,
+)
 from orders_app.controllers.orders.serializers import serialize_order_details
-from orders_app.controllers.services.order_quote import quote_ref
+from orders_app.controllers.services.order_quote import (
+    group_live_children, matches, quote_ref,
+)
 from orders_app.models import Order, OrderItem
 from restaurants_app.models import (
     MenuItem, MenuSection, Restaurant, RestaurantEmployee, Table,
@@ -360,3 +367,166 @@ class ReadIsPureAndStableTests(_QuoteFixture):
                          len(payload['unavailable_extras']))
         self.assertEqual(details['no_available_items'] + details['no_unavailable_items'],
                          len(payload['quote']))
+
+
+class IncompleteQuoteIsRefusedAtAcceptanceTests(_QuoteFixture):
+    """R2, completed on the SERVER: an incomplete quote cannot be accepted.
+
+    Disclosing ``quote_complete: false`` makes the response honest; it does not
+    make the order unacceptable. The flag is optional to a client, and the
+    acceptance transition used to check only the reference and that one
+    deliverable parent existed — so a caller holding the diner session (an older
+    client, or any direct caller) could return the perfectly valid reference and
+    move the order to the kitchen with part of its payable represented by no
+    quoted line at all.
+
+    These orders are built through the REAL ``initiate_order`` so the draft is
+    genuinely acceptable in every other respect, and then ONE parent row is
+    soft-deleted directly — which is what makes the fixture a fixture: no
+    demonstrated public delete operation on the reviewed ordering journey
+    produces such a row.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.extra = MenuItem.objects.create(
+            name='Cheese', section=self.section, approved=True, enabled=True,
+            available=True, in_stock=True, primary_price=D('2000.00'),
+            is_extra=True,
+        )
+        self.with_extra = MenuItem.objects.create(
+            name='Burger', section=self.section, approved=True, enabled=True,
+            available=True, in_stock=True, primary_price=D('10000.00'),
+            has_extras=True, extras_applicable=[str(self.extra.id)],
+            extras_min_selections=0, extras_max_selections=1,
+        )
+        self.plain = self.dish('Fries', price=D('4000.00'))
+        self._tables = 1
+
+    def table_for_a_new_order(self):
+        self._tables += 1
+        return Table.objects.create(
+            number=self._tables, str_number=str(self._tables),
+            restaurant=self.restaurant, qr_mode='order_pay',
+        )
+
+    def draft(self):
+        """A real two-parent draft: one line carries an extra, one does not."""
+        table = self.table_for_a_new_order()
+        response = ConOrder.initiate_order(
+            restaurant_id=str(self.restaurant.pk), table_id=str(table.pk),
+            items=[
+                {'item': str(self.with_extra.id), 'quantity': 1,
+                 'extras': [str(self.extra.id)]},
+                {'item': str(self.plain.id), 'quantity': 1},
+            ],
+        )
+        self.assertEqual(response.get('status'), 200, response)
+        return Order.objects.get(pk=response['data']['order_details']['id'])
+
+    def orphan(self, order):
+        """Soft-delete the parent that carries the extra, leaving it orphaned.
+
+        The saved payable is deliberately NOT recalculated: the child's amount
+        stays in ``actual_cost``, which is the whole reason its disappearance
+        from the quote matters.
+        """
+        parent = OrderItem.objects.get(
+            order=order, parent_item__isnull=True, item=self.with_extra,
+        )
+        OrderItem.objects.filter(pk=parent.pk).update(deleted=True)
+        return Order.objects.get(pk=order.pk)
+
+    # -- the refusal -----------------------------------------------------
+    def test_a_valid_reference_for_an_incomplete_quote_is_refused(self):
+        order = self.orphan(self.draft())
+        result = update_order_status(
+            order, OrderStatus_Pending, None, quote_ref=quote_ref(order),
+        )
+        self.assertEqual(result['status'], 400)
+        self.assertEqual(result['reason'], REASON_QUOTE_INCOMPLETE)
+
+    def test_the_order_is_not_moved_to_the_kitchen(self):
+        order = self.orphan(self.draft())
+        update_order_status(order, OrderStatus_Pending, None,
+                            quote_ref=quote_ref(order))
+        self.assertEqual(
+            Order.objects.get(pk=order.pk).order_status, OrderStatus_Initiated,
+            'an order whose quote cannot represent its payable was accepted',
+        )
+
+    def test_neither_pre_existing_invariant_would_have_refused_it(self):
+        """The negative control: only the NEW rule stands between this draft and
+        the kitchen. The reference matches exactly, and a deliverable parent
+        remains — so the refusal above is not a stale reference or an empty
+        ticket wearing a different name."""
+        order = self.orphan(self.draft())
+        self.assertTrue(matches(order, quote_ref(order)))
+        self.assertGreaterEqual(ConOrder.deliverable_parent_count(order), 1)
+
+    def test_the_payable_really_does_exceed_the_quotable_lines(self):
+        """What is at stake: the orphan's amount is still in ``actual_cost``."""
+        order = self.orphan(self.draft())
+        live = OrderItem.objects.filter(order=order, deleted=False)
+        _, orphaned = group_live_children(list(live))
+        self.assertEqual(len(orphaned), 1)
+        with working_context():
+            quotable = sum(
+                (row.actual_cost for row in live if row.parent_item_id is None),
+                D('0'),
+            )
+        self.assertLess(quotable, order.actual_cost)
+
+    # -- a refusal changes nothing ---------------------------------------
+    def test_the_refusal_rewrites_nothing(self):
+        order = self.orphan(self.draft())
+        before = {
+            row.pk: (row.deleted, row.quantity, row.actual_cost, row.available)
+            for row in OrderItem.objects.filter(order=order)
+        }
+        reference = quote_ref(order)
+
+        update_order_status(order, OrderStatus_Pending, None,
+                            quote_ref=reference)
+
+        after = {
+            row.pk: (row.deleted, row.quantity, row.actual_cost, row.available)
+            for row in OrderItem.objects.filter(order=order)
+        }
+        self.assertEqual(after, before, 'a refusal is not a repair')
+        reloaded = Order.objects.get(pk=order.pk)
+        self.assertEqual(reloaded.actual_cost, order.actual_cost)
+        self.assertEqual(quote_ref(reloaded), reference,
+                         'the refusal churned the reference it refused')
+
+    # -- the healthy order is untouched ----------------------------------
+    def test_a_complete_quote_is_still_accepted(self):
+        order = self.draft()
+        result = update_order_status(
+            order, OrderStatus_Pending, None, quote_ref=quote_ref(order),
+        )
+        self.assertEqual(result['status'], 200, result)
+        self.assertEqual(Order.objects.get(pk=order.pk).order_status,
+                         OrderStatus_Pending)
+
+    # -- one definition, two consumers -----------------------------------
+    def test_the_disclosure_and_the_refusal_agree(self):
+        """``quote_complete`` and the acceptance rule read the SAME split.
+
+        A response saying the quote is complete while the transition refuses it
+        — or the reverse, which is the defect Codex named — would be two answers
+        to one question.
+        """
+        for build, complete, expected in (
+            (lambda: self.draft(), True, 200),
+            (lambda: self.orphan(self.draft()), False, 400),
+        ):
+            with self.subTest(complete=complete):
+                order = build()
+                payload = serialize_order_details(order)
+                self.assertIs(payload['order']['quote_complete'], complete)
+                result = update_order_status(
+                    order, OrderStatus_Pending, None,
+                    quote_ref=payload['order']['quote_ref'],
+                )
+                self.assertEqual(result['status'], expected, result)

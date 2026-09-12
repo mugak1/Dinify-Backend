@@ -295,10 +295,35 @@ so keep it current when conventions change.
   exists to prevent. So the saved payable is left untouched, the child still
   appears in the flat `extras` collection, a bounded warning is logged (order id
   and a count; no amounts, no order contents), and an ADDITIVE
-  `order_details.quote_complete` says so. The result is a CONTROLLED
-  NON-CONFIRMABLE one: the client refuses it twice over, on the flag AND on the
-  reconciliation that fails anyway. **Never rewrite `quote_total` / `actual_cost`
-  to match the representable lines.**
+  `order_details.quote_complete` says so. **Never rewrite `quote_total` /
+  `actual_cost` to match the representable lines.**
+  **AND THE SERVER REFUSES TO ACCEPT ONE — a disclosure a client may ignore is not
+  an invariant** (Codex P1 on PR #316, valid). The flag made the response honest
+  and left the transition unchanged: `_acceptance_refusal` checked the reference
+  and that one deliverable parent existed, and the reference of an incomplete
+  draft is perfectly VALID (an orphan is a live row, so it is inside the
+  fingerprint), so any caller holding the diner session — an older client, or a
+  direct one — could return it and move the order to the kitchen with part of its
+  payable represented by no quoted line. Acceptance now carries a FOURTH
+  invariant, `quote_incomplete`, checked on the population it is about to accept:
+  AFTER the acknowledgement, because "your order changed" is the accurate answer
+  when the reference is stale, and BEFORE `no_deliverable_items`, because that is
+  a statement about the itemised lines and an order whose itemisation cannot
+  represent the payable has not earned one. **The split is ONE function**,
+  `order_quote.group_live_children`, read by the serializer that RENDERS the quote
+  and by the check that decides whether one may be honoured — two copies would
+  disagree exactly where it matters, a response saying incomplete while the
+  transition accepts. **IT COSTS NO QUERY**: `_acceptance_refusal` now fetches the
+  live rows once and passes them to `matches`, which ran that same query itself.
+  The result is a CONTROLLED NON-CONFIRMABLE one on BOTH sides: the client refuses
+  it twice over (the flag AND the reconciliation that fails anyway) and the server
+  refuses to accept it at all. The refusal rewrites nothing — no reprice, no
+  replacement order, no partial acceptance, and the reference it refused is
+  unchanged. Pinned by `IncompleteQuoteIsRefusedAtAcceptanceTests`, whose fixture
+  is a REAL `initiate_order` draft with one parent soft-deleted directly, and
+  whose negative control asserts that BOTH pre-existing invariants pass on it —
+  the reference matches and a deliverable parent remains — so only the new rule
+  stands between that draft and the kitchen.
   **TWO PER-LINE QUERIES WENT WITH IT**, both from the same fetch: the read now
   carries `select_related('item')` (the per-row `item.name` was a query apiece)
   and `serialize_order_item_details` reads `parent_item_id` rather than

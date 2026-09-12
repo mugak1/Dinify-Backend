@@ -34,7 +34,9 @@ from orders_app.models import Order, OrderItem
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
 )
-from orders_app.controllers.services.order_quote import quote_ref
+from orders_app.controllers.services.order_quote import (
+    group_live_children, quote_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,20 +97,14 @@ def serialize_order_details(order: Order) -> dict:
     # answers to "what is in this order". `update_order_amounts` reconciles
     # over undeleted rows, so this is the basis the saved payable was built on.
     live_rows = [r for r in rows if not r.deleted]
-    live_ids = {r.pk for r in live_rows}
 
     # Children are attached only to a parent that is ITSELF in the population.
     # A live child of a non-live parent belongs under no quoted line, so it is
     # tracked separately rather than silently dropped — see `quote_complete`.
-    by_parent = {}
-    orphaned_children = []
-    for row in live_rows:
-        if row.parent_item_id is None:
-            continue
-        if row.parent_item_id in live_ids:
-            by_parent.setdefault(row.parent_item_id, []).append(row)
-        else:
-            orphaned_children.append(row)
+    # The split is `order_quote`'s, NOT a local copy: the acceptance transition
+    # refuses exactly the population this call declares incomplete, and a second
+    # implementation is how a response and a transition come to disagree.
+    by_parent, orphaned_children = group_live_children(live_rows)
 
     if orphaned_children:
         # Bounded: an order id and a count. No amounts, no order contents, no

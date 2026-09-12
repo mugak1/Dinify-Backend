@@ -102,6 +102,38 @@ def _row_fingerprint(row):
     ]
 
 
+def group_live_children(live_rows):
+    """Attach each live child to a live parent, and name the ones with none.
+
+    THE ONE definition of "which rows can a quote represent", shared by the
+    serializer that RENDERS the quote and by the acceptance check that decides
+    whether one may be honoured. Two copies would be two answers, and the case
+    they disagree on is exactly the one that matters: a response saying the
+    quote is incomplete while the transition accepts it anyway.
+
+    ``live_rows`` must already BE the live population (``deleted=False``) —
+    re-filtering here would be a second definition of "live". Returns
+    ``(by_parent, orphaned)``: children keyed by the parent they belong under,
+    and the live children whose parent is NOT in the population.
+
+    An orphaned child is not merely unrenderable. Its amount is part of the
+    order's saved payable (``update_order_amounts`` reconciles over the live
+    rows), so no itemised quote built from the remaining lines can add up to
+    what the diner would be charged.
+    """
+    live_ids = {row.pk for row in live_rows}
+    by_parent = {}
+    orphaned = []
+    for row in live_rows:
+        if row.parent_item_id is None:
+            continue
+        if row.parent_item_id in live_ids:
+            by_parent.setdefault(row.parent_item_id, []).append(row)
+        else:
+            orphaned.append(row)
+    return by_parent, orphaned
+
+
 def quote_ref(order, rows=None):
     """The opaque acknowledgement reference for ``order`` as it is saved now.
 
