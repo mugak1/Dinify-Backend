@@ -74,6 +74,7 @@ def update_order_status(
 REASON_LEGACY_PRICING = 'legacy_pricing_version'
 REASON_QUOTE_REQUIRED = 'quote_ref_required'
 REASON_QUOTE_STALE = 'quote_ref_stale'
+REASON_QUOTE_INCOMPLETE = 'quote_incomplete'
 REASON_NOTHING_TO_PREPARE = 'no_deliverable_items'
 
 MESSAGE_LEGACY_PRICING = (
@@ -87,6 +88,10 @@ MESSAGE_QUOTE_STALE = (
     'Your order changed since you reviewed it. Please review the updated order '
     'and place it again.'
 )
+MESSAGE_QUOTE_INCOMPLETE = (
+    'We could not itemise this order in full, so it cannot be placed as it is. '
+    'Please ask a member of staff for help.'
+)
 MESSAGE_NOTHING_TO_PREPARE = (
     'None of the items on this order are available right now, so there is '
     'nothing to send to the kitchen.'
@@ -94,7 +99,7 @@ MESSAGE_NOTHING_TO_PREPARE = (
 
 
 def _acceptance_refusal(order, supplied_quote_ref):
-    """The three invariants that must hold to ACCEPT a draft, or ``None``.
+    """The four invariants that must hold to ACCEPT a draft, or ``None``.
 
     Runs inside ``_submit_order``'s transaction, on the row re-read under the
     table lock — so what is checked is what is about to be accepted, not a
@@ -109,13 +114,27 @@ def _acceptance_refusal(order, supplied_quote_ref):
        it is accepting. There is deliberately NO staff or internal bypass: being
        a trusted caller is not a reason to accept an amount no one reviewed, and
        a bare "confirmed" boolean would say nothing about WHICH quote.
-    3. **SOMETHING TO PREPARE.** An order whose every parent line is
+    3. **A QUOTE THAT CAN REPRESENT THE PAYABLE.** A live child whose parent is
+       not in the live population belongs under no quoted line, yet its amount is
+       still in the saved payable — so no itemised quote built from the remaining
+       lines can add up to what the diner would be charged. The response already
+       DISCLOSES this (``order_details.quote_complete``), but a disclosure a
+       client may ignore is not an invariant: an older client, or any caller
+       holding the diner session, could return the perfectly valid reference and
+       move the order to the kitchen with part of its amount unrepresented. The
+       server refuses it here, on the population it is about to accept. It is
+       checked AFTER the acknowledgement because being told "your order changed"
+       is the accurate and more useful answer when the reference is stale, and
+       BEFORE "nothing to prepare" because that is a statement about the itemised
+       lines — an order whose itemisation cannot represent the payable has not
+       earned one.
+    4. **SOMETHING TO PREPARE.** An order whose every parent line is
        undeliverable must not become an empty kitchen ticket. The test is
        DELIVERABILITY AND QUANTITY, never a payable amount — a legitimately free
        dish (0.00) is orderable and still counts.
 
     A refusal changes nothing: no reprice, no replacement order, no partial
-    acceptance.
+    acceptance. Nothing here rewrites an amount to make a population add up.
     """
     # Local imports keep this off the module import graph and dodge the
     # con_orders <-> create_order cycle, as _submit_order already does.
@@ -142,11 +161,31 @@ def _acceptance_refusal(order, supplied_quote_ref):
             'message': MESSAGE_QUOTE_REQUIRED,
             'reason': REASON_QUOTE_REQUIRED,
         }
-    if not order_quote.matches(order, supplied_quote_ref):
+
+    # ONE fetch of the live population, shared by the reference check and the
+    # completeness check — `matches` would otherwise run this exact query itself,
+    # so the submit path costs the same as before.
+    live_rows = list(OrderItem.objects.filter(order=order, deleted=False))
+
+    if not order_quote.matches(order, supplied_quote_ref, rows=live_rows):
         return {
             'status': 400,
             'message': MESSAGE_QUOTE_STALE,
             'reason': REASON_QUOTE_STALE,
+        }
+
+    _, orphaned = order_quote.group_live_children(live_rows)
+    if orphaned:
+        # Bounded: an order id and a count. No amounts, no order contents, no
+        # personal data — the same disclosure the serializer logs.
+        logger.warning(
+            'Order submission refused (order_id=%s, reason=%s, orphaned=%d)',
+            order.pk, REASON_QUOTE_INCOMPLETE, len(orphaned),
+        )
+        return {
+            'status': 400,
+            'message': MESSAGE_QUOTE_INCOMPLETE,
+            'reason': REASON_QUOTE_INCOMPLETE,
         }
 
     if ConOrder.deliverable_parent_count(order) < 1:

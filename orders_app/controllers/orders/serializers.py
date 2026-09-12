@@ -26,6 +26,7 @@ an order's net exceed its gross, because the reference excluded modifiers while 
 effective included them. It is documented in BREAKING_CHANGES.md rather than
 preserved.
 """
+import logging
 from decimal import Decimal
 
 from misc_app.controllers.money import format_money, working_context
@@ -33,7 +34,11 @@ from orders_app.models import Order, OrderItem
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
 )
-from orders_app.controllers.services.order_quote import quote_ref
+from orders_app.controllers.services.order_quote import (
+    group_live_children, quote_ref,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _legacy_view(item, corrected):
@@ -42,11 +47,22 @@ def _legacy_view(item, corrected):
     For a CORRECTED order the modifier component is subtracted back out of the
     reference figures, reproducing exactly what the pre-D02 code stored. For a
     LEGACY order the stored values are already in that form and pass through.
+
+    THE SUBTRACTION IS EXACT, AND THE CONTEXT LIVES HERE RATHER THAN AT THE
+    CALL SITES. It is composite Decimal arithmetic on money, so ``money.py``'s
+    rule applies to it directly: the process default is 28 significant digits
+    against columns that hold 50, and ``-`` ROUNDS SILENTLY there rather than
+    raising. ``_legacy_total`` wrapped its own ``sum`` and so looked covered,
+    but the two OTHER callers — ``_quote_line`` and
+    ``serialize_order_item_details`` — invoke this from outside any context, so
+    the rounding happened before either of them could act on the value. Making
+    exactness a property of this function is what closes all three at once.
     """
     if not corrected:
         return item.unit_price, item.total_cost, item.savings
-    unit = item.unit_price - (item.unit_cost_of_options or 0)
-    total = item.total_cost - item.cost_of_options
+    with working_context():
+        unit = item.unit_price - (item.unit_cost_of_options or 0)
+        total = item.total_cost - item.cost_of_options
     return unit, total, item.savings
 
 
@@ -64,21 +80,43 @@ def _legacy_total(rows, corrected):
 
 
 def serialize_order_details(order: Order) -> dict:
-    all_order_items = OrderItem.objects.filter(order=order)
-    rows = list(all_order_items)
+    # ONE fetch, `select_related` so the per-row `item.name` reads below do not
+    # become a query apiece, and ONE population derived from it.
+    rows = list(
+        OrderItem.objects.filter(order=order).select_related('item')
+    )
     corrected = order.pricing_version == PRICING_VERSION_CORRECTED
 
-    by_parent = {}
-    for row in rows:
-        if row.parent_item_id is not None:
-            by_parent.setdefault(row.parent_item_id, []).append(row)
-
-    # `update_order_amounts` reconciles over UNDELETED rows, so the legacy
-    # total below and the quote reference are computed on the same basis.
+    # THE LIVE POPULATION, DEFINED ONCE AND USED FOR EVERYTHING. It used to be
+    # defined here and then applied to only two of the five things that read
+    # the rows: the legacy total and the quote reference took `live_rows` while
+    # the parent/child map, the flat collections and the availability counts
+    # took the unfiltered list. A soft-deleted parent or child was therefore
+    # presented as an active quoted purchase while the reference and the rollup
+    # the diner's acceptance is bound to excluded it — one response holding two
+    # answers to "what is in this order". `update_order_amounts` reconciles
+    # over undeleted rows, so this is the basis the saved payable was built on.
     live_rows = [r for r in rows if not r.deleted]
 
-    non_extra_items = [r for r in rows if r.parent_item_id is None]
-    extra_items = [r for r in rows if r.parent_item_id is not None]
+    # Children are attached only to a parent that is ITSELF in the population.
+    # A live child of a non-live parent belongs under no quoted line, so it is
+    # tracked separately rather than silently dropped — see `quote_complete`.
+    # The split is `order_quote`'s, NOT a local copy: the acceptance transition
+    # refuses exactly the population this call declares incomplete, and a second
+    # implementation is how a response and a transition come to disagree.
+    by_parent, orphaned_children = group_live_children(live_rows)
+
+    if orphaned_children:
+        # Bounded: an order id and a count. No amounts, no order contents, no
+        # personal data.
+        logger.warning(
+            'Order %s has %d live order item(s) whose parent is not in the '
+            'live population; its quote cannot represent the saved payable',
+            order.pk, len(orphaned_children),
+        )
+
+    non_extra_items = [r for r in live_rows if r.parent_item_id is None]
+    extra_items = [r for r in live_rows if r.parent_item_id is not None]
     parent_items = [r for r in non_extra_items if r.available]
     unavailable_parent_items = [r for r in non_extra_items if not r.available]
     unavailable_parent_ids = {r.pk for r in unavailable_parent_items}
@@ -116,6 +154,21 @@ def serialize_order_details(order: Order) -> dict:
         'reference_total_cost': order.total_cost,
         'pricing_version': order.pricing_version,
         'quote_ref': quote_ref(order, rows=live_rows),
+
+        # ADDITIVE (R2): does `quote` below represent every live row that the
+        # saved payable includes? It is FALSE only when the record cannot
+        # supply a coherent quote — today, when a live child's parent is not in
+        # the live population, so the child's amount is in `actual_cost` with
+        # no line to sit under.
+        #
+        # THE SAVED AMOUNTS ARE NEVER REWRITTEN TO MAKE THE LINES ADD UP. The
+        # alternative — quietly trimming the total to the representable lines —
+        # would produce a quote that appears to reconcile while charging
+        # something else, which is the precise failure the itemised quote
+        # exists to prevent. The response states the shortfall instead and the
+        # result is non-confirmable: the client's reconciliation refuses it,
+        # and this flag says so independently of that arithmetic.
+        'quote_complete': not orphaned_children,
 
         # ADDITIVE (D02/A): the payable as a CANONICAL DECIMAL STRING — the exact
         # figure the review sheet states and the diner confirms. The legacy
@@ -277,7 +330,10 @@ def serialize_order_item_details(item: OrderItem, corrected=None,
         'available': item.available,
         'status': item.status,
 
-        'is_extra': False if item.parent_item is None else True,
+        # `parent_item_id`, never `parent_item`: the object form lazily
+        # SELECTs the parent row, which was one query per extra on every
+        # order detail read. The id is already on the row.
+        'is_extra': item.parent_item_id is not None,
         'no_extras': len(children),
         'extras': extras_list
     }

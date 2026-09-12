@@ -270,6 +270,92 @@ so keep it current when conventions change.
   seam at the statement boundary — a seam that SURVIVES the fold, so the test still
   means something after the defect is fixed. The fix REMOVES a query — see the read
   budget below
+- The diner's review describes ONE live population, and the legacy view is exact
+  (D02/D03 residual R2 + R3): ✅ two coherence defects in
+  `orders_app/controllers/orders/serializers.py`, both closed without changing a
+  single saved amount.
+  **ONE LIVE POPULATION.** `serialize_order_details` fetched every `OrderItem` of
+  the order and then split that list TWO WAYS: `live_rows` (undeleted) fed the
+  legacy total and `quote_ref`, while the parent/child map, the flat collections
+  and the availability counts came from the UNFILTERED list. A soft-deleted parent
+  or child was therefore presented as an active quoted purchase while the
+  reference and the rollup the diner's acceptance is bound to excluded it — one
+  response holding two answers to "what is in this order". It is a COHERENCE defect
+  rather than an executed exploit: no live delete operation on the reviewed
+  ordering journey produces such a row, and `tests_order_live_quote.py` writes
+  `deleted` directly, which is exactly what makes those fixtures fixtures. The
+  population is now defined ONCE (`deleted=False`) and supplies the review, the
+  counts, the relationships and the digest. A healthy draft's `quote_ref` is
+  BYTE-IDENTICAL to what the canonical helper derives, so reconstructing the
+  population churned no reference.
+  **AN ORPHANED LIVE CHILD IS DISCLOSED, NEVER HIDDEN.** A live child whose parent
+  is not in the live population belongs under no quoted line, and its amount is
+  still in `actual_cost`. Silently dropping it would leave a quote that APPEARS to
+  reconcile while charging something else — the exact failure the itemised quote
+  exists to prevent. So the saved payable is left untouched, the child still
+  appears in the flat `extras` collection, a bounded warning is logged (order id
+  and a count; no amounts, no order contents), and an ADDITIVE
+  `order_details.quote_complete` says so. **Never rewrite `quote_total` /
+  `actual_cost` to match the representable lines.**
+  **AND THE SERVER REFUSES TO ACCEPT ONE — a disclosure a client may ignore is not
+  an invariant** (Codex P1 on PR #316, valid). The flag made the response honest
+  and left the transition unchanged: `_acceptance_refusal` checked the reference
+  and that one deliverable parent existed, and the reference of an incomplete
+  draft is perfectly VALID (an orphan is a live row, so it is inside the
+  fingerprint), so any caller holding the diner session — an older client, or a
+  direct one — could return it and move the order to the kitchen with part of its
+  payable represented by no quoted line. Acceptance now carries a FOURTH
+  invariant, `quote_incomplete`, checked on the population it is about to accept:
+  AFTER the acknowledgement, because "your order changed" is the accurate answer
+  when the reference is stale, and BEFORE `no_deliverable_items`, because that is
+  a statement about the itemised lines and an order whose itemisation cannot
+  represent the payable has not earned one. **The split is ONE function**,
+  `order_quote.group_live_children`, read by the serializer that RENDERS the quote
+  and by the check that decides whether one may be honoured — two copies would
+  disagree exactly where it matters, a response saying incomplete while the
+  transition accepts. **IT COSTS NO QUERY**: `_acceptance_refusal` now fetches the
+  live rows once and passes them to `matches`, which ran that same query itself.
+  The result is a CONTROLLED NON-CONFIRMABLE one on BOTH sides: the client refuses
+  it twice over (the flag AND the reconciliation that fails anyway) and the server
+  refuses to accept it at all. The refusal rewrites nothing — no reprice, no
+  replacement order, no partial acceptance, and the reference it refused is
+  unchanged. Pinned by `IncompleteQuoteIsRefusedAtAcceptanceTests`, whose fixture
+  is a REAL `initiate_order` draft with one parent soft-deleted directly, and
+  whose negative control asserts that BOTH pre-existing invariants pass on it —
+  the reference matches and a deliverable parent remains — so only the new rule
+  stands between that draft and the kitchen.
+  **TWO PER-LINE QUERIES WENT WITH IT**, both from the same fetch: the read now
+  carries `select_related('item')` (the per-row `item.name` was a query apiece)
+  and `serialize_order_item_details` reads `parent_item_id` rather than
+  `parent_item`, whose object form lazily SELECTed the parent row once per extra.
+  A 20-row order went 31 → 1 query and is pinned FLAT against a 2-row one. No
+  budget was raised; `tests_order_path_queries.py` is untouched and green, which
+  also confirms serialization sits outside the pinned create-transaction window.
+  `serialize_order_item_details`'s standalone `children=None` branch is
+  deliberately NOT changed — it has other callers, and this was a narrow fix.
+  **`_legacy_view` IS EXACT, AND THE CONTEXT LIVES IN THE ADAPTER.** Recovering the
+  pre-D02 `unit_price` / `total_cost` subtracts the modifier component back out —
+  composite Decimal arithmetic on money, so `money.working_context()` applies to it
+  directly. `_legacy_total` wrapped its own `sum` and so LOOKED covered, but
+  `_quote_line` and `serialize_order_item_details` both call `_legacy_view` from
+  outside any context, so the silent 28-digit rounding happened before either could
+  act on the value: a saved reference unit of `10000000000000000000000000001.01`
+  less a `1.00` modifier came back as `1.000000000000000000000000000E+28`, a cent
+  short. Making exactness a property of the function closes all three callers at
+  once. **THE SAME OMISSION EXISTED IN `option_breakdown`** (`con_orders.py`): its
+  `group_total += adjustment` accumulated under the ambient context while
+  `price_unit` summed the very same adjustments inside `working_context`, so the
+  LABEL a diner is shown for a group could round while the CHARGE stayed exact —
+  reopening precisely the shown-vs-charged split that one traversal exists to
+  close. Its `cost_amount` now renders through `format_money` rather than `str()`,
+  which spells a large exponent in scientific notation; the two are byte-identical
+  for every ordinary amount, and `options` is not part of the quote fingerprint, so
+  no stored value and no `quote_ref` moved. The oracles in
+  `tests_order_money_wire.py::LegacyViewExactnessTests` /
+  `OptionGroupLabelExactnessTests` are INDEPENDENT LITERALS, never the production
+  helper run twice, and each class carries an ordinary-amount negative control.
+  The amounts are at the edge of what `max_digits=50` supports — technical capacity,
+  deliberately NOT a claim about any real Kampala order
 - Order acceptance is bound to the reviewed quote (D02): ✅ `Order.pricing_version`
   (migration `orders_app/0037`, additive, `db_default` LEGACY) plus an opaque
   `quote_ref` derived from the PERSISTED lines and totals (`order_quote.py`, SHA-256

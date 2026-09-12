@@ -38,7 +38,7 @@ from orders_app.controllers.services.order_pricing import (
     modifier_adjustment, price_unit, unit_from_row,
 )
 from misc_app.controllers.money import (
-    MoneyConfigError, quantize_money, working_context,
+    MoneyConfigError, format_money, quantize_money, working_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -360,6 +360,16 @@ class ConOrder:
                     }
                 resolved_choices.append(choice)
 
+            # UNDER THE MODULE'S OWN DECIMAL CONTEXT. This accumulation is
+            # composite Decimal arithmetic on money, so the same rule that
+            # covers `price_unit`'s sum of the very same adjustments covers it:
+            # the process default is 28 significant digits against columns that
+            # hold 50, and `+` ROUNDS SILENTLY there. Without it the LABEL side
+            # of this single traversal could round while the CHARGED side (which
+            # already sums inside `working_context`) stayed exact — reopening
+            # precisely the shown-vs-charged split this one traversal exists to
+            # close. `quantize_money` below takes its own context and cannot
+            # repair a value that was already rounded on the way in.
             group_total = Decimal('0')
             for choice in resolved_choices:
                 try:
@@ -382,7 +392,8 @@ class ConOrder:
                             name=menu_item.name),
                     }
                 adjustments.append(adjustment)
-                group_total += adjustment
+                with working_context():
+                    group_total += adjustment
 
             if not resolved_choices:
                 continue
@@ -396,8 +407,14 @@ class ConOrder:
                 # Nothing prices from it.
                 'cost': float(group_total),
                 # ADDITIVE and canonical: the exact decimal string. This is the
-                # value to read; `cost` is compatibility.
-                'cost_amount': str(group_total),
+                # value to read; `cost` is compatibility. Rendered through the
+                # ONE sanctioned formatter rather than `str()`, which spells a
+                # large exponent in SCIENTIFIC notation — the single form a
+                # field documented as "the exact decimal string" must not take.
+                # Byte-identical to `str()` for every ordinary amount, and
+                # `options` is not part of the quote fingerprint, so no existing
+                # value and no `quote_ref` moves.
+                'cost_amount': format_money(group_total, field='cost_amount'),
                 'choices': ', '.join(c.get('name', '') for c in resolved_choices),
             })
         return {'status': 200, 'adjustments': adjustments, 'options': options}

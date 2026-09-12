@@ -36,6 +36,8 @@ from decimal import Decimal
 from django.test import Client, TestCase
 from django.utils import timezone
 
+from misc_app.controllers.money import working_context
+
 from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER, RestaurantStatus_Live,
 )
@@ -420,3 +422,164 @@ class NegativeZeroDiscountTests(_WireBase):
             [{'item': str(free.id), 'quantity': 1}],
         )
         self.assertEqual(order['quote_total'], '0.00')
+
+
+class LegacyViewExactnessTests(_WireBase):
+    """The LEGACY-shaped figures are recovered exactly, not approximately.
+
+    ``_legacy_view`` subtracts the modifier component back out of a CORRECTED
+    row to reproduce what ``unit_price`` / ``total_cost`` held before D02. That
+    subtraction is composite Decimal arithmetic on money, so it belongs inside
+    ``working_context()`` for exactly the reason the module-level docstring
+    gives: the process default is 28 significant digits against columns that
+    hold 50, and ``-`` ROUNDS SILENTLY there rather than raising.
+
+    ``_legacy_total`` wrapped its own ``sum`` and so looked covered — but it
+    calls ``_legacy_view`` INSIDE that context only for the summation, while
+    ``_quote_line`` and the per-item legacy serializer both invoke
+    ``_legacy_view`` from outside any context at all. The rounding therefore
+    happened before the sum ever saw the value.
+
+    THE ORACLE IS AN INDEPENDENT LITERAL, never the production helper run twice:
+    the expected string is written out here in full, so a regression that
+    changes both sides together still fails.
+
+    THE AMOUNTS ARE AT THE EDGE OF WHAT THE COLUMNS SUPPORT (``max_digits=50``),
+    not of what a Kampala restaurant charges. ``money.py`` states that its
+    bounds are technical capacity and "deliberately NOT a commercial price cap",
+    so the advertised range is what gets verified. This is not a claim that any
+    real order carries these figures.
+    """
+
+    #: 31 significant digits — schema-valid, and three past the 28 the process
+    #: default allows.
+    SAVED_REFERENCE_UNIT = D('10000000000000000000000000001.01')
+    SAVED_MODIFIER_UNIT = D('1.00')
+    #: Written out by hand: 1, twenty-seven zeros, then `0.01`.
+    EXPECTED_LEGACY_BASE = D('10000000000000000000000000000.01')
+
+    def _corrected_row(self):
+        """One persisted CORRECTED line carrying the schema-edge amounts."""
+        dish = self.item('Edge', price=self.SAVED_REFERENCE_UNIT)
+        order = Order.objects.create(
+            restaurant=self.restaurant, table=self.tables[0],
+            order_number=90001, pricing_version=1,
+            total_cost=self.SAVED_REFERENCE_UNIT,
+            discounted_cost=self.SAVED_REFERENCE_UNIT,
+            savings=D('0.00'), actual_cost=self.SAVED_REFERENCE_UNIT,
+        )
+        return OrderItem.objects.create(
+            order=order, item=dish, quantity=1, available=True, status='ok',
+            unit_price=self.SAVED_REFERENCE_UNIT,
+            discounted_price=self.SAVED_REFERENCE_UNIT,
+            unit_cost_of_options=self.SAVED_MODIFIER_UNIT,
+            total_cost=self.SAVED_REFERENCE_UNIT,
+            discounted_cost=self.SAVED_REFERENCE_UNIT,
+            cost_of_options=self.SAVED_MODIFIER_UNIT,
+            savings=D('0.00'), actual_cost=self.SAVED_REFERENCE_UNIT,
+        )
+
+    def test_the_legacy_unit_subtraction_keeps_the_last_cent(self):
+        from orders_app.controllers.orders.serializers import _legacy_view
+        unit, _total, _savings = _legacy_view(self._corrected_row(), True)
+        self.assertEqual(
+            unit, self.EXPECTED_LEGACY_BASE,
+            'the modifier component was subtracted under the ambient 28-digit '
+            'context, so the cent was rounded away before anything could sum it',
+        )
+
+    def test_the_legacy_total_subtraction_keeps_the_last_cent(self):
+        from orders_app.controllers.orders.serializers import _legacy_view
+        _unit, total, _savings = _legacy_view(self._corrected_row(), True)
+        self.assertEqual(total, self.EXPECTED_LEGACY_BASE)
+
+    def test_the_quote_line_renders_the_exact_legacy_figures(self):
+        """``_quote_line`` calls ``_legacy_view`` before entering its own
+        context, so the rendered strings carry whatever the subtraction left."""
+        from orders_app.controllers.orders.serializers import _quote_line
+        line = _quote_line(self._corrected_row(), [], True)
+        self.assertEqual(line['unit_price'], '10000000000000000000000000000.01')
+        self.assertEqual(line['total_cost'], '10000000000000000000000000000.01')
+
+    def test_the_per_item_legacy_serializer_renders_the_exact_figures(self):
+        """The second direct caller, reached by the flat ``order_items`` list."""
+        from orders_app.controllers.orders.serializers import (
+            serialize_order_item_details,
+        )
+        detail = serialize_order_item_details(
+            item=self._corrected_row(), corrected=True, children=[])
+        self.assertEqual(detail['unit_price'], self.EXPECTED_LEGACY_BASE)
+        self.assertEqual(detail['total_cost'], self.EXPECTED_LEGACY_BASE)
+
+    def test_an_ordinary_amount_is_completely_unchanged(self):
+        """The context widens precision; it never alters an ordinary result."""
+        from orders_app.controllers.orders.serializers import _legacy_view
+
+        class _Row:
+            unit_price = D('10000.00')
+            unit_cost_of_options = D('1500.00')
+            total_cost = D('30000.00')
+            cost_of_options = D('4500.00')
+            savings = D('0.00')
+
+        unit, total, savings = _legacy_view(_Row(), True)
+        self.assertEqual(unit, D('8500.00'))
+        self.assertEqual(total, D('25500.00'))
+        self.assertEqual(savings, D('0.00'))
+
+
+class OptionGroupLabelExactnessTests(_WireBase):
+    """A modifier group's DISPLAYED cost is exact, like the charged one.
+
+    ``option_breakdown`` exists so that "the cost a diner is shown for a group
+    and the cost they are charged for it are the same number by construction" —
+    its own words. The charged side sums the adjustments inside
+    ``price_unit``'s ``working_context()``; the LABEL side accumulated
+    ``group_total += adjustment`` under the ambient context, where ``+`` rounds
+    silently at 28 significant digits. So the two could disagree on a
+    schema-valid amount, which is exactly the split the single traversal was
+    written to remove.
+
+    ``cost_amount`` is also rendered here rather than through ``str()``:
+    ``str(Decimal('1E+28'))`` is scientific notation, which is the one form a
+    field documented as "the exact decimal string" must not take. For every
+    ordinary amount the two spellings are byte-identical, so nothing existing
+    moves. Note ``options`` is not part of the quote fingerprint, so this
+    changes no ``quote_ref``.
+    """
+
+    def _breakdown(self, costs):
+        from orders_app.controllers.con_orders import ConOrder
+        dish = self.with_choices(self.item('Opt', price=D('1000.00')), [
+            (f'c{i}', f'Choice {i}', cost) for i, cost in enumerate(costs)
+        ])
+        return ConOrder.option_breakdown(
+            dish, {'g1': [f'c{i}' for i in range(len(costs))]})
+
+    def test_a_group_total_keeps_every_digit(self):
+        result = self._breakdown(['10000000000000000000000000001.01', '-1.00'])
+        self.assertEqual(result['status'], 200, result)
+        self.assertEqual(
+            result['options'][0]['cost_amount'],
+            '10000000000000000000000000000.01',
+            'the group label was accumulated under the ambient 28-digit '
+            'context, so the shown cost no longer matches the charged one',
+        )
+
+    def test_the_label_and_the_charge_agree_on_a_large_group(self):
+        """The two sides of the single traversal, compared directly."""
+        from decimal import Decimal as _D
+        result = self._breakdown(['10000000000000000000000000001.01', '-1.00'])
+        with working_context():
+            charged = sum(result['adjustments'], _D('0'))
+        self.assertEqual(result['options'][0]['cost_amount'], f'{charged:f}')
+
+    def test_an_ordinary_group_total_is_completely_unchanged(self):
+        result = self._breakdown(['1500.00', '500.00'])
+        self.assertEqual(result['options'][0]['cost_amount'], '2000.00')
+        self.assertEqual(result['options'][0]['cost'], 2000.0)
+
+    def test_a_negative_group_total_keeps_its_sign(self):
+        """A "no cheese, -500" group is legal and must not be normalised away."""
+        result = self._breakdown(['-500.00'])
+        self.assertEqual(result['options'][0]['cost_amount'], '-500.00')

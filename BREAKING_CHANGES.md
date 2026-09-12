@@ -588,7 +588,7 @@ under the superseded rules.
 PUT api/v1/orders/submit/   {"order": "<uuid>", "quote_ref": "<opaque>"}
 ```
 
-Four refusals, each `HTTP 400` with a machine-readable `reason` beside the
+Five refusals, each `HTTP 400` with a machine-readable `reason` beside the
 sentence:
 
 | `reason` | when |
@@ -596,7 +596,21 @@ sentence:
 | `quote_ref_required` | no acknowledgement was sent |
 | `quote_ref_stale` | the saved quote is not the one named |
 | `legacy_pricing_version` | the draft was priced before this change |
-| `nothing_to_prepare` | no line on the order is still deliverable |
+| `quote_incomplete` | the saved order cannot be itemised in full |
+| `no_deliverable_items` | no line on the order is still deliverable |
+
+(The fourth row is new; the last one is a correction — the table previously
+printed the Python constant's NAME, `nothing_to_prepare`, rather than the value
+the API has always sent.)
+
+**`quote_incomplete`** is refused when a live row's parent is not itself in the
+live population. Its amount is part of the saved payable, so no itemised quote
+built from the remaining lines can add up to what the diner would be charged —
+and the reference is perfectly valid, because that row IS in the fingerprint. The
+response already discloses this (`order_details.quote_complete`, below), but a
+disclosure a client may ignore is not an invariant, so the server refuses the
+acceptance itself. Nothing is repriced, trimmed or rewritten to make the lines
+add up.
 
 **WHY AN ACKNOWLEDGEMENT AT ALL.** Correct calculation is not agreement to an
 amount. Before this, a client could price an order in the browser, show the
@@ -629,6 +643,10 @@ INSERT from older code valid.
   row contributes to the payable. The two are deliberately distinct — conflating
   them double-counts or drops the extras.
 - `data.order_details.quote_ref`, `.pricing_version`, `.reference_total_cost`.
+- `data.order_details.quote_complete` — whether `data.quote` represents every
+  live row the saved payable includes. `false` means the record cannot supply a
+  coherent quote, and the order will be refused at acceptance with
+  `quote_incomplete`; the saved amounts are never adjusted to make it `true`.
 
 ### The `savings` contract changed
 
