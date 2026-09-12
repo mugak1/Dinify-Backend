@@ -25,6 +25,7 @@ from restaurants_app.controllers.menu_relationships import (
     validate_menu_item_relationships,
 )
 from dinify_backend.tenancy.relations import SameTenant, GlobalRelation
+from misc_app.controllers.money import format_money
 
 # Two-tenant behavioural test classes that PROVE the SameTenant runtime
 # enforcement declared below (the tenancy meta-test asserts each verified_by
@@ -613,17 +614,28 @@ class SerializerPublicGetMenuItem(ModelSerializer):
                 if extra is None:
                     continue
                 # D02/R22: an extra whose stored price cannot be read is not
-                # published. The diner app resolves an extra's price from the
-                # `primary_price` / `discount_details` handed over here, so
-                # publishing an unreadable one would put a selectable option on
+                # published — publishing one would put a selectable option on
                 # screen with no valid price.
-                if not extra.price_verdict((policy or {}).get('now')).usable:
+                verdict = extra.price_verdict((policy or {}).get('now'))
+                if not verdict.usable:
                     continue
                 extras.append({
                     'id': extra.id,
                     'name': extra.name,
                     'primary_price': extra.primary_price,
                     'discount_details': extra.discount_details,
+                    # THE SERVER'S OWN RESOLVED PRICE, from the verdict this
+                    # branch has ALREADY computed to decide publication — it
+                    # used to be discarded. The diner app was left deriving an
+                    # extra's effective price from `discount_details` against
+                    # the DEVICE clock, rounding to whole units, so a 999 extra
+                    # at 10% off was shown at 899 while the server charged
+                    # 899.10: a second pricing rule, on the one surface that
+                    # must agree with the server. The parent item has published
+                    # exactly these two keys since D02; extras now do too.
+                    'is_discount_active': verdict.discount_active,
+                    'current_price': format_money(verdict.effective_base,
+                                                  field='current_price'),
                 })
             return extras
 
@@ -713,7 +725,11 @@ class SerializerPublicGetMenuItem(ModelSerializer):
         verdict = self._price_verdict(menu_item)
         if not verdict.usable:
             return None
-        return str(verdict.effective_base)
+        # THE SHARED FORMATTER, not `str()`. They agree byte-for-byte on every
+        # ordinary amount; they part company exactly where it matters — `str()`
+        # emits scientific notation above the ambient exponent and would print a
+        # signed zero as `-0.00`, neither of which any client can parse as money.
+        return format_money(verdict.effective_base, field='current_price')
 
 
 class SerializerPutTable(ModelSerializer):

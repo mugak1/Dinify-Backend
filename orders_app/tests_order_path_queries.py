@@ -33,19 +33,26 @@ lookup, allergen labels are one batched statement for the order instead of one
 per line, and ``process_item_extras`` hands its rows back so the caller never
 re-SELECTs the children it just wrote:
 
-    1-line order   23 -> 20
-    4-line order   35 -> 23
+    1-line order   23 -> 20 -> 19
+    4-line order   35 -> 23 -> 22
     per line        4 -> 1     (the INSERT, and nothing else)
     MenuItem reads  1 per line -> 0 per line (one batch for the order)
 
-MEASURED BREAKDOWN of the 20 a one-line order runs — every one of them is a
+THE LAST STEP (D02 completion B) REMOVED A STATEMENT RATHER THAN ADDING ONE. The
+batched allergen read was folded into the catalogue statement as an aggregate,
+because two statements could observe ONE operator transaction half applied — the
+old dish name beside its new allergen labels. The count going DOWN is a
+consequence of the coherence fix, not its purpose; see
+``catalogue_snapshot.py`` and ``tests_order_snapshot.py``.
+
+MEASURED BREAKDOWN of the 19 a one-line order runs — every one of them is a
 distinct, named piece of work rather than a repeat:
 
     1  SELECT restaurants            resolve the target
     1  SELECT tables                 scoped table resolve
     1  SELECT ?                      the admission advisory lock
-    1  SELECT menu_items             THE catalogue snapshot (whole order)
-    1  SELECT menu_item_tags         allergen labels (whole order)
+    1  SELECT menu_items             THE catalogue snapshot (whole order),
+                                     allergen labels aggregated into it
     1  SELECT restaurant_daily_...   counter row lock
     1  UPDATE restaurant_daily_...   counter increment
     1  INSERT orders                 the draft
@@ -196,15 +203,16 @@ class CreateOrderQueryCountTests(OrderPathBase):
         # Warm any one-off caches (content types, savepoint bookkeeping) on a
         # throwaway order first, as restaurants_app.tests does for the scan read.
         self.measure(self.lines(count=1), table_index=0)
-        self.assertEqual(self.measure(self.lines(count=4), table_index=1), 23)
+        self.assertEqual(self.measure(self.lines(count=4), table_index=1), 22)
 
     def test_single_line_order_query_count(self):
         self.measure(self.lines(count=1), table_index=0)
-        self.assertEqual(self.measure(self.lines(count=1), table_index=1), 20)
+        self.assertEqual(self.measure(self.lines(count=1), table_index=1), 19)
 
     # Measured on this fixture across all three passes: a 4-line order ran 54
-    # queries before D01's collapse, 35 after it, and 23 after D02's; a 1-line
-    # order ran 27, then 23, now 20. The per-line cost — the part that grows with
+    # queries before D01's collapse, 35 after it, 23 after D02's and 22 once the
+    # allergen read was folded in; a 1-line order ran 27, then 23, then 20, now
+    # 19. The per-line cost — the part that grows with
     # the size of the order, and so with how long the table row lock is held —
     # went 9 -> 4 -> 1.
     def test_per_line_cost_is_one_query(self):

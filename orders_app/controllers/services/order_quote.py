@@ -41,8 +41,7 @@ quote table, service or revision column would be terminology, not a guarantee.
 """
 import hashlib
 import json
-from decimal import Decimal, InvalidOperation
-
+from misc_app.controllers.money import MoneyConfigError, format_money
 from orders_app.models import OrderItem
 
 
@@ -56,11 +55,20 @@ def _money(value):
     between the response that issues it and the transition that checks it, for an
     order nobody touched. Normalising here makes the reference a property of the
     SAVED VALUES and nothing else.
+
+    THE SHARED FORMATTER IS USED, AND NOT A LOCAL QUANTIZE. Quantizing here
+    under the ambient decimal context raised ``InvalidOperation`` for any amount
+    needing more than the default 28 significant digits, and the escape hatch
+    below then built the key out of a Python ``repr`` — stable, but a repr of the
+    value rather than the value, and different in form from every other
+    fingerprint. ``format_money`` takes the module's own context, so a
+    schema-valid large amount fingerprints as the plain string it is. For every
+    normal-value amount the two produce byte-identical output, so existing
+    references are unchanged.
     """
     try:
-        return str(Decimal(str(value if value is not None else 0)).quantize(
-            Decimal('0.01')))
-    except (InvalidOperation, ArithmeticError, ValueError):
+        return format_money(value, field='quote')
+    except MoneyConfigError:
         # Unreachable for a DecimalField; a non-numeric value still has to
         # produce a stable, non-matching key rather than raise.
         return f'!{value!r}'

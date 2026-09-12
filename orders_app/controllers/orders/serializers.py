@@ -28,6 +28,7 @@ preserved.
 """
 from decimal import Decimal
 
+from misc_app.controllers.money import format_money, working_context
 from orders_app.models import Order, OrderItem
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
@@ -47,6 +48,19 @@ def _legacy_view(item, corrected):
     unit = item.unit_price - (item.unit_cost_of_options or 0)
     total = item.total_cost - item.cost_of_options
     return unit, total, item.savings
+
+
+def _legacy_total(rows, corrected):
+    """The legacy order total, summed UNDER THE MODULE'S DECIMAL CONTEXT.
+
+    The process default is 28 significant digits and the monetary columns hold
+    50, so `+` here ROUNDS SILENTLY rather than raising: an order combining a
+    large schema-valid line with a small one came back short of what its own
+    rows store, and nothing downstream could tell. See money.working_context.
+    """
+    with working_context():
+        total = sum((_legacy_view(r, corrected)[1] for r in rows), Decimal('0'))
+    return total
 
 
 def serialize_order_details(order: Order) -> dict:
@@ -90,8 +104,7 @@ def serialize_order_details(order: Order) -> dict:
         # what this key held before D02. Recovered exactly by subtracting the
         # modifier component the corrected reference now carries.
         'total_cost': (
-            sum((_legacy_view(r, corrected)[1] for r in live_rows), Decimal('0'))
-            if corrected else order.total_cost
+            _legacy_total(live_rows, corrected) if corrected else order.total_cost
         ),
         'discounted_cost': order.discounted_cost,
         'savings': order.savings,
@@ -103,6 +116,16 @@ def serialize_order_details(order: Order) -> dict:
         'reference_total_cost': order.total_cost,
         'pricing_version': order.pricing_version,
         'quote_ref': quote_ref(order, rows=live_rows),
+
+        # ADDITIVE (D02/A): the payable as a CANONICAL DECIMAL STRING — the exact
+        # figure the review sheet states and the diner confirms. The legacy
+        # `actual_cost` above keeps its established numeric form for older
+        # clients, and it is not the same thing on the wire: DRF renders a
+        # `Decimal` through `float()`, so that key reaches the browser as
+        # `899.1` rather than `899.10` and loses digits outright above ~15
+        # significant figures. An amount a diner is asked to agree to must not be
+        # carried by a type that cannot represent it.
+        'quote_total': format_money(order.actual_cost, field='quote_total'),
 
         'no_items': len(parent_items),
         'no_unavailable_items': len(unavailable_parent_items),
@@ -149,7 +172,10 @@ def _quote_line(item, children, corrected):
     mixing the two would double-count, which is why they are labelled.
     """
     unit_price, total_cost, savings = _legacy_view(item, corrected)
-    extras_actual = sum((child.actual_cost for child in children), Decimal('0'))
+    with working_context():
+        extras_actual = sum(
+            (child.actual_cost for child in children), Decimal('0'))
+        line_total_with_extras = item.actual_cost + extras_actual
     return {
         'id': str(item.pk),
         'item': str(item.item_id),
@@ -161,18 +187,33 @@ def _quote_line(item, children, corrected):
         'modifiers': item.modifiers_snapshot or [],
         'options': item.options or [],
 
-        'unit_price': unit_price,
-        'reference_unit_price': item.unit_price,
-        'discounted_price': item.discounted_price,
-        'unit_cost_of_options': item.unit_cost_of_options or 0,
+        # EVERY AMOUNT HERE IS A CANONICAL DECIMAL STRING, and that is the
+        # whole point of this block rather than a formatting preference. DRF
+        # encodes a `Decimal` as `float(obj)`, so an exact `Decimal('899.10')`
+        # assembled above reaches the browser as `899.1` and a large exact
+        # amount as `1e+28`. The quote is the one payload a diner is asked to
+        # agree to, so it carries values a JSON number cannot misrepresent.
+        # The LEGACY keys on `order_details` are untouched — this is the new
+        # contract, not a global renderer change.
+        'unit_price': format_money(unit_price, field='unit_price'),
+        'reference_unit_price': format_money(item.unit_price,
+                                             field='reference_unit_price'),
+        'discounted_price': format_money(item.discounted_price,
+                                         field='discounted_price'),
+        'unit_cost_of_options': format_money(item.unit_cost_of_options or 0,
+                                             field='unit_cost_of_options'),
         'discounted': item.discounted,
 
-        'total_cost': total_cost,
-        'reference_total_cost': item.total_cost,
-        'discounted_cost': item.discounted_cost,
-        'savings': savings,
-        'line_actual_cost': item.actual_cost,
-        'line_total_with_extras': item.actual_cost + extras_actual,
+        'total_cost': format_money(total_cost, field='total_cost'),
+        'reference_total_cost': format_money(item.total_cost,
+                                             field='reference_total_cost'),
+        'discounted_cost': format_money(item.discounted_cost,
+                                        field='discounted_cost'),
+        'savings': format_money(savings, field='savings'),
+        'line_actual_cost': format_money(item.actual_cost,
+                                         field='line_actual_cost'),
+        'line_total_with_extras': format_money(line_total_with_extras,
+                                               field='line_total_with_extras'),
 
         'extras': [
             {
@@ -182,9 +223,12 @@ def _quote_line(item, children, corrected):
                 'quantity': child.quantity,
                 'available': child.available,
                 'status': child.status,
-                'unit_price': child.unit_price,
-                'discounted_price': child.discounted_price,
-                'actual_cost': child.actual_cost,
+                'unit_price': format_money(child.unit_price,
+                                           field='extra.unit_price'),
+                'discounted_price': format_money(
+                    child.discounted_price, field='extra.discounted_price'),
+                'actual_cost': format_money(child.actual_cost,
+                                            field='extra.actual_cost'),
             }
             for child in children
         ],

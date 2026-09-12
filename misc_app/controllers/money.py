@@ -61,6 +61,8 @@ from decimal import (
 #: Money is carried at two decimal places, matching every monetary column
 #: (``DecimalField(max_digits=50, decimal_places=2)``).
 MONEY_QUANTUM = Decimal('0.01')
+#: The canonical zero: unsigned, at the money scale.
+MONEY_ZERO = Decimal('0.00')
 MONEY_DECIMAL_PLACES = 2
 #: Mirrors the columns' ``max_digits``.
 MAX_MONEY_DIGITS = 50
@@ -201,6 +203,39 @@ def extend_money(unit, quantity, *, field=''):
     if result.copy_abs() >= MAX_MONEY_MAGNITUDE:
         raise MoneyConfigError(OUT_OF_RANGE, field)
     return quantize_money(result, field=field)
+
+
+def format_money(value, *, field='', allow_negative=True):
+    """Canonical FIXED-SCALE decimal string for the wire: ``'899.10'``, ``'0.00'``.
+
+    This is the only sanctioned way a monetary value leaves the server as text,
+    and it exists because the rendered JSON is not what the view assembled. DRF's
+    ``JSONRenderer`` encodes a ``Decimal`` as ``float(obj)``, so an exact
+    ``Decimal('899.10')`` in ``response.data`` reaches the client as ``899.1`` —
+    the scale is gone, and a large exact amount is gone entirely
+    (``Decimal('1e28')`` renders ``1e+28``). A test asserting on ``response.data``
+    compares the value the view built, never the value the client parses, so it
+    cannot see any of that.
+
+    ``str(Decimal)`` is NOT a substitute: it emits scientific notation for a
+    value with a large exponent, so the one case that most needs a plain fixed
+    string is the one case it would not produce.
+
+    NEGATIVE ZERO IS NORMALISED. ``Decimal('-0.00')`` formats as ``'-0.00'``,
+    which reads as a signed amount while comparing equal to zero — two different
+    answers to "is this free?" in one value. Producers should already have
+    refused whatever created it; this makes the wire form unambiguous regardless.
+    """
+    if value is None:
+        value = 0
+    if isinstance(value, Decimal):
+        amount = quantize_money(value, field=field)
+    else:
+        amount = parse_money(value, field=field, allow_negative=allow_negative)
+    if amount == 0:
+        # Covers Decimal('-0.00') and any other signed zero spelling.
+        amount = MONEY_ZERO
+    return f'{amount:f}'
 
 
 def working_context():

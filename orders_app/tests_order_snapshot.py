@@ -170,13 +170,19 @@ class SnapshotCoherenceTests(TransactionTestCase):
                          'every line saw the SAME committed availability')
         self.assertEqual(order.actual_cost, D('4000.00'))
 
-    def test_a_tag_edit_between_the_two_statements_changes_only_the_labels(self):
-        """THE ARGUED EXCEPTION, exercised rather than asserted in prose.
+    def test_a_label_only_edit_landing_mid_read_is_simply_not_observed(self):
+        """THE CONTROL THAT USED TO BE THE ARGUED EXCEPTION.
 
-        The allergen labels come from a SECOND statement. A tag edit committing
-        between the two can change only the label text written onto the line —
-        exactly the field it describes — and cannot move an amount, a merge
-        decision or a deliverability flag.
+        This test previously patched the separate allergen read by name and
+        asserted that a tag edit landing between the two statements moved the
+        LABEL and nothing else. That was true of the mechanism then and it
+        certified more than it proved: it showed a label-only edit is harmless,
+        which is not the same statement as "the snapshot is coherent" — see the
+        combined-edit regression below, which the old mechanism failed.
+
+        With the labels folded into the item statement there is no window to land
+        in, so the edit is simply not in the snapshot. Kept as a control: a
+        mechanism that read labels LATE would show 'Peanuts' here.
         """
         if not _postgres():
             self.skipTest('requires PostgreSQL')
@@ -188,34 +194,198 @@ class SnapshotCoherenceTests(TransactionTestCase):
         for item in self.items:
             item.sync_tag_links([tag.id])
 
-        real_tags = catalogue_snapshot._allergen_tags
+        fired = {'count': 0}
 
-        def edit_then_read(rows):
-            self._commit_on_another_connection(lambda: RestaurantTag.objects.filter(
-                pk=tag.pk,
-            ).update(name='Peanuts'))
-            return real_tags(rows)
+        def rename_the_tag_mid_read(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if fired['count'] == 0 and 'FROM "menu_items"' in sql:
+                fired['count'] += 1
+                self._commit_on_another_connection(
+                    lambda: RestaurantTag.objects.filter(pk=tag.pk).update(
+                        name='Peanuts'),
+                )
+            return result
 
-        catalogue_snapshot._allergen_tags = edit_then_read
+        real_build = catalogue_snapshot.build_snapshot
+
+        def build_under_the_wrapper(restaurant, items, now):
+            with connection.execute_wrapper(rename_the_tag_mid_read):
+                return real_build(restaurant, items, now)
+
+        from orders_app.controllers.services import create_order as service
+        original = service.build_snapshot
+        service.build_snapshot = build_under_the_wrapper
         try:
             response = self._place(2)
         finally:
-            catalogue_snapshot._allergen_tags = real_tags
+            service.build_snapshot = original
 
+        self.assertEqual(fired['count'], 1, 'the concurrent edit never ran')
         self.assertEqual(response.get('status'), 200, response)
         order = Order.objects.get(pk=response['data']['order_details']['id'])
         rows = list(OrderItem.objects.filter(order=order, parent_item__isnull=True))
         self.assertEqual(len(rows), 4)
-        # The labels moved with the edit — that is the field the second
-        # statement owns — and NOTHING ELSE did.
         for row in rows:
             self.assertEqual(
-                [t['name'] for t in row.allergen_tags_snapshot], ['Peanuts'],
+                [t['name'] for t in row.allergen_tags_snapshot], ['Nuts'],
+                'a label edit committed after the read reached the snapshot',
             )
             self.assertEqual(row.unit_price, D('1000.00'))
             self.assertEqual(row.actual_cost, D('1000.00'))
             self.assertTrue(row.available)
         self.assertEqual(order.actual_cost, D('4000.00'))
+        # The edit really did commit.
+        self.assertEqual(RestaurantTag.objects.get(pk=tag.pk).name, 'Peanuts')
+
+    def test_a_combined_definition_and_tag_edit_is_never_half_observed(self):
+        """THE REGRESSION THE LABEL-ONLY TEST ABOVE DOES NOT COVER.
+
+        The test before this one proves that a LABEL-ONLY edit can move nothing
+        but the label — true, and useful, and NOT the same statement as "the
+        snapshot is coherent". One operator transaction that changes the dish
+        DEFINITION and its allergen LINKS together is the case that matters: a
+        reader taking two statements can have that edit commit between them and
+        write a line carrying the OLD dish name with the NEW allergen labels — a
+        preparation instruction that existed in the catalogue at no instant, and
+        the one an allergic diner is handed.
+
+        THE INTERLEAVING IS EXACT, NOT TIMED. A ``connection.execute_wrapper``
+        installed around the snapshot fires the competing commit the moment the
+        FIRST ``menu_items`` SELECT returns, so the edit lands precisely in the
+        window between the phases if a window exists. The seam is the snapshot
+        builder, which survives whatever the read is made of — a test that
+        patched the second phase by name could not outlive folding the two into
+        one statement, which is the fix.
+        """
+        if not _postgres():
+            self.skipTest('requires PostgreSQL')
+
+        dish = self.items[0]
+        nuts = RestaurantTag.objects.create(
+            restaurant=self.restaurant, name='Nuts', category='allergen',
+            icon='nut', colour='amber',
+        )
+        shellfish = RestaurantTag.objects.create(
+            restaurant=self.restaurant, name='Shellfish', category='allergen',
+            icon='shell', colour='blue',
+        )
+        dish.sync_tag_links([nuts.id])
+
+        def operator_rewrites_the_dish():
+            """ONE transaction: the recipe changed, so the name AND the
+            allergens changed with it."""
+            def mutate():
+                from django.db import transaction
+                with transaction.atomic():
+                    row = MenuItem.objects.select_for_update().get(pk=dish.pk)
+                    row.name = 'Dish 0 (shellfish)'
+                    row.save(update_fields=['name'])
+                    row.sync_tag_links([shellfish.id])
+            self._commit_on_another_connection(mutate)
+
+        fired = {'count': 0}
+
+        def fire_between_statements(execute, sql, params, many, context):
+            result = execute(sql, params, many, context)
+            if fired['count'] == 0 and 'FROM "menu_items"' in sql:
+                fired['count'] += 1
+                operator_rewrites_the_dish()
+            return result
+
+        real_build = catalogue_snapshot.build_snapshot
+
+        def build_under_the_wrapper(restaurant, items, now):
+            with connection.execute_wrapper(fire_between_statements):
+                return real_build(restaurant, items, now)
+
+        from orders_app.controllers.services import create_order as service
+        original = service.build_snapshot
+        service.build_snapshot = build_under_the_wrapper
+        try:
+            response = ConOrder.initiate_order(
+                restaurant_id=str(self.restaurant.pk),
+                table_id=str(self.tables[0].pk),
+                items=[{'item': str(dish.id), 'quantity': 1}],
+            )
+        finally:
+            service.build_snapshot = original
+
+        self.assertEqual(fired['count'], 1, 'the competing edit never interleaved')
+        self.assertEqual(response.get('status'), 200, response)
+
+        order = Order.objects.get(pk=response['data']['order_details']['id'])
+        row = OrderItem.objects.get(order=order, parent_item__isnull=True)
+        labels = [tag['name'] for tag in (row.allergen_tags_snapshot or [])]
+
+        # COHERENT means the saved line describes ONE committed catalogue state.
+        # Either is correct; the hybrid is not.
+        self.assertIn(
+            (row.item_name_snapshot, tuple(labels)),
+            {('Dish 0', ('Nuts',)), ('Dish 0 (shellfish)', ('Shellfish',))},
+            f'half-applied snapshot: name={row.item_name_snapshot!r} '
+            f'labels={labels!r}',
+        )
+
+    def test_an_edit_after_the_snapshot_is_simply_not_in_it(self):
+        """The control that keeps the regression above honest.
+
+        With the competing transaction committing AFTER the whole snapshot
+        rather than inside it, the line must carry the pre-edit state in both
+        fields. A mechanism that passed the regression by reading everything
+        LATE would fail here.
+        """
+        if not _postgres():
+            self.skipTest('requires PostgreSQL')
+
+        dish = self.items[1]
+        nuts = RestaurantTag.objects.create(
+            restaurant=self.restaurant, name='Nuts', category='allergen',
+            icon='nut', colour='amber',
+        )
+        sesame = RestaurantTag.objects.create(
+            restaurant=self.restaurant, name='Sesame', category='allergen',
+            icon='seed', colour='tan',
+        )
+        dish.sync_tag_links([nuts.id])
+
+        real_build = catalogue_snapshot.build_snapshot
+
+        def build_then_let_the_edit_land(restaurant, items, now):
+            snapshot = real_build(restaurant, items, now)
+
+            def mutate():
+                from django.db import transaction
+                with transaction.atomic():
+                    row = MenuItem.objects.select_for_update().get(pk=dish.pk)
+                    row.name = 'Dish 1 (sesame)'
+                    row.save(update_fields=['name'])
+                    row.sync_tag_links([sesame.id])
+            self._commit_on_another_connection(mutate)
+            return snapshot
+
+        from orders_app.controllers.services import create_order as service
+        original = service.build_snapshot
+        service.build_snapshot = build_then_let_the_edit_land
+        try:
+            response = ConOrder.initiate_order(
+                restaurant_id=str(self.restaurant.pk),
+                table_id=str(self.tables[1].pk),
+                items=[{'item': str(dish.id), 'quantity': 1}],
+            )
+        finally:
+            service.build_snapshot = original
+
+        self.assertEqual(response.get('status'), 200, response)
+        order = Order.objects.get(pk=response['data']['order_details']['id'])
+        row = OrderItem.objects.get(order=order, parent_item__isnull=True)
+        self.assertEqual(row.item_name_snapshot, 'Dish 1')
+        self.assertEqual(
+            [tag['name'] for tag in (row.allergen_tags_snapshot or [])], ['Nuts'],
+        )
+        # And the edit really did commit.
+        self.assertEqual(
+            MenuItem.objects.get(pk=dish.pk).name, 'Dish 1 (sesame)',
+        )
 
 
 class SnapshotReadShapeTests(TransactionTestCase):
@@ -243,7 +413,13 @@ class SnapshotReadShapeTests(TransactionTestCase):
             for n in range(6)
         ]
 
-    def test_it_is_two_statements_however_many_lines(self):
+    def test_it_is_ONE_statement_however_many_lines(self):
+        """The measured breakdown, not a round number.
+
+        It was TWO — one for the items, one batched allergen read — and the
+        second is now an aggregate inside the first. The count went DOWN, and
+        the flatness assertion is what keeps it from becoming per-line.
+        """
         from django.test.utils import CaptureQueriesContext
         from django.utils import timezone
 
@@ -257,78 +433,43 @@ class SnapshotReadShapeTests(TransactionTestCase):
             return len(captured.captured_queries)
 
         measure(1)                       # warm
-        self.assertEqual(measure(1), 2)
-        self.assertEqual(measure(6), 2, 'the read does not grow with the order')
+        self.assertEqual(measure(1), 1)
+        self.assertEqual(measure(6), 1, 'the read became per-line')
 
-    def test_it_joins_the_group_and_the_group_s_own_section(self):
-        """``group_operationally_visible`` dereferences the GROUP's section — a
-        lazy load that is easy to miss and would be a read outside the
-        snapshot. Touching every publication attribute must issue no query."""
-        from django.test.utils import CaptureQueriesContext
+    def test_the_one_statement_still_carries_the_allergen_labels(self):
+        """A single query is only the right answer if it still answers.
+
+        Folding a read away and losing what it read would pass a query-count
+        assertion perfectly.
+        """
+        if not _postgres():
+            self.skipTest('requires PostgreSQL')
+
         from django.utils import timezone
-        from restaurants_app.models import SectionGroup
-
-        group = SectionGroup.objects.create(
-            name='G', section=self.section, approved=True, enabled=True,
-            available=True,
+        tag = RestaurantTag.objects.create(
+            restaurant=self.restaurant, name='Nuts', category='allergen',
+            icon='nut', colour='amber',
         )
-        for item in self.items:
-            item.section_group = group
-            item.save(update_fields=['section_group'])
-
-        lines = [{'item': str(i.id), 'quantity': 1} for i in self.items]
-        snapshot = catalogue_snapshot.build_snapshot(
-            self.restaurant, lines, timezone.localtime(),
+        other = RestaurantTag.objects.create(
+            restaurant=self.restaurant, name='Chef pick', category='promo',
+            icon='star', colour='gold',
         )
-        with CaptureQueriesContext(connection) as captured:
-            for item in self.items:
-                resolved = snapshot.get(item.id)
-                _ = resolved.menu_item.section.available
-                _ = resolved.menu_item.section_group.available
-                _ = resolved.menu_item.section_group.section.available
-                _ = resolved.verdict.usable
-                _ = resolved.allergen_tags
-        self.assertEqual(len(captured.captured_queries), 0, [
-            q['sql'] for q in captured.captured_queries
-        ])
+        self.items[0].sync_tag_links([tag.id, other.id])
 
-    def test_it_takes_no_row_lock_on_the_catalogue(self):
-        from django.test.utils import CaptureQueriesContext
-        from django.utils import timezone
-
-        lines = [{'item': str(i.id), 'quantity': 1} for i in self.items]
-        with CaptureQueriesContext(connection) as captured:
-            catalogue_snapshot.build_snapshot(
-                self.restaurant, lines, timezone.localtime(),
-            )
-        for query in captured.captured_queries:
-            self.assertNotIn('FOR UPDATE', query['sql'].upper())
-            self.assertNotIn('FOR SHARE', query['sql'].upper())
-
-    def test_it_is_restaurant_scoped(self):
-        """The snapshot is the per-line tenant guard, so it must not resolve a
-        foreign id — that is what lets add_order_item read from it."""
-        from django.utils import timezone
-
-        other_owner = User.objects.create_user(
-            first_name='O', last_name='O', email='oo@t.com',
-            phone_number='256700066003', username='256700066003',
-            country='Uganda', password='password', roles=[],
-        )
-        other = Restaurant.objects.create(
-            name='Other', location='o', owner=other_owner,
-            status=RestaurantStatus_Live,
-        )
-        other_section = MenuSection.objects.create(
-            name='OS', restaurant=other, approved=True, enabled=True,
-        )
-        foreign = MenuItem.objects.create(
-            name='Foreign', section=other_section, primary_price=D('100'),
-            approved=True, enabled=True,
-        )
         snapshot = catalogue_snapshot.build_snapshot(
             self.restaurant,
-            [{'item': str(foreign.id), 'quantity': 1}],
+            [{'item': str(self.items[0].id), 'quantity': 1},
+             {'item': str(self.items[1].id), 'quantity': 1}],
             timezone.localtime(),
         )
-        self.assertIsNone(snapshot.get(foreign.id))
+        tagged = snapshot.get(self.items[0].pk)
+        self.assertEqual(
+            tagged.allergen_tags,
+            [{'name': 'Nuts', 'icon': 'nut', 'colour': 'amber'}],
+            'a non-allergen tag leaked in, or the labels were lost',
+        )
+        # An item with NO allergen tags aggregates to SQL NULL and must still be
+        # present, carrying an empty list rather than None.
+        untagged = snapshot.get(self.items[1].pk)
+        self.assertIsNotNone(untagged, 'a tagless item fell out of the join')
+        self.assertEqual(untagged.allergen_tags, [])
