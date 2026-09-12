@@ -26,6 +26,15 @@ the second exists when only the first does.
      scoped read that resolves an intent key. A client may additionally
      recover an uncertain ACCEPTANCE.
 
+  3  CORRELATED. Everything in 2, plus a shared projection on BOTH the
+     acceptance result and the scoped read that names the order, the keyed
+     intent and the server-resolved scope, separates a genuine draft from an
+     acceptance that predates the evidence table, publishes the ORIGINAL
+     accepted reference and moment, and labels current order/fulfilment state
+     apart from the acceptance. A client may additionally VALIDATE that an
+     answer belongs to the command it issued, and may distinguish "never
+     accepted" from "accepted, unrecorded" — which at level 2 read alike.
+
 A client must treat an ABSENT value as level 0 and promise nothing, and must
 never infer a level from a route returning 404 — a missing route and an intent
 that never existed are different facts.
@@ -37,6 +46,10 @@ CHECKOUT_PROTOCOL_BINDING = 1
 #: Acceptance evidence is durable and recoverable by intent key.
 CHECKOUT_PROTOCOL_RECOVERABLE = 2
 
+#: The answer is correlated to the issued command and states the original
+#: acceptance, so a client can verify it rather than assume it.
+CHECKOUT_PROTOCOL_CORRELATED = 3
+
 #: WHAT THIS BUILD ACTUALLY SUPPORTS. Raised only by the change that makes the
 #: next level true — never in advance of it.
 #:
@@ -46,4 +59,13 @@ CHECKOUT_PROTOCOL_RECOVERABLE = 2
 #: (`orders/journey/order-details/?intent=<client_order_id>`). Raising it for
 #: one without the other would have been the #661 mistake in a new place — a
 #: client told it may recover an acceptance it has no way to look up.
-CHECKOUT_PROTOCOL = CHECKOUT_PROTOCOL_RECOVERABLE
+#:
+#: Raised to 3 by the D04 completion, which publishes
+#: `acceptance_result.acceptance_result` on both the acceptance result and the
+#: scoped read. A NEW NUMBER RATHER THAN A NEW MEANING FOR 2: a client pinned
+#: to 2 keeps exactly the promises 2 made, and only a client that recognises 3
+#: may rely on the correlation fields or on the three-state verdict. Silently
+#: widening 2 is the #661 mistake, and it would be worse here — a level-2
+#: client reading the old `accepted` boolean is RIGHT to treat it as
+#: two-valued, because for it, it is.
+CHECKOUT_PROTOCOL = CHECKOUT_PROTOCOL_CORRELATED

@@ -7,6 +7,9 @@ from typing import Union
 from django.db import transaction
 from django.utils import timezone
 from users_app.models import User
+from orders_app.controllers.services.acceptance_result import (
+    OUTCOME_ALREADY_ACCEPTED, OUTCOME_NEWLY_ACCEPTED, acceptance_result,
+)
 from orders_app.models import Order, OrderAcceptance, OrderItem
 from dinify_backend.configss.messages import (
     OK_ORDER_UPDATED, ERR_ORDER_UPDATED
@@ -261,6 +264,17 @@ def _acceptance_replay(order, supplied_quote_ref):
             'status': 200,
             'message': OK_ORDER_UPDATED,
             'idempotent': True,
+            # THE CORRELATED ANSWER. `idempotent: True` says "this was not a
+            # second acceptance"; it does not say WHICH acceptance, of WHICH
+            # order, at WHOSE table, against WHICH quote — so a client had
+            # nothing to check the reply against and a late or misrouted 200
+            # was indistinguishable from the right one. `evidence` is the row
+            # already in hand, so this costs no query.
+            'checkout': acceptance_result(
+                order,
+                outcome=OUTCOME_ALREADY_ACCEPTED,
+                evidence=evidence,
+            ),
         }
 
     logger.info(
@@ -410,14 +424,24 @@ def _submit_order(order: Order, user: Union[User, None],
         # `supplied_quote_ref` is what `_acceptance_refusal` has just proved
         # names this order's saved quote, so the stored value is the exact
         # figure the diner confirmed rather than one re-derived afterwards.
-        OrderAcceptance.objects.create(
+        evidence = OrderAcceptance.objects.create(
             order=order,
             accepted_at=timezone.now(),
             quote_ref=supplied_quote_ref,
+        )
+
+        # Built INSIDE the transaction, from the row this transition just
+        # wrote and the order as it just saved it, so the reply describes the
+        # state that actually committed. `evidence` is passed rather than
+        # looked up: the acceptance path's query cost is pinned to an exact
+        # integer by `tests_order_acceptance.WhatTheEvidenceCostsTests`.
+        correlated = acceptance_result(
+            order, outcome=OUTCOME_NEWLY_ACCEPTED, evidence=evidence,
         )
 
     return {
         'status': 200,
         'message': OK_ORDER_UPDATED,
         'idempotent': False,
+        'checkout': correlated,
     }
