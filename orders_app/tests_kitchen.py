@@ -17,7 +17,9 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
+from orders_app.models import (
+    Order, OrderAcceptance, OrderItem, RestaurantDailyOrderCounter,
+)
 from orders_app.controllers.con_orders import ConOrder
 from orders_app.controllers.initiate_order import any_present_ongoing_order
 from orders_app.controllers.manage_order import update_order_status
@@ -985,11 +987,53 @@ class SubmitClaimsTableTests(KitchenTestBase):
         self.assertEqual(result['status'], 200)
         self.assertTrue(spy.called)
 
-    def test_double_submit_same_order_is_rejected(self):
-        # The status is re-checked on the FRESH row under the lock, so a second
-        # submit of an already-submitted order gets today's 400.
+    def test_double_submit_of_the_same_acceptance_is_idempotent(self):
+        """D04 CHANGED THIS ANSWER, and the old one was the defect.
+
+        A second submit of the SAME acceptance used to fall through to the
+        `initiated` re-check and get `This order cannot be submitted.` — a
+        FAILURE reported for an operation that had SUCCEEDED. A diner whose
+        response was lost on the wire read that as "nothing was ordered" while
+        the kitchen was already cooking it.
+
+        The evidence row is what makes the honest answer available: the same
+        quote replays as the acceptance that already happened.
+        """
+        order = self._draft(self.table1)['order']
+        first = self._submit(order)
+        self.assertEqual(first['status'], 200)
+        self.assertFalse(first['idempotent'])
+
+        second = self._submit(order)
+        self.assertEqual(second['status'], 200, second)
+        self.assertTrue(second['idempotent'])
+        # ...and no second acceptance was recorded
+        self.assertEqual(
+            OrderAcceptance.objects.filter(order=order).count(), 1)
+
+    def test_a_second_submit_under_a_different_quote_is_a_conflict(self):
+        """The other half: replaying the key of an accepted order against a
+        DIFFERENT quote is a different acceptance being attempted, not a
+        replay of the one that happened."""
         order = self._draft(self.table1)['order']
         self.assertEqual(self._submit(order)['status'], 200)
+
+        conflict = update_order_status(
+            order, OrderStatus_Pending, None, quote_ref='not-the-one',
+        )
+        self.assertEqual(conflict['status'], 409, conflict)
+        self.assertEqual(conflict['reason'], 'order_already_accepted')
+        self.assertEqual(
+            OrderAcceptance.objects.filter(order=order).count(), 1)
+
+    def test_an_order_never_accepted_still_cannot_be_submitted_twice(self):
+        """The negative control: the `initiated` re-check is unchanged for an
+        order carrying no evidence — which is what a pre-D04 accepted order
+        looks like, and what a cancelled draft looks like."""
+        order = self._draft(self.table1)['order']
+        self.assertEqual(self._submit(order)['status'], 200)
+        OrderAcceptance.objects.filter(order=order).delete()
+
         second = self._submit(order)
         self.assertEqual(second['status'], 400)
         self.assertEqual(second['message'], 'This order cannot be submitted.')

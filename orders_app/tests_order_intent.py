@@ -1032,14 +1032,30 @@ class TheServerStatesWhatItCanPromiseTests(IntentFixture):
         self.assertEqual(self._details(retry)['checkout_protocol'],
                          self._details(first)['checkout_protocol'])
 
-    def test_this_build_promises_binding_and_not_recovery(self):
-        """The level is raised ONLY by the change that makes the next one
-        true. Durable acceptance evidence and the intent-key recovery read do
-        not exist yet, so claiming level 2 here would tell a client to rely on
-        a route that answers 404 — and a missing route and an intent that
-        never existed are different facts a client must not confuse."""
-        self.assertEqual(CHECKOUT_PROTOCOL, CHECKOUT_PROTOCOL_BINDING)
-        self.assertLess(CHECKOUT_PROTOCOL, CHECKOUT_PROTOCOL_RECOVERABLE)
+    def test_the_level_is_only_as_high_as_what_is_built(self):
+        """A level is raised ONLY by the change that makes it true.
+
+        D04/B shipped level 1 and D04/C raised it to 2, and 2 promises TWO
+        things: durable acceptance evidence, and a scoped read that resolves
+        an intent key. Asserting the number alone would let a future edit
+        raise it past what exists — which is the #661 mistake in a new place,
+        a client told it may recover an acceptance it has no way to look up.
+        So the promise is checked rather than the integer.
+        """
+        self.assertGreaterEqual(CHECKOUT_PROTOCOL, CHECKOUT_PROTOCOL_BINDING)
+
+        if CHECKOUT_PROTOCOL >= CHECKOUT_PROTOCOL_RECOVERABLE:
+            from orders_app.models import OrderAcceptance
+            from restaurants_app.controllers.handle_diner_journey import (
+                handle_show_order_details,
+            )
+            import inspect
+            # durable acceptance evidence exists, and survives an Order save
+            self.assertTrue(hasattr(OrderAcceptance, 'accepted_at'))
+            self.assertTrue(hasattr(OrderAcceptance, 'quote_ref'))
+            # ...and the read can be resolved by an intent key
+            self.assertIn(
+                "'intent'", inspect.getsource(handle_show_order_details))
 
     def test_the_level_is_not_derived_from_the_pricing_version(self):
         """Two keys, two independent sources — a server can price correctly

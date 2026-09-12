@@ -587,6 +587,64 @@ class DinerResourceScopingClosureTests(ClosureFixtureBase):
             )
             self.assertEqual(resp.status_code, 404, f'{order_id}: {resp.content}')
 
+    # -- the D04/C recovery selector (?intent=) is scoped identically -------
+    #
+    # A client whose checkout response was lost holds its `client_order_id`
+    # and no order id, so the diner read resolves that key too. HOLDING A KEY
+    # IS NOT AUTHORITY: the lookup is filtered to the session's restaurant AND
+    # table exactly as the order-id form is, so the selector widened the
+    # anonymous surface by nothing. It rides the EXISTING route, so the diner
+    # capability header contract is untouched — no new allowlist entry, in
+    # either repository.
+
+    def test_session_a_cannot_recover_b_order_by_its_intent_key(self):
+        key = uuid4()
+        b_order = self._make_order(
+            self.restaurant_b, self.table_b, status=OrderStatus_Initiated)
+        Order.objects.filter(pk=b_order.pk).update(client_order_id=key)
+
+        resp = self.client.get(
+            f'{ORDER_DETAILS_URL}?intent={key}',
+            **_header_kw(SESSION_HEADER, self._sess(self.table_a)),
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_a_key_at_another_table_of_the_same_restaurant_is_also_refused(self):
+        """The narrower case, and the one a restaurant-wide key namespace
+        makes reachable: same tenant, different table."""
+        key = uuid4()
+        other = self._make_order(
+            self.restaurant_a, self.table_a2, status=OrderStatus_Initiated)
+        Order.objects.filter(pk=other.pk).update(client_order_id=key)
+
+        resp = self.client.get(
+            f'{ORDER_DETAILS_URL}?intent={key}',
+            **_header_kw(SESSION_HEADER, self._sess(self.table_a)),
+        )
+        self.assertEqual(resp.status_code, 404, resp.content)
+
+    def test_foreign_unknown_and_malformed_intent_keys_are_indistinguishable(self):
+        session = self._sess(self.table_a)
+        foreign = self._make_order(self.restaurant_b, self.table_b)
+        foreign_key = uuid4()
+        Order.objects.filter(pk=foreign.pk).update(client_order_id=foreign_key)
+
+        for value in (str(foreign_key), str(uuid4()), 'not-a-uuid', '5', ''):
+            resp = self.client.get(
+                f'{ORDER_DETAILS_URL}?intent={value}',
+                **_header_kw(SESSION_HEADER, session),
+            )
+            self.assertEqual(resp.status_code, 404, f'{value!r}: {resp.content}')
+
+    def test_the_recovery_selector_still_requires_a_session(self):
+        own = self._make_order(
+            self.restaurant_a, self.table_a, status=OrderStatus_Initiated)
+        key = uuid4()
+        Order.objects.filter(pk=own.pk).update(client_order_id=key)
+
+        resp = self.client.get(f'{ORDER_DETAILS_URL}?intent={key}')
+        self.assertNotEqual(resp.status_code, 200, resp.content)
+
     def test_diner_source_flag_cannot_enter_staff_branch(self):
         # A body source='admin' from a pure diner (only a session, no JWT) selects
         # the staff branch, which REQUIRES authentication — so the diner is bounced

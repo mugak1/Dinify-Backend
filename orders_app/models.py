@@ -292,3 +292,50 @@ class RestaurantDailyOrderCounter(BaseModel):
                 name="uniq_daily_counter",
             ),
         ]
+
+
+class OrderAcceptance(models.Model):
+    """
+    D04 — THE DURABLE FACT THAT A DINER'S ORDER WAS ACCEPTED.
+
+    WHY A ROW AND NOT TWO COLUMNS ON ``Order``. The evidence has to survive
+    ORDINARY ``Order`` saves, and a column only does that as long as every
+    writer happens to have re-read the row first. Django's ``save()`` writes
+    every field from the in-memory instance, so a caller holding an instance
+    loaded BEFORE acceptance writes the pre-acceptance values back — silently,
+    with no error, and the order then reads as never accepted. No production
+    path does that today; the point is that a separate row makes it
+    IMPOSSIBLE rather than currently-unreached. ``tests_order_acceptance``
+    pins it by saving a deliberately stale ``Order`` instance and asserting
+    the evidence is intact — a test the two-column design fails.
+
+    WHAT IT IS NOT. Not the order's STATE: ``order_status`` moves on through
+    ``preparing`` / ``served``, and a kitchen recall moves it back, while this
+    row never changes again. Not a payment, and not a claim that the food
+    arrived. It records exactly one thing — at this instant, this order was
+    accepted against this quote — which is what a client whose response was
+    lost needs in order to distinguish "my submit never landed" from "it
+    landed and the kitchen has moved on".
+
+    WRITTEN ONCE. The ``OneToOneField`` makes at-most-one a database fact, and
+    the acceptance transition is its only writer: nothing updates an existing
+    row, so a replay reads it rather than rewriting it. ``CASCADE`` because
+    the evidence has no subject without its order; orders are soft-deleted,
+    never hard-deleted, so it is not reachable in practice.
+    """
+    order = models.OneToOneField(
+        Order, on_delete=models.CASCADE, related_name='acceptance',
+    )
+    #: When the acceptance COMMITTED — the diner's own moment, distinct from
+    #: `time_last_updated`, which every later kitchen action moves.
+    accepted_at = models.DateTimeField(db_index=True)
+    #: The exact reference the diner's acceptance was bound to (D02). A retry
+    #: naming a DIFFERENT quote is not a replay of this acceptance: it is an
+    #: attempt to accept something else against an order already accepted.
+    quote_ref = models.CharField(max_length=128)
+
+    class Meta:
+        db_table = 'order_acceptances'
+
+    def __str__(self):                             # pragma: no cover
+        return f'acceptance of {self.order_id} at {self.accepted_at}'

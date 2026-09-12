@@ -439,8 +439,58 @@ so keep it current when conventions change.
   lesson about collapsing two contract introductions into one flag. An ABSENT value is
   level 0 and promises nothing, and a 404 from a future recovery route is a missing
   route, never an intent that never existed.
-  **LEVEL 2 IS NOT BUILT**: durable acceptance evidence and the intent-key recovery
-  read are D04/C, and the frontend coordinator is D04/D
+  **LEVEL 2 LANDED IN D04/C** (next bullet); the frontend coordinator is D04/D
+- A LOST CHECKOUT RESPONSE IS RECOVERABLE, AND A RETRY IS NEVER TOLD IT FAILED
+  (D04/C): ✅ `OrderAcceptance` (migration `orders_app/0039`, ONE new table, nothing
+  else touched) plus an intent-key selector on the diner's existing order read.
+  Two failures closed, both of them a checkout reporting FAILURE after SUCCESS —
+  the worst answer a checkout can give, because the diner believes nothing was
+  ordered while the kitchen is already cooking it. A RETRY AFTER A LOST RESPONSE got
+  `This order cannot be submitted.`, because the re-check that produced it reads
+  `order_status` — which by then says `pending`, `preparing`, `served` or
+  `cancelled`, none of which is a statement about whether the submission LANDED. And
+  a client that lost the response ENTIRELY held no order id (that is what it lost),
+  so it could not look up what the key it still holds resolved to.
+  **THE EVIDENCE IS A ROW, NOT TWO COLUMNS ON `Order`, and that is load-bearing.**
+  Django's `save()` writes every field from the in-memory instance, so a caller
+  holding an instance loaded BEFORE acceptance writes the pre-acceptance values back
+  — silently, with no error, leaving an order that reads as never accepted. No
+  production path does that today; a separate row makes it IMPOSSIBLE rather than
+  currently-unreached. `tests_order_acceptance` proves the hazard is real on an
+  ordinary column first (a stale save DOES revert `order_status`) and then that the
+  evidence survives it — tests a two-column design fails.
+  **IT IS WRITTEN WITH THE TRANSITION OR NOT AT ALL.** Same transaction: an accepted
+  order with no record reports a retry as a failure, and a record with no transition
+  tells a client an order was placed the kitchen never saw. It stores WHEN and the
+  exact `quote_ref` the acceptance was bound to, and it NEVER MOVES AGAIN — the
+  kitchen advancing, recalling or cancelling the order leaves it untouched.
+  **THE REPLAY MATRIX.** No evidence → the ordinary invariants decide (which is also
+  the pre-D04 case: nothing recorded that acceptance, so nothing may be claimed about
+  it). SAME `quote_ref` → **200 `idempotent`**, no second acceptance, no second table
+  claim. A DIFFERENT or ABSENT one → **409 `order_already_accepted`** — a different
+  acceptance being attempted, or one that cannot be proven the same; neither is a
+  failure of the original and neither may produce a second. **A CANCELLED ORDER THAT
+  WAS ACCEPTED STILL REPLAYS AS ACCEPTED**: the submission did land, and the
+  cancellation is a later, separate fact the same response already carries in
+  `order_status`. The check runs BEFORE the `initiated` re-check, because that check
+  is exactly what produced the false failure, and UNDER the same locks an acceptance
+  takes (advisory → table → order re-read → evidence), so two concurrent submissions
+  cannot both conclude there is no evidence.
+  **THE RECOVERY READ IS THE EXISTING ONE, WITH A SECOND SELECTOR**:
+  `orders/journey/order-details/?intent=<client_order_id>`. ONE decision reached by
+  two identifiers, not two routes — a dedicated route would have to be added to the
+  diner capability allowlist in BOTH repositories, widening the anonymous surface to
+  say what the existing route already says. **Scoped to the session's restaurant AND
+  table exactly as the order-id form is**, so holding a key is not authority; the key
+  is validated by the SAME rule the write path uses, so a malformed value never
+  reaches a `UUIDField` filter. Exactly one selector: naming both is a 400. The
+  projection is BYTE-IDENTICAL to the order-id form, and the read now also publishes
+  `accepted` / `accepted_at` (the question a recovering client actually has) and
+  `checkout_protocol`, because a client deciding whether a retry is safe needs the
+  answer from whichever response it has. `CHECKOUT_PROTOCOL` is therefore **2**, and
+  it was raised by the change that made BOTH halves of level 2 true at once.
+  COST: submit 10 → **12** (one SELECT to ask, one INSERT to write); a replay is
+  **7** and returns at the evidence read. Both pinned
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one
@@ -1545,6 +1595,15 @@ so keep it current when conventions change.
   transition locks the table row and re-checks draft status + occupancy on the
   fresh row, so two diners submitting for the same table serialize (first claims,
   second gets a clean 400)
+- `api/v1/orders/journey/` → the anonymous diner journey
+  (`restaurants_app/endpoints/order_journey.py`): `table-scan/`, `show-menu/`,
+  `order-details/`, `payment-details/`. **`order-details/` takes EITHER
+  `?order=<uuid>` OR `?intent=<client_order_id>`** (D04/C) — ONE decision reached by
+  two identifiers, deliberately not a second route: a dedicated one would have to
+  join the diner capability allowlist in both repositories to say what this route
+  already says. Both selectors are scoped to the session's restaurant AND table, so
+  holding an intent key is not authority; naming both is a 400, naming neither keeps
+  the existing 400, and every unresolvable value collapses to ONE non-disclosing 404
 - `api/v1/kitchen/` → Kitchen endpoints (urls_kitchen.py) — separate file
 - `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
   `issues/`, `issues/<uuid:issue_id>/` — separate app (`admin/issues/` retired)
@@ -4644,7 +4703,7 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
   "Restaurant Lifecycle"; 0057 adds the platform-owned `Restaurant.is_test` flag,
   additive with NO backfill — see "Canonical Data Shapes"),
-  `orders_app/migrations/0038_order_request_fingerprint.py` (0034 removed the
+  `orders_app/migrations/0039_order_acceptance.py` (0034 removed the
   inline review fields; 0035 adds the launch-boundary `Order.is_test` flag; 0036
   adds the D01 `quantity >= 0` CHECK constraint, additive and reversible with NO
   `RunPython`; 0037 adds `Order.pricing_version`, one `AddField` carrying BOTH
@@ -4658,7 +4717,11 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   and with NO backfill and none possible: a pre-D04 order has no record of the
   request that created it, so NULL means exactly "predates D04". Its `db_index=True`
   is NOT free; the index build is proportional to the row count of `orders`, which
-  this repository cannot observe),
+  this repository cannot observe; 0039 creates the D04/C `OrderAcceptance` table and
+  NOTHING else — no existing table touched, no `RunPython`, no backfill and none
+  possible, since an order accepted before it left no record of when or against which
+  quote. `CreateModel` is the safest shape under the expand-only rule: old code
+  neither reads nor writes the table, and its index is built on an empty one),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
   `users_app/migrations/0014_customer_access_state.py` (0010 adds

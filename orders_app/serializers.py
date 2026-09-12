@@ -4,8 +4,11 @@ from orders_app.controllers.orders.serializers import _quote_line
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
 )
+from orders_app.controllers.services.checkout_protocol import (
+    CHECKOUT_PROTOCOL,
+)
 from orders_app.controllers.services.order_quote import group_live_children
-from orders_app.models import Order, OrderItem
+from orders_app.models import Order, OrderAcceptance, OrderItem
 
 
 class SerializerPutOrderItem(ModelSerializer):
@@ -123,6 +126,9 @@ class SerializerPublicOrderDetails(ModelSerializer):
     quote = SerializerMethodField()
     quote_total = SerializerMethodField()
     quote_complete = SerializerMethodField()
+    accepted = SerializerMethodField()
+    accepted_at = SerializerMethodField()
+    checkout_protocol = SerializerMethodField()
 
     class Meta:
         model = Order
@@ -136,6 +142,8 @@ class SerializerPublicOrderDetails(ModelSerializer):
             'time_last_updated',
             # D04/U1 — see the class docstring.
             'quote', 'quote_total', 'quote_complete',
+            # D04/C — the acceptance fact, and what this server can promise.
+            'accepted', 'accepted_at', 'checkout_protocol',
         )
 
     def _rows(self, order):
@@ -219,3 +227,55 @@ class SerializerPublicOrderDetails(ModelSerializer):
         """
         _live, _by_parent, orphaned = self._live_split(order)
         return not orphaned
+
+    def _evidence(self, order):
+        """The acceptance row, fetched once for both keys below."""
+        cached = getattr(self, '_acceptance_cache', None)
+        if cached is None or cached[0] != order.pk:
+            cached = (order.pk,
+                      OrderAcceptance.objects.filter(order=order).first())
+            self._acceptance_cache = cached
+        return cached[1]
+
+    def get_accepted(self, order):
+        """DID THE DINER'S SUBMISSION LAND? (D04/C)
+
+        The one question a client whose response was lost actually has, and
+        the one no field here could previously answer. `order_status` cannot:
+        the kitchen moves it to `preparing` and `served`, a recall moves it
+        back and a cancellation moves it elsewhere, so by the time a retry
+        looks it describes the KITCHEN's progress, not whether the order was
+        ever accepted.
+
+        A CANCELLED ORDER THAT WAS ACCEPTED STILL READS `true`, deliberately:
+        the submission did land, and the cancellation is a later, separate
+        fact this same response already carries in `order_status`. Collapsing
+        the two would tell a diner their order never went through.
+
+        FALSE MEANS "NO EVIDENCE", which covers a genuine draft and an order
+        accepted BEFORE D04 alike — nothing recorded the latter, and inventing
+        a value for it would be a claim this server cannot support.
+        """
+        return self._evidence(order) is not None
+
+    def get_accepted_at(self, order):
+        """When the acceptance COMMITTED, or null.
+
+        Distinct from `time_last_updated`, which every later kitchen action
+        moves — which is exactly why that field could never serve as the
+        answer.
+        """
+        evidence = self._evidence(order)
+        return None if evidence is None else evidence.accepted_at
+
+    def get_checkout_protocol(self, order):
+        """What THIS server can promise a checkout client.
+
+        The same constant the initiate response carries, published here too
+        because this is the surface a RECOVERING client reads — and a client
+        deciding whether a retry is safe needs the answer from whichever
+        response it actually has. An ABSENT value means level 0: promise
+        nothing. It is deliberately not `pricing_version`, which describes how
+        the money was calculated.
+        """
+        return CHECKOUT_PROTOCOL

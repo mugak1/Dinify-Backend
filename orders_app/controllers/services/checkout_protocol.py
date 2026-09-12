@@ -39,4 +39,11 @@ CHECKOUT_PROTOCOL_RECOVERABLE = 2
 
 #: WHAT THIS BUILD ACTUALLY SUPPORTS. Raised only by the change that makes the
 #: next level true — never in advance of it.
-CHECKOUT_PROTOCOL = CHECKOUT_PROTOCOL_BINDING
+#:
+#: Raised to 2 by D04/C, which added BOTH halves of that level in one change:
+#: durable acceptance evidence (`OrderAcceptance`, written with the transition
+#: and never moved afterwards) and the scoped recovery read
+#: (`orders/journey/order-details/?intent=<client_order_id>`). Raising it for
+#: one without the other would have been the #661 mistake in a new place — a
+#: client told it may recover an acceptance it has no way to look up.
+CHECKOUT_PROTOCOL = CHECKOUT_PROTOCOL_RECOVERABLE
