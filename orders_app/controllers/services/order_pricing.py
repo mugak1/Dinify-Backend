@@ -119,6 +119,29 @@ class PricedLine:
         self.actual_cost = actual_cost
 
 
+class ResolvedExtra:
+    """One selected extra, priced but NOT yet written.
+
+    The unit of exchange between :meth:`ConOrder.resolve_line_extras` and both
+    of its consumers — the merge key, which needs these facts before the parent
+    row exists, and :meth:`ConOrder.persist_line_extras`, which writes them.
+    Resolving once and passing the result is what keeps the split from costing a
+    second catalogue read.
+
+    ``deliverable`` is the extra's OWN deliverability. The parent factor is
+    applied by the caller, because only the caller knows whether the required-
+    extras rule has since flipped the line.
+    """
+
+    __slots__ = ('menu_item', 'unit', 'deliverable', 'allergen_tags')
+
+    def __init__(self, *, menu_item, unit, deliverable, allergen_tags):
+        self.menu_item = menu_item
+        self.unit = unit
+        self.deliverable = deliverable
+        self.allergen_tags = allergen_tags
+
+
 def modifier_adjustment(raw_cost, *, field='additionalCost'):
     """Canonicalise ONE stored modifier adjustment.
 
@@ -254,27 +277,75 @@ def modifier_identity(selected_modifiers):
     ))
 
 
-def extras_identity(extra_ids):
-    """Order-independent key for a line's selected extras.
+def preparation_identity(labels):
+    """Key for a preparation-snapshot label list (allergen labels today).
 
-    A SORTED TUPLE rather than a set: duplicate extra ids are refused upstream
+    ORDER IS PRESERVED rather than sorted. Both sides of a comparison derive
+    these from the same catalogue read, so their order is already deterministic,
+    and the order is itself the display order the kitchen ticket carries.
+    """
+    return tuple(
+        (str(label.get('name', '')), str(label.get('icon', '')),
+         str(label.get('colour', '')))
+        if isinstance(label, dict) else (str(label), '', '')
+        for label in (labels or [])
+    )
+
+
+def extra_identity(*, item_id, reference_unit, effective_unit, deliverable,
+                   name_snapshot, allergen_snapshot):
+    """THE semantic identity of ONE child extra row.
+
+    The same facts the PARENT key carries, for the same reason: an extra is a
+    thing the kitchen makes and the diner pays for, so two lines that would
+    produce differently-priced, differently-available or differently-labelled
+    children are not one line. Extras carry no modifiers, so there is no
+    selection component.
+    """
+    return (
+        str(item_id),
+        str(reference_unit),
+        str(effective_unit),
+        bool(deliverable),
+        str(name_snapshot or ''),
+        preparation_identity(allergen_snapshot),
+    )
+
+
+def extras_identity(extras):
+    """Order-independent key for a line's RESOLVED extras.
+
+    THIS USED TO BE THE IDS ALONE, and that made the parent key claim a
+    comparison it was not making: two lines merged on "same dish, same extras
+    chosen" while the extras' own price, deliverability and preparation
+    snapshots were never compared, so a merge could keep one child's OLD price
+    for a NEW selection. Each entry is now a full :func:`extra_identity`.
+
+    A SORTED TUPLE rather than a set: duplicate extras are refused upstream
     today, and keeping the multiset shape means a future change to that policy
     cannot silently make two different lines compare equal.
     """
-    return tuple(sorted(str(extra_id) for extra_id in (extra_ids or [])))
+    return tuple(sorted(extras or []))
 
 
-def line_identity(*, item_id, selected_modifiers, extra_ids, reference_unit,
+def line_identity(*, item_id, selected_modifiers, extras, reference_unit,
                   effective_unit, deliverable, name_snapshot,
-                  modifiers_snapshot):
-    """THE semantic identity of a parent order line.
+                  modifiers_snapshot, allergen_snapshot=None):
+    """THE semantic identity of a parent order line, CHILDREN INCLUDED.
 
     Two lines merge only when they are the same dish, with the same complete
-    selections, AND compatible immutable pricing, deliverability and preparation
-    snapshots. Within one order, resolved from one catalogue snapshot, the last
-    four are constant per item, so this changes nothing about ordinary merging —
-    it makes the rule structural rather than incidental, so a caller that prices
-    two lines differently can never collapse them onto one stored amount.
+    selections, compatible immutable pricing, deliverability and preparation
+    snapshots — AND children that are themselves identical on every one of those
+    axes. Within one order, resolved from one catalogue snapshot, all of it is
+    constant per item, so this changes nothing about ordinary merging. It makes
+    the rule structural rather than incidental, so no caller can collapse two
+    lines onto one stored amount that only one of them was priced at.
+
+    ``extras`` is a sequence of :func:`extra_identity` tuples, NOT bare ids. The
+    caller must therefore have RESOLVED its extras before asking for an
+    identity, which is deliberate: the required-extras outcome can flip this
+    line's ``deliverable``, and a key assigned before that is a key the next
+    identical line will not be found under.
 
     Identity is never derived from labels alone, from JSON insertion order, or
     from anything a client supplied.
@@ -282,10 +353,11 @@ def line_identity(*, item_id, selected_modifiers, extra_ids, reference_unit,
     return (
         str(item_id),
         modifier_identity(selected_modifiers),
-        extras_identity(extra_ids),
+        extras_identity(extras),
         str(reference_unit),
         str(effective_unit),
         bool(deliverable),
         str(name_snapshot or ''),
         tuple(str(label) for label in (modifiers_snapshot or [])),
+        preparation_identity(allergen_snapshot),
     )

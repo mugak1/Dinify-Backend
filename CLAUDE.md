@@ -192,7 +192,23 @@ so keep it current when conventions change.
     `out_of_range`, hiding an item the database stores happily and refusing it at
     checkout) while `*`, `+` and `-` ROUND SILENTLY, which is worse — an inexact
     product the range check then waves through. `quantize_money` and `extend_money`
-    now carry it internally; `price_unit` and `extend` wrap their own sums
+    now carry it internally; `price_unit` and `extend` wrap their own sums, as do
+    `update_order_amounts` and the serializer's legacy-total and line aggregates.
+    **`format_money` is THE only sanctioned way a monetary value leaves the server as
+    text**, and it exists because the RENDERED JSON is not what the view assembled:
+    DRF's `JSONRenderer` encodes a `Decimal` through `float(obj)`, so an exact
+    `Decimal('899.10')` in `response.data` reaches the browser as `899.1` and
+    `Decimal('1e28')` as `1e+28`. **A test asserting on `response.data` compares the
+    value the view BUILT, never the value the client PARSES**, so it cannot see any of
+    that — `tests_order_money_wire.py` decodes `response.content` with a `parse_float`
+    hook that marks every JSON float, which is the only way the distinction is
+    observable. `str(Decimal)` is NOT a substitute (scientific notation for a large
+    exponent — the one case that most needs a plain fixed string), and NEGATIVE ZERO
+    is normalised, since `Decimal('-0.00')` formats as a signed amount while comparing
+    equal to zero. **The QUOTE — `quote_total` and every money key on every
+    `data.quote` line — is canonical decimal STRINGS**; the legacy `order_details`
+    keys keep their established numeric form for older clients, so this is the new
+    contract rather than a global renderer change
   - `restaurants_app/controllers/pricing_policy.py` — `resolve_price` is THE answer to
     *what does this item cost right now*, returning a `PriceVerdict` that both the
     public menu read and the order path consume. **The discount WINDOW is checked
@@ -200,7 +216,16 @@ so keep it current when conventions change.
     makes an item unpriceable; an expired one with unreadable figures is simply not
     applied. `MenuItem.effective_base_price()` now RAISES on an unusable price rather
     than clamping to zero, and `item_priceable` joins `item_visible_in_menu` /
-    `item_orderable`, so an item the server cannot price is neither shown nor sold
+    `item_orderable`, so an item the server cannot price is neither shown nor sold.
+    **THE SIGN OF AN OVER-100% DISCOUNT IS DECIDED ON THE RAW VALUE, BEFORE
+    ROUNDING**, and that ordering is the whole guard rather than a refinement of it:
+    quantizing a small negative payable to two places yields `Decimal('-0.00')`, which
+    `== Decimal('0')`, so the post-quantize `effective < 0` test could not see it — a
+    0.01 dish at 100.5% off resolved USABLE at negative zero and was published and
+    sold FREE at HTTP 200, the same outcome the pre-D02 zero clamp produced, reached
+    by arithmetic instead of by a clamp. The post-quantize check is KEPT as defence in
+    depth: it alone catches an effective price ABOVE the reference, which no sign test
+    can express
   - `orders_app/controllers/services/order_pricing.py` — `PricedUnit`/`PricedLine`,
     the modifier adjustment, and **`line_identity`**: `(item, modifiers, extras,
     reference_unit, effective_unit, deliverable, name_snapshot, modifiers_snapshot)`.
@@ -210,12 +235,41 @@ so keep it current when conventions change.
     a merge. `modifier_identity` DE-DUPLICATES choices (canonicalisation already
     collapses a repeat, and legacy rows shipped without a migration) while
     `extras_identity` keeps its multiset shape (duplicate extras are REFUSED upstream,
-    not collapsed) — the asymmetry is deliberate and spelled out at both declarations
-  `catalogue_snapshot.py` resolves the whole order's catalogue in **exactly two
-  statements** — one restaurant-scoped `MenuItem` read and one batched allergen-tag
-  read — under one captured `now`, so every line of an order is priced against the
-  same menu and the same clock. It is what makes a concurrent operator edit either
-  wholly before or wholly after an order, never halfway through one
+    not collapsed) — the asymmetry is deliberate and spelled out at both declarations.
+    **EXTRAS CARRY THEIR OWN FULLY RESOLVED IDENTITY, not just an id**
+    (`ResolvedExtra` + `extra_identity`: item, reference unit, effective unit,
+    deliverability, name snapshot, allergen snapshot). An id-only extras signature
+    merged two lines whose CHILDREN differed — a repriced, sold-out, renamed or
+    re-tagged extra merging into a line priced before the change — so the stored row
+    disagreed with the quote about what the kitchen was preparing. **AND THE
+    REQUIRED-EXTRAS OUTCOME IS DETERMINED BEFORE THE FINAL MERGE IDENTITY**, never
+    after: computing deliverability afterwards decides identity on a property the line
+    does not yet have. `ConOrder.resolve_line` is the ONE resolution both
+    `add_order_item` and `find_existing_order_item`'s fallback go through, so the two
+    cannot form different opinions about one line. **Defect 2 is NOT HTTP-REACHABLE** —
+    no live route adds an item to an existing order — and
+    `tests_order_merge_identity.py` says so in terms rather than implying a tenant
+    bypass that does not exist
+  `catalogue_snapshot.py` resolves the whole order's catalogue in **exactly ONE
+  statement**, under one captured `now`, so every line of an order is priced against
+  the same menu and the same clock. It is what makes a concurrent operator edit
+  either wholly before or wholly after an order, never halfway through one.
+  **IT USED TO BE TWO** — a `MenuItem` read and a batched allergen-tag read — and
+  under READ COMMITTED each statement takes its OWN snapshot, so ONE operator
+  transaction changing a dish definition AND its allergen links could commit between
+  them and be HALF-OBSERVED: the new price with the old allergens, or the reverse, on
+  a ticket a kitchen works from. The labels are now aggregated INTO the item read by
+  `JSONBAgg(JSONB_BUILD_OBJECT(...))`, so name/icon/colour alignment is STRUCTURAL
+  rather than inferable from three parallel `ArrayAgg`s. It is **PostgreSQL-only with
+  no fallback**, deliberately — a portable second path would be a second opinion, and
+  this repository already requires PostgreSQL. Rejected alternatives, for the next
+  reader: `prefetch_related` (still two statements), a per-transaction
+  `REPEATABLE READ` (cannot be set mid-transaction) and an optimistic re-read (adds a
+  query, breaking the pinned budget). The proof is a two-connection
+  `TransactionTestCase` firing a REAL competing commit from a `connection.execute_wrapper`
+  seam at the statement boundary — a seam that SURVIVES the fold, so the test still
+  means something after the defect is fixed. The fix REMOVES a query — see the read
+  budget below
 - Order acceptance is bound to the reviewed quote (D02): ✅ `Order.pricing_version`
   (migration `orders_app/0037`, additive, `db_default` LEGACY) plus an opaque
   `quote_ref` derived from the PERSISTED lines and totals (`order_quote.py`, SHA-256
@@ -227,10 +281,14 @@ so keep it current when conventions change.
   NOTHING: the diner table session remains the sole authority for whose order this is.
   A LEGACY draft is never repriced or deleted, only refused, and the client re-prices
   the unchanged basket. See `BREAKING_CHANGES.md` §13
-- Order-path READ BUDGET: ✅ (PR-H §4) — the per-line cost inside `_create_order`'s
-  transaction is **4 queries** (the chokepoint's restaurant-scoped `MenuItem` guard,
-  the merge lookup, the allergen-tag read, the INSERT); a 4-line order runs 35
-  queries, a 1-line order 23. It was 9/line, 54 and 27. Pinned by
+- Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
+  `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
+  4-line order runs **22** and a 1-line order **19**. The ladder, measured on one
+  fixture across every pass: 4-line 54 → 35 (D01) → 23 (D02) → 22 (the allergen read
+  folded into the snapshot); 1-line 27 → 23 → 20 → 19; per-line 9 → 4 → 1. **The most
+  recent repin went DOWN, and it went down BECAUSE of the coherence fix** — folding
+  two statements into one is what removed both the half-observed snapshot and the
+  query. Pinned by
   `orders_app/tests_order_path_queries.py` with EXACT counts plus a flatness case,
   so a re-introduced N+1 fails CI. What made the difference: `add_order_item` takes
   an optional `order=` (the instance `_create_order` already holds, restaurant FK
@@ -1074,6 +1132,31 @@ so keep it current when conventions change.
   it removed 7 queries per dashboard load. The response carries ONE window; the
   frontend issues its own second call for the comparison basis. Do not
   reintroduce either — see `BREAKING_CHANGES.md` §10.
+  **The `dashboard-v2` REVENUE CARD DISCLOSES WHICH PRICING CONVENTION IT SUMMED**
+  (D02/C). `gross` is `Sum('total_cost')` and `discounts` is `Sum('savings')`, and
+  D02 changed what both COLUMNS MEAN: a CORRECTED order's `total_cost` includes paid
+  modifier costs and its `savings` can never be negative, while a LEGACY one's
+  excludes them and could be. A window spanning the deployment therefore reported
+  three figures — `gross`, `discounts`, and the `net` derived from both — mixing two
+  measurements, with nothing on the response saying so; the boundary was described
+  ONLY in `BREAKING_CHANGES.md` §13, which an operator reading a dashboard never
+  sees. The card now carries an additive
+  `pricing_conventions: {mixed, legacy_orders, corrected_orders, notice}`.
+  **NO ORDER IS REPRICED, REWRITTEN OR EXCLUDED** — both conventions stay in the
+  totals, because dropping the legacy half would silently understate a real trading
+  period, which is worse than a mixed figure that says it is mixed. The `notice` is
+  present ONLY when the window actually straddles the boundary (one that appeared on
+  every response would be ignored on the one that mattered), and it is a sentence
+  about COMPARABILITY, never about correctness: the payable is unaffected. **IT COSTS
+  NOTHING** — the counts are conditional aggregates folded into an aggregate that had
+  to run anyway, so `_build_revenue` went from 5 queries to **4** (the two money sums
+  were two separate round trips over the same queryset). That repin is DOWNWARD and
+  carries its breakdown. Known adjacent surface, deliberately NOT given a notice here:
+  `sales-trends` / `sales-hourly` emit a `discount` column over the same `savings`
+  contract, but their headline `revenue` is `actual_cost` — the payable, which means
+  the same thing under both conventions — so the mixing there is confined to a
+  non-headline column and widening the change would have touched four more response
+  shapes.
   Sales/Diners/Menu are Order-based and share `sale_filters`; Diners operates
   strictly on non-NULL-customer sale orders so anonymous-QR guests are never
   collapsed into a phantom repeat diner (guests are surfaced as a separate count,
@@ -4311,11 +4394,48 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   does not grow with the catalogue, and reports counts plus bounded samples of ids
   and stable reason codes — never catalogue JSON, order contents or personal data.
   Exit codes: 0 clean, 1 blocker, 2 concerns only, 3 INSPECTION INCOMPLETE (never
-  reported as clean). It has NO fix/repair mode and performs no save, audit write,
+  reported as clean). **INCOMPLETE COVERS A PARTIAL PASS, NOT ONLY A FAILED ONE, AND
+  IT DOMINATES 1 AND 2** — the extras axis is skipped past `MAX_TRACKED_UNPRICEABLE`,
+  and reporting that run as `2` would be the more dangerous of the two available lies:
+  a concern list reads as something an operator can work through to the end, when part
+  of the pass that produced it never ran. A definite blocker from section 1 is still
+  printed in full and named in the exit reason (`_exit` takes a contextual one for
+  exactly that case), because one code has to be chosen and neither finding may be
+  lost to the choice. Until the Codex review of PR #315 the skip was a stderr NOTE
+  only, so such a run could print `CLEAN` and exit 0. It has NO fix/repair mode and performs no save, audit write,
   notification or provider call, and it runs against the PRE-migration schema so it
   can inform the deploy decision rather than only confirm it. A preflight is a
   point-in-time observation, not a substitute for the constraint. Invocation:
-  `python manage.py check_order_input_compatibility [--sample-size N] [--chunk-size N]`
+  `python manage.py check_order_input_compatibility [--sample-size N] [--chunk-size N]`.
+  **IT NOW INSPECTS MONEY TOO (D02/C).** The structural pass says in terms that it
+  "validates NO monetary configuration", so before this it could report a catalogue
+  CLEAN while D02 refused items in it at checkout. It reuses `resolve_price`,
+  `parse_money` and — the one that matters most — `modifier_adjustment`, all asserted
+  BY IDENTITY, and reads an adjustment exactly as `con_orders` does
+  (`choice.get('additionalCost', 0)`, **no `or 0`**): an `or 0` here was quietly more
+  permissive than the thing the command exists to predict, calling a catalogue clean
+  that checkout then refuses on a stored `None` / `''` / `[]` / `{}` / `False`.
+  FIVE NAMED DISTINCTIONS, kept apart on purpose: an unpriceable LIVE item is a
+  CONCERN while an unpriceable DRAFT one is INFORMATIONAL; a required group with
+  **FEWER PRICEABLE CHOICES THAN ITS OWN MINIMUM** is a CONCERN (no variant of the dish
+  is orderable) while an unreadable choice beside ENOUGH readable ones is INFORMATIONAL
+  (reporting it would tell an operator to take a working dish down). **THE SHORTFALL IS
+  MEASURED AGAINST THE REQUIREMENT, NEVER AGAINST ZERO** — `readable == 0` answered only
+  the requires-ONE case, so a group requiring TWO with one readable choice beside one
+  unreadable one was filed as informational even though every request meeting the
+  minimum must name the unreadable choice and be refused (found by the Codex review of
+  PR #315). The structural pass does not cover it: `MIN_EXCEEDS_DEFINED_CHOICES` fires
+  only when the minimum exceeds the DEFINED choices, and the monetary check stays scoped
+  to groups that actually hold an unreadable choice so it never double-reports a
+  structural defect. And a possible NEGATIVE combination is a
+  worst-case bound that IGNORES group maxima, so it is informational and says which
+  selections refuse is decidable only at checkout. A required EXTRAS minimum that
+  cannot be met from the priceable extras is its own concern, resolved by a SECOND
+  streaming pass over `has_extras` parents rather than a per-item lookup, off a
+  BOUNDED id set that reports itself incomplete past the cap. ONE observation time is
+  captured for the whole scan — a discount window is time-dependent, and reading the
+  clock per item would describe no single moment. Still read-only, still bounded,
+  still no repair mode, and the report still carries no catalogue JSON
 - `unlock_platform_admin` in `platform_admin_app/management/commands/` — clears
   `failed_attempts`/`locked_until` for a platform-staff account under a row lock and
   audits `ADMIN_AUTH_LOCKOUT_CLEARED`. Does NOT touch the password, TOTP secret or

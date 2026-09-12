@@ -34,10 +34,12 @@ from orders_app.controllers.services.order_admission import (
     evaluate,
 )
 from orders_app.controllers.services.order_pricing import (
-    PricingRefused, extend, line_identity, modifier_adjustment, price_unit,
-    unit_from_row,
+    PricingRefused, ResolvedExtra, extend, extra_identity, line_identity,
+    modifier_adjustment, price_unit, unit_from_row,
 )
-from misc_app.controllers.money import MoneyConfigError, quantize_money
+from misc_app.controllers.money import (
+    MoneyConfigError, quantize_money, working_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -449,18 +451,124 @@ class ConOrder:
         return {'present': False}
 
     @staticmethod
+    def resolve_line(item: dict, menu_item, restaurant, *, verdict=None,
+                     allergen_tags=None, snapshot=None, now=None) -> dict:
+        """Price ONE submitted line completely and derive its canonical identity.
+
+        THE ONE RULE, shared by :meth:`add_order_item` and by
+        :meth:`find_existing_order_item`'s no-identity fallback. Both need the
+        same three things to happen in the same order — resolve the parent,
+        resolve the CHILDREN, decide the REQUIRED-EXTRAS outcome — before a key
+        exists, and a second copy of that sequence is exactly how the two would
+        come to disagree about which lines are the same line.
+
+        Returns everything the caller needs to persist the line as well, so
+        nothing is resolved twice.
+        """
+        if verdict is None:
+            verdict = menu_item.price_verdict(now)
+        if allergen_tags is None:
+            allergen_tags = [
+                {'name': t.name, 'icon': t.icon, 'colour': t.colour}
+                for t in menu_item.tags.filter(category='allergen')
+            ]
+
+        priced = ConOrder._resolve_for_pricing(
+            menu_item, item.get('selected_modifiers') or {}, now=now,
+            verdict=verdict,
+        )
+        if priced.get('status') != 200:
+            return priced
+
+        unit = priced['unit']
+        selected_options = priced['options']
+        deliverable = priced['deliverable']
+        modifiers_snapshot = [
+            f"{o['name']}: {o['choices']}" for o in selected_options
+        ]
+
+        extras_resolution = ConOrder.resolve_line_extras(
+            item=item, restaurant=restaurant, snapshot=snapshot, now=now,
+        )
+        if extras_resolution.get('status') != 200:
+            return extras_resolution
+        resolved_extras = extras_resolution['extras']
+
+        # P4: a dish whose REQUIRED extras minimum cannot be met by the extras
+        # that actually survive is not deliverable. It counts the surviving
+        # ELIGIBLE CHOSEN extras — one unavailable extra does not condemn a dish
+        # whose remaining selections still satisfy the minimum — and it never
+        # substitutes an extra the diner did not choose. Before D02 the
+        # publication gate counted SUBMITTED extras, so a dish with a required
+        # sauce that had just sold out shipped available, payable and unmakeable.
+        #
+        # IT IS DECIDED HERE, BEFORE THE KEY. It used to run after the row was
+        # written, and the index was then re-keyed on the flipped state while the
+        # LOOKUP still used the pre-flip key — so two identical selections whose
+        # required extra had sold out became two rows, neither findable under the
+        # other's key.
+        minimum = menu_item.extras_min_selections or 0
+        if deliverable and menu_item.has_extras and minimum > 0:
+            surviving = sum(1 for e in resolved_extras if e.deliverable)
+            if surviving < minimum:
+                deliverable = False
+
+        identity = ConOrder.line_identity_for(
+            menu_item, item, unit, deliverable, menu_item.name,
+            modifiers_snapshot,
+            extras=[
+                ResolvedExtra(
+                    menu_item=e.menu_item, unit=e.unit,
+                    # The child's EFFECTIVE deliverability on this line: its own
+                    # availability AND the parent's. That is the value that gets
+                    # stored, so it is the value the key must carry.
+                    deliverable=e.deliverable and deliverable,
+                    allergen_tags=e.allergen_tags,
+                )
+                for e in resolved_extras
+            ],
+            allergen_snapshot=allergen_tags,
+        )
+        return {
+            'status': 200,
+            'unit': unit,
+            'deliverable': deliverable,
+            'selected_options': selected_options,
+            'modifiers_snapshot': modifiers_snapshot,
+            'allergen_tags': allergen_tags,
+            'extras': resolved_extras,
+            'identity': identity,
+        }
+
+    @staticmethod
     def line_identity_for(menu_item, item, unit, deliverable, name_snapshot,
-                          option_labels):
-        """The canonical D03 identity of the parent line this request describes."""
+                          option_labels, extras=(), allergen_snapshot=None):
+        """The canonical D03 identity of the parent line this request describes.
+
+        ``extras`` is the line's RESOLVED children (see
+        :meth:`resolve_line_extras`), never the submitted ids: the ids alone
+        would make this key claim a comparison it was not making.
+        """
         return line_identity(
             item_id=menu_item.pk,
             selected_modifiers=item.get('selected_modifiers') or {},
-            extra_ids=item.get('extras') or [],
+            extras=[
+                extra_identity(
+                    item_id=resolved.menu_item.pk,
+                    reference_unit=resolved.unit.reference_unit,
+                    effective_unit=resolved.unit.effective_unit,
+                    deliverable=resolved.deliverable,
+                    name_snapshot=resolved.menu_item.name,
+                    allergen_snapshot=resolved.allergen_tags,
+                )
+                for resolved in extras
+            ],
             reference_unit=unit.reference_unit,
             effective_unit=unit.effective_unit,
             deliverable=deliverable,
             name_snapshot=name_snapshot,
             modifiers_snapshot=option_labels,
+            allergen_snapshot=allergen_snapshot,
         )
 
     @staticmethod
@@ -477,12 +585,27 @@ class ConOrder:
         return line_identity(
             item_id=row.item_id,
             selected_modifiers=row.selected_modifiers or {},
-            extra_ids=[child.item_id for child in children],
+            # The CHILDREN'S OWN STORED FACTS, not their ids. A stored line and
+            # an incoming request are still compared on exactly the same key —
+            # the request side resolves its extras first and supplies the same
+            # shape.
+            extras=[
+                extra_identity(
+                    item_id=child.item_id,
+                    reference_unit=child.unit_price,
+                    effective_unit=child.discounted_price,
+                    deliverable=bool(child.available),
+                    name_snapshot=child.item_name_snapshot,
+                    allergen_snapshot=child.allergen_tags_snapshot,
+                )
+                for child in children
+            ],
             reference_unit=row.unit_price,
             effective_unit=row.discounted_price,
             deliverable=bool(row.available),
             name_snapshot=row.item_name_snapshot,
             modifiers_snapshot=row.modifiers_snapshot or [],
+            allergen_snapshot=row.allergen_tags_snapshot,
         )
 
     @staticmethod
@@ -517,18 +640,17 @@ class ConOrder:
         if menu_item is None:
             menu_item = MenuItem.objects.get(pk=item['item'])
         if identity is None:
-            # The request's OWN selections must be priced here — an identity
-            # computed without them would describe a different line.
-            resolved = ConOrder._resolve_for_pricing(
-                menu_item, item.get('selected_modifiers') or {},
+            # The request's OWN selections AND ITS CHILDREN must be priced here
+            # — an identity computed without them would describe a different
+            # line. It goes through the SAME `resolve_line` the creation path
+            # uses, so the two cannot hold different opinions about what makes
+            # two lines identical.
+            resolved = ConOrder.resolve_line(
+                item, menu_item, menu_item.section.restaurant,
             )
             if resolved.get('status') != 200:
                 return None
-            identity = ConOrder.line_identity_for(
-                menu_item, item, resolved['unit'], resolved['deliverable'],
-                menu_item.name,
-                [f"{o['name']}: {o['choices']}" for o in resolved['options']],
-            )
+            identity = resolved['identity']
 
         candidates = list(
             OrderItem.objects.filter(
@@ -736,33 +858,33 @@ class ConOrder:
         )
 
     @staticmethod
-    def process_item_extras(item: dict, order_id: str, order_item_id: str,
-                            restaurant: Restaurant, parent_quantity: int = 1,
-                            parent_deliverable: bool = True, snapshot=None,
+    def resolve_line_extras(item: dict, restaurant: Restaurant, snapshot=None,
                             now=None) -> dict:
-        """Persist one line's selected extras, each at the parent's quantity.
+        """Resolve one line's selected extras WITHOUT writing anything.
 
-        D02 (P1): an extra is ONE PER UNIT OF ITS PARENT DISH — the rule the
-        diner app's basket arithmetic has always used. It was hardcoded
-        ``quantity = 1`` here, so three burgers with cheese were charged, and
-        prepared, with one cheese.
+        Split out of ``process_item_extras`` (D03 completion) because the merge
+        key needs these facts BEFORE the parent row is written: a key built from
+        extra IDS alone claims a comparison it is not making, and a key assigned
+        before the required-extras outcome is decided is a key the next
+        identical line will not be found under.
 
-        D02 (P5): when the PARENT is not deliverable its extras are zeroed and
-        flagged too. They were previously priced on their own availability
-        alone, so a sold-out dish left its cheese payable and on the kitchen
-        board with no dish to put it on.
+        Returns ``{'status': 200, 'extras': [ResolvedExtra, ...]}`` — in
+        SUBMITTED ORDER, one entry per submitted extra — or a controlled 400 the
+        caller must propagate. ``deliverable`` on each entry is the extra's OWN
+        deliverability; the parent factor is applied by the caller, which is the
+        only place that knows the line's final state.
 
-        Returns ``{'status': 200, 'deliverable_extras': n}`` or a controlled 400
-        the caller must propagate.
+        It costs exactly what the old inline resolution cost: nothing with a
+        snapshot, one scoped fetch per extra without one. The caller passes the
+        result to :meth:`persist_line_extras`, so nothing is resolved twice.
         """
         extras = item.get('extras', None)
         if extras is None:
-            return {'status': 200, 'deliverable_extras': 0, 'rows': []}
+            return {'status': 200, 'extras': []}
         if not isinstance(extras, list):
             return {'status': 400, 'message': NOT_ON_MENU_MESSAGE}
 
-        deliverable_extras = 0
-        created_rows = []
+        resolved_extras = []
         for extra_id in extras:
             resolved = snapshot.get(extra_id) if snapshot is not None else None
             if resolved is not None:
@@ -792,13 +914,44 @@ class ConOrder:
             if priced.get('status') != 200:
                 return priced
 
-            extra_deliverable = priced['deliverable'] and parent_deliverable
+            resolved_extras.append(ResolvedExtra(
+                menu_item=extra_item,
+                unit=priced['unit'],
+                deliverable=priced['deliverable'],
+                allergen_tags=allergen_tags,
+            ))
+        return {'status': 200, 'extras': resolved_extras}
+
+    @staticmethod
+    def persist_line_extras(resolved_extras, order_id: str, order_item_id: str,
+                            parent_quantity: int = 1,
+                            parent_deliverable: bool = True) -> dict:
+        """Write already-resolved extras as child rows.
+
+        D02 (P1): an extra is ONE PER UNIT OF ITS PARENT DISH — the rule the
+        diner app's basket arithmetic has always used. It was hardcoded
+        ``quantity = 1``, so three burgers with cheese were charged, and
+        prepared, with one cheese.
+
+        D02 (P5): when the PARENT is not deliverable its extras are zeroed and
+        flagged too. They were previously priced on their own availability
+        alone, so a sold-out dish left its cheese payable and on the kitchen
+        board with no dish to put it on.
+
+        Returns ``{'status': 200, 'deliverable_extras': n, 'rows': [...]}`` or a
+        controlled 400 the caller must propagate.
+        """
+        deliverable_extras = 0
+        created_rows = []
+        for resolved in resolved_extras:
+            extra_item = resolved.menu_item
+            extra_deliverable = resolved.deliverable and parent_deliverable
             if extra_deliverable:
                 deliverable_extras += 1
 
             try:
                 amounts = ConOrder.extended_values(
-                    priced['unit'],
+                    resolved.unit,
                     parent_quantity if extra_deliverable else 0,
                 )
             except (PricingRefused, MoneyConfigError):
@@ -812,10 +965,10 @@ class ConOrder:
                 # kitchen snapshots (extras carry no modifiers)
                 'item_name_snapshot': extra_item.name,
                 'modifiers_snapshot': [],
-                'allergen_tags_snapshot': allergen_tags,
+                'allergen_tags_snapshot': resolved.allergen_tags,
                 'options': [],
                 'selected_modifiers': {},
-                'discounted': priced['unit'].discount_active,
+                'discounted': resolved.unit.discount_active,
                 'available': extra_deliverable,
                 'status': 'initiated' if extra_deliverable else 'unavailable',
                 **amounts,
@@ -839,6 +992,32 @@ class ConOrder:
             'deliverable_extras': deliverable_extras,
             'rows': created_rows,
         }
+
+    @staticmethod
+    def process_item_extras(item: dict, order_id: str, order_item_id: str,
+                            restaurant: Restaurant, parent_quantity: int = 1,
+                            parent_deliverable: bool = True, snapshot=None,
+                            now=None) -> dict:
+        """Resolve AND persist one line's extras — the pre-split entry point.
+
+        Kept so a caller that has not resolved its extras itself still works.
+        ``add_order_item`` no longer uses it: it needs the resolution before the
+        merge key, so it calls the two halves in order.
+        """
+        resolution = ConOrder.resolve_line_extras(
+            item=item, restaurant=restaurant, snapshot=snapshot, now=now,
+        )
+        if resolution.get('status') != 200:
+            return resolution
+        if not resolution['extras'] and item.get('extras', None) is None:
+            return {'status': 200, 'deliverable_extras': 0, 'rows': []}
+        return ConOrder.persist_line_extras(
+            resolved_extras=resolution['extras'],
+            order_id=order_id,
+            order_item_id=order_item_id,
+            parent_quantity=parent_quantity,
+            parent_deliverable=parent_deliverable,
+        )
 
     @staticmethod
     def add_order_item(item: dict, order_id: str, order: Order = None,
@@ -887,22 +1066,24 @@ class ConOrder:
                 for t in menu_item.tags.filter(category='allergen')
             ]
 
-        priced = ConOrder._resolve_for_pricing(
-            menu_item, item.get('selected_modifiers') or {}, now=now,
-            verdict=verdict,
+        # ONE call resolves the parent, the children and the required-extras
+        # outcome, in that order, and derives the key from all of it. The same
+        # call backs the merge lookup's fallback, so a caller with no index can
+        # never disagree with this one about which lines are the same line.
+        resolved = ConOrder.resolve_line(
+            item, menu_item, order.restaurant, verdict=verdict,
+            allergen_tags=allergen_tags, snapshot=snapshot, now=now,
         )
-        if priced.get('status') != 200:
-            return priced
+        if resolved.get('status') != 200:
+            return resolved
 
-        unit = priced['unit']
-        selected_options = priced['options']
-        deliverable = priced['deliverable']
-        modifiers_snapshot = [f"{o['name']}: {o['choices']}" for o in selected_options]
-
-        identity = ConOrder.line_identity_for(
-            menu_item, item, unit, deliverable, menu_item.name,
-            modifiers_snapshot,
-        )
+        unit = resolved['unit']
+        deliverable = resolved['deliverable']
+        selected_options = resolved['selected_options']
+        modifiers_snapshot = resolved['modifiers_snapshot']
+        allergen_tags = resolved['allergen_tags']
+        resolved_extras = resolved['extras']
+        identity = resolved['identity']
 
         existing_item = (
             index.get(identity) if index is not None
@@ -952,83 +1133,31 @@ class ConOrder:
         # are read_only on the serializer).
         row = item_record.save(order=order, item=menu_item)
 
-        extras_result = ConOrder.process_item_extras(
-            item=item,
+        # The children are written from the SAME resolution the key was built
+        # from, so the stored rows and the key cannot describe different extras.
+        # `deliverable` already carries the required-extras outcome, so the
+        # zeroing P5 performs is applied as the rows are written rather than by
+        # a second pass that rewrites them.
+        extras_result = ConOrder.persist_line_extras(
+            resolved_extras=resolved_extras,
             order_id=order_id,
             order_item_id=str(row.pk),
-            restaurant=order.restaurant,
             parent_quantity=row.quantity,
             parent_deliverable=deliverable,
-            snapshot=snapshot,
-            now=now,
         )
         if extras_result.get('status') != 200:
             return extras_result
 
-        # P4: a dish whose REQUIRED extras minimum cannot be met by the extras
-        # that actually survived is not deliverable. It counts the surviving
-        # ELIGIBLE CHOSEN extras — one unavailable extra does not condemn a dish
-        # whose remaining selections still satisfy the minimum — and it never
-        # substitutes an extra the diner did not choose. Before this the
-        # publication gate counted SUBMITTED extras, so a dish with a required
-        # sauce that had just sold out shipped available, payable and
-        # unmakeable.
         children = extras_result.get('rows') or []
 
-        minimum = menu_item.extras_min_selections or 0
-        if deliverable and menu_item.has_extras and minimum > 0:
-            if extras_result.get('deliverable_extras', 0) < minimum:
-                unmet = ConOrder._mark_line_undeliverable(row, children=children)
-                if unmet.get('status') != 200:
-                    return unmet
-                deliverable = False
-
         if index is not None:
-            # Re-key on the row as persisted: a line that has just been flipped
-            # undeliverable is no longer the same line as a deliverable one, and
-            # P3 keeps those apart. The children are the rows just written, so
-            # keying costs no query.
+            # Keyed on the row as persisted. It equals `identity` by
+            # construction now that the required-extras outcome is decided
+            # BEFORE the key — the assertion of that equality is a test, not a
+            # runtime check, because recomputing it here would cost a second
+            # reading of the same facts.
             index[ConOrder.row_identity(row, children)] = row
         return {'status': 200, 'message': 'Order item added successfully.'}
-
-    @staticmethod
-    def _mark_line_undeliverable(row, children=None):
-        """Zero a parent line and everything that depends on it.
-
-        P5: dependent extras are zeroed and flagged with the parent, so an
-        undeliverable dish can never leave a payable, preparable extra behind.
-        The diner's reconciliation presents this as ONE loss — the dish — rather
-        than the dish and each of its extras separately; that partition lives in
-        ``serialize_order_details``.
-        """
-        row.available = False
-        row.status = 'unavailable'
-        try:
-            ConOrder._extend_row(row, unit_from_row(row), 0)
-        except (PricingRefused, MoneyConfigError):
-            return {
-                'status': 400,
-                'message': 'This item cannot be ordered right now. '
-                           'Please choose another item.',
-            }
-        row.save()
-        if children is None:
-            children = list(
-                OrderItem.objects.filter(parent_item=row, deleted=False)
-            )
-        for child in children:
-            child.available = False
-            child.status = 'unavailable'
-            try:
-                ConOrder._extend_row(child, unit_from_row(child), 0)
-            except (PricingRefused, MoneyConfigError):
-                return {
-                    'status': 400,
-                    'message': 'This item cannot be ordered right now. '
-                               'Please choose another item.',
-                }
-            child.save()
-        return {'status': 200}
 
     @staticmethod
     def update_order_amounts(order: Order) -> dict:
@@ -1050,9 +1179,24 @@ class ConOrder:
             deleted=False,
             order=order
         )
-        total_cost = sum([item.total_cost for item in order_items], Decimal('0'))
-        discounted_cost = sum([item.discounted_cost for item in order_items], Decimal('0'))
-        savings = total_cost - discounted_cost
+        # UNDER THE MODULE'S OWN DECIMAL CONTEXT, not the process default's 28
+        # significant digits. The monetary columns hold 50, and `+` and `-`
+        # ROUND SILENTLY rather than raising, so an order combining a large
+        # schema-valid line with a small one lost the small one outright: a
+        # 1e28 dish plus a 0.01 dish reconciled to exactly the 1e28, and the
+        # cent was gone from the saved order with nothing to notice. The unit
+        # helpers already take this context; the ROLLUP over their results did
+        # not, which is why an exact unit helper is not on its own enough.
+        with working_context():
+            total_cost = sum(
+                [item.total_cost for item in order_items], Decimal('0'))
+            discounted_cost = sum(
+                [item.discounted_cost for item in order_items], Decimal('0'))
+            savings = total_cost - discounted_cost
+        total_cost = quantize_money(total_cost, field='total_cost')
+        discounted_cost = quantize_money(discounted_cost,
+                                         field='discounted_cost')
+        savings = quantize_money(savings, field='savings')
         actual_cost = discounted_cost
 
         # Payment state stays derived from verified transactions. Nothing here
@@ -1065,7 +1209,10 @@ class ConOrder:
             Sum('transaction_amount')
         )['transaction_amount__sum'] or Decimal('0')
 
-        balance_payable = actual_cost - total_paid
+        with working_context():
+            balance_payable = actual_cost - total_paid
+        balance_payable = quantize_money(balance_payable,
+                                         field='balance_payable')
 
         order.total_cost = total_cost
         order.discounted_cost = discounted_cost

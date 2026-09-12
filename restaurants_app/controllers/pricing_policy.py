@@ -165,6 +165,20 @@ def resolve_price(primary_price, discount_details, now=None):
             raw_effective = reference - (reference * pct / _HUNDRED)
         else:
             raw_effective = reference - amt
+        # THE SIGN IS DECIDED ON THE RAW VALUE, BEFORE ROUNDING, and that
+        # ordering is the whole guard rather than a refinement of it. Rounding
+        # to two places maps a small negative payable onto NEGATIVE ZERO, and
+        # `Decimal('-0.00') == Decimal('0')` is True — so the post-quantization
+        # `effective < _ZERO` test below could not see it. A 0.01 dish with a
+        # 100.5% discount resolved USABLE at `Decimal('-0.00')`: an incoherent
+        # configuration published on the menu and sold for nothing, which is the
+        # same free-dish outcome the pre-D02 zero clamp produced, arrived at by
+        # arithmetic instead of by a clamp. The raw value is exact at working
+        # precision, so it still carries the sign that says so.
+        raw_is_negative = raw_effective < _ZERO
+    if raw_is_negative:
+        return _unusable(DISCOUNT_EXCEEDS_PRICE)
+
     try:
         effective = quantize_money(raw_effective, field='effective_base')
     except MoneyConfigError:
@@ -173,7 +187,9 @@ def resolve_price(primary_price, discount_details, now=None):
     # A discount may take the price to zero (100% off, a waived dish) but never
     # below it, and never ABOVE the reference. Either direction is an incoherent
     # configuration, and the pre-fix zero clamp turned the first one into a free
-    # dish. Fail closed instead.
+    # dish. Fail closed instead. KEPT as defence in depth beside the raw-sign
+    # test above: this one still catches an effective price ABOVE the reference,
+    # which no sign check can express.
     if effective < _ZERO or effective > reference:
         return _unusable(DISCOUNT_EXCEEDS_PRICE)
 

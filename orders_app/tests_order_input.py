@@ -1164,16 +1164,23 @@ class D01LateRollbackTests(TransactionTestCase):
         an order would survive holding a parent with no extras and a stale
         roll-up.
         """
+        # THE SEAM IS `persist_line_extras`, which is where CHILD WORK happens
+        # and still runs AFTER the parent row is written — the same strictly-late
+        # failure point this test has always used. (It was `process_item_extras`
+        # until the D03 completion split resolution out of persistence so the
+        # merge key could see the children; resolution now runs BEFORE the
+        # parent row exists, so failing there would be an EARLY rejection and
+        # would prove nothing about rollback.)
         from orders_app.controllers.con_orders import ConOrder as Con
-        real_extras = Con.process_item_extras
+        real_extras = Con.persist_line_extras
         seen = {'calls': 0, 'inside': None}
 
-        def spy(item, order_id, order_item_id, restaurant, **kwargs):
+        def spy(resolved_extras, order_id, order_item_id, **kwargs):
             seen['calls'] += 1
             if seen['calls'] == 1:
                 result = real_extras(
-                    item=item, order_id=order_id, order_item_id=order_item_id,
-                    restaurant=restaurant, **kwargs,
+                    resolved_extras=resolved_extras, order_id=order_id,
+                    order_item_id=order_item_id, **kwargs,
                 )
                 seen['inside'] = {
                     'orders': Order.objects.filter(pk=order_id).count(),
@@ -1188,7 +1195,7 @@ class D01LateRollbackTests(TransactionTestCase):
                 return result
             return {'status': 400, 'message': 'injected failure in child work'}
 
-        with mock.patch.object(Con, 'process_item_extras', staticmethod(spy)):
+        with mock.patch.object(Con, 'persist_line_extras', staticmethod(spy)):
             result = _create_order(
                 restaurant=self.restaurant, table=table or self.table,
                 items=self._items_with_extras(),

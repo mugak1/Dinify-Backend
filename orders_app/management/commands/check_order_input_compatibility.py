@@ -42,8 +42,14 @@ IT REPORTS COUNTS AND BOUNDED SAMPLES — primary keys and stable reason codes,
 never catalogue JSON, order contents, customer data or credentials. Rows are
 streamed in chunks, so memory does not grow with the size of the catalogue.
 
-AN INCOMPLETE INSPECTION IS NEVER REPORTED AS A CLEAN ONE: any failure during
-the scan exits non-zero and says so.
+AN INCOMPLETE INSPECTION IS NEVER REPORTED AS A CLEAN ONE, and that covers a
+PARTIAL one as well as a failed one. A pass that deliberately skips an axis —
+the required-extras check past its tracking bound — returns that fact, and it
+DOMINATES the exit code: a concern list produced by a pass that did not finish
+is not an exhaustive list, so reporting it as ``2`` would read as work an
+operator could get to the end of. A definite blocker found in question 1 is
+still reported in full and named in the exit reason, but it does not make the
+catalogue answer known.
 
     python manage.py check_order_input_compatibility
     python manage.py check_order_input_compatibility --sample-size 50 --chunk-size 1000
@@ -54,12 +60,14 @@ Exit codes:
     1  BLOCKER — negative persisted quantities exist; the migration will abort
     2  compatibility concerns only — the migration will apply, but some items
        are not orderable as configured
-    3  the inspection did not complete; the result is unknown
+    3  the inspection did not complete — it raised, or it deliberately
+       skipped an axis — so the catalogue result is unknown. Dominates 1 and 2
 
 A PREFLIGHT IS A POINT-IN-TIME OBSERVATION. It is not a substitute for the
 database constraint, which is what keeps the invariant true afterwards.
 """
 from django.core.management.base import BaseCommand, CommandError
+from django.utils import timezone
 
 from orders_app.controllers.services.order_input import (
     MAX_CHOICES_PER_GROUP,
@@ -80,7 +88,22 @@ from restaurants_app.controllers.modifier_definition import (
     REQUIRED_GROUPS_EXCEED_CEILING,
     inspect_modifier_definition,
 )
+from misc_app.controllers.money import parse_money
+from orders_app.controllers.services.order_pricing import (
+    PricingRefused, modifier_adjustment,
+)
+from restaurants_app.controllers.pricing_policy import (
+    DISCOUNT_EXCEEDS_PRICE, DISCOUNT_UNREADABLE, PRICE_UNREADABLE, resolve_price,
+)
+from restaurants_app.controllers.menu_publication import (
+    normalize_extras_applicable,
+)
 from restaurants_app.models import MenuItem
+
+#: Bound on the unpriceable-id set the extras axis needs. Past it the extras
+#: check reports itself NOT DONE rather than growing without limit — an
+#: incomplete inspection must never read as a clean one.
+MAX_TRACKED_UNPRICEABLE = 10_000
 
 EXIT_CLEAN = 0
 EXIT_BLOCKER = 1
@@ -93,6 +116,24 @@ EXTRAS_MIN_EXCEEDS_CEILING = 'extras_min_exceeds_ceiling'
 DEFAULT_SAMPLE_SIZE = 20
 MAX_SAMPLE_SIZE = 200
 DEFAULT_CHUNK_SIZE = 500
+
+
+def _short(value, limit=24):
+    """A bounded, printable form of an opaque identifier. Never the catalogue
+    JSON, never an unbounded operator string."""
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + '…'
+
+
+def _as_uuid(value):
+    """Parse a stored allowlist member to a UUID, or ``None``. The allowlist is
+    canonical lowercase-UUID strings; the ids collected during the scan are real
+    UUID objects, so one side has to be converted to compare them."""
+    import uuid as _uuid
+    try:
+        return _uuid.UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 class _Bucket:
@@ -167,8 +208,8 @@ class Command(BaseCommand):
 
         try:
             blockers = self._inspect_quantities(sample_size)
-            concerns, informational, scanned = self._inspect_catalogue(
-                sample_size, chunk_size,
+            concerns, informational, scanned, incomplete = (
+                self._inspect_catalogue(sample_size, chunk_size)
             )
         except Exception as error:  # noqa: BLE001 - reported, never swallowed
             # An incomplete inspection must never read as a clean one.
@@ -201,6 +242,10 @@ class Command(BaseCommand):
         self._heading(
             f'2. CATALOGUE COMPATIBILITY  ({scanned} menu items inspected)'
         )
+        # BEFORE the buckets, because it qualifies every one of them: a list
+        # produced by a pass that did not finish is not an exhaustive list.
+        for note in incomplete:
+            self.stdout.write(self.style.ERROR(f'      {note}'))
         any_concern = False
         for label, bucket in concerns:
             if bucket:
@@ -222,6 +267,29 @@ class Command(BaseCommand):
         )
 
         self._heading('RESULT')
+        if incomplete:
+            # AN INCOMPLETE INSPECTION IS NOT A VERDICT. Part of the catalogue
+            # pass did not run, so neither CLEAN nor CONCERNS can be claimed —
+            # and CONCERNS is the more dangerous of the two, because it reads as
+            # an exhaustive list an operator can work through to the end. A
+            # definite blocker from section 1 is still reported in full above and
+            # named in the exit reason, but a fact established there does not
+            # make the catalogue answer known.
+            self.stdout.write(self.style.ERROR(
+                'INCOMPLETE — part of the catalogue inspection did not run, so '
+                'the catalogue result is UNKNOWN. Do not treat this as a pass.'
+            ))
+            reason = self.EXIT_REASONS[EXIT_INCOMPLETE]
+            if blockers:
+                self.stdout.write(self.style.ERROR(
+                    '      A definite blocker was also found above: resolve the '
+                    'negative quantities before deploying orders_app/0036.'
+                ))
+                reason = (
+                    'negative order-item quantities exist AND part of the '
+                    'catalogue inspection did not run; catalogue result unknown'
+                )
+            return self._exit(EXIT_INCOMPLETE, reason)
         if blockers:
             self.stdout.write(self.style.ERROR(
                 'BLOCKED — resolve the negative quantities before deploying '
@@ -251,15 +319,24 @@ class Command(BaseCommand):
             'as configured'
         ),
         EXIT_INCOMPLETE: 'the inspection did not complete; result unknown',
+        # ^ covers BOTH a pass that raised and one that deliberately skipped an
+        #   axis; `_exit(reason=...)` narrows it where more can be said.
     }
 
-    def _exit(self, code):
+    def _exit(self, code, reason=None):
         """A non-zero exit is what makes this usable as an operator gate. It is
         raised rather than returned because Django prints a command's return
-        value and exits 0 regardless."""
+        value and exits 0 regardless.
+
+        `reason` overrides the table for the one case a fixed sentence cannot
+        state: an inspection that did not complete WHILE a definite blocker was
+        also found. The exit reason is the last line an operator reads, so it
+        has to carry both rather than pick one.
+        """
         self.exit_code = code
         if code:
-            raise CommandError(self.EXIT_REASONS[code], returncode=code)
+            raise CommandError(reason or self.EXIT_REASONS[code],
+                               returncode=code)
         return None
 
     # -- section 1 --------------------------------------------------------
@@ -280,6 +357,119 @@ class Command(BaseCommand):
         return bucket
 
     # -- section 2 --------------------------------------------------------
+    # ------------------------------------------------------------------
+    # D02 MONETARY COMPATIBILITY
+    #
+    # The structural pass above answers "is this definition well-formed?". It
+    # states in terms that it "validates NO monetary configuration", so it
+    # CANNOT certify a catalogue against D02's new price refusals: an item whose
+    # `primary_price` is unreadable, or whose currently-scheduled discount is
+    # incoherent, is now neither published nor orderable, and nothing here used
+    # to say so.
+    #
+    # IT REUSES THE SHARED PRIMITIVES — `resolve_price` and `parse_money`, the
+    # exact functions checkout calls — so the preflight and the runtime cannot
+    # hold different opinions. The structural inspector is NOT taught about
+    # money; the two passes stay separate questions over one streamed scan.
+    # ------------------------------------------------------------------
+
+    #: The reasons `resolve_price` can refuse, rendered for an operator.
+    PRICE_REASONS = {
+        PRICE_UNREADABLE: 'the stored price cannot be read as money',
+        DISCOUNT_UNREADABLE: 'a LIVE discount magnitude cannot be read',
+        DISCOUNT_EXCEEDS_PRICE:
+            'a LIVE discount is incoherent (below zero, or above the price)',
+    }
+
+    def _inspect_money(self, item, verdict, live, now, buckets):
+        """One item's monetary configuration. Pure inspection; no query."""
+        state = 'orderable' if live else 'draft/inactive'
+
+        price = resolve_price(item.primary_price, item.discount_details, now=now)
+        if not price.usable:
+            reason = self.PRICE_REASONS.get(price.reason, price.reason)
+            target = (buckets['unpriceable_live'] if live
+                      else buckets['unpriceable_inactive'])
+            target.add(item.pk, reason)
+            # An unpriceable item is not orderable at all, so its modifier
+            # adjustments cannot be reached. Saying so once is enough.
+            return price
+
+        if not verdict.is_active:
+            return price
+
+        # --- modifier adjustments ---------------------------------------
+        #
+        # THREE OUTCOMES, DELIBERATELY APART. A required group whose choices are
+        # ALL unreadable makes EVERY variant of the dish refuse; one unreadable
+        # choice beside readable ones does not, and reporting the two the same
+        # way would tell an operator to take a perfectly orderable dish down.
+        negative_total = parse_money(0)
+        any_unreadable = False
+        for group in verdict.groups:
+            readable = 0
+            unreadable = 0
+            for choice_id in group.choice_ids:
+                raw = (group.choices_by_id.get(choice_id) or {})
+                try:
+                    # THE CHECKOUT PRIMITIVE, CALLED THE WAY CHECKOUT CALLS IT.
+                    # `con_orders` reads `choice.get('additionalCost', 0)` with
+                    # no `or 0`, so a stored None / '' / [] / {} / False is a
+                    # REFUSAL there, not a free option. An `or 0` here would have
+                    # been quietly more permissive than the thing this command
+                    # exists to predict, and would have reported a catalogue
+                    # clean that checkout then refuses — the exact drift passing
+                    # the shared primitive in is meant to prevent.
+                    adjustment = modifier_adjustment(
+                        raw.get('additionalCost', 0))
+                except PricingRefused:
+                    unreadable += 1
+                    continue
+                readable += 1
+                if adjustment < 0:
+                    negative_total += adjustment
+            if unreadable:
+                any_unreadable = True
+                # THE SHORTFALL IS MEASURED AGAINST THE REQUIREMENT, never
+                # against zero. A group requiring TWO with one readable choice
+                # beside one unreadable one has no satisfying selection either:
+                # every request that meets the minimum must name the unreadable
+                # choice, and checkout refuses that line. Testing `readable == 0`
+                # answered only the requires-one case and filed the rest as
+                # informational — the one bucket an operator does not act on.
+                if readable < group.min_selections:
+                    detail = (
+                        'every choice unreadable' if readable == 0
+                        else f'{readable} priceable of '
+                             f'{group.min_selections} required'
+                    )
+                    buckets['required_group_unpriceable'].add(
+                        item.pk,
+                        f'group {_short(group.group_id)}: {detail}, {state}',
+                    )
+        if any_unreadable:
+            buckets['some_choice_unpriceable'].add(item.pk, state)
+
+        # --- signed adjustments: the bound, and what it does NOT prove ----
+        #
+        # A negative adjustment ("no cheese, -500") is legal, and checkout
+        # refuses only a line whose PAYABLE UNIT would go below zero. Which
+        # combinations do that is a question about the diner's selection, and
+        # enumerating a catalogue's variants would be combinatorial and would
+        # still not be a proof. So the WORST CASE is bounded instead: every
+        # negative adjustment taken at once. If even that stays at or above
+        # zero, no selection can be refused for this reason. If it does not, SOME
+        # selection can be — and this bound IGNORES per-group maxima, so it
+        # over-reports rather than missing a case.
+        if negative_total < 0:
+            worst = price.effective_base + negative_total
+            if worst < 0:
+                buckets['negative_combination_possible'].add(
+                    item.pk,
+                    f'worst-case unit {worst} (ignores group maxima), {state}',
+                )
+        return price
+
     def _inspect_catalogue(self, sample_size, chunk_size):
         invalid = _Bucket(sample_size)
         invalid_inactive = _Bucket(sample_size)
@@ -292,13 +482,35 @@ class Command(BaseCommand):
         combined_over = _Bucket(sample_size)
         wide_groups = _Bucket(sample_size)
         wide_choices = _Bucket(sample_size)
+        money = {
+            'unpriceable_live': _Bucket(sample_size),
+            'unpriceable_inactive': _Bucket(sample_size),
+            'required_group_unpriceable': _Bucket(sample_size),
+            'some_choice_unpriceable': _Bucket(sample_size),
+            'negative_combination_possible': _Bucket(sample_size),
+            'required_extras_unpriceable': _Bucket(sample_size),
+        }
+
+        # ONE OBSERVATION TIME for the whole scan. A discount window is
+        # time-dependent, so reading the clock per item would let a window close
+        # mid-scan and report two items under two different presents — a report
+        # describing no single moment.
+        now = timezone.localtime()
+
+        # Items whose price the server cannot read, collected as the scan goes so
+        # the extras axis needs no per-parent query. BOUNDED: past the cap the
+        # extras check reports itself incomplete rather than growing without
+        # limit or quietly checking less than it claims.
+        unpriceable_ids = set()
+        unpriceable_overflowed = False
 
         scanned = 0
         rows = (
             MenuItem.objects
             .only(
                 'id', 'options', 'approved', 'enabled', 'deleted',
-                'has_extras', 'extras_min_selections',
+                'has_extras', 'extras_min_selections', 'extras_applicable',
+                'primary_price', 'discount_details',
             )
             .order_by('pk')
             .iterator(chunk_size=chunk_size)
@@ -315,6 +527,13 @@ class Command(BaseCommand):
                 # THE request contract itself, not a restatement of it.
                 identifier_predicate=is_submittable_identifier,
             )
+
+            price = self._inspect_money(item, verdict, live, now, money)
+            if not price.usable:
+                if len(unpriceable_ids) < MAX_TRACKED_UNPRICEABLE:
+                    unpriceable_ids.add(item.pk)
+                else:
+                    unpriceable_overflowed = True
 
             if verdict.is_invalid:
                 target = invalid if live else invalid_inactive
@@ -357,6 +576,45 @@ class Command(BaseCommand):
                     item.pk, f'{combined_required} required entries, {state}',
                 )
 
+        # --- the extras axis, resolved WITHOUT a per-parent query -------
+        #
+        # An extra whose price the server cannot read is not published, so a
+        # parent that REQUIRES extras can end up with too few to satisfy its own
+        # minimum — a dish that is not orderable for a reason neither the
+        # structural pass nor the parent's own price can see. It needs the set of
+        # unpriceable ids, which only exists once the first pass has finished, so
+        # it is a second STREAMING pass over the parents that actually require
+        # extras rather than a lookup per item.
+        if unpriceable_ids and not unpriceable_overflowed:
+            parents = (
+                MenuItem.objects
+                .filter(has_extras=True, extras_min_selections__gt=0)
+                .only(
+                    'id', 'extras_applicable', 'extras_min_selections',
+                    'approved', 'enabled', 'deleted',
+                )
+                .order_by('pk')
+                .iterator(chunk_size=chunk_size)
+            )
+            for parent in parents:
+                allowed = normalize_extras_applicable(parent.extras_applicable)
+                if not allowed:
+                    continue
+                usable = sum(
+                    1 for extra_id in allowed
+                    if _as_uuid(extra_id) not in unpriceable_ids
+                )
+                minimum = parent.extras_min_selections or 0
+                if usable < minimum:
+                    state = ('orderable'
+                             if item_structurally_published(parent)
+                             else 'draft/inactive')
+                    money['required_extras_unpriceable'].add(
+                        parent.pk,
+                        f'{usable} priceable of {len(allowed)} configured, '
+                        f'{minimum} required, {state}',
+                    )
+
         concerns = [
             ('active definitions checkout will now REFUSE', invalid),
             ('required selections above the defined choices', min_over_choices),
@@ -388,6 +646,22 @@ class Command(BaseCommand):
                 f'ceiling ({MAX_SELECTION_ENTRIES_PER_REQUEST})',
                 combined_over,
             ),
+            # --- D02 MONETARY -------------------------------------------
+            (
+                'LIVE items the server cannot price (not published, not '
+                'orderable)',
+                money['unpriceable_live'],
+            ),
+            (
+                'required option groups with too few priceable choices to meet '
+                'their minimum (no variant of the dish is orderable)',
+                money['required_group_unpriceable'],
+            ),
+            (
+                'dishes whose required extras cannot all be priced (too few '
+                'publishable to meet the minimum)',
+                money['required_extras_unpriceable'],
+            ),
         ]
         informational = [
             (
@@ -405,5 +679,35 @@ class Command(BaseCommand):
                 'group',
                 wide_choices,
             ),
+            # --- D02 MONETARY, and NOT concerns -------------------------
+            (
+                'items the server cannot price on DRAFT/INACTIVE items '
+                '(not orderable anyway)',
+                money['unpriceable_inactive'],
+            ),
+            (
+                'items with SOME unreadable choice cost — the dish still has '
+                'orderable variants; picking that choice is what refuses',
+                money['some_choice_unpriceable'],
+            ),
+            (
+                'items where a combination of NEGATIVE adjustments could take '
+                'the payable unit below zero — a worst-case bound that ignores '
+                'group maxima, so which selections refuse is decidable only at '
+                'checkout',
+                money['negative_combination_possible'],
+            ),
         ]
-        return concerns, informational, scanned
+        # WHAT THIS PASS DID NOT DO, RETURNED RATHER THAN PRINTED. A skipped
+        # inspection is part of the RESULT, not an aside: reported only as a
+        # stderr note it left `handle` free to print CLEAN and exit 0 for a
+        # catalogue half of which was never examined. Returning it is what lets
+        # the exit code say so.
+        incomplete = []
+        if unpriceable_overflowed:
+            incomplete.append(
+                f'NOT CHECKED: more than {MAX_TRACKED_UNPRICEABLE} unpriceable '
+                'items were found, so the required-extras axis was not '
+                'inspected. Resolve the unpriceable items and re-run.'
+            )
+        return concerns, informational, scanned, incomplete

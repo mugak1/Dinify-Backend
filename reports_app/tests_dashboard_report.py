@@ -51,7 +51,10 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Refunded, PaymentStatus_Pending,
 )
 from reports_app.controllers.restaurant.dashboard import (
-    generate_restaurant_dashboard_v2,
+    MIXED_PRICING_NOTICE, _build_revenue, generate_restaurant_dashboard_v2,
+)
+from orders_app.controllers.services.order_pricing import (
+    PRICING_VERSION_CORRECTED, PRICING_VERSION_LEGACY,
 )
 from reports_app.controllers.common.bucketing import PERIOD_TRUNC
 
@@ -592,7 +595,11 @@ class DashboardV2ResponseShapeTests(DashboardV2Base):
 
     def test_the_card_shapes_are_exactly_what_remains(self):
         data = self.dashboard(bucket='day')['data']
-        self.assertEqual(set(data['revenue']), {'series', 'totals'})
+        # `pricing_conventions` is ADDITIVE (D02/C): it says which pricing
+        # convention produced the gross and discount beside it, and removes no
+        # field. See DashboardV2PricingConventionTests.
+        self.assertEqual(set(data['revenue']),
+                         {'series', 'totals', 'pricing_conventions'})
         self.assertEqual(set(data['orders']), {'series', 'breakdown', 'total'})
 
     def test_the_primary_window_totals_are_unchanged(self):
@@ -634,6 +641,11 @@ class DashboardV2QueryCountTests(DashboardV2Base):
     second window cost 5 queries in revenue (paid buckets, refund buckets, three
     aggregates) and 2 in orders (bucket rows, count). Pinned because the shape of
     the deletion is invisible in a response assertion.
+
+    REVENUE WENT 5 -> 4 in D02/C, and the count is repinned DOWNWARD with its
+    breakdown: gross and discounts used to be two separate aggregates over the
+    same `paid` queryset and are now one, which is also what carries the pricing
+    -convention counts. So the disclosure added no query and removed one.
     """
 
     def test_revenue_and_orders_each_query_one_window(self):
@@ -648,7 +660,9 @@ class DashboardV2QueryCountTests(DashboardV2Base):
 
         with CaptureQueriesContext(connection) as ctx:
             d._build_revenue(*args)
-        self.assertEqual(len(ctx), 5)          # was 10
+        # paid buckets, refund buckets, ONE aggregate over paid (gross +
+        # discounts + both convention counts), refund total.
+        self.assertEqual(len(ctx), 4)          # was 10, then 5
 
         with CaptureQueriesContext(connection) as ctx:
             d._build_orders(*args)
@@ -707,3 +721,160 @@ class DashboardV2EndpointTests(DashboardV2Base):
         resp = self.client.get(self.url('period=day&bucket=day'), **self.auth())
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(len(resp.json()['data']['orders']['series']), 366)
+
+
+class DashboardV2PricingConventionTests(DashboardV2Base):
+    """D02/C — the revenue card DISCLOSES which pricing convention it summed.
+
+    THE DEFECT IS A REPORTING ONE. D02 changed what two persisted columns MEAN:
+    a CORRECTED order's ``total_cost`` includes paid modifier costs and its
+    ``savings`` can never be negative, while a LEGACY one's ``total_cost``
+    excludes them and its ``savings`` could be negative. ``gross``,
+    ``discounts`` and the ``net`` derived from them sum both kinds, so a window
+    spanning the deployment reported three figures mixing two measurements with
+    nothing saying so — a boundary described only in ``BREAKING_CHANGES.md``,
+    which an operator reading a dashboard never sees.
+
+    A failing test here is evidence of a MISSING DISCLOSURE. It is not evidence
+    that any deployed database contains a mixed window, and nothing here
+    reprices, rewrites or excludes an order.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The shared fixture is silent about conventions, so pin the whole
+        # window to one side and let each case move what it needs. `.update()`
+        # rather than a fixture argument: `pricing_version` is server-owned and
+        # deliberately has no request field.
+        Order.objects.filter(restaurant=self.restaurant).update(
+            pricing_version=PRICING_VERSION_LEGACY)
+
+    def conventions(self, **kwargs):
+        result = self.dashboard(bucket='month', **kwargs)
+        self.assertEqual(result['status'], 200, result)
+        return result['data']['revenue']['pricing_conventions']
+
+    def mark_corrected(self, limit=None):
+        ids = list(
+            Order.objects
+            .filter(restaurant=self.restaurant, time_created__year=2024)
+            .order_by('time_created')
+            .values_list('id', flat=True)
+        )
+        if limit is not None:
+            ids = ids[:limit]
+        Order.objects.filter(id__in=ids).update(
+            pricing_version=PRICING_VERSION_CORRECTED)
+
+    # --- the three periods ----------------------------------------------
+    def test_a_legacy_only_period_carries_no_notice(self):
+        conventions = self.conventions()
+        self.assertFalse(conventions['mixed'])
+        self.assertIsNone(conventions['notice'])
+        self.assertEqual(conventions['legacy_orders'], 5)
+        self.assertEqual(conventions['corrected_orders'], 0)
+
+    def test_a_corrected_only_period_carries_no_notice(self):
+        self.mark_corrected()
+        conventions = self.conventions()
+        self.assertFalse(conventions['mixed'])
+        self.assertIsNone(conventions['notice'])
+        self.assertEqual(conventions['legacy_orders'], 0)
+        self.assertEqual(conventions['corrected_orders'], 5)
+
+    def test_a_mixed_period_is_disclosed(self):
+        self.mark_corrected(limit=2)
+        conventions = self.conventions()
+        self.assertTrue(conventions['mixed'])
+        self.assertEqual(conventions['legacy_orders'], 3)
+        self.assertEqual(conventions['corrected_orders'], 2)
+        self.assertEqual(conventions['notice'], MIXED_PRICING_NOTICE)
+
+    def test_the_notice_names_what_is_not_comparable(self):
+        """It is a statement about COMPARABILITY, not about correctness — the
+        payable is unaffected and no order is repriced, and saying otherwise
+        would send an operator looking for money that is not missing."""
+        self.mark_corrected(limit=2)
+        notice = self.conventions()['notice']
+        self.assertIn('Gross and discounts', notice)
+        self.assertIn('actually paid is unaffected', notice)
+        self.assertIn('No order has been repriced', notice)
+
+    # --- it disclosed rather than changed --------------------------------
+    def test_a_mixed_period_still_reports_BOTH_conventions_in_the_totals(self):
+        """Dropping the legacy half would silently understate a real trading
+        period, which is a worse answer than a mixed one that says it is mixed."""
+        before = self.dashboard(bucket='month')['data']['revenue']['totals']
+        self.mark_corrected(limit=2)
+        after = self.dashboard(bucket='month')['data']['revenue']['totals']
+        self.assertEqual(before, after)
+        # 5 in-window orders at gross 1000 / discount 200 each, both sides.
+        self.assertEqual(after['gross'], '5000.00')
+        self.assertEqual(after['discounts'], '1000.00')
+
+    def test_the_disclosure_does_not_reprice_or_rewrite_any_order(self):
+        self.mark_corrected(limit=2)
+        before = sorted(Order.objects.values_list(
+            'id', 'pricing_version', 'total_cost', 'savings', 'actual_cost'))
+        self.dashboard(bucket='month')
+        self.assertEqual(
+            sorted(Order.objects.values_list(
+                'id', 'pricing_version', 'total_cost', 'savings',
+                'actual_cost')),
+            before,
+        )
+
+    # --- it inherits the card's existing scoping -------------------------
+    def test_it_counts_only_the_window_the_totals_describe(self):
+        """The 2023 order is out of range, so it must not reach the counts —
+        otherwise the disclosure would describe a period the figures do not."""
+        Order.objects.filter(time_created__year=2023).update(
+            pricing_version=PRICING_VERSION_CORRECTED)
+        conventions = self.conventions()
+        self.assertFalse(conventions['mixed'],
+                         'an out-of-window order reached the disclosure')
+        self.assertEqual(conventions['corrected_orders'], 0)
+
+    def test_a_test_order_is_excluded_exactly_as_it_is_from_the_totals(self):
+        """It reads the SAME already tenant-, date- and test-filtered queryset
+        the money sums do, so a commercially invisible order cannot raise a
+        notice about a period it does not appear in."""
+        rehearsal = self.make_order(when=utc(2024, 3, 4, 9))
+        Order.objects.filter(id=rehearsal.id).update(
+            is_test=True, pricing_version=PRICING_VERSION_CORRECTED)
+        conventions = self.conventions()
+        self.assertFalse(conventions['mixed'])
+        self.assertEqual(conventions['corrected_orders'], 0)
+
+    def test_an_empty_window_is_not_mixed(self):
+        conventions = self.conventions(date_from='2020-01-01',
+                                       date_to='2020-01-31')
+        self.assertFalse(conventions['mixed'])
+        self.assertIsNone(conventions['notice'])
+        self.assertEqual(conventions['legacy_orders'], 0)
+        self.assertEqual(conventions['corrected_orders'], 0)
+
+    # --- and it costs nothing -------------------------------------------
+    def test_the_revenue_card_runs_four_queries(self):
+        """MEASURED, with the breakdown stated, so a later N+1 fails here:
+
+          1. the paid series, grouped
+          2. the refund series, grouped
+          3. ONE aggregate over `paid` — gross, discounts AND both convention
+             counts
+          4. the refund total
+
+        It was FIVE — gross and discounts were two separate round trips over the
+        same queryset. Folding them together is what makes the disclosure free:
+        the counts ride an aggregate that had to run anyway, so the card now
+        costs one query FEWER than before this change rather than one more. A
+        second scan for the conventions would have been the obvious
+        implementation and is exactly what this pins out."""
+        self.mark_corrected(limit=2)
+        with self.assertNumQueries(4):
+            _build_revenue(
+                self.restaurant.id,
+                datetime(2024, 1, 1, tzinfo=dt_timezone.utc),
+                datetime(2024, 12, 31, 23, 59, tzinfo=dt_timezone.utc),
+                PERIOD_TRUNC['month'], 'month',
+            )

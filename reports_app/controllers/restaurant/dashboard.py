@@ -10,6 +10,9 @@ from django.db.models.functions import (
 from django.utils import timezone
 
 from orders_app.models import Order, OrderItem
+from orders_app.controllers.services.order_pricing import (
+    PRICING_VERSION_CORRECTED, PRICING_VERSION_LEGACY,
+)
 from restaurants_app.models import Table
 from finance_app.models import DinifyTransaction
 from reports_app.controllers.common.bucketing import period_boundaries
@@ -352,6 +355,50 @@ def _dec(value):
     return str(Decimal(value).quantize(Decimal('0.01')))
 
 
+#: What the notice says when a window straddles the D02 pricing correction. It
+#: is a sentence about COMPARABILITY, deliberately not about correctness: every
+#: row is right for the rules it was priced under, and none is rewritten.
+MIXED_PRICING_NOTICE = (
+    'This period contains orders priced under two different conventions. '
+    'Gross and discounts are not directly comparable across the whole period: '
+    'before the pricing correction an order\u2019s gross excluded paid modifier '
+    'costs and its discount could be negative. The amount each diner actually '
+    'paid is unaffected. No order has been repriced.'
+)
+
+
+def _pricing_conventions(legacy, corrected):
+    """Disclose WHICH pricing convention produced the gross and discount above.
+
+    THE DEFECT THIS CLOSES IS A REPORTING ONE, not a monetary one. D02 changed
+    what two persisted columns MEAN: a CORRECTED order's ``total_cost`` includes
+    paid modifier costs and its ``savings`` can never be negative, while a
+    LEGACY order's ``total_cost`` excludes them and its ``savings`` could be
+    negative (the reference excluded modifiers while the effective included
+    them). ``gross`` and ``discounts`` above sum both kinds, and ``net`` is
+    derived from both — so a window spanning the deployment reports three
+    figures that mix two measurements, with nothing on the response saying so.
+    Until now that boundary was described ONLY in ``BREAKING_CHANGES.md`` §13,
+    which an operator reading a dashboard never sees.
+
+    NO ORDER IS REPRICED, REWRITTEN OR EXCLUDED. Both conventions stay in the
+    totals, because dropping the legacy half would silently understate a real
+    trading period — which is a worse answer than a mixed one that says it is
+    mixed. The disclosure is the whole remedy.
+
+    ``notice`` is present ONLY when the window actually straddles the boundary.
+    A period entirely on one side is not ambiguous and gets no warning: a notice
+    that appeared on every response would be ignored on the one that mattered.
+    """
+    mixed = bool(legacy) and bool(corrected)
+    return {
+        'mixed': mixed,
+        'legacy_orders': legacy,
+        'corrected_orders': corrected,
+        'notice': MIXED_PRICING_NOTICE if mixed else None,
+    }
+
+
 def _build_revenue(restaurant_id, date_from, date_to, trunc_fn, bucket):
     base = Order.objects.filter(
         restaurant=restaurant_id,
@@ -398,8 +445,19 @@ def _build_revenue(restaurant_id, date_from, date_to, trunc_fn, bucket):
             'refunds': _dec(refund_map.get(boundary, _ZERO)),
         })
 
-    gross_total = paid.aggregate(v=Sum('total_cost'))['v'] or _ZERO
-    discounts_total = paid.aggregate(v=Sum('savings'))['v'] or _ZERO
+    # ONE aggregate over `paid`, not three separate round trips. The two money
+    # sums were already two queries; folding the convention counts in beside
+    # them makes the disclosure below cost NOTHING — the card now runs one
+    # FEWER query than before, over the same already tenant-, date- and
+    # test-filtered queryset. No second scan, no unfiltered read.
+    totals = paid.aggregate(
+        gross=Sum('total_cost'),
+        discounts=Sum('savings'),
+        legacy=Count('id', filter=Q(pricing_version=PRICING_VERSION_LEGACY)),
+        corrected=Count('id', filter=Q(pricing_version=PRICING_VERSION_CORRECTED)),
+    )
+    gross_total = totals['gross'] or _ZERO
+    discounts_total = totals['discounts'] or _ZERO
     refunds_total = refunded.aggregate(v=Sum('actual_cost'))['v'] or _ZERO
     net = Decimal(gross_total) - Decimal(discounts_total) - Decimal(refunds_total)
 
@@ -411,6 +469,8 @@ def _build_revenue(restaurant_id, date_from, date_to, trunc_fn, bucket):
             'refunds': _dec(refunds_total),
             'net': _dec(net),
         },
+        'pricing_conventions': _pricing_conventions(
+            totals['legacy'], totals['corrected']),
     }
 
 

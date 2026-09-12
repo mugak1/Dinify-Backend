@@ -11,39 +11,49 @@ mid-build could have line 1 validated against one version of a row and line 3
 priced against another, and a discount window closing mid-build could apply to one
 line and not the next. ``transaction.atomic()`` does not prevent any of that.
 
-WHAT IS MATERIALIZED, AND FROM WHICH STATEMENT. Exactly two statements run:
+WHAT IS MATERIALIZED, AND FROM WHICH STATEMENT. Exactly ONE statement runs:
 
   (1) SELECT FROM menu_items
         INNER JOIN menu_sections
         LEFT  JOIN section_groups
         LEFT  JOIN menu_sections (the group's own section)
+        LEFT  JOIN menu_item_tags JOIN restaurant_tags  (aggregated)
       WHERE menu_items.id IN (...) AND menu_sections.restaurant_id = %s
+      GROUP BY the four joined primary keys
 
-      This ONE statement materializes every field any decision here reads:
-      pricing (``primary_price``, ``discount_details``, ``options``),
-      availability (``available``, ``in_stock``), publication
-      (``approved``/``enabled``/``deleted`` on the item, its section and its
-      group, plus the section schedule fields), extras configuration
-      (``is_extra``, ``has_extras``, ``extras_applicable``,
-      ``extras_min_selections``, ``extras_max_selections``) and the name
-      snapshot. The three joins are what remove the lazy accesses —
+      It materializes every field any decision here reads: pricing
+      (``primary_price``, ``discount_details``, ``options``), availability
+      (``available``, ``in_stock``), publication (``approved``/``enabled``/
+      ``deleted`` on the item, its section and its group, plus the section
+      schedule fields), extras configuration (``is_extra``, ``has_extras``,
+      ``extras_applicable``, ``extras_min_selections``,
+      ``extras_max_selections``), the name snapshot AND the allergen labels.
+      The three entity joins are what remove the lazy accesses —
       ``item.section``, ``item.section_group`` and, easy to miss,
       ``item.section_group.section``, which ``group_operationally_visible``
       dereferences.
 
-  (2) SELECT FROM restaurant_tags JOIN menu_item_tags
-      WHERE menu_item_tags.menu_item_id IN (...) AND category = 'allergen'
+WHY THE ALLERGEN LABELS ARE IN THAT STATEMENT AND NOT A SECOND ONE. They used to
+be a separate batched read, argued safe because a tag edit could move only the
+label text — true for a LABEL-ONLY edit, and not the statement that was needed.
+One operator transaction that rewrites a recipe changes the dish DEFINITION and
+its allergen LINKS TOGETHER, and under READ COMMITTED each statement takes its own
+snapshot, so that single atomic edit could be observed HALF APPLIED: the old dish
+name beside the new allergen labels, written onto a kitchen ticket describing a
+catalogue state that existed at no instant. That is a preparation fact, not a
+display detail, and it is the one an allergic diner is handed. Folding the labels
+into the item statement makes coherence STRUCTURAL — one statement sees one
+committed state by definition — and it costs a query rather than adding one.
+``tests_order_snapshot.py`` drives the exact interleaving with a
+``connection.execute_wrapper`` rather than a sleep, and keeps the label-only and
+edit-after-the-snapshot cases as controls.
 
-      One batched statement for the whole order, replacing one query per line.
-
-THE NARROW MECHANISM FOR THE SECOND STATEMENT. Allergen tags are a PREPARATION
-SNAPSHOT and nothing else: no amount, no merge decision, no publication verdict and
-no deliverability flag reads them. So a tag edit committing between (1) and (2) can
-change only the allergen label text written onto the line — exactly the field it
-describes — and cannot make two statements disagree about anything that is claimed
-consistent here. Both run inside the order transaction, immediately after the table
-lock. This is an argued exception to the single-statement rule, not an oversight;
-``tests_order_snapshot.py`` exercises a real concurrent edit between the phases.
+POSTGRESQL IS REQUIRED for that aggregate, deliberately and without a fallback. A
+second, portable two-statement path would be a second opinion about the same
+question, and the one it gives is the incoherent one — the failure mode would
+reappear on exactly the deployment that took the fallback. This repository already
+requires PostgreSQL for the order path (``JSONField`` ``__contains`` in the
+deletion-blocker predicates), CI runs it, and production is RDS.
 
 WHAT IT DELIBERATELY DOES NOT DO. It takes NO lock on ``menu_items``. Locking the
 catalogue on every checkout would serialise every diner behind the menu editor and
@@ -56,6 +66,9 @@ price they never saw is not a lock but the server-priced quote they acknowledge
 before the order is accepted.
 """
 import uuid
+
+from django.contrib.postgres.aggregates import JSONBAgg
+from django.db.models import F, Func, Q, TextField, Value
 
 from restaurants_app.models import MenuItem
 
@@ -158,40 +171,46 @@ def build_snapshot(restaurant, items, now):
         # dereferences the group's own section, which would otherwise be a lazy
         # load per grouped line and a read outside this snapshot.
         .select_related('section', 'section_group', 'section_group__section')
+        .annotate(allergen_labels=_ALLERGEN_LABELS)
     )
-
-    allergens = _allergen_tags(rows)
 
     resolved = {}
     for row in rows:
         resolved[row.pk] = ResolvedItem(
             menu_item=row,
             # The price verdict is computed HERE, once, from columns that came
-            # out of statement (1), at the snapshot's single captured instant.
+            # out of the single statement, at the snapshot's captured instant.
             verdict=row.price_verdict(now),
-            allergen_tags=allergens.get(row.pk, []),
+            # `default=None` rather than an empty array: an item with no
+            # allergen tags aggregates to SQL NULL, and normalising it here
+            # keeps every consumer reading a list.
+            allergen_tags=row.allergen_labels or [],
         )
     return CatalogueSnapshot(now=now, restaurant=restaurant, items=resolved)
 
 
-def _allergen_tags(rows):
-    """Allergen label snapshots for every row, in ONE batched statement."""
-    if not rows:
-        return {}
-    by_item = {}
-    through = MenuItem.tags.through
-    pairs = (
-        through.objects
-        .filter(menu_item_id__in=[row.pk for row in rows],
-                tag__category='allergen')
-        .values('menu_item_id', 'tag__name', 'tag__icon', 'tag__colour',
-                'tag__display_order')
-        .order_by('tag__display_order', 'tag__name')
-    )
-    for pair in pairs:
-        by_item.setdefault(pair['menu_item_id'], []).append({
-            'name': pair['tag__name'],
-            'icon': pair['tag__icon'],
-            'colour': pair['tag__colour'],
-        })
-    return by_item
+#: ONE allergen label, built in SQL so the aggregate carries whole labels rather
+#: than three parallel arrays a reader would have to trust are aligned. The keys
+#: are typed TEXT explicitly: an untyped parameter inside ``jsonb_build_object``
+#: is ambiguous to PostgreSQL's polymorphic resolution.
+def _label_key(name):
+    return Value(name, output_field=TextField())
+
+
+_ALLERGEN_LABEL = Func(
+    _label_key('name'), F('tags__name'),
+    _label_key('icon'), F('tags__icon'),
+    _label_key('colour'), F('tags__colour'),
+    function='JSONB_BUILD_OBJECT',
+)
+
+#: The allergen labels for one menu item, aggregated inside the item statement.
+#: ``filter`` keeps the join a LEFT one for items with no allergen tags — they
+#: must still appear in the result — and ``order_by`` reproduces the display
+#: order the separate read used to apply in Python.
+_ALLERGEN_LABELS = JSONBAgg(
+    _ALLERGEN_LABEL,
+    filter=Q(tags__category='allergen'),
+    order_by=('tags__display_order', 'tags__name'),
+    default=None,
+)
