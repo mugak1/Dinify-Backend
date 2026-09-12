@@ -63,6 +63,26 @@ class Order(BaseModel):
     # idempotency key supplied by the diner app (Phase 3); absent today
     client_order_id = models.UUIDField(null=True, blank=True, db_index=True)
 
+    # === what that key was bound to (D04) ===
+    # The canonical purchase this order was created for, as `v1:<sha256>` —
+    # see `orders_app.controllers.services.order_intent`. It is what makes the
+    # idempotency key mean something: without it a replay could only ask "has
+    # this key been used?", never "for THIS?", and a request naming three
+    # burgers received the one-burger order the key had been used for.
+    #
+    # SERVER-DERIVED AND NEVER CLIENT-SUPPLIED, like `is_test` and
+    # `pricing_version`: computed from the D01-validated request inside the
+    # creation transaction, absent from every serializer and from
+    # EDIT_INFORMATION.
+    #
+    # NULLABLE, AND NULL IS NOT AN EMPTY PURCHASE — it means the order predates
+    # D04 (or was created without a key). Equivalence to an arriving request
+    # CANNOT BE PROVEN for such a row, and it is never populated after the fact
+    # from a retry: that would certify a request nobody recorded.
+    request_fingerprint = models.CharField(
+        max_length=128, null=True, blank=True, db_index=True,
+    )
+
     # === the launch boundary (PR-D) ===
     # A rehearsal order, placed by the owner while the restaurant was still
     # `onboarding` so they could prove the flow end to end before going live.

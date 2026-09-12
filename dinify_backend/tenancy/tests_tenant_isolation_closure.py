@@ -1089,22 +1089,77 @@ class ModifierIntegrityClosureTests(ClosureFixtureBase):
 
     # -- idempotency first (proof 22) --------------------------------------
     def test_idempotent_replay_skips_modifier_revalidation(self):
+        """A replay is never re-validated against mutable modifier config.
+
+        THE FIXTURE CHANGED WITH D04, AND THE PROPERTY DID NOT. This used to
+        replay a DIFFERENT selection (`{'g-bogus': ['x']}` against an original
+        of `{'g-req': ['c1']}`) and assert the original order came back — which
+        exercised the property only because the key alone matched and the body
+        was ignored entirely. That is the defect D04 closes: a request naming a
+        different purchase is now a conflict, not a silent hand-back.
+
+        So the INVALIDITY is moved to where the property actually lives — the
+        MENU. The replay sends the SAME purchase while the stored modifier
+        definition becomes one that would now be refused, and it must still
+        return the original order without consulting it.
+        """
+        coid = str(uuid4())
+        selection = {'g-req': ['c1']}
+        first = self._create(
+            [self._line(self.item_mod, selected_modifiers=selection)],
+            client_order_id=coid,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        self.assertFalse(first.get('idempotent'))
+
+        # the choice the original named no longer exists on the menu
+        MenuItem.objects.filter(pk=self.item_mod.pk).update(options={
+            'hasModifiers': True,
+            'groups': [{'id': 'g-req', 'name': 'Base', 'type': 'single',
+                        'minSelections': 1, 'maxSelections': 1,
+                        'choices': [{'id': 'c9', 'name': 'Nine',
+                                     'available': True, 'additionalCost': 0}]}],
+        })
+        # ...and a NEW order carrying it would indeed be refused now
+        fresh = self._create(
+            [self._line(self.item_mod, selected_modifiers=selection)],
+            table=self.table_a2,
+        )
+        self.assertNotEqual(fresh.get('status'), 200, fresh)
+
+        replay = self._create(
+            [self._line(self.item_mod, selected_modifiers=selection)],
+            client_order_id=coid,
+        )
+        self.assertEqual(replay.get('status'), 200, replay)
+        self.assertTrue(replay.get('idempotent'))
+        self.assertEqual(replay['order'].id, first['order'].id)
+
+    def test_a_key_replayed_for_a_different_selection_is_refused(self):
+        """The other half, and the reason the fixture above had to move.
+
+        Two different modifier selections are two different purchases. Reusing
+        one key across them used to return the FIRST order at HTTP 200, with
+        nothing telling the diner the kitchen was preparing something else.
+        """
         coid = str(uuid4())
         first = self._create(
             [self._line(self.item_mod, selected_modifiers={'g-req': ['c1']})],
             client_order_id=coid,
         )
         self.assertEqual(first.get('status'), 200, first)
-        self.assertFalse(first.get('idempotent'))
-        # Replay with a now-INVALID selection: must still return the original order
-        # WITHOUT re-validating current modifier config.
-        replay = self._create(
-            [self._line(self.item_mod, selected_modifiers={'g-bogus': ['x']})],
+
+        conflict = self._create(
+            [self._line(self.item_mod, selected_modifiers={'g-req': ['c2']})],
             client_order_id=coid,
         )
-        self.assertEqual(replay.get('status'), 200, replay)
-        self.assertTrue(replay.get('idempotent'))
-        self.assertEqual(replay['order'].id, first['order'].id)
+        self.assertEqual(conflict.get('status'), 409, conflict)
+        self.assertEqual(conflict.get('reason'), 'checkout_intent_mismatch')
+        self.assertEqual(
+            Order.objects.filter(client_order_id=coid).count(), 1)
+        line = OrderItem.objects.get(
+            order=first['order'], item=self.item_mod, parent_item__isnull=True)
+        self.assertEqual(line.selected_modifiers, {'g-req': ['c1']})
 
     # -- sold-out + extras unchanged (proofs 24-25) ------------------------
     def test_soldout_reconciliation_unchanged_with_modifiers(self):

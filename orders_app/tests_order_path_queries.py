@@ -58,13 +58,34 @@ distinct, named piece of work rather than a repeat:
     1  INSERT orders                 the draft
     1  INSERT order_items            the line          <- the ONLY per-line cost
     1  SELECT order_items            the roll-up read
-    2  SELECT orders                 replay lookup + the post-loop re-read
+    2  SELECT orders                 the occupancy gate + the post-loop re-read
     1  UPDATE orders                 the roll-up write
     1  SELECT transactions           payments for the roll-up
     3  SAVEPOINT / 3 RELEASE         the two nested atomics
 
 A 4-line order is the same list with four INSERTs instead of one.
+
+THE LIST ABOVE IS THE KEYLESS PATH, and that is not a simplification — it is
+the one the numbers above pin. A request carrying a `client_order_id` costs
+exactly TWO more, flat, whatever the order's size: the step-1 intent lookup and
+the post-wait recheck (D04). Both are deliberate and neither is per line:
+
+    1-line order   19 keyless -> 21 keyed
+    4-line order   22 keyless -> 24 keyed
+    per line        1         -> 1          (unchanged: the INSERT)
+    a matched replay          -> 1 SELECT   (plus its savepoint pair)
+
+A KEYLESS request pays nothing, because `resolve_intent` returns ABSENT on a
+None key BEFORE it queries — which is what lets the many in-process keyless
+callers keep the budget they had. The recheck is likewise skipped outright for
+them rather than issuing a query that could only return ABSENT.
+
+The two are not interchangeable and neither is redundant: the step-1 lookup
+runs before the table lock and is what makes a replay cheap, while the recheck
+runs after it and is what stops a request that waited behind a winner doing any
+new-order work. Removing either is a behaviour change, not an optimisation.
 """
+import uuid
 from decimal import Decimal
 
 from django.db import connection
@@ -476,3 +497,80 @@ class NormalizeOrderItemsBatchTests(OrderPathBase):
             [{'item': str(self.items[0].id).upper(), 'quantity': 1}],
         )
         self.assertEqual(result['status'], 200, result)
+
+
+class IntentBindingCostsTwoFlatQueriesTests(OrderPathBase):
+    """What D04's binding costs, and that it costs it flatly (D04).
+
+    Exact counts rather than bounds, for the same reason as every other class
+    here: an upper bound would not notice a per-line intent query creeping
+    back in. The point of the pair is that the keyed path pays a CONSTANT
+    surcharge — if either resolution ever moved inside the per-line loop the
+    flatness case below would fail while a bound would not.
+    """
+
+    def measure(self, items, table_index, key=None):
+        with CaptureQueriesContext(connection) as captured:
+            result = _create_order(
+                restaurant=self.restaurant,
+                table=self.tables[table_index],
+                items=items,
+                created_by=None,
+                client_order_id=key,
+            )
+        self.assertEqual(result.get('status'), 200, result)
+        return len(captured.captured_queries), result
+
+    def test_a_keyless_request_pays_nothing_for_the_binding(self):
+        """`resolve_intent` returns ABSENT on a None key BEFORE it queries, and
+        the post-wait recheck is skipped outright — so every in-process
+        keyless caller keeps exactly the budget it had."""
+        self.measure(self.lines(count=1), 0)              # warm
+        self.assertEqual(self.measure(self.lines(count=1), 1)[0], 19)
+        self.assertEqual(self.measure(self.lines(count=4), 2)[0], 22)
+
+    def test_a_keyed_request_pays_exactly_two_more(self):
+        """The step-1 lookup and the post-wait recheck. Neither is redundant:
+        the first runs before the table lock and makes a replay cheap, the
+        second runs after it and is what stops a request that waited behind a
+        winner doing any new-order work."""
+        self.measure(self.lines(count=1), 0)              # warm
+        self.assertEqual(
+            self.measure(self.lines(count=1), 1, uuid.uuid4())[0], 21)
+        self.assertEqual(
+            self.measure(self.lines(count=4), 2, uuid.uuid4())[0], 24)
+
+    def test_the_surcharge_does_not_grow_with_the_order(self):
+        self.measure(self.lines(count=1), 0)              # warm
+        one = self.measure(self.lines(count=1), 1, uuid.uuid4())[0]
+        four = self.measure(self.lines(count=4), 2, uuid.uuid4())[0]
+        keyless_one = self.measure(self.lines(count=1), 3)[0]
+        keyless_four = self.measure(self.lines(count=4), 4)[0]
+        self.assertEqual(one - keyless_one, 2)
+        self.assertEqual(four - keyless_four, 2)
+        # and the per-line cost is still the INSERT and nothing else
+        self.assertEqual((four - one) / 3, 1)
+
+    def test_a_matched_replay_costs_one_select(self):
+        """Recovery has to be cheap or a client cannot use it. A replay takes
+        the step-1 lookup and returns — no lock, no admission, no snapshot, no
+        counter, no INSERT."""
+        key = uuid.uuid4()
+        self.measure(self.lines(count=1), 0)              # warm
+        self.measure(self.lines(count=1), 1, key)
+
+        with CaptureQueriesContext(connection) as captured:
+            replay = _create_order(
+                restaurant=self.restaurant, table=self.tables[1],
+                items=self.lines(count=1), created_by=None,
+                client_order_id=key,
+            )
+        self.assertTrue(replay['idempotent'], replay)
+        selects = [
+            q for q in captured.captured_queries
+            if q['sql'].lstrip().upper().startswith('SELECT')
+        ]
+        self.assertEqual(len(selects), 1, [q['sql'][:90] for q in selects])
+        # the savepoint pair the outer atomic opens, and nothing else
+        self.assertEqual(len(captured.captured_queries), 3,
+                         [q['sql'][:90] for q in captured.captured_queries])

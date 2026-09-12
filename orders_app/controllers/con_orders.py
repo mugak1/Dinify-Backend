@@ -29,6 +29,9 @@ from orders_app.controllers.services.order_input import (
     client_order_id_rejection, quantity_error, validate_order_items,
     validate_service_client_order_id,
 )
+from orders_app.controllers.services.order_intent import (
+    REFUSALS, fingerprint, resolve_intent,
+)
 from orders_app.controllers.services.order_admission import (
     STAGE_CREATE,
     evaluate,
@@ -1275,38 +1278,6 @@ class ConOrder:
                 'message': MESSAGES.get('GENERAL_ERROR')
             }
 
-        # Lifecycle admission (PREFLIGHT, FAST FEEDBACK): may this caller order at a
-        # restaurant in this state at all? One rule — `order_admission.evaluate` —
-        # covering both what used to be two separate gates here: whether the
-        # restaurant takes orders at all (`suspended`/`offboarded` do not) and THE
-        # LAUNCH BOUNDARY, which refuses the anonymous public at a restaurant that
-        # has not gone live however many QR codes are already printed. The owner can
-        # still place the one end-to-end rehearsal order the go-live checklist
-        # requires, and that order is marked `is_test` at creation so it never
-        # becomes commercial reality.
-        #
-        # This is preflight ONLY. It reads the instance loaded above, in autocommit,
-        # so it can go stale while the request waits on a lock — the LOAD-BEARING
-        # admission runs inside `_create_order`'s transaction, under the shared
-        # advisory lock, against status re-read there. Same split as the menu
-        # publication preflight below. Both call the SAME function, so the fast
-        # answer and the authoritative one can never disagree about the rule.
-        preflight_admission = evaluate(restaurant.status, created_by, STAGE_CREATE)
-        if not preflight_admission.allowed:
-            return {
-                'status': 400,
-                'message': preflight_admission.message
-            }
-
-        # availability: a diner cannot place an order while the restaurant has
-        # paused ordering (accepting_orders=False). Staff/admin orders
-        # (created_by set) are a management action and bypass this gate.
-        if created_by is None and not restaurant.accepting_orders:
-            return {
-                'status': 400,
-                'message': 'This restaurant is not currently accepting orders'
-            }
-
         # STATIC INPUT VALIDATION (D01). One pure, database-free rule for the
         # request's SHAPE: a non-empty list of object lines, each with a real
         # UUID item id and a real positive integer quantity inside the request
@@ -1349,48 +1320,14 @@ class ConOrder:
         if not key_ok:
             return client_order_id_rejection()
 
-        # Canonical selection validation (preflight, FAST FEEDBACK): one authority
-        # for tenant ownership, diner publication (anonymous only), and extra
-        # applicability — is_extra + membership in the parent's extras_applicable +
-        # has_extras + no duplicate/self-reference + min/max on the validated unique
-        # set. Every unorderable id (foreign / nonexistent / malformed / unpublished
-        # / disallowed / wrong-role) collapses to ONE opaque NOT_ON_MENU_MESSAGE so
-        # the response never reveals whether an id exists on another tenant.
-        #
-        # This is preflight only — the LOAD-BEARING re-check runs at a time captured
-        # AFTER the table lock inside _create_order's transaction, so a menu change
-        # while a request waits on that lock cannot slip a stale selection through.
-        # Extras integrity applies to EVERY caller (staff included); publication is
-        # gated on created_by (an authorised staff/admin order bypasses diner
-        # publication but never tenant or relationship integrity). available /
-        # in_stock stay OUT of this gate — they flow through the zero-and-flag
-        # reconciliation in add_order_item / process_item_extras.
-        # Idempotency-first: a replay of an already-created order is returned as-is
-        # by _create_order even if the menu has since changed, so it must NOT be
-        # re-validated here. Only a genuinely NEW submission runs the preflight;
-        # the authoritative re-check still runs inside _create_order's transaction
-        # (after the idempotency lookup and the table lock), which is the
-        # load-bearing enforcement.
-        is_replay = bool(
-            client_order_id is not None
-            and Order.objects.filter(
-                restaurant=restaurant, client_order_id=client_order_id,
-            ).exists()
-        )
-        if not is_replay:
-            preflight = validate_order_selections(
-                restaurant, items, timezone.localtime(),
-                enforce_publication=(created_by is None),
-            )
-            if preflight.get('status') != 200:
-                return preflight
+        # WHAT THIS ATTEMPT IS FOR (D04). The canonical purchase, taken from the
+        # VALIDATED request and before any catalogue-dependent normalisation —
+        # see `order_intent.fingerprint` for why that ordering is the contract.
+        request_fingerprint = fingerprint(items)
 
-            # Modifier (option) selection limits — separate from publication.
-            options_check = ConOrder.check_options_requirements(items)
-            if options_check.get('status') != 200:
-                return options_check
-
-        # tenant consistency: the table must belong to this restaurant. Scoped
+        # TENANT CONSISTENCY — an AUTHORITY check, so it applies to a replay
+        # exactly as it applies to a new order, and it has moved ABOVE the
+        # intent resolution because the binding is scoped to this table. Scoped
         # fetch validates existence AND ownership in one query, so a
         # foreign/nonexistent/malformed table id → 400 (never 500, never a
         # silent order against another restaurant's floor).
@@ -1402,25 +1339,127 @@ class ConOrder:
                 'message': 'Invalid table for this restaurant'
             }
 
-        # availability: a diner may only order at a table whose QR mode permits
-        # ordering. Whitelist the ordering modes so any future non-ordering mode
-        # fails safe rather than accidentally permitting orders. Staff/admin
-        # orders (created_by set) bypass this gate.
-        ORDERING_QR_MODES = ('order_pay', 'order_only')  # 'menu_only' is view-only
-        if created_by is None and table.qr_mode not in ORDERING_QR_MODES:
-            return {
-                'status': 400,
-                'message': 'Ordering is not available at this table'
-            }
+        # IS THIS ATTEMPT ALREADY AN ORDER? (D04)
+        #
+        # THE SHAPE OF THIS IS THE POINT. It used to be a speculative
+        # `is_replay = exists(restaurant, key)` boolean carried down through
+        # unrelated branches, which answered only "has this key been used?" —
+        # never "for THIS purchase, at THIS table, by THIS caller?" — and gated
+        # only the menu preflight. A resolver that RETURNS the verified order,
+        # or refuses, is what lets the new-order gates below be skipped safely,
+        # because reaching them at all now means the request really is new.
+        #
+        # It is a PREFLIGHT: unlocked, deciding nothing. `_create_order` asks
+        # the SAME function under the row lock, and again after the table wait.
+        intent = resolve_intent(
+            restaurant_id=restaurant.pk,
+            client_order_id=client_order_id,
+            table_id=table.pk,
+            request_fingerprint=request_fingerprint,
+            created_by_id=getattr(created_by, 'pk', created_by),
+            customer_id=getattr(customer, 'pk', customer),
+        )
+        if intent.outcome in REFUSALS:
+            return REFUSALS[intent.outcome]()
 
-        # availability: a diner cannot order at a table that is not available for
-        # a scan (soft-deleted, disabled, inactive, or out of service). Reuse the
-        # same predicate the diner QR-scan flow uses so the two stay consistent.
-        if created_by is None and not table.is_available_for_scan():
-            return {
-                'status': 400,
-                'message': 'This table is not available for ordering'
-            }
+        # THE NEW-ORDER GATES. Every one of these answers "may a NEW order be
+        # created here, now?", so a MATCHED REPLAY skips all of them: an order
+        # that already exists is not created again, and refusing to hand it
+        # back because a new one would now be disallowed is a lifecycle change
+        # retroactively hiding a diner's own draft.
+        #
+        # AUTHORITY IS NOT SKIPPED and is not in this block. For a diner it is
+        # the table session, resolved at the endpoint by `require_table_session`
+        # -> `_resolve_table`, which independently enforces the QR generation
+        # (revocation) and `is_available_for_scan()`; for staff it is
+        # `can_user_access_module(TABLES)`. Both run before this function and
+        # are unaffected.
+        if not intent.is_match:
+            # Lifecycle admission (PREFLIGHT, FAST FEEDBACK): may this caller order
+            # at a restaurant in this state at all? One rule —
+            # `order_admission.evaluate` — covering both what used to be two
+            # separate gates here: whether the restaurant takes orders at all
+            # (`suspended`/`offboarded` do not) and THE LAUNCH BOUNDARY, which
+            # refuses the anonymous public at a restaurant that has not gone live
+            # however many QR codes are already printed. The owner can still place
+            # the one end-to-end rehearsal order the go-live checklist requires,
+            # and that order is marked `is_test` at creation so it never becomes
+            # commercial reality.
+            #
+            # This is preflight ONLY. It reads the instance loaded above, in
+            # autocommit, so it can go stale while the request waits on a lock —
+            # the LOAD-BEARING admission runs inside `_create_order`'s transaction,
+            # under the shared advisory lock, against status re-read there. Both
+            # call the SAME function, so the fast answer and the authoritative one
+            # can never disagree about the rule.
+            preflight_admission = evaluate(
+                restaurant.status, created_by, STAGE_CREATE)
+            if not preflight_admission.allowed:
+                return {
+                    'status': 400,
+                    'message': preflight_admission.message
+                }
+
+            # availability: a diner cannot place an order while the restaurant has
+            # paused ordering (accepting_orders=False). Staff/admin orders
+            # (created_by set) are a management action and bypass this gate.
+            if created_by is None and not restaurant.accepting_orders:
+                return {
+                    'status': 400,
+                    'message': 'This restaurant is not currently accepting orders'
+                }
+
+            # availability: a diner may only order at a table whose QR mode permits
+            # ordering. Whitelist the ordering modes so any future non-ordering mode
+            # fails safe rather than accidentally permitting orders. Staff/admin
+            # orders (created_by set) bypass this gate.
+            ORDERING_QR_MODES = ('order_pay', 'order_only')  # 'menu_only' is view-only
+            if created_by is None and table.qr_mode not in ORDERING_QR_MODES:
+                return {
+                    'status': 400,
+                    'message': 'Ordering is not available at this table'
+                }
+
+            # availability: a diner cannot order at a table that is not available
+            # for a scan (soft-deleted, disabled, inactive, or out of service).
+            # Reuse the same predicate the diner QR-scan flow uses so the two stay
+            # consistent. (Redundant for a diner, whose session could not have
+            # resolved otherwise — kept as defence for any future caller.)
+            if created_by is None and not table.is_available_for_scan():
+                return {
+                    'status': 400,
+                    'message': 'This table is not available for ordering'
+                }
+
+            # Canonical selection validation (preflight, FAST FEEDBACK): one
+            # authority for tenant ownership, diner publication (anonymous only),
+            # and extra applicability — is_extra + membership in the parent's
+            # extras_applicable + has_extras + no duplicate/self-reference + min/max
+            # on the validated unique set. Every unorderable id (foreign /
+            # nonexistent / malformed / unpublished / disallowed / wrong-role)
+            # collapses to ONE opaque NOT_ON_MENU_MESSAGE so the response never
+            # reveals whether an id exists on another tenant.
+            #
+            # This is preflight only — the LOAD-BEARING re-check runs at a time
+            # captured AFTER the table lock inside _create_order's transaction, so a
+            # menu change while a request waits on that lock cannot slip a stale
+            # selection through. Extras integrity applies to EVERY caller (staff
+            # included); publication is gated on created_by (an authorised
+            # staff/admin order bypasses diner publication but never tenant or
+            # relationship integrity). available / in_stock stay OUT of this gate —
+            # they flow through the zero-and-flag reconciliation in add_order_item /
+            # process_item_extras.
+            preflight = validate_order_selections(
+                restaurant, items, timezone.localtime(),
+                enforce_publication=(created_by is None),
+            )
+            if preflight.get('status') != 200:
+                return preflight
+
+            # Modifier (option) selection limits — separate from publication.
+            options_check = ConOrder.check_options_requirements(items)
+            if options_check.get('status') != 200:
+                return options_check
 
         # idempotency, table-gating, daily numbering and creation are all
         # handled atomically by the order-creation service.
