@@ -4394,7 +4394,15 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   does not grow with the catalogue, and reports counts plus bounded samples of ids
   and stable reason codes — never catalogue JSON, order contents or personal data.
   Exit codes: 0 clean, 1 blocker, 2 concerns only, 3 INSPECTION INCOMPLETE (never
-  reported as clean). It has NO fix/repair mode and performs no save, audit write,
+  reported as clean). **INCOMPLETE COVERS A PARTIAL PASS, NOT ONLY A FAILED ONE, AND
+  IT DOMINATES 1 AND 2** — the extras axis is skipped past `MAX_TRACKED_UNPRICEABLE`,
+  and reporting that run as `2` would be the more dangerous of the two available lies:
+  a concern list reads as something an operator can work through to the end, when part
+  of the pass that produced it never ran. A definite blocker from section 1 is still
+  printed in full and named in the exit reason (`_exit` takes a contextual one for
+  exactly that case), because one code has to be chosen and neither finding may be
+  lost to the choice. Until the Codex review of PR #315 the skip was a stderr NOTE
+  only, so such a run could print `CLEAN` and exit 0. It has NO fix/repair mode and performs no save, audit write,
   notification or provider call, and it runs against the PRE-migration schema so it
   can inform the deploy decision rather than only confirm it. A preflight is a
   point-in-time observation, not a substitute for the constraint. Invocation:
@@ -4408,10 +4416,18 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   permissive than the thing the command exists to predict, calling a catalogue clean
   that checkout then refuses on a stored `None` / `''` / `[]` / `{}` / `False`.
   FIVE NAMED DISTINCTIONS, kept apart on purpose: an unpriceable LIVE item is a
-  CONCERN while an unpriceable DRAFT one is INFORMATIONAL; a required group whose
-  EVERY choice is unreadable is a CONCERN (no variant of the dish is orderable) while
-  ONE unreadable choice among readable ones is INFORMATIONAL (reporting it would tell
-  an operator to take a working dish down); and a possible NEGATIVE combination is a
+  CONCERN while an unpriceable DRAFT one is INFORMATIONAL; a required group with
+  **FEWER PRICEABLE CHOICES THAN ITS OWN MINIMUM** is a CONCERN (no variant of the dish
+  is orderable) while an unreadable choice beside ENOUGH readable ones is INFORMATIONAL
+  (reporting it would tell an operator to take a working dish down). **THE SHORTFALL IS
+  MEASURED AGAINST THE REQUIREMENT, NEVER AGAINST ZERO** — `readable == 0` answered only
+  the requires-ONE case, so a group requiring TWO with one readable choice beside one
+  unreadable one was filed as informational even though every request meeting the
+  minimum must name the unreadable choice and be refused (found by the Codex review of
+  PR #315). The structural pass does not cover it: `MIN_EXCEEDS_DEFINED_CHOICES` fires
+  only when the minimum exceeds the DEFINED choices, and the monetary check stays scoped
+  to groups that actually hold an unreadable choice so it never double-reports a
+  structural defect. And a possible NEGATIVE combination is a
   worst-case bound that IGNORES group maxima, so it is informational and says which
   selections refuse is decidable only at checkout. A required EXTRAS minimum that
   cannot be met from the priceable extras is its own concern, resolved by a SECOND

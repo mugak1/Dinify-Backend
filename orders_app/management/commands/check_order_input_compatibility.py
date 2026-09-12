@@ -42,8 +42,14 @@ IT REPORTS COUNTS AND BOUNDED SAMPLES — primary keys and stable reason codes,
 never catalogue JSON, order contents, customer data or credentials. Rows are
 streamed in chunks, so memory does not grow with the size of the catalogue.
 
-AN INCOMPLETE INSPECTION IS NEVER REPORTED AS A CLEAN ONE: any failure during
-the scan exits non-zero and says so.
+AN INCOMPLETE INSPECTION IS NEVER REPORTED AS A CLEAN ONE, and that covers a
+PARTIAL one as well as a failed one. A pass that deliberately skips an axis —
+the required-extras check past its tracking bound — returns that fact, and it
+DOMINATES the exit code: a concern list produced by a pass that did not finish
+is not an exhaustive list, so reporting it as ``2`` would read as work an
+operator could get to the end of. A definite blocker found in question 1 is
+still reported in full and named in the exit reason, but it does not make the
+catalogue answer known.
 
     python manage.py check_order_input_compatibility
     python manage.py check_order_input_compatibility --sample-size 50 --chunk-size 1000
@@ -54,7 +60,8 @@ Exit codes:
     1  BLOCKER — negative persisted quantities exist; the migration will abort
     2  compatibility concerns only — the migration will apply, but some items
        are not orderable as configured
-    3  the inspection did not complete; the result is unknown
+    3  the inspection did not complete — it raised, or it deliberately
+       skipped an axis — so the catalogue result is unknown. Dominates 1 and 2
 
 A PREFLIGHT IS A POINT-IN-TIME OBSERVATION. It is not a substitute for the
 database constraint, which is what keeps the invariant true afterwards.
@@ -201,8 +208,8 @@ class Command(BaseCommand):
 
         try:
             blockers = self._inspect_quantities(sample_size)
-            concerns, informational, scanned = self._inspect_catalogue(
-                sample_size, chunk_size,
+            concerns, informational, scanned, incomplete = (
+                self._inspect_catalogue(sample_size, chunk_size)
             )
         except Exception as error:  # noqa: BLE001 - reported, never swallowed
             # An incomplete inspection must never read as a clean one.
@@ -235,6 +242,10 @@ class Command(BaseCommand):
         self._heading(
             f'2. CATALOGUE COMPATIBILITY  ({scanned} menu items inspected)'
         )
+        # BEFORE the buckets, because it qualifies every one of them: a list
+        # produced by a pass that did not finish is not an exhaustive list.
+        for note in incomplete:
+            self.stdout.write(self.style.ERROR(f'      {note}'))
         any_concern = False
         for label, bucket in concerns:
             if bucket:
@@ -256,6 +267,29 @@ class Command(BaseCommand):
         )
 
         self._heading('RESULT')
+        if incomplete:
+            # AN INCOMPLETE INSPECTION IS NOT A VERDICT. Part of the catalogue
+            # pass did not run, so neither CLEAN nor CONCERNS can be claimed —
+            # and CONCERNS is the more dangerous of the two, because it reads as
+            # an exhaustive list an operator can work through to the end. A
+            # definite blocker from section 1 is still reported in full above and
+            # named in the exit reason, but a fact established there does not
+            # make the catalogue answer known.
+            self.stdout.write(self.style.ERROR(
+                'INCOMPLETE — part of the catalogue inspection did not run, so '
+                'the catalogue result is UNKNOWN. Do not treat this as a pass.'
+            ))
+            reason = self.EXIT_REASONS[EXIT_INCOMPLETE]
+            if blockers:
+                self.stdout.write(self.style.ERROR(
+                    '      A definite blocker was also found above: resolve the '
+                    'negative quantities before deploying orders_app/0036.'
+                ))
+                reason = (
+                    'negative order-item quantities exist AND part of the '
+                    'catalogue inspection did not run; catalogue result unknown'
+                )
+            return self._exit(EXIT_INCOMPLETE, reason)
         if blockers:
             self.stdout.write(self.style.ERROR(
                 'BLOCKED — resolve the negative quantities before deploying '
@@ -285,15 +319,24 @@ class Command(BaseCommand):
             'as configured'
         ),
         EXIT_INCOMPLETE: 'the inspection did not complete; result unknown',
+        # ^ covers BOTH a pass that raised and one that deliberately skipped an
+        #   axis; `_exit(reason=...)` narrows it where more can be said.
     }
 
-    def _exit(self, code):
+    def _exit(self, code, reason=None):
         """A non-zero exit is what makes this usable as an operator gate. It is
         raised rather than returned because Django prints a command's return
-        value and exits 0 regardless."""
+        value and exits 0 regardless.
+
+        `reason` overrides the table for the one case a fixed sentence cannot
+        state: an inspection that did not complete WHILE a definite blocker was
+        also found. The exit reason is the last line an operator reads, so it
+        has to carry both rather than pick one.
+        """
         self.exit_code = code
         if code:
-            raise CommandError(self.EXIT_REASONS[code], returncode=code)
+            raise CommandError(reason or self.EXIT_REASONS[code],
+                               returncode=code)
         return None
 
     # -- section 1 --------------------------------------------------------
@@ -387,11 +430,22 @@ class Command(BaseCommand):
                     negative_total += adjustment
             if unreadable:
                 any_unreadable = True
-                if group.min_selections > 0 and readable == 0:
+                # THE SHORTFALL IS MEASURED AGAINST THE REQUIREMENT, never
+                # against zero. A group requiring TWO with one readable choice
+                # beside one unreadable one has no satisfying selection either:
+                # every request that meets the minimum must name the unreadable
+                # choice, and checkout refuses that line. Testing `readable == 0`
+                # answered only the requires-one case and filed the rest as
+                # informational — the one bucket an operator does not act on.
+                if readable < group.min_selections:
+                    detail = (
+                        'every choice unreadable' if readable == 0
+                        else f'{readable} priceable of '
+                             f'{group.min_selections} required'
+                    )
                     buckets['required_group_unpriceable'].add(
                         item.pk,
-                        f'group {_short(group.group_id)}: every choice '
-                        f'unreadable, {state}',
+                        f'group {_short(group.group_id)}: {detail}, {state}',
                     )
         if any_unreadable:
             buckets['some_choice_unpriceable'].add(item.pk, state)
@@ -599,8 +653,8 @@ class Command(BaseCommand):
                 money['unpriceable_live'],
             ),
             (
-                'required option groups whose every choice has an unreadable '
-                'cost (no variant of the dish is orderable)',
+                'required option groups with too few priceable choices to meet '
+                'their minimum (no variant of the dish is orderable)',
                 money['required_group_unpriceable'],
             ),
             (
@@ -644,10 +698,16 @@ class Command(BaseCommand):
                 money['negative_combination_possible'],
             ),
         ]
+        # WHAT THIS PASS DID NOT DO, RETURNED RATHER THAN PRINTED. A skipped
+        # inspection is part of the RESULT, not an aside: reported only as a
+        # stderr note it left `handle` free to print CLEAN and exit 0 for a
+        # catalogue half of which was never examined. Returning it is what lets
+        # the exit code say so.
+        incomplete = []
         if unpriceable_overflowed:
-            self.stderr.write(self.style.WARNING(
-                f'      NOTE: more than {MAX_TRACKED_UNPRICEABLE} unpriceable '
-                'items were found, so the required-extras axis was NOT '
-                'checked. Resolve the unpriceable items and re-run.'
-            ))
-        return concerns, informational, scanned
+            incomplete.append(
+                f'NOT CHECKED: more than {MAX_TRACKED_UNPRICEABLE} unpriceable '
+                'items were found, so the required-extras axis was not '
+                'inspected. Resolve the unpriceable items and re-run.'
+            )
+        return concerns, informational, scanned, incomplete

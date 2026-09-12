@@ -210,6 +210,42 @@ class PreflightBlockerTests(_PreflightBase):
         finally:
             self._restore_constraint()
 
+    def test_an_incomplete_catalogue_pass_still_names_a_definite_blocker(self):
+        """Incompleteness dominates the exit code, but it must not swallow a
+        fact that WAS established.
+
+        Section 1 completed, so the negative quantity is real and is reported in
+        full; section 2 skipped its required-extras axis, so the catalogue
+        answer is unknown. ONE exit code has to be chosen and `3` is the honest
+        one — but neither finding may be lost because of that, so the blocker is
+        named in the RESULT block and in the exit reason.
+
+        It lives beside the blocker helper rather than with the monetary tests
+        because writing a negative row needs the constraint dance this class
+        owns.
+        """
+        from unittest import mock
+        self._negative_row(-2)
+        # Two unpriceable items and a bound of one: the pass overflows its
+        # tracking set and skips the extras axis. Patching the bound rather than
+        # creating 10,001 rows — the behaviour under test is what happens once
+        # it is exceeded, which is the same whatever the number is.
+        MenuItem.objects.filter(
+            pk__in=[self.item().pk, self.item().pk],
+        ).update(primary_price=Decimal('-5.00'))
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(pre, 'MAX_TRACKED_UNPRICEABLE', 1):
+            with self.assertRaises(CommandError) as caught:
+                call_command('check_order_input_compatibility',
+                             stdout=out, stderr=err)
+        output = out.getvalue() + err.getvalue()
+        self.assertEqual(getattr(caught.exception, 'returncode', None),
+                         pre.EXIT_INCOMPLETE, output)
+        self.assertIn('negative order-item quantities exist AND',
+                      str(caught.exception))
+        self.assertIn('A definite blocker was also found above', output)
+        self.assertIn('order items with a negative quantity: 1', output)
+
 
 class PreflightCatalogueTests(_PreflightBase):
     def test_a_malformed_active_definition_is_a_concern_naming_its_state(self):
@@ -396,6 +432,42 @@ class PreflightMonetaryTests(_PreflightBase):
         code, output = self.run_preflight()
         self.assertEqual(code, pre.EXIT_CLEAN, output)
 
+    def test_a_group_requiring_TWO_with_one_priceable_choice_is_a_concern(self):
+        """The shortfall is against the REQUIREMENT, not against zero.
+
+        Byte-identical fixture to the test above except for the minimum, which
+        is the whole point: with `minSelections=2` the readable choice can no
+        longer satisfy the group on its own, so every request that meets the
+        minimum must also name the unreadable one — and checkout refuses that
+        line. No variant of this dish is orderable.
+
+        The structural pass does NOT cover it: `MIN_EXCEEDS_DEFINED_CHOICES`
+        fires only when the minimum exceeds the number of DEFINED choices, and
+        two choices are defined here. Unreadability is the only reason, which is
+        why the monetary pass is the one that has to see it.
+        """
+        item = self.item(options=self.group(
+            [('c1', 100), ('c2', 'abc')], minimum=2,
+        ))
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CONCERNS, output)
+        self.assertIn('too few priceable choices', output)
+        self.assertIn('1 priceable of 2 required', output)
+        self.assertIn(str(item.pk), output)
+
+    def test_a_group_requiring_two_with_two_priceable_choices_is_clean(self):
+        """The negative control for the test above: the same unreadable choice
+        beside ENOUGH readable ones stays informational, because a satisfying
+        selection exists. Without this, tightening the rule to `readable <
+        min_selections` could not be told apart from flagging every group that
+        has any unreadable choice at all."""
+        self.item(options=self.group(
+            [('c1', 100), ('c2', 200), ('c3', 'abc')], minimum=2,
+        ))
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CLEAN, output)
+        self.assertIn('SOME unreadable choice cost', output)
+
     # --- signed adjustments ---------------------------------------------
     def test_a_possible_negative_combination_is_reported_as_checkout_only(self):
         item = self.item(primary_price='100',
@@ -492,6 +564,42 @@ class PreflightMonetaryTests(_PreflightBase):
         _code, output = self.run_preflight()
         self.assertNotIn('discount_percentage', output)
         self.assertNotIn('additionalCost', output)
+
+    # --- what the pass did NOT do ---------------------------------------
+    def overflow_tracking(self):
+        """Shrink the unpriceable-id bound so two rows overflow it.
+
+        Patching the bound rather than creating 10,001 items: the behaviour
+        under test is what the command does once the bound is exceeded, and
+        that is the same whatever the number is.
+        """
+        from unittest import mock
+        return mock.patch.object(pre, 'MAX_TRACKED_UNPRICEABLE', 1)
+
+    def test_a_skipped_extras_axis_is_INCOMPLETE_not_merely_concerns(self):
+        """Past the tracking bound the required-extras axis is not inspected,
+        and the catalogue answer is therefore unknown rather than merely
+        concerning. `2` would be the more dangerous report of the two: it reads
+        as an exhaustive list an operator can work through to the end, when part
+        of the pass that produced it never ran."""
+        self.unpriceable_price(self.item())
+        self.unpriceable_price(self.item())
+        with self.overflow_tracking():
+            code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_INCOMPLETE, output)
+        self.assertIn('NOT CHECKED', output)
+        self.assertIn('required-extras axis', output)
+        self.assertIn('UNKNOWN', output)
+        self.assertNotIn('CLEAN at this moment', output)
+
+    def test_an_unexceeded_bound_leaves_the_extras_axis_checked(self):
+        """The negative control: below the bound nothing is skipped, so the
+        same fixture reports its ordinary concerns and exits 2."""
+        self.unpriceable_price(self.item())
+        self.unpriceable_price(self.item())
+        code, output = self.run_preflight()
+        self.assertEqual(code, pre.EXIT_CONCERNS, output)
+        self.assertNotIn('NOT CHECKED', output)
 
 
 class PreflightSafetyTests(_PreflightBase):
