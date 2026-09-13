@@ -54,7 +54,47 @@ so keep it current when conventions change.
   satisfy the reports `SALE_STATUSES` {served, paid} and count as sales.
   `order_status` is written from server constants (never the request body) and
   `payment_status` is never touched; every non-completion transition still
-  writes only the fulfilment axis
+  writes only the fulfilment axis.
+  **EVERY KITCHEN ORDER COMMAND NOW GOES THROUGH ONE BOUNDARY (D05)** —
+  `orders_app/controllers/services/kitchen_transition.py`. The three write views
+  are thin adapters holding no business rule; the service owns the lock order,
+  the re-read, the authoritative permission decision, eligibility, the
+  precondition, the recall window and occupancy. **The request contract CHANGED
+  and there is no legacy form** — see `BREAKING_CHANGES.md` §15. What it closed,
+  each reproduced on unmodified `fd190dd` with real HTTP and (for the races) two
+  connections: a DRAFT was fully writable and could be walked to `served`,
+  turning something the diner never placed into a SALE and leaving them unable to
+  place it; a CANCELLED order was still preparable and could be stamped served,
+  because the cancelled guard existed only on the serve branch; a cancel
+  committing between a serve's unlocked read and its save was OVERWRITTEN on the
+  sale axis (and the reverse left a SERVED order marked cancelled); an ordinary
+  kitchen user's free void, qualified against a `new` the order had already
+  stopped being, survived preparation starting; recall never consulted occupancy,
+  so two orders ended up ongoing at one table; a delayed `{'fulfilment_status':
+  'preparing'}` executed as a RECALL; and after a serve/recall/serve cycle a
+  delayed recall reopened a LATER completion — the case no source-state check can
+  see, which is why `Order.fulfilment_revision` exists (migration
+  `orders_app/0040`, additive, `default=0` AND `db_default=0`). It versions the
+  WHOLE kitchen-order state (fulfilment, cancellation and priority), is
+  server-owned, is deliberately NOT in `order_quote`'s fingerprint, and 0 on an
+  existing row is the ADOPTION BASELINE — never a claim about history and never
+  evidence of acceptance. **LOCK ORDER: `Table -> Order`**, the tail of
+  acceptance's `advisory -> Table -> Order`; kitchen commands do NOT take the
+  admission advisory lock, because `order_admission.admit` decides whether NEW
+  work may be admitted and managing accepted work is a different question.
+  **THE PERMISSION DECISION LINEARIZES at the post-lock re-check** (the resolver
+  holds no request-level cache, so a revocation committed before that point is
+  respected; one committing after it can still overlap, and that is stated rather
+  than claimed away). `priority` is a STRICT JSON boolean — the omitted-value
+  toggle is gone, since a retry undid itself. **Recall has a server-enforced
+  10-minute window** from the current completion; the 24h Completed feed is
+  VISIBILITY and is unchanged. **`OrderItem.status` is still never written** — it
+  has no production writer and it IS inside the quote fingerprint. Coherent
+  historical orders with no `OrderAcceptance` stay operable; contradictory rows
+  are refused for manual review and left untouched, never repaired. D05 closed
+  the kitchen PRODUCER of D04's `evidence_unavailable` for new rows without
+  resolving the rows already produced, so that state remains a statement of
+  ignorance
 - Order-creation hardening: ✅ (PRs #198–#201, #210) — the live v2 `initiate`
   create path enforces tenant consistency (table + menu items must belong to the
   same restaurant, BUG-P1-1), rejects orders when the restaurant is not
@@ -1733,7 +1773,14 @@ so keep it current when conventions change.
   already says. Both selectors are scoped to the session's restaurant AND table, so
   holding an intent key is not authority; naming both is a 400, naming neither keeps
   the existing 400, and every unresolvable value collapses to ONE non-disclosing 404
-- `api/v1/kitchen/` → Kitchen endpoints (urls_kitchen.py) — separate file
+- `api/v1/kitchen/` → Kitchen endpoints (urls_kitchen.py) — separate file. The
+  three ORDER COMMAND routes (`orders/<pk>/fulfilment-status/`,
+  `orders/<pk>/priority/`, `orders/<pk>/cancel/`) each take an explicit command
+  plus a REQUIRED `if_revision`, and are thin adapters over
+  `kitchen_transition.execute`; the two feeds additively publish `order_status`,
+  `fulfilment_revision` and an envelope `kitchen_protocol`. None of the three is
+  on the delegated `ALLOWED_ROUTES` allowlist and none may be added — see
+  `delegation_scopes.py`, which records why for each
 - `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
   `issues/`, `issues/<uuid:issue_id>/` — separate app (`admin/issues/` retired)
 - `api/v1/reviews/` → reviews_app endpoints (`reviews_app/urls.py`):
@@ -4832,7 +4879,7 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
   "Restaurant Lifecycle"; 0057 adds the platform-owned `Restaurant.is_test` flag,
   additive with NO backfill — see "Canonical Data Shapes"),
-  `orders_app/migrations/0039_order_acceptance.py` (0034 removed the
+  `orders_app/migrations/0040_order_fulfilment_revision.py` (0034 removed the
   inline review fields; 0035 adds the launch-boundary `Order.is_test` flag; 0036
   adds the D01 `quantity >= 0` CHECK constraint, additive and reversible with NO
   `RunPython`; 0037 adds `Order.pricing_version`, one `AddField` carrying BOTH
@@ -4850,7 +4897,16 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   NOTHING else — no existing table touched, no `RunPython`, no backfill and none
   possible, since an order accepted before it left no record of when or against which
   quote. `CreateModel` is the safest shape under the expand-only rule: old code
-  neither reads nor writes the table, and its index is built on an empty one),
+  neither reads nor writes the table, and its index is built on an empty one;
+  0040 adds the D05 `Order.fulfilment_revision`, ONE additive `AddField` carrying
+  BOTH `default=0` and `db_default=0` — load-bearing, because a rollback lands
+  OLD CODE on the NEW schema and old code INSERTs orders without naming the
+  column. `ADD COLUMN ... DEFAULT 0 NOT NULL` does not rewrite the table on
+  PostgreSQL 11+, but it still takes a brief ACCESS EXCLUSIVE lock to update the
+  catalogue and therefore WAITS behind any open transaction on `orders`; that
+  wait is a property of the deployment, which this repository cannot observe, so
+  do not describe it as instantaneous. Deliberately NO index — nothing filters or
+  orders by it),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
   `users_app/migrations/0014_customer_access_state.py` (0010 adds

@@ -151,6 +151,39 @@ class Order(BaseModel):
     )
     served_at = models.DateTimeField(null=True, blank=True)
     priority = models.BooleanField(default=False, db_index=True)
+
+    # === the kitchen-order concurrency token (D05) ===
+    # WHICH VERSION of this order's KITCHEN-ORDER STATE a command is acting on.
+    # Its domain is the whole state a kitchen command reads and writes —
+    # fulfilment status, cancellation and priority — not merely the text of
+    # `fulfilment_status`. Every command names the revision it believes it saw
+    # (`if_revision`), and `kitchen_transition` refuses when that no longer
+    # matches the locked row.
+    #
+    # WHY IT EXISTS: a target-only payload cannot say which command was intended.
+    # A delayed `preparing` was indistinguishable from a deliberate `ready ->
+    # preparing` correction, and a delayed recall could reopen a LATER completion
+    # because the source state was `served` again after a serve/recall cycle. An
+    # explicit action answers the first; only a revision answers the second,
+    # because a cycle returns the row to a state a source-state check accepts.
+    #
+    # IT IS A COMPARE-AND-SET TOKEN, NOT HISTORY. It counts nothing, proves
+    # nothing about the past, and 0 on an existing row is the ADOPTION BASELINE —
+    # never a claim that the order has never been touched, and never evidence
+    # that it was accepted (that is `OrderAcceptance`, whose meaning D04 fixed
+    # and this does not alter).
+    #
+    # SERVER-OWNED, like `is_test`, `pricing_version` and `request_fingerprint`:
+    # no request field assigns it, it is absent from every write serializer and
+    # from EDIT_INFORMATION, and `if_revision` is a PRECONDITION rather than a
+    # value a caller may set. It is incremented exactly once per applied command
+    # and never on a refusal, a read, a rollback or the no-change priority
+    # result; it never resets on a serve/recall cycle and never wraps — the
+    # service refuses before the column's 32-bit ceiling rather than overflowing.
+    #
+    # DELIBERATELY NOT part of `order_quote`'s fingerprint: that reference is
+    # about what the DINER agreed to pay, and a kitchen command must not move it.
+    fulfilment_revision = models.PositiveIntegerField(default=0, db_default=0)
     # local business date the order belongs to; authoritative for daily numbering
     order_date = models.DateField(null=True, db_index=True)
 

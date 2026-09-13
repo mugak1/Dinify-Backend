@@ -769,6 +769,101 @@ two-valued, because for it, it is.
 
 ---
 
+## 15. Kitchen order commands name an action and a precondition (D05)
+
+**Every kitchen order mutation changed shape.** This is a hard cutover: there is
+no legacy body form, no optional precondition and no bypass. An old client's
+write is refused with a stable reason; its READS are unaffected.
+
+### The three routes
+
+```
+PUT api/v1/kitchen/orders/<pk>/fulfilment-status/
+    {"action": "advance"|"serve"|"correct"|"recall", "if_revision": <int>}
+
+PUT api/v1/kitchen/orders/<pk>/priority/
+    {"priority": true|false, "if_revision": <int>}
+
+PUT api/v1/kitchen/orders/<pk>/cancel/
+    {"cancellation_reason": "<enum>", "if_revision": <int>}
+```
+
+**`{"fulfilment_status": "<target>"}` IS GONE**, and that is the point rather
+than tidying. A TARGET does not identify a command: `preparing` is reachable
+forwards from `new` and backwards from `ready`, so a delayed forward request was
+executed as a RECALL and silently undid another device. An ACTION names one edge.
+
+**`if_revision` IS REQUIRED ON EVERY COMMAND.** `Order.fulfilment_revision`
+(migration `orders_app/0040`, additive, `default=0` AND `db_default=0`) versions
+the whole kitchen-order state — fulfilment, cancellation and priority together.
+It is compared against the row read under the lock, and it is what closes the
+case an action alone cannot: after a serve → recall → serve cycle the source
+state is `served` again, so a delayed recall reopened a LATER completion.
+
+**`priority` must be a JSON boolean, always stated.** The omitted-value TOGGLE is
+removed: a retried request undid itself, which is the opposite of what a
+retryable flag needs. `bool(raw)` is gone with it — `'no'` and `'false'` both
+used to mean True.
+
+### Responses
+
+Success is `200` with `outcome` (`applied` | `unchanged`) and `data` — the
+current-state projection. An authorised conflict is `409` with `reason` and the
+SAME `data` shape, so a client has one thing to reconcile against:
+
+```json
+{"id": "...", "fulfilment_revision": 3, "order_status": "pending",
+ "fulfilment_status": "ready", "priority": false, "served_at": null,
+ "cancelled_at": null, "cancellation_reason": null}
+```
+
+Reasons: `kitchen_action_required`, `kitchen_action_unknown`,
+`kitchen_precondition_required`, `kitchen_precondition_invalid` (400);
+`kitchen_forbidden`, `kitchen_manage_required` (403);
+`kitchen_precondition_stale`, `order_is_draft`, `order_cancelled`,
+`order_terminal`, `order_state_incoherent`, `illegal_transition`,
+`recall_window_expired`, `table_occupied`, `order_scope_mismatch`,
+`order_accepted_while_waiting`, `revision_limit_reached` (409). A 403 carries **no** `data` — it must not become
+an oracle for a tenant the caller has no relationship with.
+
+### New refusals a previously-accepted request may now hit
+
+- **An `initiated` DRAFT is refused by every command.** It was fully writable:
+  a draft could be walked to `served`, which set `order_status='served'` and made
+  something the diner never placed a SALE — after which they could no longer
+  place it.
+- **A CANCELLED order is terminal on every axis.** The guard existed only on the
+  serve branch, so a cancelled ticket could still be prepared and stamped served.
+- **Recall has a server-enforced 10-minute window** from the current completion.
+  There was no server age rule at all; the 24h Completed feed is VISIBILITY and
+  is unchanged.
+- **Recall is refused when the table has since been claimed** (`table_occupied`).
+- **Incoherent historical rows are refused for manual review**, untouched
+  (`order_state_incoherent`) — e.g. a served order carrying cancellation
+  provenance. Coherent orders with no `OrderAcceptance` remain fully operable.
+- **A command formed against a DRAFT is refused even if the diner places the
+  order while it waits** (`order_accepted_while_waiting`). Submission holds the
+  same table lock and does not advance the revision, so without this a cancel
+  aimed at a draft applied to the just-placed order.
+
+### Feeds
+
+`orders/active/` and `orders/completed/` additively publish `order_status` and
+`fulfilment_revision` per ticket, and `kitchen_protocol: 1` on the envelope. A
+client that does not see the protocol must go READ-ONLY rather than inventing a
+revision.
+
+### Cutover
+
+**Backend first, then frontend, and the window between them is a write outage
+for the kitchen board.** There is deliberately no grace period: a one-release
+optional precondition would leave delayed cancellation, serve-cycle and priority
+commands outside the guarantee, and would let an old writer mutate rows without
+advancing the token. The migration is additive with a database default, so an
+old writer's INSERT still succeeds — that is schema compatibility, not
+behavioural compatibility. Sequence the deploy as a hold/drain/update/verify,
+preferably outside service.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

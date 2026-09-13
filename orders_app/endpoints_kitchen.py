@@ -1,16 +1,31 @@
 """
 Kitchen view endpoints (api/v1/kitchen/).
 
+THE WRITE VIEWS ARE THIN ADAPTERS (D05). Every order command — advance, serve,
+correct, recall, cancel, priority — parses its body, delegates to
+``orders_app.controllers.services.kitchen_transition.execute``, and renders the
+envelope. No business rule lives here: the transition service owns the lock
+order, the re-read, the authoritative permission decision, eligibility, the
+revision precondition, the recall window and occupancy. Two adapters over one
+boundary cannot drift into two opinions, which is what the split rules used to
+do.
+
 Module-gated through the central permission resolver: access honours the
 owner-configured Roles & Access grid for the `kitchen` module
 (can_user_access_module / MODULE_KITCHEN), so revoking/granting kitchen on a role
 takes server-side effect. The in-progress goodwill-cancel escalation defers to
 the manage-level gate (can_manage_restaurant), which is intentionally NOT
-module-granular. All views are authenticated via the global SimpleJWT default —
-there is no AllowAny here. Kitchen writes the fulfilment axis (fulfilment_status,
-priority, served_at and the fulfilment timestamps) and, on the serve/recall
-completion transition and on cancel, order_status; payment_status stays
-finance-owned.
+module-granular; the service re-evaluates BOTH against state re-read under the
+lock. All views are authenticated via the global SimpleJWT default — there is no
+AllowAny here. Kitchen writes the fulfilment axis (fulfilment_status, priority,
+served_at, the fulfilment timestamps and the D05 revision) and, on the
+serve/recall completion transition and on cancel, order_status; payment_status
+stays finance-owned.
+
+The READ views are unchanged in shape and gate, and now publish the two fields a
+client needs to command safely (``order_status``, ``fulfilment_revision``) plus
+``kitchen_protocol`` — a narrow capability declaration, separate from D04's
+``checkout_protocol`` because they are different contracts.
 """
 import logging
 from datetime import timedelta
@@ -23,22 +38,25 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from orders_app.models import Order, OrderItem
+from orders_app.controllers.services.kitchen_transition import (
+    KITCHEN_PROTOCOL,
+    KitchenRefusal,
+    OrderNotFound,
+    execute,
+    parse_cancel_command,
+    parse_fulfilment_command,
+    parse_priority_command,
+)
 from orders_app.serializers_kitchen import (
     ActiveKitchenOrderSerializer,
     KitchenMenuItemSerializer,
 )
 from restaurants_app.models import MenuItem
-from users_app.controllers.permissions_check import (
-    can_user_access_module,
-    can_manage_restaurant,
-)
+from users_app.controllers.permissions_check import can_user_access_module
 from dinify_backend.configss.string_definitions import (
     MODULE_KITCHEN,
     OrderStatus_Cancelled,
     OrderStatus_Initiated,
-    OrderStatus_Served,
-    OrderStatus_Pending,
-    CANCELLATION_REASONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,15 +65,6 @@ logger = logging.getLogger(__name__)
 # recallable) for this long after served_at. Keeps the feed finite — 24h is a
 # sane "this service" window with no timezone math; adjustable.
 COMPLETED_WINDOW = timedelta(hours=24)
-
-# Server-authoritative forward transitions (one step each).
-FORWARD_TRANSITIONS = {
-    'new': 'preparing',
-    'preparing': 'ready',
-    'ready': 'served',
-}
-FULFILMENT_STATUSES = {'new', 'preparing', 'ready', 'served'}
-
 
 def _get_order_or_none(pk):
     # Guard against malformed UUIDs so bad input is a 404, never a 500.
@@ -118,7 +127,8 @@ class ActiveKitchenOrdersView(APIView):
 
         data = ActiveKitchenOrderSerializer(qs, many=True).data
         return Response(
-            {'status': 200, 'message': 'Active kitchen orders retrieved', 'data': data},
+            {'status': 200, 'message': 'Active kitchen orders retrieved',
+             'kitchen_protocol': KITCHEN_PROTOCOL, 'data': data},
             status=200,
         )
 
@@ -166,127 +176,95 @@ class CompletedKitchenOrdersView(APIView):
 
         data = ActiveKitchenOrderSerializer(qs, many=True).data
         return Response(
-            {'status': 200, 'message': 'Completed kitchen orders retrieved', 'data': data},
+            {'status': 200, 'message': 'Completed kitchen orders retrieved',
+             'kitchen_protocol': KITCHEN_PROTOCOL, 'data': data},
             status=200,
         )
 
 
-class KitchenOrderFulfilmentStatusView(APIView):
-    """PUT the server-authoritative fulfilment status of an order."""
+class _KitchenCommandView(APIView):
+    """Shared adapter for the three order-command routes.
+
+    HTTP in, HTTP out. It parses (through the service's own validators), calls
+    ``execute``, and renders. The only thing it decides is how a refusal becomes
+    a status code — every rule that could differ between routes lives in the one
+    boundary, so the routes cannot disagree about drafts, cancellation,
+    preconditions or permissions.
+    """
+
+    #: Subclasses set this to the matching ``parse_*_command``.
+    parse = None
 
     def put(self, request, pk):
-        order = _get_order_or_none(pk)
-        if order is None:
-            return Response({'status': 404, 'message': 'Order not found'}, status=404)
-        if not can_user_access_module(request.user, order.restaurant_id, MODULE_KITCHEN):
-            return Response(
-                {'status': 403, 'message': 'You do not have permission for this kitchen'},
-                status=403,
-            )
-
-        target = request.data.get('fulfilment_status')
-        if target not in FULFILMENT_STATUSES:
-            return Response(
-                {'status': 400, 'message': 'Invalid fulfilment_status'},
-                status=400,
-            )
-
-        current = order.fulfilment_status
-        now = timezone.now()
-
-        # The completion transition couples the finance-owned order_status to
-        # the fulfilment axis: serving completes the sale (-> 'served');
-        # recalling reverts it (-> 'pending'). Tracked here so order_status is
-        # added to update_fields ONLY on the branch where it actually changed.
-        order_status_changed = False
-
-        if FORWARD_TRANSITIONS.get(current) == target:
-            # forward one step; entering served stamps served_at and advances
-            # order_status — but never resurrect a cancelled order into a sale.
-            if target == 'served':
-                order.served_at = now
-                if order.order_status != OrderStatus_Cancelled:
-                    order.order_status = OrderStatus_Served
-                    order_status_changed = True
-        elif current == 'served' and target == 'ready':
-            # recall from the Completed feed — no age gate (the feed's own
-            # COMPLETED_WINDOW already bounds what's visible/recallable). Undo
-            # ONLY the coupling we set (order_status == 'served'); never touch a
-            # cancelled/other state.
-            order.served_at = None
-            if order.order_status == OrderStatus_Served:
-                order.order_status = OrderStatus_Pending
-                order_status_changed = True
-        elif current == 'ready' and target == 'preparing':
-            # recall back to preparing is allowed whenever ready (served_at null)
-            pass
-        else:
-            return Response(
-                {'status': 400, 'message': f'Illegal transition {current} -> {target}'},
-                status=400,
-            )
-
-        order.fulfilment_status = target
-        order.fulfilment_status_updated_at = now
-        order.fulfilment_status_updated_by = request.user
-        # The fulfilment axis is written on every transition; the completion
-        # transition also writes order_status (serve -> 'served', recall ->
-        # 'pending'), appended to update_fields only on the branch where it
-        # changed so non-completion transitions leave finance-owned order_status
-        # untouched. payment_status is never written here. time_last_updated is
-        # listed so its auto_now fires on this partial save.
-        update_fields = [
-            'fulfilment_status',
-            'served_at',
-            'fulfilment_status_updated_at',
-            'fulfilment_status_updated_by',
-            'time_last_updated',
-        ]
-        if order_status_changed:
-            update_fields.append('order_status')
-        order.save(update_fields=update_fields)
+        try:
+            command = type(self).parse(request.data)
+            result = execute(pk, request.user, command)
+        except OrderNotFound:
+            # ONE non-disclosing answer for unknown, soft-deleted and
+            # out-of-scope alike — this route must never become an oracle for
+            # order ids at a restaurant the caller cannot see.
+            return Response({'status': 404, 'message': 'Order not found'},
+                            status=404)
+        except KitchenRefusal as refusal:
+            body = {
+                'status': refusal.status,
+                'message': refusal.message,
+                'reason': refusal.reason,
+            }
+            # Present only where the caller has already cleared the module gate
+            # for THIS order's restaurant, so a conflict can tell an operator
+            # what the ticket actually is without disclosing anything they were
+            # not already entitled to read.
+            if refusal.state is not None:
+                body['data'] = refusal.state
+            return Response(body, status=refusal.status)
 
         return Response(
             {
                 'status': 200,
-                'message': 'Fulfilment status updated',
-                'data': {
-                    'id': str(order.id),
-                    'fulfilment_status': order.fulfilment_status,
-                    'served_at': order.served_at,
-                },
+                'message': ('Ticket updated'
+                            if result['outcome'] == 'applied'
+                            else 'No change'),
+                'outcome': result['outcome'],
+                'data': result['state'],
             },
             status=200,
         )
 
 
-class KitchenOrderPriorityView(APIView):
-    """PUT (set or toggle) the priority flag of an order."""
+class KitchenOrderFulfilmentStatusView(_KitchenCommandView):
+    """PUT one fulfilment command: ``{"action": ..., "if_revision": n}``.
 
-    def put(self, request, pk):
-        order = _get_order_or_none(pk)
-        if order is None:
-            return Response({'status': 404, 'message': 'Order not found'}, status=404)
-        if not can_user_access_module(request.user, order.restaurant_id, MODULE_KITCHEN):
-            return Response(
-                {'status': 403, 'message': 'You do not have permission for this kitchen'},
-                status=403,
-            )
+    The ACTION is required and there is no ``fulfilment_status`` fallback: a
+    target does not identify a command. ``preparing`` is reachable both forwards
+    (from ``new``) and backwards (from ``ready``), so a delayed forward request
+    used to execute as a recall and silently undo another device.
+    """
+    parse = staticmethod(parse_fulfilment_command)
 
-        if 'priority' in request.data:
-            order.priority = bool(request.data.get('priority'))
-        else:
-            order.priority = not order.priority
-        order.save(update_fields=['priority', 'time_last_updated'])
 
-        return Response(
-            {
-                'status': 200,
-                'message': 'Priority updated',
-                'data': {'id': str(order.id), 'priority': order.priority},
-            },
-            status=200,
-        )
+class KitchenOrderPriorityView(_KitchenCommandView):
+    """PUT ``{"priority": true|false, "if_revision": n}``.
+
+    A strict JSON boolean, always stated. The omitted-value toggle is gone: it
+    made a retried request undo itself, which is the opposite of the property a
+    retryable flag needs.
+    """
+    parse = staticmethod(parse_priority_command)
+
+
+class KitchenOrderCancelView(_KitchenCommandView):
+    """PUT ``{"cancellation_reason": ..., "if_revision": n}``.
+
+    State-aware authorisation, decided by the service from state re-read under
+    the lock: a free void while ``new``, manager/owner past that, never on a
+    served ticket (recall it first, if the recall is itself currently legal).
+
+    Cancelling frees the table and drops the ticket from the board. Payments are
+    parked — there are no refund mechanics here, and a cancellation is not a
+    statement that any money moved.
+    """
+    parse = staticmethod(parse_cancel_command)
 
 
 class KitchenMenuItemsView(APIView):
@@ -380,86 +358,3 @@ class KitchenMenuItemStockView(APIView):
             status=200,
         )
 
-
-class KitchenOrderCancelView(APIView):
-    """
-    PUT to cancel/void an order — the ONE kitchen write that sets order_status.
-
-    State-aware authorisation:
-      - 'new'                   : free void (base kitchen permission only)
-      - 'preparing' / 'ready'   : manager/owner-only (the goodwill gate)
-      - 'served'                : not directly cancellable (recall it first)
-
-    Setting order_status='cancelled' frees the table and drops the ticket from
-    the board (both the occupancy gate and the active-set query exclude
-    cancelled orders). Payments are parked — no refund mechanics. The write is
-    deliberately limited to order_status + the cancellation provenance fields;
-    payment_status and the fulfilment axis are never touched.
-    """
-
-    def put(self, request, pk):
-        order = _get_order_or_none(pk)
-        if order is None:
-            return Response({'status': 404, 'message': 'Order not found'}, status=404)
-        if not can_user_access_module(request.user, order.restaurant_id, MODULE_KITCHEN):
-            return Response(
-                {'status': 403, 'message': 'You do not have permission for this kitchen'},
-                status=403,
-            )
-
-        if order.order_status == OrderStatus_Cancelled:
-            return Response(
-                {'status': 400, 'message': 'Order is already cancelled'},
-                status=400,
-            )
-        if order.fulfilment_status == 'served':
-            return Response(
-                {'status': 400, 'message': 'Cannot cancel a served order; recall it first'},
-                status=400,
-            )
-        if order.fulfilment_status in ('preparing', 'ready') and not \
-                can_manage_restaurant(request.user, order.restaurant_id):
-            return Response(
-                {
-                    'status': 403,
-                    'message': 'Only a manager can cancel an order once preparation has started',
-                },
-                status=403,
-            )
-
-        reason = request.data.get('cancellation_reason')
-        if reason not in CANCELLATION_REASONS:
-            return Response(
-                {'status': 400, 'message': 'A valid cancellation_reason is required'},
-                status=400,
-            )
-
-        now = timezone.now()
-        order.order_status = OrderStatus_Cancelled
-        order.cancelled_at = now
-        order.cancelled_by = request.user
-        order.cancellation_reason = reason
-        # Deliberately limited to order_status + cancellation provenance, so
-        # payment_status and the fulfilment axis are never clobbered.
-        # time_last_updated is listed so its auto_now fires on this partial save.
-        order.save(update_fields=[
-            'order_status',
-            'cancelled_at',
-            'cancelled_by',
-            'cancellation_reason',
-            'time_last_updated',
-        ])
-
-        return Response(
-            {
-                'status': 200,
-                'message': 'Order cancelled',
-                'data': {
-                    'id': str(order.id),
-                    'order_status': order.order_status,
-                    'cancelled_at': order.cancelled_at,
-                    'cancellation_reason': order.cancellation_reason,
-                },
-            },
-            status=200,
-        )

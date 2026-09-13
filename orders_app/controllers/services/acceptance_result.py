@@ -106,8 +106,11 @@ ACCEPTANCE_EVIDENCE_UNAVAILABLE_MEANING = (
     'server cannot determine whether the submission landed. Two producers '
     'reach it and nothing on the row separates them: an order accepted '
     'before the evidence table existed, and a draft that a kitchen write '
-    'cancelled or advanced. Treat it as not safe to accept again, and never '
-    'backfill a moment or a reference for it.'
+    'cancelled or advanced. D05 closed the second producer for NEW rows — '
+    'every kitchen command now refuses a draft — but it did NOT resolve the '
+    'rows already produced, so the state stays a statement of ignorance '
+    'rather than becoming a verdict. Treat it as not safe to accept again, '
+    'and never backfill a moment or a reference for it.'
 )
 
 #: This response IS the result of an acceptance that just happened.

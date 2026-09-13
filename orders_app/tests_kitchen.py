@@ -55,6 +55,7 @@ from dinify_backend.configss.string_definitions import (
     PaymentStatus_Pending,
     RestaurantStatus_Live,
     CancellationReason_CustomerChangedMind,
+    CancellationReason_KitchenError,
     MODULE_KITCHEN,
 )
 from reports_app.controllers.common.sale_filters import sale_orders, revenue_sum
@@ -123,6 +124,40 @@ class KitchenTestBase(TestCase):
                 user=user, restaurant=self.restaurant, roles=restaurant_roles,
             )
         return user
+
+    # --- D05 command helpers -------------------------------------------
+    # Every kitchen mutation now names an explicit ACTION and the REVISION it
+    # believes it is acting on. These helpers read the current revision so an
+    # ordinary test states its intent rather than its precondition; a test ABOUT
+    # the precondition passes `if_revision` explicitly.
+
+    def _rev(self, order):
+        return Order.objects.values_list(
+            'fulfilment_revision', flat=True).get(pk=order.pk)
+
+    def _command(self, order, action, if_revision=None, **extra):
+        body = {'action': action,
+                'if_revision': self._rev(order) if if_revision is None
+                else if_revision}
+        body.update(extra)
+        return self.client.put(_fulfilment_url(order.pk), body, format='json')
+
+    def _set_priority(self, order, priority, if_revision=None):
+        return self.client.put(
+            _priority_url(order.pk),
+            {'priority': priority,
+             'if_revision': self._rev(order) if if_revision is None
+             else if_revision},
+            format='json')
+
+    def _cancel_cmd(self, order, reason=CancellationReason_CustomerChangedMind,
+                    if_revision=None):
+        return self.client.put(
+            _cancel_url(order.pk),
+            {'cancellation_reason': reason,
+             'if_revision': self._rev(order) if if_revision is None
+             else if_revision},
+            format='json')
 
     def _make_order(self, table=None, **overrides):
         """A kitchen fixture that satisfies the D02 acceptance invariants.
@@ -588,91 +623,121 @@ class KitchenTransitionTests(KitchenTestBase):
         super().setUp()
         self.client.force_authenticate(user=self.kitchen_user)
 
-    def _patch_status(self, order, target):
-        return self.client.put(
-            _fulfilment_url(order.id), {'fulfilment_status': target}, format='json',
-        )
-
     def test_forward_transitions(self):
         order = self._make_order(fulfilment_status='new')
-        self.assertEqual(self._patch_status(order, 'preparing').status_code, 200)
+        self.assertEqual(self._command(order, 'advance').status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'preparing')
 
-        self.assertEqual(self._patch_status(order, 'ready').status_code, 200)
+        self.assertEqual(self._command(order, 'advance').status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'ready')
 
-        self.assertEqual(self._patch_status(order, 'served').status_code, 200)
+        self.assertEqual(self._command(order, 'serve').status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'served')
         self.assertIsNotNone(order.served_at)
         self.assertEqual(order.fulfilment_status_updated_by_id, self.kitchen_user.id)
+        # Three applied commands, three increments (D05).
+        self.assertEqual(order.fulfilment_revision, 3)
 
     def test_illegal_transitions_rejected(self):
         order = self._make_order(fulfilment_status='new')
-        self.assertEqual(self._patch_status(order, 'ready').status_code, 400)
-        self.assertEqual(self._patch_status(order, 'served').status_code, 400)
-        self.assertEqual(self._patch_status(order, 'banana').status_code, 400)
+        # `serve` and `correct` both need `ready`; neither is reachable from new.
+        self.assertEqual(self._command(order, 'serve').status_code, 409)
+        self.assertEqual(self._command(order, 'correct').status_code, 409)
+        self.assertEqual(self._command(order, 'recall').status_code, 409)
+        # An unknown action is a controlled 400, never reinterpreted.
+        self.assertEqual(self._command(order, 'banana').status_code, 400)
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, 'new')
+        self.assertEqual(order.fulfilment_revision, 0)
 
     def test_recall_served_to_ready_clears_served_at(self):
-        order = self._make_order(fulfilment_status='served', served_at=timezone.now())
-        self.assertEqual(self._patch_status(order, 'ready').status_code, 200)
+        order = self._make_order(
+            fulfilment_status='served', order_status=OrderStatus_Served,
+            served_at=timezone.now())
+        self.assertEqual(self._command(order, 'recall').status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'ready')
         self.assertIsNone(order.served_at)
 
-    def test_recall_served_to_ready_regardless_of_age(self):
-        # no recall age gate — the Completed feed's own window bounds what is
-        # visible/recallable
+    def test_recall_is_refused_outside_the_server_window(self):
+        # POLICY CHANGED BY D05. This used to assert recall worked at ANY age —
+        # the Completed feed's 24h visibility was doing duty as a permission
+        # rule, and the API had no age rule at all, so a ticket served weeks
+        # earlier recalled at 200. The approved rule is a server-enforced
+        # 10-minute window from the CURRENT completion; feed retention is
+        # unchanged and is visibility, not permission.
         order = self._make_order(
-            fulfilment_status='served',
+            fulfilment_status='served', order_status=OrderStatus_Served,
             served_at=timezone.now() - timedelta(days=2),
         )
-        self.assertEqual(self._patch_status(order, 'ready').status_code, 200)
+        response = self._command(order, 'recall')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['reason'], 'recall_window_expired')
         order.refresh_from_db()
-        self.assertEqual(order.fulfilment_status, 'ready')
-        self.assertIsNone(order.served_at)
+        self.assertEqual(order.fulfilment_status, 'served')
+        self.assertEqual(order.fulfilment_revision, 0)
 
-    def test_recall_ready_to_preparing_allowed(self):
+    def test_correct_ready_to_preparing_allowed(self):
+        # Active correction: its own action, and it carries NO time rule —
+        # nothing was completed, so there is no completion to be within a window
+        # of.
         order = self._make_order(fulfilment_status='ready')
-        self.assertEqual(self._patch_status(order, 'preparing').status_code, 200)
+        self.assertEqual(self._command(order, 'correct').status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'preparing')
 
     def test_patch_cannot_mutate_finance_fields(self):
+        # Body keys the contract does not define are ignored outright — and a
+        # `fulfilment_revision` in the body is NOT a value a caller may assign.
         order = self._make_order(
             fulfilment_status='new',
-            order_status=OrderStatus_Initiated,
+            order_status=OrderStatus_Pending,
             payment_status=PaymentStatus_Pending,
         )
-        response = self.client.put(
-            _fulfilment_url(order.id),
-            {'fulfilment_status': 'preparing', 'order_status': 'cancelled', 'payment_status': 'paid'},
-            format='json',
+        response = self._command(
+            order, 'advance',
+            order_status='cancelled', payment_status='paid',
+            fulfilment_revision=999, is_test=True,
         )
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'preparing')
-        self.assertEqual(order.order_status, OrderStatus_Initiated)
+        self.assertEqual(order.order_status, OrderStatus_Pending)
         self.assertEqual(order.payment_status, PaymentStatus_Pending)
+        self.assertEqual(order.fulfilment_revision, 1)
+        self.assertFalse(order.is_test)
 
-    def test_priority_toggle_and_explicit_set(self):
+    def test_priority_requires_an_explicit_boolean(self):
+        # POLICY CHANGED BY D05. The omitted-value TOGGLE is gone: a retried
+        # request used to undo itself, which is the opposite of what a retryable
+        # flag needs. The value is now always stated.
         order = self._make_order(priority=False)
-        self.assertEqual(self.client.put(_priority_url(order.id), {}, format='json').status_code, 200)
+        self.assertEqual(
+            self.client.put(_priority_url(order.id), {}, format='json').status_code,
+            400)
+        order.refresh_from_db()
+        self.assertFalse(order.priority)
+
+        self.assertEqual(self._set_priority(order, True).status_code, 200)
         order.refresh_from_db()
         self.assertTrue(order.priority)
 
-        self.client.put(_priority_url(order.id), {'priority': False}, format='json')
+        self.assertEqual(self._set_priority(order, False).status_code, 200)
         order.refresh_from_db()
         self.assertFalse(order.priority)
 
     def test_patch_denied_for_waiter(self):
         order = self._make_order(fulfilment_status='new')
+        revision = self._rev(order)
         self.client.force_authenticate(user=self.waiter_user)
-        self.assertEqual(self._patch_status(order, 'preparing').status_code, 403)
+        self.assertEqual(
+            self._command(order, 'advance', if_revision=revision).status_code, 403)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'new')
+        self.assertEqual(order.fulfilment_revision, 0)
 
 
 class TableGatingTests(KitchenTestBase):
@@ -1067,14 +1132,12 @@ class SubmitClaimsTableTests(KitchenTestBase):
         self.assertIn(str(order.id), self._active_ids(self.kitchen_user))
 
         self.client.force_authenticate(user=self.kitchen_user)
-        for target in ('preparing', 'ready', 'served'):
-            resp = self.client.put(
-                _fulfilment_url(order.id),
-                {'fulfilment_status': target}, format='json',
-            )
+        for action in ('advance', 'advance', 'serve'):
+            resp = self._command(order, action)
             self.assertEqual(resp.status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'served')
+        self.assertEqual(order.fulfilment_revision, 3)
 
         self._assert_free(self.table1)
         self.assertNotIn(str(order.id), self._active_ids(self.kitchen_user))
@@ -1178,6 +1241,10 @@ class KitchenCancelTests(KitchenTestBase):
     VALID_REASON = CancellationReason_CustomerChangedMind
 
     def _cancel(self, order, user, **payload):
+        # D05: every kitchen mutation names the revision it acts on. Injected
+        # here so each test states its own intent; a test ABOUT the precondition
+        # passes `if_revision` explicitly.
+        payload.setdefault('if_revision', self._rev(order))
         self.client.force_authenticate(user=user)
         return self.client.put(_cancel_url(order.id), payload, format='json')
 
@@ -1225,11 +1292,12 @@ class KitchenCancelTests(KitchenTestBase):
     def test_preparing_or_ready_requires_manager(self):
         for status in ('preparing', 'ready'):
             # a kitchen-only user is denied once preparation has started
-            order = self._make_order(fulfilment_status=status, order_status=OrderStatus_Initiated)
+            order = self._make_order(fulfilment_status=status, order_status=OrderStatus_Pending)
             response = self._cancel(order, self.kitchen_user, cancellation_reason=self.VALID_REASON)
             self.assertEqual(response.status_code, 403, msg=f'kitchen denied for {status}')
             order.refresh_from_db()
-            self.assertEqual(order.order_status, OrderStatus_Initiated)  # unchanged
+            self.assertEqual(order.order_status, OrderStatus_Pending)  # unchanged
+            self.assertEqual(order.fulfilment_revision, 0)             # and no bump
 
             # manager and owner may cancel
             for user in (self.manager_user, self.owner_user):
@@ -1244,55 +1312,80 @@ class KitchenCancelTests(KitchenTestBase):
                 self.assertEqual(order.cancelled_by_id, user.id)
 
     def test_served_order_not_cancellable(self):
-        # 'served' is blocked even for a manager with a valid reason; recall first.
-        order = self._make_order(fulfilment_status='served', served_at=timezone.now(), order_status=OrderStatus_Initiated)
+        # 'served' is blocked even for a manager with a valid reason; recall
+        # first — and only if that recall is itself currently legal. The status
+        # moved 400 -> 409 with D05: the body was fine, the state forbids it.
+        order = self._make_order(
+            fulfilment_status='served', served_at=timezone.now(),
+            order_status=OrderStatus_Served)
         response = self._cancel(order, self.manager_user, cancellation_reason=self.VALID_REASON)
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['reason'], 'illegal_transition')
         order.refresh_from_db()
-        self.assertEqual(order.order_status, OrderStatus_Initiated)
+        self.assertEqual(order.order_status, OrderStatus_Served)
 
-    def test_already_cancelled_order_returns_400(self):
+    def test_already_cancelled_order_is_a_no_write_conflict(self):
+        # A retry after a lost response must not claim THIS caller's command
+        # ran, and must not disturb the original cancellation's provenance.
         order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Cancelled)
+        order.cancelled_at = timezone.now() - timedelta(minutes=5)
+        order.cancelled_by = self.owner_user
+        order.cancellation_reason = CancellationReason_KitchenError
+        order.save(update_fields=[
+            'cancelled_at', 'cancelled_by', 'cancellation_reason'])
+        before = Order.objects.get(pk=order.pk)
+
         response = self._cancel(order, self.manager_user, cancellation_reason=self.VALID_REASON)
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['reason'], 'order_cancelled')
+
+        after = Order.objects.get(pk=order.pk)
+        self.assertEqual(after.cancelled_at, before.cancelled_at)
+        self.assertEqual(after.cancelled_by_id, self.owner_user.id)
+        self.assertEqual(after.cancellation_reason, CancellationReason_KitchenError)
+        self.assertEqual(after.fulfilment_revision, before.fulfilment_revision)
 
     def test_missing_or_invalid_reason_returns_400(self):
-        order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Initiated)
+        order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Pending)
         # missing reason
         self.assertEqual(self._cancel(order, self.kitchen_user).status_code, 400)
         order.refresh_from_db()
-        self.assertEqual(order.order_status, OrderStatus_Initiated)
+        self.assertEqual(order.order_status, OrderStatus_Pending)
 
         # invalid reason
         self.assertEqual(
             self._cancel(order, self.kitchen_user, cancellation_reason='banana').status_code, 400,
         )
+        # a non-string reason is refused by TYPE, not coerced
+        self.assertEqual(
+            self._cancel(order, self.kitchen_user, cancellation_reason=1).status_code, 400,
+        )
         order.refresh_from_db()
-        self.assertEqual(order.order_status, OrderStatus_Initiated)
+        self.assertEqual(order.order_status, OrderStatus_Pending)
+        self.assertEqual(order.fulfilment_revision, 0)
 
     def test_denied_for_user_without_kitchen_role(self):
-        order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Initiated)
+        order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Pending)
         for user in (self.waiter_user, self.outsider_user):
             response = self._cancel(order, user, cancellation_reason=self.VALID_REASON)
             self.assertEqual(response.status_code, 403, msg=f'expected 403 for {user.username}')
+            # A 403 discloses no state — it is not an oracle for a tenant the
+            # caller has no relationship with.
+            self.assertNotIn('data', response.json())
         order.refresh_from_db()
-        self.assertEqual(order.order_status, OrderStatus_Initiated)  # unchanged
+        self.assertEqual(order.order_status, OrderStatus_Pending)  # unchanged
 
     def test_unknown_or_malformed_pk_404(self):
         self.client.force_authenticate(user=self.kitchen_user)
         # Unknown-but-valid UUID and a malformed id both resolve to 404, never 500.
-        self.assertEqual(
-            self.client.put(
-                _cancel_url(uuid.uuid4()),
-                {'cancellation_reason': self.VALID_REASON}, format='json',
-            ).status_code, 404,
-        )
-        self.assertEqual(
-            self.client.put(
-                _cancel_url('not-a-uuid'),
-                {'cancellation_reason': self.VALID_REASON}, format='json',
-            ).status_code, 404,
-        )
+        for pk in (uuid.uuid4(), 'not-a-uuid'):
+            self.assertEqual(
+                self.client.put(
+                    _cancel_url(pk),
+                    {'cancellation_reason': self.VALID_REASON, 'if_revision': 0},
+                    format='json',
+                ).status_code, 404,
+            )
 
 
 class KitchenModuleGridOverrideTests(KitchenTestBase):
@@ -1390,11 +1483,6 @@ class KitchenServeAdvancesOrderStatusTests(KitchenTestBase):
         self.client.force_authenticate(user=self.kitchen_user)
         self.today = timezone.localdate()
 
-    def _patch_status(self, order, target):
-        return self.client.put(
-            _fulfilment_url(order.id), {'fulfilment_status': target}, format='json',
-        )
-
     def _sale_qs(self):
         return sale_orders(self.restaurant.id, self.today, self.today)
 
@@ -1410,7 +1498,7 @@ class KitchenServeAdvancesOrderStatusTests(KitchenTestBase):
         # in-flight: not yet a sale
         self.assertFalse(self._is_sale(order))
 
-        self.assertEqual(self._patch_status(order, 'served').status_code, 200)
+        self.assertEqual(self._command(order, 'serve').status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'served')
         self.assertEqual(order.order_status, OrderStatus_Served)
@@ -1430,7 +1518,7 @@ class KitchenServeAdvancesOrderStatusTests(KitchenTestBase):
         )
         self.assertTrue(self._is_sale(order))
 
-        self.assertEqual(self._patch_status(order, 'ready').status_code, 200)
+        self.assertEqual(self._command(order, 'recall').status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'ready')
         self.assertEqual(order.order_status, OrderStatus_Pending)
@@ -1441,31 +1529,39 @@ class KitchenServeAdvancesOrderStatusTests(KitchenTestBase):
         # (a) new -> preparing: order_status is NOT in the save's update_fields
         order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Pending)
         with mock.patch.object(Order, 'save', autospec=True) as save_mock:
-            self.assertEqual(self._patch_status(order, 'preparing').status_code, 200)
+            self.assertEqual(self._command(order, 'advance').status_code, 200)
         self.assertEqual(save_mock.call_count, 1)
         self.assertNotIn('order_status', save_mock.call_args.kwargs['update_fields'])
+        # ...while the revision always is: it versions the whole kitchen state.
+        self.assertIn('fulfilment_revision', save_mock.call_args.kwargs['update_fields'])
 
         # (b) unmocked: order_status is untouched across the non-completion steps
         order = self._make_order(fulfilment_status='new', order_status=OrderStatus_Pending)
-        self.assertEqual(self._patch_status(order, 'preparing').status_code, 200)
-        self.assertEqual(self._patch_status(order, 'ready').status_code, 200)
+        self.assertEqual(self._command(order, 'advance').status_code, 200)
+        self.assertEqual(self._command(order, 'advance').status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.fulfilment_status, 'ready')
         self.assertEqual(order.order_status, OrderStatus_Pending)
 
-    def test_cancelled_order_driven_to_served_stays_cancelled(self):
-        # The fulfilment endpoint doesn't itself block a cancelled order on the
-        # fulfilment axis (pre-existing gap), but the serve guard keeps
-        # order_status='cancelled' -> it never becomes a sale.
+    def test_cancelled_order_cannot_be_driven_anywhere(self):
+        # POLICY CHANGED BY D05, and this test's own former comment named the
+        # gap: the fulfilment endpoint did NOT block a cancelled order on the
+        # fulfilment axis, so a cancelled ticket could still be prepared and
+        # stamped with a served time — only the serve guard kept it out of
+        # Reports. A cancelled order is now terminal for every kitchen command.
         order = self._make_order(
             fulfilment_status='ready',
             order_status=OrderStatus_Cancelled,
             actual_cost=Decimal('5000.00'),
         )
-        self.assertEqual(self._patch_status(order, 'served').status_code, 200)
+        response = self._command(order, 'serve')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()['reason'], 'order_cancelled')
         order.refresh_from_db()
-        self.assertEqual(order.fulfilment_status, 'served')
+        self.assertEqual(order.fulfilment_status, 'ready')
+        self.assertIsNone(order.served_at)
         self.assertEqual(order.order_status, OrderStatus_Cancelled)
+        self.assertEqual(order.fulfilment_revision, 0)
         self.assertFalse(self._is_sale(order))
 
     def test_serve_is_server_authoritative_ignoring_body_order_status(self):
@@ -1474,11 +1570,7 @@ class KitchenServeAdvancesOrderStatusTests(KitchenTestBase):
         order = self._make_order(
             fulfilment_status='ready', order_status=OrderStatus_Pending,
         )
-        response = self.client.put(
-            _fulfilment_url(order.id),
-            {'fulfilment_status': 'served', 'order_status': 'paid'},
-            format='json',
-        )
+        response = self._command(order, 'serve', order_status='paid')
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.order_status, OrderStatus_Served)
