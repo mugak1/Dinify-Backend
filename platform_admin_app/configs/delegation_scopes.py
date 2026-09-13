@@ -145,6 +145,13 @@ ALLOWED_ROUTES = {
     #       the tenant's order history, and needs manage-level authority, which a
     #       delegation never carries.
     #   kitchen/orders/<pk>/priority/  harmless but useless alone.
+    #   kitchen/orders/<pk>/state/  the per-order OBSERVATION that settles an
+    #       uncertain kitchen command. Omitted BY REASONING, not by oversight:
+    #       a delegated session cannot issue any of the three commands above, so
+    #       it can never hold an uncertain one to reconcile. Nothing it discloses
+    #       is new — the two board feeds it MAY read carry the same fields — so
+    #       this is a surface with no delegated caller rather than a withheld
+    #       capability. Add it only alongside a delegated writer that needs it.
     #   reviews/<id>/resolution/  manage-level gate; closed by construction.
     #   restaurant-setup writes, table-actions, reservations, waitlist, tags,
     #       upsell-config, role-permissions, manager-actions  all authenticate

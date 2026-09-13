@@ -46,6 +46,7 @@ from orders_app.controllers.services.kitchen_transition import (
     parse_cancel_command,
     parse_fulfilment_command,
     parse_priority_command,
+    read_state,
 )
 from orders_app.serializers_kitchen import (
     ActiveKitchenOrderSerializer,
@@ -265,6 +266,42 @@ class KitchenOrderCancelView(_KitchenCommandView):
     statement that any money moved.
     """
     parse = staticmethod(parse_cancel_command)
+
+
+class KitchenOrderStateView(APIView):
+    """GET ``kitchen/orders/<pk>/state/`` — what ONE order is right now.
+
+    A thin adapter over ``kitchen_transition.read_state``, exactly as the three
+    command routes are thin adapters over ``execute``. It exists because the two
+    feeds cannot answer for an order that has left them, which is precisely what
+    a cancellation — the command whose uncertain outcome matters most — produces.
+
+    It is a READ: no lock, no transaction, no write, no repair, and no claim that
+    any earlier command caused what it reports. It answers for a cancelled,
+    served, terminal or draft order, because those are the orders it is for.
+
+    It renders the SAME projection and the SAME ``kitchen_protocol`` declaration
+    the command routes do, so a client has one shape to reconcile against however
+    it obtained it.
+    """
+
+    def get(self, request, pk):
+        try:
+            state = read_state(pk, request.user)
+        except OrderNotFound:
+            return Response({'status': 404, 'message': 'Order not found'},
+                            status=404)
+        except KitchenRefusal as refusal:
+            return Response(
+                {'status': refusal.status, 'message': refusal.message,
+                 'reason': refusal.reason},
+                status=refusal.status,
+            )
+        return Response(
+            {'status': 200, 'message': 'Order state',
+             'kitchen_protocol': KITCHEN_PROTOCOL, 'data': state},
+            status=200,
+        )
 
 
 class KitchenMenuItemsView(APIView):

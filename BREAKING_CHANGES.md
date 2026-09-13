@@ -864,6 +864,64 @@ old writer's INSERT still succeeds — that is schema compatibility, not
 behavioural compatibility. Sequence the deploy as a hold/drain/update/verify,
 preferably outside service.
 
+### 15a. Completion (post-#319): one observation route, and priority is scoped
+
+Three follow-ups to §15. Only the second changes an answer a deployed client
+could already be getting.
+
+**NEW, ADDITIVE — `GET api/v1/kitchen/orders/<pk>/state/`.** The per-order
+OBSERVATION that settles an uncertain command. A command whose reply is lost
+leaves a client unable to say whether the server acted, and the commands whose
+outcome matters most — a cancellation, and a serve past the 24h Completed
+window — are exactly the ones that REMOVE the order from BOTH feeds, so "it is
+not on the board" is not an answer. It returns the same
+`{status, message, kitchen_protocol, data}` envelope and the SAME projection
+every command answers with, for ANY order it can see: cancelled, served,
+terminal or draft. Eligibility is a question about what may be COMMANDED and
+stays with the command routes. It takes no lock, opens no transaction, writes
+nothing and repairs nothing, and it makes no claim that an earlier command
+caused what it reports.
+
+**EVERY REFUSAL IS ONE NON-DISCLOSING 404** — an unknown id, a malformed one, a
+soft-deleted order, AND an order at a restaurant the caller cannot see, in
+status and in body alike. That last case is where this READ parts company with
+the three command routes, which answer `403 kitchen_forbidden`: on a read,
+403-for-foreign beside 404-for-unknown is an existence oracle over the whole
+orders table, free and silent for any authenticated kitchen user, and it would
+contradict this repository's rule that a tenant-scoped detail read answers 404
+"so existence is not confirmed". **The command routes are unchanged and still
+answer 403**; that asymmetry is deliberate here — `kitchen_forbidden` is a
+client-visible reason the board renders — but it is the same exposure to a
+caller willing to attempt a mutation instead of a read, and narrowing it is its
+own contract decision.
+
+It is DELIBERATELY ABSENT from the delegated `ALLOWED_ROUTES` — a delegated
+session can issue none of the three commands, so it can never hold an uncertain
+one to reconcile (the reasoning is recorded in `delegation_scopes.py`).
+
+**A NARROWING — priority now applies only to a ticket the kitchen is still
+working on.** `PUT kitchen/orders/<pk>/priority/` on a ticket whose
+`fulfilment_status` is `served` was a 200 and is now
+`409 illegal_transition`. The flag is meaningless on a completed ticket, but
+that is not why it is refused: applying it BUMPED THE REVISION, and a served
+ticket is recall-eligible for ten minutes — so a stray priority tap spent the
+precondition an operator was holding and their recall came back stale with the
+window running down. No shipped board offers the control there (the Completed
+card renders Recall only), so no current client is affected.
+
+**INTERNAL — `KitchenCommand` validates on construction.** The revision's type
+and range, the `priority` boolean and the `cancellation_reason` vocabulary were
+enforced only by the three `parse_*` functions, so a caller that built a command
+another way reached `execute` with none of them applied — and `execute` checked
+only the ACTION, despite documenting that it self-guards a direct caller. Those
+rules now live in `__post_init__`, raising the same `KitchenRefusal` the parsers
+raise, and cross-action fields (an `advance` carrying a `cancellation_reason`)
+are unrepresentable rather than ignored. `_assert_revision` also re-asserts the
+type at the compare-and-set: `!=` alone reads as exact while `False == 0` and
+`1.0 == 1` are both true in Python, so either value satisfied a precondition it
+had never been checked against. **No HTTP request shape changes** — every one of
+these was already enforced at the parser for a request arriving over the wire.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

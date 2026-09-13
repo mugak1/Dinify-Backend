@@ -94,7 +94,56 @@ so keep it current when conventions change.
   are refused for manual review and left untouched, never repaired. D05 closed
   the kitchen PRODUCER of D04's `evidence_unavailable` for new rows without
   resolving the rows already produced, so that state remains a statement of
-  ignorance
+  ignorance.
+  **THE BOUNDARY NOW VALIDATES, AND THERE IS ONE PER-ORDER OBSERVATION (K4).**
+  `KitchenCommand` validates in `__post_init__`, so "fully validated" is a
+  property of the TYPE rather than a description of how the three `parse_*`
+  functions happen to be written: the revision's type and range, the `priority`
+  boolean and the `cancellation_reason` vocabulary were enforced ONLY at the
+  parsers, so a caller that built a command another way reached `execute` with
+  none of them — and `execute` checked only the ACTION, despite documenting that
+  it self-guards a direct caller. A directly-built cancel could write ANY string
+  as the stored reason, permanently, since a cancellation is never re-cancelled.
+  Cross-action fields are UNREPRESENTABLE rather than ignored (an `advance`
+  carrying a `cancellation_reason` cannot be built), because silently dropping one
+  leaves a caller believing they said something the boundary threw away.
+  `_assert_revision` also RE-ASSERTS THE TYPE at the compare-and-set: `!=` reads
+  as exact while Python's numeric tower is not, so `False` satisfied a
+  precondition of 0 and `1.0` one of 1 — a token whose whole purpose is exactness,
+  satisfied by a coercion. **PRIORITY APPLIES ONLY TO A TICKET THE KITCHEN IS
+  STILL WORKING ON** (`new`/`preparing`/`ready`): a served ticket accepted one,
+  and the harm is not that the flag is meaningless there but that applying it
+  BUMPED THE REVISION — a served ticket is recall-eligible for ten minutes, so a
+  stray priority tap spent the precondition an operator was holding and their
+  recall came back stale with the window running down. The eligibility question is
+  asked BEFORE the equality one, as everywhere else here, so the no-op branch
+  cannot answer "no change" about a ticket the rule does not apply to. **NONE OF
+  THIS CHANGES AN HTTP REQUEST SHAPE** — every rule was already enforced at the
+  parser for a request arriving over the wire; the one ANSWER that changes is
+  priority on a served ticket, 200 → 409 `illegal_transition`, which no shipped
+  board can reach. `GET kitchen/orders/<pk>/state/`
+  (`KitchenOrderStateView` → `kitchen_transition.read_state`) is the per-order
+  OBSERVATION that settles an uncertain command, and it is the one thing the FEEDS
+  CANNOT REPLACE: a cancellation — and a serve past the 24h Completed window —
+  removes the order from BOTH feeds, so "it is not on the board" is not an answer
+  about whether the command ran. It answers for ANY order it can see (cancelled,
+  served, terminal, DRAFT), returns the SAME projection every command answers
+  with, and takes no lock, opens no transaction, writes nothing and asserts no
+  causal link between the state and any earlier command. Eligibility stays with
+  `execute`. **EVERY REFUSAL IS ONE NON-DISCLOSING 404** — unknown, malformed,
+  soft-deleted AND out of the caller's scope alike, in status and in body. The
+  scope case is where this READ parts company with the three command routes,
+  which answer `403 kitchen_forbidden`: on a read, 403-for-foreign beside
+  404-for-unknown is an existence oracle over the whole orders table, free and
+  silent for any authenticated kitchen user, and it contradicts both the rule
+  above (a tenant-scoped detail read answers 404 so existence is not confirmed)
+  and `OrderNotFound`'s own docstring. The COMMAND routes still answer 403 and
+  are unchanged — `kitchen_forbidden` is a reason the board renders — but that is
+  the same exposure to a caller willing to attempt a mutation, and narrowing it
+  is its own contract decision rather than this change's. It is DELIBERATELY ABSENT from the delegated `ALLOWED_ROUTES` — a
+  delegated session can issue none of the three commands, so it can never hold an
+  uncertain one to reconcile; the reasoning is recorded in `delegation_scopes.py`
+  beside the command exclusions. See `BREAKING_CHANGES.md` §15a
 - Order-creation hardening: ✅ (PRs #198–#201, #210) — the live v2 `initiate`
   create path enforces tenant consistency (table + menu items must belong to the
   same restaurant, BUG-P1-1), rejects orders when the restaurant is not
@@ -1778,8 +1827,11 @@ so keep it current when conventions change.
   `orders/<pk>/priority/`, `orders/<pk>/cancel/`) each take an explicit command
   plus a REQUIRED `if_revision`, and are thin adapters over
   `kitchen_transition.execute`; the two feeds additively publish `order_status`,
-  `fulfilment_revision` and an envelope `kitchen_protocol`. None of the three is
-  on the delegated `ALLOWED_ROUTES` allowlist and none may be added — see
+  `fulfilment_revision` and an envelope `kitchen_protocol`. A FOURTH order route,
+  `GET orders/<pk>/state/`, is the per-order OBSERVATION that settles an uncertain
+  command (`kitchen_transition.read_state`) — it answers for an order that has
+  left both feeds, which is exactly what a cancellation produces. None of the four
+  is on the delegated `ALLOWED_ROUTES` allowlist and none may be added — see
   `delegation_scopes.py`, which records why for each
 - `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
   `issues/`, `issues/<uuid:issue_id>/` — separate app (`admin/issues/` retired)
