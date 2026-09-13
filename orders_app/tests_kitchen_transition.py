@@ -948,3 +948,55 @@ class WhatACommandCostsTests(KitchenTestBase):
         order = self._make_order()
         with self.assertNumQueries(0):
             self._put(_fulfilment_url(order.pk), {'action': 'advance'})
+
+
+class UnknownActionTests(KitchenTestBase):
+    """`execute` validates the command vocabulary ITSELF. (Codex P2 on PR #319.)
+
+    The endpoint's parser gates the HTTP surface, but the service is documented
+    as the authoritative boundary that self-guards a direct caller — the same
+    property `_create_order` states about itself. Without a check here an
+    unrecognised action fell through `_apply_fulfilment`'s branches into the
+    RECALL arm, so `KitchenCommand(action='invalid')` would recall a served
+    order rather than being refused.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client.force_authenticate(user=self.kitchen_user)
+
+    def test_an_unknown_action_cannot_reach_the_recall_arm(self):
+        order = self._make_order(
+            fulfilment_status='served', order_status=OrderStatus_Served,
+            served_at=timezone.now())
+        with self.assertRaises(kt.KitchenRefusal) as caught:
+            kt.execute(order.pk, self.kitchen_user,
+                       kt.KitchenCommand(action='invalid', if_revision=0))
+        self.assertEqual(caught.exception.reason, 'kitchen_action_unknown')
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, 'served')
+        self.assertIsNotNone(order.served_at)
+        self.assertEqual(order.fulfilment_revision, 0)
+
+    def test_every_unrecognised_value_is_refused_not_reinterpreted(self):
+        order = self._make_order(fulfilment_status='ready')
+        for action in ('', 'RECALL', 'Advance', 'fulfilment_status', None, 0):
+            with self.assertRaises(kt.KitchenRefusal, msg=repr(action)) as caught:
+                kt.execute(order.pk, self.kitchen_user,
+                           kt.KitchenCommand(action=action, if_revision=0))
+            self.assertEqual(caught.exception.reason, 'kitchen_action_unknown',
+                             msg=repr(action))
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, 'ready')
+        self.assertEqual(order.fulfilment_revision, 0)
+
+    def test_the_five_real_actions_are_the_control(self):
+        for action, fulfilment in (
+            (kt.ACTION_ADVANCE, 'new'),
+            (kt.ACTION_SERVE, 'ready'),
+            (kt.ACTION_CORRECT, 'ready'),
+        ):
+            order = self._make_order(fulfilment_status=fulfilment)
+            result = kt.execute(order.pk, self.kitchen_user,
+                                kt.KitchenCommand(action=action, if_revision=0))
+            self.assertEqual(result['outcome'], 'applied', msg=action)

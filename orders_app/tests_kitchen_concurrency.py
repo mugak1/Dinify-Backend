@@ -567,3 +567,123 @@ class RollbackTests(KitchenRaceBase):
         self.assertEqual(after.fulfilment_revision, before.fulfilment_revision)
         self.assertEqual(after.fulfilment_status_updated_at,
                          before.fulfilment_status_updated_at)
+
+
+class DraftBoundaryAcrossAcceptanceTests(KitchenRaceBase):
+    """A command formed against a DRAFT must not become a command against the
+    order the diner has meanwhile placed. (Codex P2 on PR #319.)
+
+    THE WINDOW IS REAL AND IT IS THIS SERVICE'S OWN. The kitchen locator reads
+    the order BEFORE taking the table lock, and `_submit_order` holds that same
+    lock while it flips `initiated -> pending`. So a kitchen command can locate a
+    draft, block, and find a perfectly ordinary accepted order waiting for it —
+    `_assert_operable` passes, and because SUBMISSION IS NOT A KITCHEN COMMAND it
+    does not advance `fulfilment_revision`, so the precondition captured against
+    the draft still matches.
+
+    THE HARM IS THE ONE §3 NAMES: a delayed command becoming a DIFFERENT command.
+    The operator formed "cancel this draft" — something the server refuses
+    outright — and timing alone turns it into "cancel this diner's live order".
+    """
+
+    def _draft_and_ref(self):
+        from orders_app.models import OrderItem
+        draft = self._order(order_status=OrderStatus_Initiated,
+                            fulfilment_status='new')
+        return draft, quote_ref(Order.objects.get(pk=draft.pk))
+
+    def _race_across_acceptance(self, kitchen_body, url_for):
+        """Submit holds the table lock; the kitchen command has ALREADY located
+        the draft and is queued behind it. Submit then commits."""
+        draft, ref = self._draft_and_ref()
+        submit_parked = threading.Event()
+        located = threading.Event()
+        release_submit = threading.Event()
+        errors, results = [], {}
+
+        def submit_worker():
+            fired = [False]
+
+            def wrapper(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                if not fired[0] and 'FOR UPDATE' in sql:
+                    fired[0] = True
+                    submit_parked.set()
+                    # Wait until the kitchen command has read the DRAFT.
+                    located.wait(timeout=WAIT_TIMEOUT)
+                    release_submit.wait(timeout=WAIT_TIMEOUT)
+                return result
+
+            with connection.execute_wrapper(wrapper):
+                return update_order_status(
+                    Order.objects.get(pk=draft.pk), OrderStatus_Pending, None, ref
+                )['status']
+
+        def kitchen_worker():
+            fired = [False]
+
+            def wrapper(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                if not fired[0] and 'FROM "orders"' in sql and 'FOR UPDATE' not in sql:
+                    # The locator has just read the row — still a draft.
+                    fired[0] = True
+                    located.set()
+                    release_submit.set()
+                return result
+
+            with connection.execute_wrapper(wrapper):
+                return self._put(self.kitchen_user, url_for(draft.pk), kitchen_body)
+
+        t1 = self._spawn(submit_worker, results, 'submit', errors)
+        self.assertTrue(submit_parked.wait(timeout=WAIT_TIMEOUT),
+                        'the submit worker never took the table lock')
+        t2 = self._spawn(kitchen_worker, results, 'kitchen', errors)
+        self._join([t1, t2], errors)
+        return draft, results
+
+    def test_a_cancel_formed_against_a_draft_cannot_kill_the_placed_order(self):
+        draft, results = self._race_across_acceptance(
+            {'cancellation_reason': CancellationReason_CustomerChangedMind,
+             'if_revision': 0},
+            _cancel_url)
+        self.assertEqual(results['submit'], 200, 'the diner placed their order')
+
+        row = Order.objects.get(pk=draft.pk)
+        self.assertEqual(
+            results['kitchen'].status_code, 409,
+            'a command formed against a draft was applied to the placed order')
+        self.assertEqual(row.order_status, OrderStatus_Pending)
+        self.assertIsNone(row.cancelled_at)
+        self.assertIsNone(row.cancellation_reason)
+        self.assertEqual(row.fulfilment_revision, 0)
+
+    def test_an_advance_formed_against_a_draft_is_refused_too(self):
+        draft, results = self._race_across_acceptance(
+            {'action': 'advance', 'if_revision': 0}, _fulfilment_url)
+        self.assertEqual(results['submit'], 200)
+        row = Order.objects.get(pk=draft.pk)
+        self.assertEqual(results['kitchen'].status_code, 409)
+        self.assertEqual(row.fulfilment_status, 'new')
+        self.assertEqual(row.fulfilment_revision, 0)
+
+    def test_a_priority_command_formed_against_a_draft_is_refused_too(self):
+        draft, results = self._race_across_acceptance(
+            {'priority': True, 'if_revision': 0}, _priority_url)
+        self.assertEqual(results['submit'], 200)
+        row = Order.objects.get(pk=draft.pk)
+        self.assertEqual(results['kitchen'].status_code, 409)
+        self.assertFalse(row.priority)
+
+    def test_control_an_ordinary_command_on_an_accepted_order_still_works(self):
+        """The refusal is about CROSSING the boundary, not about accepted orders.
+        A command formed AFTER acceptance is unaffected."""
+        draft, ref = self._draft_and_ref()
+        self.assertEqual(
+            update_order_status(
+                Order.objects.get(pk=draft.pk), OrderStatus_Pending, None, ref
+            )['status'], 200)
+        response = self._put(self.kitchen_user, _fulfilment_url(draft.pk),
+                             {'action': 'advance', 'if_revision': 0})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            Order.objects.get(pk=draft.pk).fulfilment_status, 'preparing')

@@ -111,6 +111,15 @@ FULFILMENT_ACTIONS = frozenset({
     ACTION_ADVANCE, ACTION_SERVE, ACTION_CORRECT, ACTION_RECALL,
 })
 
+#: EVERY action the service will act on. `execute` checks against this itself
+#: rather than trusting that a caller came through an endpoint parser: the
+#: service is the authoritative boundary and self-guards a direct caller, the
+#: same property `_create_order` states about itself. Without it an unrecognised
+#: action fell through `_apply_fulfilment`'s three named branches into the RECALL
+#: arm — so `KitchenCommand(action='invalid')` recalled a served order instead of
+#: being refused.
+ALL_ACTIONS = FULFILMENT_ACTIONS | {ACTION_CANCEL, ACTION_SET_PRIORITY}
+
 #: Declared to clients so a new one can tell a server that supports this contract
 #: from one that does not. Deliberately its own narrow name: D04's
 #: `checkout_protocol` describes the DINER's checkout and `pricing_version`
@@ -160,6 +169,7 @@ REASON_ILLEGAL = 'illegal_transition'
 REASON_RECALL_EXPIRED = 'recall_window_expired'
 REASON_TABLE_OCCUPIED = 'table_occupied'
 REASON_SCOPE_MISMATCH = 'order_scope_mismatch'
+REASON_ACCEPTED_WHILE_WAITING = 'order_accepted_while_waiting'
 REASON_REVISION_EXHAUSTED = 'revision_limit_reached'
 
 OUTCOME_APPLIED = 'applied'
@@ -470,14 +480,17 @@ def execute(order_id, actor, command):
     need those writers to participate in a shared barrier, which is a
     permissions-platform change and is not in scope here.
     """
-    # THE LOCATOR. It resolves which table to lock and nothing else — every fact
-    # it returns is re-read under the lock below. Soft-deleted and unknown ids
-    # collapse to one non-disclosing outcome.
+    _assert_known_action(command.action)
+
+    # THE LOCATOR. It resolves which table to lock, and records the ONE fact the
+    # lock cannot recover afterwards: whether this command was formed against a
+    # DRAFT. Everything else it returns is re-read under the lock below.
+    # Soft-deleted and unknown ids collapse to one non-disclosing outcome.
     try:
         located = (
             Order.objects
             .filter(id=order_id, deleted=False)
-            .values('id', 'table_id', 'restaurant_id')
+            .values('id', 'table_id', 'restaurant_id', 'order_status')
             .first()
         )
     except (ValidationError, ValueError, TypeError):
@@ -555,6 +568,40 @@ def execute(order_id, actor, command):
                 'You do not have permission for this kitchen',
             )
 
+        # THE ACCEPTANCE BOUNDARY. A command formed against a DRAFT must not
+        # become a command against the order the diner has meanwhile placed.
+        #
+        # The window is this service's own: the locator reads before the table
+        # lock, and `_submit_order` holds that same lock while it flips
+        # `initiated -> pending`. So a kitchen command can locate a draft, block,
+        # and find an ordinary accepted order waiting — `_assert_operable` then
+        # passes, and because SUBMISSION IS NOT A KITCHEN COMMAND it does not
+        # advance the revision, so the precondition captured against the draft
+        # still matches. Measured: a cancel formed against a draft applied to the
+        # diner's just-placed order.
+        #
+        # THE HARM IS A DELAYED COMMAND BECOMING A DIFFERENT COMMAND. The
+        # operator formed "cancel this draft" — which the server refuses outright
+        # — and timing alone turned it into "cancel this diner's live order".
+        #
+        # The remedy is here rather than in `_submit_order`: bumping the revision
+        # on acceptance would put a NON-kitchen event into a token documented as
+        # versioning kitchen state, and would make every ticket's first command
+        # depend on how it came to exist.
+        if (
+            located['order_status'] == OrderStatus_Initiated
+            and order.order_status != OrderStatus_Initiated
+        ):
+            logger.info(
+                'Kitchen command refused across the acceptance boundary '
+                '(order_id=%s, action=%s)', order.pk, command.action,
+            )
+            raise _conflict(
+                order, REASON_ACCEPTED_WHILE_WAITING,
+                'This order was placed while your request was in flight. '
+                'Check the board before trying again.',
+            )
+
         _assert_operable(order)
 
         # The management escalation is STATE-DEPENDENT, so it is decided from the
@@ -584,6 +631,18 @@ def execute(order_id, actor, command):
             return _apply_cancel(order, command, actor, now)
         return _apply_fulfilment(order, command, actor, now, locked_table,
                                  ConOrder)
+
+
+def _assert_known_action(action):
+    """The command vocabulary, checked HERE and not only at the adapter.
+
+    An unrecognised action is a controlled refusal, never a reinterpretation.
+    It is checked before ANY lookup, so it discloses nothing and costs nothing.
+    """
+    if not isinstance(action, str) or action not in ALL_ACTIONS:
+        raise KitchenRefusal(
+            400, REASON_ACTION_UNKNOWN, 'Unknown action for this request.',
+        )
 
 
 def _bump(order, fields, actor=None, stamp_fulfilment=None):

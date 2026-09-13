@@ -823,7 +823,7 @@ Reasons: `kitchen_action_required`, `kitchen_action_unknown`,
 `kitchen_precondition_stale`, `order_is_draft`, `order_cancelled`,
 `order_terminal`, `order_state_incoherent`, `illegal_transition`,
 `recall_window_expired`, `table_occupied`, `order_scope_mismatch`,
-`revision_limit_reached` (409). A 403 carries **no** `data` — it must not become
+`order_accepted_while_waiting`, `revision_limit_reached` (409). A 403 carries **no** `data` — it must not become
 an oracle for a tenant the caller has no relationship with.
 
 ### New refusals a previously-accepted request may now hit
@@ -841,6 +841,10 @@ an oracle for a tenant the caller has no relationship with.
 - **Incoherent historical rows are refused for manual review**, untouched
   (`order_state_incoherent`) — e.g. a served order carrying cancellation
   provenance. Coherent orders with no `OrderAcceptance` remain fully operable.
+- **A command formed against a DRAFT is refused even if the diner places the
+  order while it waits** (`order_accepted_while_waiting`). Submission holds the
+  same table lock and does not advance the revision, so without this a cancel
+  aimed at a draft applied to the just-placed order.
 
 ### Feeds
 
