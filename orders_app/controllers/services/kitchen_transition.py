@@ -206,11 +206,52 @@ class OrderNotFound(Exception):
 @dataclass(frozen=True)
 class KitchenCommand:
     """A fully validated command. Building one proves the REQUEST is well formed;
-    it proves nothing about the order, which is resolved under the lock."""
+    it proves nothing about the order, which is resolved under the lock.
+
+    **THE VALIDATION IS IN THE CONSTRUCTOR, so "fully validated" is a property of
+    the TYPE rather than a description of how the three parsers happen to be
+    written.** It used to be the latter: this was a bare dataclass, so the
+    revision's type and range, the priority boolean and the cancellation
+    vocabulary were enforced only by ``parse_fulfilment_command`` /
+    ``parse_priority_command`` / ``parse_cancel_command``. A caller that built a
+    command another way — a future internal writer, a management command, a retry
+    helper — reached ``execute`` with none of it applied, and ``execute``
+    checked only the ACTION. The service's own docstring says it "self-guards a
+    direct caller"; for everything but the action it did not.
+
+    CROSS-ACTION FIELDS ARE UNREPRESENTABLE, not merely ignored: an ``advance``
+    carrying a ``cancellation_reason`` is not a command this contract defines, so
+    it cannot be constructed. Ignoring it would leave a caller believing they had
+    said something the boundary silently dropped.
+
+    It raises ``KitchenRefusal`` rather than ``TypeError`` so the one adapter
+    renders a malformed direct command exactly as it renders a malformed body —
+    one refusal vocabulary, whichever way the command was formed.
+    """
     action: str
     if_revision: int
     cancellation_reason: Optional[str] = None
     priority: Optional[bool] = None
+
+    def __post_init__(self):
+        _assert_known_action(self.action)
+        _validate_revision_value(self.if_revision)
+
+        if self.action == ACTION_CANCEL:
+            _validate_cancellation_reason(self.cancellation_reason)
+        elif self.cancellation_reason is not None:
+            raise KitchenRefusal(
+                400, REASON_BODY_INVALID,
+                'cancellation_reason does not belong to this command.',
+            )
+
+        if self.action == ACTION_SET_PRIORITY:
+            _validate_priority_value(self.priority)
+        elif self.priority is not None:
+            raise KitchenRefusal(
+                400, REASON_BODY_INVALID,
+                'priority does not belong to this command.',
+            )
 
 
 # --- request validation -----------------------------------------------------
@@ -225,8 +266,8 @@ def _require_mapping(body):
         )
 
 
-def _parse_revision(body):
-    """``if_revision`` — REQUIRED, a real non-negative ``int``, in range.
+def _validate_revision_value(value):
+    """``if_revision`` — a real non-negative ``int``, in range.
 
     ``bool`` is refused explicitly because it is an ``int`` subclass in Python,
     so ``True`` would otherwise pass as revision 1. A float is refused even when
@@ -235,13 +276,11 @@ def _parse_revision(body):
     for the same reason DRF's coercions are avoided throughout — a precondition
     that a coercion table can satisfy is not a precondition. ZERO IS VALID: it is
     the adoption baseline every pre-D05 row carries.
+
+    THE ONE RULE, read by the body parser AND by ``KitchenCommand.__post_init__``,
+    so a command formed in process is held to exactly what a command formed from
+    JSON is held to.
     """
-    if 'if_revision' not in body:
-        raise KitchenRefusal(
-            400, REASON_PRECONDITION_REQUIRED,
-            'if_revision is required. Reload the ticket and try again.',
-        )
-    value = body.get('if_revision')
     if isinstance(value, bool) or not isinstance(value, int):
         raise KitchenRefusal(
             400, REASON_PRECONDITION_INVALID,
@@ -253,6 +292,45 @@ def _parse_revision(body):
             'if_revision is out of range.',
         )
     return value
+
+
+def _validate_cancellation_reason(value):
+    """The stored reason is a CONTROLLED vocabulary. Without this in the type, a
+    directly-built command wrote whatever string it carried onto the row —
+    permanently, since a cancellation is never re-cancelled."""
+    if not isinstance(value, str) or value not in CANCELLATION_REASONS:
+        raise KitchenRefusal(
+            400, REASON_REASON_INVALID,
+            'A valid cancellation_reason is required.',
+        )
+    return value
+
+
+def _validate_priority_value(value):
+    """A STRICT JSON boolean. ``1``/``0``/``'yes'`` are not booleans, and the
+    column is one — coercing them here would reinstate exactly the guesswork the
+    strict parser removed, one layer further in."""
+    if not isinstance(value, bool):
+        # The PRESENCE message stays with the parser: a body that omitted the key
+        # and one that sent `'yes'` are different mistakes, and the second is not
+        # improved by being told the field is required.
+        raise KitchenRefusal(
+            400, REASON_PRIORITY_INVALID,
+            'priority must be true or false.',
+        )
+    return value
+
+
+def _parse_revision(body):
+    """Presence, then the shared rule. Absence and malformation are different
+    facts and keep different reason codes: one says reload the ticket, the other
+    says the value itself is wrong."""
+    if 'if_revision' not in body:
+        raise KitchenRefusal(
+            400, REASON_PRECONDITION_REQUIRED,
+            'if_revision is required. Reload the ticket and try again.',
+        )
+    return _validate_revision_value(body.get('if_revision'))
 
 
 def parse_fulfilment_command(body):
@@ -280,12 +358,7 @@ def parse_fulfilment_command(body):
 
 def parse_cancel_command(body):
     _require_mapping(body)
-    reason = body.get('cancellation_reason')
-    if not isinstance(reason, str) or reason not in CANCELLATION_REASONS:
-        raise KitchenRefusal(
-            400, REASON_REASON_INVALID,
-            'A valid cancellation_reason is required.',
-        )
+    reason = _validate_cancellation_reason(body.get('cancellation_reason'))
     return KitchenCommand(
         action=ACTION_CANCEL,
         if_revision=_parse_revision(body),
@@ -307,12 +380,7 @@ def parse_priority_command(body):
             400, REASON_PRIORITY_INVALID,
             'priority is required and must be true or false.',
         )
-    value = body.get('priority')
-    if not isinstance(value, bool):
-        raise KitchenRefusal(
-            400, REASON_PRIORITY_INVALID,
-            'priority must be true or false.',
-        )
+    value = _validate_priority_value(body.get('priority'))
     return KitchenCommand(
         action=ACTION_SET_PRIORITY,
         if_revision=_parse_revision(body),
@@ -448,7 +516,20 @@ def _assert_revision(order, command):
     recall reopen a later completion after a serve/recall/serve cycle, and it is
     exactly the case a source-state check cannot see.
     """
-    if command.if_revision != order.fulfilment_revision:
+    supplied = command.if_revision
+    # DEFENCE IN DEPTH AT THE COMPARE-AND-SET ITSELF. `KitchenCommand` now
+    # refuses a non-integer at construction, but this is the one line the whole
+    # token rests on and `!=` alone reads as exact while Python's numeric tower
+    # is not: `False == 0` and `1.0 == 1` are both True, so either value
+    # satisfied a precondition it had never been checked against. Re-asserting
+    # the type here costs nothing and means the guarantee does not depend on
+    # which constructor a future caller reached for.
+    if isinstance(supplied, bool) or not isinstance(supplied, int):
+        raise KitchenRefusal(
+            400, REASON_PRECONDITION_INVALID,
+            'if_revision must be a whole number.',
+        )
+    if supplied != order.fulfilment_revision:
         raise _conflict(
             order, REASON_PRECONDITION_STALE,
             'This ticket changed since you loaded it. '
@@ -633,6 +714,60 @@ def execute(order_id, actor, command):
                                  ConOrder)
 
 
+def read_state(order_id, actor):
+    """OBSERVE one order. The reconciliation surface the FEEDS CANNOT REPLACE.
+
+    A kitchen command whose reply is lost leaves the client unable to say whether
+    the server acted. An ordinary feed answers that for a ticket still on a
+    board — but the commands whose outcome matters most are exactly the ones that
+    REMOVE the order from both feeds: a cancellation, and a serve past the
+    Completed window. "It is not on the board" is then not an answer about
+    whether the command ran, and a client with nothing else to ask was left
+    either reporting a failure that may not have happened or showing a warning
+    nobody could ever clear.
+
+    FIVE THINGS ARE LOAD-BEARING.
+
+    1. **IT IS AN OBSERVATION, NOT A VERDICT.** It returns what the order IS. It
+       draws no conclusion about which command produced that state, and there is
+       deliberately no field in which it could — attributing a state to a caller's
+       earlier command is a causal claim this row cannot support, and the client
+       says so in its own words too.
+
+    2. **NO LOCK, NO TRANSACTION, NO WRITE.** Nothing is repaired, stamped,
+       normalised or reconciled; the revision does not move. A read that took the
+       `Table` lock would queue behind live service to answer a question about the
+       past.
+
+    3. **NO ELIGIBILITY FILTER.** A draft, a cancelled order, a served one and a
+       paid one all answer. Refusing them would remove exactly the orders this
+       exists for. Eligibility is a question about what may be COMMANDED, and
+       ``execute`` still owns it.
+
+    4. **THE SAME PROJECTION AS EVERY COMMAND ANSWER** (``order_state``), so a
+       client reconciles against ONE shape however it obtained it. A second,
+       slightly different read shape is how two surfaces start disagreeing.
+
+    5. **THE SAME SCOPE RULE AS A COMMAND.** The module gate is evaluated against
+       the order's own restaurant; an unknown, soft-deleted or unparseable id is
+       the one non-disclosing ``OrderNotFound``. It is a strictly narrower answer
+       than the feeds this caller may already read.
+    """
+    try:
+        order = Order.objects.filter(id=order_id, deleted=False).first()
+    except (ValidationError, ValueError, TypeError):
+        raise OrderNotFound()
+    if order is None:
+        raise OrderNotFound()
+
+    if not can_user_access_module(actor, order.restaurant_id, MODULE_KITCHEN):
+        raise KitchenRefusal(
+            403, REASON_FORBIDDEN,
+            'You do not have permission for this kitchen',
+        )
+    return order_state(order)
+
+
 def _assert_known_action(action):
     """The command vocabulary, checked HERE and not only at the adapter.
 
@@ -662,7 +797,19 @@ def _bump(order, fields, actor=None, stamp_fulfilment=None):
 
 
 def _apply_priority(order, command):
-    """Setting priority to the value it already holds is a NO-WRITE result.
+    """Priority is a statement about WHAT THE KITCHEN SHOULD COOK NEXT, so it
+    applies only to a ticket the kitchen is still working on.
+
+    A SERVED ticket used to accept one, and the harm is not that the flag is
+    meaningless there — it is that applying it BUMPS THE REVISION. A served
+    ticket is recall-eligible for ten minutes, and an operator holding that
+    ticket's revision would find their recall refused as stale because a stray
+    priority tap had spent it, with the window running down while they reloaded.
+    The eligibility question is asked BEFORE the equality one, as it is
+    everywhere else here: answering "no change" would say priority applies to a
+    completed ticket, which is the thing being denied.
+
+    Setting priority to the value it already holds is a NO-WRITE result.
 
     It reports the CURRENT state and claims nothing about history: it does not
     say this caller's earlier command succeeded, and it deliberately moves
@@ -671,6 +818,11 @@ def _apply_priority(order, command):
     eligibility and the supplied revision have all already passed — equality
     with a STALE revision is a conflict, refused above.
     """
+    if order.fulfilment_status not in ACTIVE_FULFILMENT_STATUSES:
+        raise _conflict(
+            order, REASON_ILLEGAL,
+            f'Priority does not apply to a ticket that is {order.fulfilment_status}.',
+        )
     if order.priority == command.priority:
         return {'outcome': OUTCOME_UNCHANGED, 'state': order_state(order)}
     order.priority = command.priority
