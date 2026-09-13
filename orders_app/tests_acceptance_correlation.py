@@ -482,50 +482,65 @@ class TheCapabilityLevelIsExplicitTests(CorrelationFixture):
 # ---------------------------------------------------------------------------
 
 class NotEveryNonDraftOrderWasAcceptedTests(CorrelationFixture):
-    """A kitchen write can move an order out of `initiated` WITHOUT an
-    acceptance, so "not a draft" cannot be read as "a submission landed".
+    """"Not a draft" still cannot be read as "a submission landed".
 
-    `KitchenOrderCancelView` resolves the order by primary key through
-    `_get_order_or_none`, which filters only `deleted=False` — a DRAFT is
-    reachable, its `fulfilment_status` is still `new`, so it takes the
-    free-void branch and needs no manager. The fulfilment-status view has the
-    same shape. Neither writes an `OrderAcceptance`.
+    THIS CLASS CHANGED WITH D05, AND THE CHANGE IS THE POINT. It used to prove
+    that a kitchen write could move an order out of `initiated` with no
+    acceptance — `KitchenOrderCancelView` resolved a draft by primary key, its
+    `fulfilment_status` was still `new`, so it took the free-void branch and
+    needed no manager, and the fulfilment view had the same shape. D05 closed
+    that: every kitchen command now refuses a draft, so the kitchen is no
+    longer a PRODUCER of the third state.
 
-    THE PROJECTION MUST NOT TURN THAT INTO AN ACCEPTANCE CLAIM. `accepted`
-    is reserved for a row of evidence; the third state says the server CANNOT
-    DETERMINE what happened, which is the truth here and the truth for a
-    pre-D04 acceptance alike.
+    IT IS NOT A RESOLVER OF THE ROWS ALREADY PRODUCED, and that is why this
+    class survives rather than being deleted. Historical rows reached that
+    state by both routes and nothing on the row separates them, so
+    `evidence_unavailable` remains a statement of ignorance — never a verdict,
+    and never something to backfill. The tests below now prove the producer is
+    closed AND that the projection still refuses to claim acceptance for a row
+    that reached the state some other way.
     """
 
-    def _cancel_through_the_kitchen(self, order):
+    def _cancel_through_the_kitchen(self, order, if_revision=0):
         request = APIRequestFactory().put(
             f'/api/v1/kitchen/orders/{order.pk}/cancel/',
-            {'cancellation_reason': CancellationReason_CustomerChangedMind},
+            {'cancellation_reason': CancellationReason_CustomerChangedMind,
+             'if_revision': if_revision},
             format='json',
         )
         force_authenticate(request, user=self.owner)
         request.user = self.owner
         return KitchenOrderCancelView.as_view()(request, pk=str(order.pk))
 
-    def test_the_kitchen_really_can_cancel_a_draft(self):
-        """The negative control for the whole class: if this ever starts
-        refusing, the misreport below is unreachable and the third state's
-        remaining producer is the pre-D04 one."""
+    def test_the_kitchen_can_no_longer_cancel_a_draft(self):
+        """D05's draft boundary, through the REAL view.
+
+        This is the inverse of the control this class used to carry. The
+        kitchen producer of `evidence_unavailable` is closed: a draft is
+        refused, nothing is written, and the order stays exactly what it was.
+        """
         order = self._draft()
         response = self._cancel_through_the_kitchen(order)
-        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data['reason'], 'order_is_draft')
 
         order.refresh_from_db()
-        self.assertEqual(order.order_status, OrderStatus_Cancelled)
+        self.assertEqual(order.order_status, OrderStatus_Initiated)
+        self.assertIsNone(order.cancelled_at)
+        self.assertEqual(order.fulfilment_revision, 0)
         self.assertFalse(OrderAcceptance.objects.filter(order=order).exists())
 
-    def test_a_cancelled_draft_is_never_reported_as_accepted(self):
+    def test_a_non_draft_without_evidence_is_never_reported_as_accepted(self):
+        """The historical row, produced DIRECTLY because the kitchen no longer
+        can. Rows of this shape exist and the projection must keep telling the
+        truth about them."""
         order = self._draft()
-        self.assertEqual(
-            self._cancel_through_the_kitchen(order).status_code, 200)
-        order.refresh_from_db()
+        order.order_status = OrderStatus_Cancelled
+        order.cancelled_at = timezone.now()
+        order.save(update_fields=['order_status', 'cancelled_at'])
 
         acceptance = _projection()(order)['acceptance']
+        self.assertEqual(acceptance['state'], 'evidence_unavailable')
         self.assertNotEqual(acceptance['state'], 'accepted')
         self.assertIsNone(acceptance['quote_ref'])
         self.assertIsNone(acceptance['accepted_at'])

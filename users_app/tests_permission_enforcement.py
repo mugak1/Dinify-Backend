@@ -41,6 +41,7 @@ from dinify_backend.configss.string_definitions import (
     RESTAURANT_OWNER, RESTAURANT_MANAGER, RESTAURANT_KITCHEN, RESTAURANT_STAFF,
     MODULE_MENU, MODULE_TABLES, MODULE_REPORTS, MODULE_REVIEWS, MODULE_TEAM,
     MODULE_SETTINGS, MODULE_SUPPORT,
+    OrderStatus_Pending,
 )
 
 SETUP_URL = '/api/v1/restaurant-setup/'
@@ -600,17 +601,24 @@ class AdminElevatedActionsTests(TestCase):
             number=1, str_number='1', restaurant=self.restaurant)
 
     def _preparing_order(self):
+        # A SUBMITTED order being prepared. `order_status` is stated because
+        # D05 refuses every kitchen command on an `initiated` draft, and the
+        # model default is `initiated` — this class is about the MANAGE-level
+        # gate, so its fixture must clear the draft boundary to reach it.
         order = Order.objects.create(
             restaurant=self.restaurant, table=self.table,
-            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000)
+            total_cost=1000, discounted_cost=1000, savings=0, actual_cost=1000,
+            order_status=OrderStatus_Pending)
         order.fulfilment_status = 'preparing'
         order.save(update_fields=['fulfilment_status'])
         return order
 
     def _cancel(self, user, order):
+        # D05: a kitchen mutation names the revision it acts on.
         return self.client.put(
             f'/api/v1/kitchen/orders/{order.id}/cancel/',
-            data=json.dumps({'cancellation_reason': 'other'}),
+            data=json.dumps({'cancellation_reason': 'other',
+                             'if_revision': order.fulfilment_revision}),
             content_type='application/json', **auth(user))
 
     def _resolve(self, user, review):
@@ -644,7 +652,7 @@ class AdminElevatedActionsTests(TestCase):
     def test_cancel_missing_order_is_404(self):
         resp = self.client.put(
             '/api/v1/kitchen/orders/00000000-0000-0000-0000-000000000000/cancel/',
-            data=json.dumps({'cancellation_reason': 'other'}),
+            data=json.dumps({'cancellation_reason': 'other', 'if_revision': 0}),
             content_type='application/json', **auth(self.owner))
         self.assertEqual(resp.status_code, 404)
 

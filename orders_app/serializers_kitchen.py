@@ -30,12 +30,25 @@ class ActiveKitchenOrderSerializer(serializers.ModelSerializer):
             'order_number',
             'table_label',
             'order_source',
+            # THE TWO FIELDS A CLIENT NEEDS TO COMMAND SAFELY (D05).
+            #
+            # `order_status` because the board could not previously tell a
+            # cancelled or draft order from a live one — the ticket carried only
+            # the fulfilment axis, so a client had no way to reconcile a conflict
+            # or explain a disappearance.
+            #
+            # `fulfilment_revision` because it is the precondition every command
+            # must name. Both are read-only projections of server-owned columns;
+            # neither is writable through any serializer.
+            'order_status',
+            'fulfilment_revision',
             'fulfilment_status',
             'priority',
             'created_at',
             'served_at',
             'items',
         ]
+        read_only_fields = fields
 
     def get_table_label(self, obj):
         table = obj.table
