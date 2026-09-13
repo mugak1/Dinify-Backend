@@ -880,11 +880,24 @@ every command answers with, for ANY order it can see: cancelled, served,
 terminal or draft. Eligibility is a question about what may be COMMANDED and
 stays with the command routes. It takes no lock, opens no transaction, writes
 nothing and repairs nothing, and it makes no claim that an earlier command
-caused what it reports. Scope is the module gate on the order's own restaurant;
-an unknown, soft-deleted or unparseable id is one non-disclosing 404. It is
-DELIBERATELY ABSENT from the delegated `ALLOWED_ROUTES` — a delegated session
-can issue none of the three commands, so it can never hold an uncertain one to
-reconcile (the reasoning is recorded in `delegation_scopes.py`).
+caused what it reports.
+
+**EVERY REFUSAL IS ONE NON-DISCLOSING 404** — an unknown id, a malformed one, a
+soft-deleted order, AND an order at a restaurant the caller cannot see, in
+status and in body alike. That last case is where this READ parts company with
+the three command routes, which answer `403 kitchen_forbidden`: on a read,
+403-for-foreign beside 404-for-unknown is an existence oracle over the whole
+orders table, free and silent for any authenticated kitchen user, and it would
+contradict this repository's rule that a tenant-scoped detail read answers 404
+"so existence is not confirmed". **The command routes are unchanged and still
+answer 403**; that asymmetry is deliberate here — `kitchen_forbidden` is a
+client-visible reason the board renders — but it is the same exposure to a
+caller willing to attempt a mutation instead of a read, and narrowing it is its
+own contract decision.
+
+It is DELIBERATELY ABSENT from the delegated `ALLOWED_ROUTES` — a delegated
+session can issue none of the three commands, so it can never hold an uncertain
+one to reconcile (the reasoning is recorded in `delegation_scopes.py`).
 
 **A NARROWING — priority now applies only to a ticket the kitchen is still
 working on.** `PUT kitchen/orders/<pk>/priority/` on a ticket whose

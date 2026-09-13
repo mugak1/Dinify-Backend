@@ -32,10 +32,13 @@ from django.utils import timezone
 from orders_app.models import Order
 from orders_app.controllers.services import kitchen_transition as kt
 from orders_app.tests_kitchen import KitchenTestBase
+from restaurants_app.models import Restaurant, RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
+    RESTAURANT_KITCHEN,
     CancellationReason_CustomerChangedMind,
     OrderStatus_Pending,
     OrderStatus_Served,
+    RestaurantStatus_Live,
 )
 
 
@@ -354,13 +357,64 @@ class OrderStateReadTests(KitchenTestBase):
         Order.objects.filter(pk=order.pk).update(deleted=True)
         self.assertEqual(self.client.get(_state_url(order.pk)).status_code, 404)
 
-    def test_a_caller_without_kitchen_access_is_refused(self):
+    def test_a_caller_outside_this_kitchen_cannot_tell_the_order_exists(self):
+        """REGRESSION (Codex P2 on PR #320, valid — and this file's own first
+        cut asserted the defect).
+
+        The first version of this read MIRRORED `execute`, answering 403 when the
+        module gate refused, and a test here pinned that. But 403-for-foreign
+        beside 404-for-unknown is an EXISTENCE ORACLE over the whole orders
+        table, reachable by any authenticated kitchen user with a free GET — and
+        it contradicts two things already written down: the repository's rule
+        that a tenant-scoped DETAIL READ answers 404 "so existence is not
+        confirmed", and `OrderNotFound`'s own docstring, which says it covers an
+        order "out of the caller's scope" precisely so this route cannot be used
+        to learn that some UUID is real somewhere.
+
+        A FOREIGN ID AND AN UNKNOWN ONE MUST BE INDISTINGUISHABLE — status AND
+        body, because a differing `reason` key would leak exactly as loudly."""
+        import uuid as _uuid
+        order = self._make_order(order_status=OrderStatus_Pending,
+                                 fulfilment_status='new')
+
+        # Kitchen staff at a DIFFERENT restaurant: authorised somewhere, not here.
+        other_restaurant = Restaurant.objects.create(
+            name='Other Kitchen', location='Elsewhere',
+            owner=self.admin_user, status=RestaurantStatus_Live,
+        )
+        stranger = self._make_member('256900000101', None)
+        RestaurantEmployee.objects.create(
+            user=stranger, restaurant=other_restaurant,
+            roles=[RESTAURANT_KITCHEN],
+        )
+        self.client.force_authenticate(user=stranger)
+
+        foreign = self.client.get(_state_url(order.pk))
+        unknown = self.client.get(_state_url(str(_uuid.uuid4())))
+
+        self.assertEqual(foreign.status_code, 404)
+        self.assertEqual(foreign.json(), unknown.json())
+
+    def test_a_caller_with_no_membership_anywhere_is_answered_the_same_way(self):
+        import uuid as _uuid
         order = self._make_order(order_status=OrderStatus_Pending,
                                  fulfilment_status='new')
         self.client.force_authenticate(user=self.outsider_user)
+
+        foreign = self.client.get(_state_url(order.pk))
+        unknown = self.client.get(_state_url(str(_uuid.uuid4())))
+
+        self.assertEqual(foreign.status_code, 404)
+        self.assertEqual(foreign.json(), unknown.json())
+
+    def test_the_kitchen_it_belongs_to_still_reads_it(self):
+        """CONTROL. Non-disclosure must not become non-function."""
+        order = self._make_order(order_status=OrderStatus_Pending,
+                                 fulfilment_status='new')
+        self.client.force_authenticate(user=self.kitchen_user)
         response = self.client.get(_state_url(order.pk))
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()['reason'], 'kitchen_forbidden')
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertEqual(response.json()['data']['id'], str(order.pk))
 
     def test_an_anonymous_caller_is_refused(self):
         order = self._make_order(order_status=OrderStatus_Pending,

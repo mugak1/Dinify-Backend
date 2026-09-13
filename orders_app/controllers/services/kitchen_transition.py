@@ -748,10 +748,28 @@ def read_state(order_id, actor):
        client reconciles against ONE shape however it obtained it. A second,
        slightly different read shape is how two surfaces start disagreeing.
 
-    5. **THE SAME SCOPE RULE AS A COMMAND.** The module gate is evaluated against
-       the order's own restaurant; an unknown, soft-deleted or unparseable id is
-       the one non-disclosing ``OrderNotFound``. It is a strictly narrower answer
-       than the feeds this caller may already read.
+    5. **THE SCOPE FAILURE IS THE SAME 404 AS AN UNKNOWN ID, AND THAT IS WHERE
+       THIS READ PARTS COMPANY WITH A COMMAND.** The module gate is evaluated
+       against the order's own restaurant, and failing it raises
+       ``OrderNotFound`` — so an order at a restaurant the caller cannot see is
+       indistinguishable from one that does not exist, in status AND in body.
+
+       The first cut mirrored ``execute`` and answered 403 here. That was wrong
+       twice over: 403-for-foreign beside 404-for-unknown is an EXISTENCE ORACLE
+       over the whole orders table, free and silent for any authenticated kitchen
+       user; and it contradicted both this repository's rule that a tenant-scoped
+       DETAIL READ answers 404 "so existence is not confirmed" and
+       ``OrderNotFound``'s own docstring, which says it covers an order "out of
+       the caller's scope" for exactly this reason. Nothing is lost: the client's
+       reconciliation path does not branch on the status, and this answer is
+       still strictly narrower than the feeds the caller may already read.
+
+       THE THREE COMMAND ROUTES STILL ANSWER 403, and that asymmetry is stated
+       rather than papered over. ``kitchen_forbidden`` is a client-visible reason
+       the board renders on a refused command, so narrowing it is a contract
+       change with its own blast radius and belongs to its own decision — but it
+       is the same exposure, reachable by a caller willing to attempt a mutation
+       instead of a read.
     """
     try:
         order = Order.objects.filter(id=order_id, deleted=False).first()
@@ -761,10 +779,10 @@ def read_state(order_id, actor):
         raise OrderNotFound()
 
     if not can_user_access_module(actor, order.restaurant_id, MODULE_KITCHEN):
-        raise KitchenRefusal(
-            403, REASON_FORBIDDEN,
-            'You do not have permission for this kitchen',
-        )
+        # NOT a 403. See point 5 above: on a READ, telling a caller that a UUID
+        # they may not see is nonetheless a real order is the disclosure this
+        # route must not make.
+        raise OrderNotFound()
     return order_state(order)
 
 

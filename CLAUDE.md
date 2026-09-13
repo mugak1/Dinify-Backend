@@ -130,7 +130,17 @@ so keep it current when conventions change.
   served, terminal, DRAFT), returns the SAME projection every command answers
   with, and takes no lock, opens no transaction, writes nothing and asserts no
   causal link between the state and any earlier command. Eligibility stays with
-  `execute`. It is DELIBERATELY ABSENT from the delegated `ALLOWED_ROUTES` — a
+  `execute`. **EVERY REFUSAL IS ONE NON-DISCLOSING 404** — unknown, malformed,
+  soft-deleted AND out of the caller's scope alike, in status and in body. The
+  scope case is where this READ parts company with the three command routes,
+  which answer `403 kitchen_forbidden`: on a read, 403-for-foreign beside
+  404-for-unknown is an existence oracle over the whole orders table, free and
+  silent for any authenticated kitchen user, and it contradicts both the rule
+  above (a tenant-scoped detail read answers 404 so existence is not confirmed)
+  and `OrderNotFound`'s own docstring. The COMMAND routes still answer 403 and
+  are unchanged — `kitchen_forbidden` is a reason the board renders — but that is
+  the same exposure to a caller willing to attempt a mutation, and narrowing it
+  is its own contract decision rather than this change's. It is DELIBERATELY ABSENT from the delegated `ALLOWED_ROUTES` — a
   delegated session can issue none of the three commands, so it can never hold an
   uncertain one to reconcile; the reasoning is recorded in `delegation_scopes.py`
   beside the command exclusions. See `BREAKING_CHANGES.md` §15a
