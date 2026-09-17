@@ -886,8 +886,19 @@ so keep it current when conventions change.
   - COST: submit **12 → 14** (the closure read plus ONE catalogue statement,
     flat in the size of the order); a REPLAY is unchanged at **7**, returning at
     the evidence read before any of this; the create path is unchanged, since the
-    operational verdict is decided from facts already in hand. See
-    `BREAKING_CHANGES.md` §16
+    operational verdict is decided from facts already in hand
+  - **CUTOVER IS FRONTEND FIRST, the REVERSE of D05/§15** — and the reverse of
+    the usual additions-go-backend-first rule, so do not carry §15's order
+    across. The client gates the deadline on `quote_protocol`, so against a
+    pre-D06 backend it consults none, never calls `retire-quote` and classifies
+    the only two codes that backend emits exactly as the branches it replaced —
+    inert. Backend first is NOT inert: a deployed client handles two refusal
+    codes and falls through for the rest, so a `quote_expired` refusal surfaces
+    a Retry that REPLAYS the same acceptance (only `quote_ref_stale` settles the
+    issued command) and is refused identically, while `reserveIntent` answers
+    `outstanding` to a fresh checkout — a stuck diner with no in-app escape.
+    Uncommon, and completely avoidable by ordering. See `BREAKING_CHANGES.md`
+    §16
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one

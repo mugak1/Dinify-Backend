@@ -1077,6 +1077,39 @@ before any of this. The create path is unchanged: the operational verdict is
 decided from facts already carried on the admission verdict and the table row the
 transaction already locks.
 
+### Cutover — FRONTEND FIRST, the opposite of §15
+
+**Merge and deploy the client before this backend, and the window between them
+is inert rather than an outage.** That is the reverse of §15's order and the
+reverse of the usual additions-go-backend-first rule, so it is worth stating
+why each direction behaves the way it does.
+
+**Frontend first is a no-op against this (pre-D06) backend.** The client reads
+the deadline only when `order_details.quote_protocol >= 1`, which this backend
+does not send, so it consults no deadline and never calls `retire-quote` — a
+route that does not exist yet. The new refusal vocabulary fires only on codes
+this backend never emits; the two it does emit (`quote_ref_stale`,
+`legacy_pricing_version`) are classified REPRICE, which is the action the
+hand-written branches they replaced already took. The interceptor's widened
+forward (409, and the new route) reaches a handler that reads the sentence off
+either shape.
+
+**Backend first strands a diner, narrowly but completely.** A deployed client
+handles exactly two refusal codes and falls through for everything else, so a
+`quote_expired` or `purchase_needs_review` refusal surfaces the sentence with a
+Retry — and Retry REPLAYS the same acceptance (D04's issued-command record is
+still outstanding, because only `quote_ref_stale` settles it), which is refused
+identically. `reserveIntent` answers `outstanding`, so that diner cannot start a
+fresh checkout either. It needs a draft left open past the 30-minute lifetime,
+or a catalogue edit inside the checkout window, so it is uncommon — and it has
+no in-app escape, which is what makes the ordering worth respecting rather than
+treating as a preference.
+
+**§15 went the other way for a reason that does not apply here**: there the
+client had to send a precondition the old client did not have, so an old writer
+against a new server was a correctness problem. Here the client only has to
+UNDERSTAND answers it may not receive yet.
+
 ### Frontend work required
 
 1. Branch on the machine `reason` rather than the sentence, and treat the four
