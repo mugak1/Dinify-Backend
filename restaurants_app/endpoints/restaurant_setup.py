@@ -5,6 +5,9 @@ Refactoring needed to make it more maintainable.
 import ast
 import logging
 from django.db import transaction
+from restaurants_app.controllers.admission_lock import (
+    lock_admission_exclusive,
+)
 from django.db.models import Max
 from rest_framework.response import Response
 
@@ -956,6 +959,61 @@ class RestaurantSetupEndpoint(APIView):
 
         return Response(response, status=response['status'])
 
+    def _delete_table(self, request, auth, data, serializer):
+        """
+        DELETE tables, with the deletion blocker decided UNDER the row lock.
+
+        WHAT THIS CLOSES (D06). The blocker used to be evaluated in autocommit and
+        Secretary then opened its own transaction to write the soft-delete, so the
+        two decisions were made against different snapshots. A diner's order
+        accepted in that gap was invisible to the check that had just said the
+        table was free, and the table was soft-deleted with a live order on it —
+        an order whose own boundary had, a moment earlier, correctly found the
+        table usable.
+
+        Holding the row across BOTH is what makes them one decision. Both order
+        boundaries take this exact row ``FOR UPDATE``: an acceptance already in
+        flight either commits first, in which case ``has_unsettled_orders`` sees
+        its order and this refuses, or it waits behind this transaction and finds
+        the table soft-deleted through its own checks. There is no interleaving
+        where both succeed.
+
+        LOCK ORDER: ``Table -> (read orders)``. The same direction the order path
+        takes, and this branch never reaches for the admission advisory lock, so
+        it can block an order but cannot cycle against one — nor against the
+        lifecycle transition, which never waits on a ``Table``.
+
+        The refusal stays a 409 with the model's own sentence. It is NEVER a 403:
+        a 403 force-logs-out the client, and being told to remove an order first
+        is not an authorization failure.
+        """
+        with transaction.atomic():
+            table = (
+                Table.objects.select_for_update()
+                .filter(id=data.get('id'))
+                .first()
+            )
+            blocker = table.deletion_blockers() if table else None
+            if blocker:
+                return Response({'status': 409, 'message': blocker}, status=409)
+
+            # A table this actor may not reach, or one that does not exist, falls
+            # through to Secretary's scoped lookup and its existing
+            # non-enumerating 404 — the lock above deliberately does NOT decide
+            # authority, and locking a row is not permission to read it.
+            response = Secretary({
+                'serializer': serializer,
+                'data': data,
+                'user_id': auth['id'],
+                'username': auth['username'],
+                'user': request.user,
+                'instance_queryset': build_scoped_instance_queryset(
+                    request.user, 'tables', serializer.Meta.model,
+                ),
+            }).delete()
+
+        return Response(response, status=response['status'])
+
     def put(self, request, config_detail):
         """
         handle the PUT method
@@ -1229,7 +1287,46 @@ class RestaurantSetupEndpoint(APIView):
             ),
         }
 
-        response = Secretary(secretary_args).update()
+        # A RESTAURANT WRITE PARTICIPATES IN ORDER ADMISSION (D06). This is the
+        # PAUSE WRITER — `accepting_orders` is edited here and nowhere else — and
+        # since D06 both order boundaries enforce it, at creation and at first
+        # acceptance, from a value re-read inside the order transaction.
+        #
+        # THE ADVISORY LOCK IS WHAT MAKES THAT ENFORCEMENT REAL; a `Restaurant`
+        # row lock would not. `order_admission.admit` reads `accepting_orders`
+        # with a plain `values_list().get()`, and under MVCC that read does not
+        # block on a row held FOR UPDATE — so an owner pausing mid-service could
+        # commit while an admission that had already read `True` was still
+        # waiting on the table lock, and the order went through after the pause.
+        # That is exactly the reasoning `mark_restaurant_test` records for the
+        # `is_test` flag, which rides the same protected read.
+        #
+        # EXCLUSIVE, and FIRST — before Secretary takes the row. It is the same
+        # order the lifecycle transition uses (`advisory EXCLUSIVE -> Restaurant`),
+        # so this writer joins an ordering already proven acyclic rather than
+        # adding a level. Taking it AFTER the row lock would invert that ordering
+        # and reintroduce the cycle it exists to prevent.
+        #
+        # SCOPED TO `restaurants` ONLY. Every other record this endpoint writes
+        # (tables, menu, employees) is serialized by its own row lock or its own
+        # barrier, and taking a per-restaurant exclusive lock for a menu-item
+        # rename would queue every diner order at the restaurant behind an edit
+        # that no admission reads.
+        if config_detail == 'restaurants':
+            admission_target = _resolve_target_restaurant_id(
+                config_detail, 'update', put_data)
+            with transaction.atomic():
+                # `admission_target` is the SERVER-resolved id `check_permission`
+                # authorized against, not a client-supplied one. A `None` here
+                # means the resolver could not identify a target, in which case
+                # the permission gate above has already refused — but the lock is
+                # skipped rather than guessed at, and Secretary's scoped queryset
+                # is what answers.
+                if admission_target:
+                    lock_admission_exclusive(admission_target)
+                response = Secretary(secretary_args).update()
+        else:
+            response = Secretary(secretary_args).update()
 
         return Response(
             response,
@@ -1280,10 +1377,25 @@ class RestaurantSetupEndpoint(APIView):
             if blocker:
                 return Response({'status': 409, 'message': blocker}, status=409)
         elif config_detail == 'tables':
-            table = Table.objects.filter(id=data.get('id')).first()
-            blocker = table.deletion_blockers() if table else None
-            if blocker:
-                return Response({'status': 409, 'message': blocker}, status=409)
+            # THE TABLE BLOCKER IS DECIDED UNDER THE ROW LOCK, AND THE DELETE
+            # HAPPENS IN THE SAME TRANSACTION (D06).
+            #
+            # It used to read the table and its orders in autocommit and then
+            # hand off to Secretary, which opened its OWN transaction — so a
+            # diner's order could be accepted in the gap and the table was
+            # soft-deleted out from under it. Both order boundaries take this
+            # exact row `FOR UPDATE`, so holding it here is what makes the two
+            # serialize: an acceptance in flight either commits first (and the
+            # blocker then sees its order and refuses) or waits (and finds the
+            # table gone through its own checks). `has_unsettled_orders` is a
+            # read over `orders`, so the direction is `Table -> Order`, matching
+            # the order path exactly; this branch never reaches for the admission
+            # advisory lock, so it can block an order but cannot cycle with one.
+            #
+            # `_delete_within` runs Secretary inside the block it opened.
+            return self._delete_table(
+                request, auth, data, serializer[config_detail],
+            )
         elif config_detail == 'menuitems':
             item = MenuItem.objects.filter(id=data.get('id')).first()
             blocker = item.deletion_blockers() if item else None

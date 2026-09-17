@@ -41,6 +41,7 @@ from orders_app.controllers.services.order_intent import (
     REFUSALS, fingerprint, resolve_intent,
 )
 from orders_app.controllers.services.catalogue_snapshot import build_snapshot
+from orders_app.controllers.services import order_eligibility as eligibility
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
 )
@@ -387,6 +388,51 @@ def _create_order(*, restaurant, table, items,
                     restaurant.pk, verdict.code,
                 )
                 return {'status': 400, 'message': verdict.message}
+
+            # 1e. AUTHORITATIVE OPERATIONAL ELIGIBILITY (D06). May new work
+            #     happen at this restaurant, at this table, right now?
+            #
+            #     `initiate_order` asks the SAME function as a preflight, on
+            #     instances loaded in autocommit. That preflight was the ONLY
+            #     place these three facts were ever checked, so a pause, a
+            #     switch to menu-only or a table taken out of service that
+            #     committed while this request waited on the table lock above
+            #     was invisible to the request that then wrote the draft — the
+            #     widest window being exactly when contention is highest. This
+            #     is the load-bearing check, and it is the same
+            #     preflight/authoritative split admission and menu publication
+            #     already use on this path.
+            #
+            #     THE FACTS COME FROM PROTECTED READS, NOT FROM `restaurant`
+            #     AND THE CALLER'S TABLE. The restaurant half rides the ONE
+            #     query `admit` ran under the advisory lock at step 1a; the
+            #     table half is the row locked at step 1b and re-read there.
+            #     Reading `restaurant.accepting_orders` off the instance this
+            #     function was handed would reintroduce precisely the drift the
+            #     locks were taken to prevent.
+            #
+            #     AFTER the replay recheck at step 1c for the same reason the
+            #     admission verdict is: a pause is a statement about NEW work,
+            #     and applying it to a replay would retroactively refuse a draft
+            #     the diner already holds.
+            #
+            #     PROVENANCE IS NOT BRANCHED ON HERE. The rule itself decides
+            #     which of its three facts bind a staff-origin order (liveness:
+            #     all of them) and which bind only the QR public (the two policy
+            #     gates), so a caller cannot accidentally hold a different
+            #     opinion by writing the `created_by is None` test twice.
+            operational = eligibility.evaluate(
+                eligibility.facts_from_verdict(verdict, table),
+                created_by,
+            )
+            if not operational.allowed:
+                logger.info(
+                    "Order creation refused (restaurant_id=%s, table_id=%s, "
+                    "reason=%s)",
+                    restaurant.pk, getattr(table, 'pk', None),
+                    operational.reason,
+                )
+                return operational.as_refusal()
 
             # 2. table-gating — only for genuinely new submissions
             ongoing = ConOrder.any_present_ongoing_order(table)

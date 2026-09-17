@@ -922,6 +922,209 @@ type at the compare-and-set: `!=` alone reads as exact while `False == 0` and
 had never been checked against. **No HTTP request shape changes** — every one of
 these was already enforced at the parser for a request arriving over the wire.
 
+## 16. A saved quote has a lifetime, and acceptance re-checks the agreed purchase (D06)
+
+D06 defines and enforces the conditions under which a saved draft may become a
+newly accepted restaurant order. Before it, three whole classes of condition were
+checked once, in the controller preflight, on instances loaded in autocommit
+**before any transaction opened** — and never again. Nothing re-read them after
+the blocking table-lock acquisition, and nothing consulted them at acceptance at
+all. Every item below was reproduced over real HTTP on unmodified `main`.
+
+### What was actually happening
+
+* **A pause did not pause.** An owner setting `accepting_orders = False`
+  mid-service stopped NEW drafts, and every draft already initiated still
+  reached the kitchen. The settings copy said the switch stopped ordering; it
+  stopped roughly half of it.
+* **A table taken out of service, disabled or switched to `menu_only` still
+  accepted an order** that had been initiated while it was usable — and the
+  staff/admin entry points checked no table fact at all, so a staff-origin order
+  could be placed onto a table that had been removed.
+* **No catalogue fact was re-read at acceptance.** A draft priced against a dish
+  that was subsequently sold out, unpublished, re-configured or re-tagged for
+  allergens was accepted unchanged, and the kitchen worked from a definition
+  nobody had agreed to.
+* **A saved quote had no lifetime.** A draft priced last week was acceptable at
+  last week's prices, indefinitely.
+* **Three writers silently reverted committed policy.** A full-row
+  `restaurant.save()` in the menu-approval path wrote back `accepting_orders`
+  and `status` from an instance loaded earlier; a full-row `table.save()` in the
+  table-status action wrote back `qr_version`, **un-revoking every diner
+  credential a QR regeneration had just revoked**; and the table deletion
+  blocker was evaluated outside the lock the delete then took.
+
+### The request contract — what changes for a client
+
+**`PUT api/v1/orders/submit/` is unchanged in shape.** It takes the same
+`{order, quote_ref}` it has taken since D02, with the same authority. What
+changes is the set of answers it can give.
+
+Four new refusals, all **HTTP 400** with the established
+`{status, message, reason}` envelope that `orders/submit/` refusals already use:
+
+| `reason` | meaning | client action |
+|---|---|---|
+| `restaurant_paused` | the restaurant has paused new diner ordering | TRANSIENT — the same attempt may succeed later |
+| `table_ordering_unavailable` | this table's QR mode does not permit ordering | TRANSIENT |
+| `table_unavailable` | the table is soft-deleted, disabled, inactive or out of service | TRANSIENT |
+| `restaurant_unavailable` | the restaurant is soft-deleted | TRANSIENT |
+| `quote_expired` | the reviewed amount is older than the server's quote lifetime | **TERMINAL** — re-price; the old quote is now retired |
+| `quote_unverifiable` | the server cannot establish how old this quote is | re-price; nothing was retired |
+| `purchase_needs_review` | something about the quoted purchase changed | **TERMINAL** — re-price; the old quote is now retired |
+| `quote_closed` | this quote was already retired by an earlier attempt | re-price |
+
+The first four carry the **byte-identical messages** the preflight has always
+returned for the same conditions; only the machine `reason` is new, and it is
+additive. A client that reads `message` and ignores `reason` behaves exactly as
+before.
+
+**The three staff-origin behaviour changes.** A staff/admin-origin order is
+still exempt from the two ORDERING POLICY gates — `accepting_orders` and
+`qr_mode` — because taking an order on a diner's behalf is what that exemption
+is for. It is **no longer exempt from table or restaurant LIVENESS**: an order
+cannot be placed onto a table that has been removed, whoever is asking. Two
+tests that pinned the old behaviour were updated rather than deleted, and the
+two that pin the surviving exemption are unchanged.
+
+### New: `PUT api/v1/orders/retire-quote/`
+
+Body `{order, quote_ref}`. Same authority as `submit` — the diner table session
+bound to the order's table, or a staff caller with the `tables` module.
+
+It asks the server whether a saved quote can still be honoured and retires it if
+it cannot. **It never retires a quote that is still good**: the client supplies
+no reason and cannot, and a quote the server finds acceptable comes back
+`quote_still_valid` with nothing written. It exists because the two obvious
+alternatives are both wrong — minting a replacement quote unilaterally leaves the
+old one acceptable (so a queued acceptance can still land, and the diner buys the
+meal twice), and attempting an acceptance to read the refusal **succeeds** when
+the quote is fine, claiming a table and sending food to a kitchen in order to ask
+a question.
+
+```
+200 {"status": 200, "outcome": "quote_still_valid", "quote_policy": {...}}
+200 {"status": 200, "outcome": "quote_closed", "reason": "quote_expired",
+     "quote_policy": {...}, "quote_closure": {...}}
+200 {"status": 200, "outcome": "quote_already_closed", "reason": ...,
+     "quote_closure": {...}}
+409 {"status": 409, "reason": "order_already_accepted", "checkout": {...}}
+```
+
+The controller consults no lifecycle state and no operational rule, takes no
+admission advisory lock and changes no order status: a restaurant that has
+PAUSED is exactly when a client most needs to establish that its held quote is
+dead. Same asymmetry the admin plane's owner-invitation cancel already draws.
+A suspension, an offboarding and a soft-deleted restaurant reach it too — none
+of them touches the table, so the diner's session stays live.
+
+An UNAVAILABLE TABLE is the one case the route cannot answer, and that is the
+capability channel's rule rather than this controller's: a soft-deleted,
+disabled, deactivated or out-of-service table revokes the diner's table session,
+so the endpoint answers the channel's opaque 404 and the controller is never
+entered. Deliberate — a revoked session must not drive a durable write, and no
+replacement quote can be minted at that table either, so there is no purchase
+for a closure to protect. A client should treat the 404 as an unanswered round
+trip and retry rather than submitting.
+
+### New response keys (additive, on the existing order read)
+
+```
+"order_details": {
+   ...
+   "quote_protocol": 1,
+   "quote_policy": {"version": 1, "status": "live", "expires_at": "…"}
+}
+```
+
+**`quote_protocol` is a SEPARATE LEVEL from `checkout_protocol`, which stays
+3 and is not touched by D06.** They answer different questions — one is "can an
+uncertain checkout be retried and recovered", the other is "may this quote still
+be accepted" — and a client can want either without the other. Raising
+`checkout_protocol` for a change that added nothing to what it promises would be
+§14's mistake in a new place, and in the direction that matters most: a client
+pinned to level 3 is RIGHT that level 3 said nothing about quote lifetime.
+
+**`quote_policy` is a DEADLINE, not a reservation.** Version 1 is **30 minutes
+from the order's `time_created`**, and it promises exactly one thing: the
+MONETARY figures the diner reviewed will be honoured within it. It does not
+reserve stock, does not promise the restaurant is open or the table usable, and
+does not guarantee any particular request will be accepted. `expires_at` is
+published so a client can stop waiting before it matters; `status` is the verdict
+at the instant the response was built, and the acceptance transaction — which
+reads its clock after its locks — is the one that decides.
+
+### Migration
+
+`orders_app/0041_order_quote_closure` — **one new table, nothing else.** No
+existing table is touched, no column is added or altered, there is no `RunPython`
+and no backfill: a draft that predates it was never closed under this protocol,
+so an absent row means "unknown, or not closed" and never "safe to replace".
+
+**The rollback direction needs an operational decision rather than a revert.**
+The SCHEMA is safe under the expand-only rule — old code neither reads nor writes
+the table — but old code also does not CONSULT closures, so while it is running a
+draft this build has permanently closed could be accepted by it. Prefer a forward
+fix; if a rollback across this change is unavoidable, hold it.
+
+### Query cost
+
+`PUT orders/submit/` goes **12 → 14** on the success path: one closure read, and
+ONE catalogue statement for the whole purchase (the single-statement contract
+`catalogue_snapshot` already holds, so it is flat in the size of the order, not
+per line). A REPLAY is unchanged at **7** — it returns at the evidence read,
+before any of this. The create path is unchanged: the operational verdict is
+decided from facts already carried on the admission verdict and the table row the
+transaction already locks.
+
+### Cutover — FRONTEND FIRST, the opposite of §15
+
+**Merge and deploy the client before this backend, and the window between them
+is inert rather than an outage.** That is the reverse of §15's order and the
+reverse of the usual additions-go-backend-first rule, so it is worth stating
+why each direction behaves the way it does.
+
+**Frontend first is a no-op against this (pre-D06) backend.** The client reads
+the deadline only when `order_details.quote_protocol >= 1`, which this backend
+does not send, so it consults no deadline and never calls `retire-quote` — a
+route that does not exist yet. The new refusal vocabulary fires only on codes
+this backend never emits; the two it does emit (`quote_ref_stale`,
+`legacy_pricing_version`) are classified REPRICE, which is the action the
+hand-written branches they replaced already took. The interceptor's widened
+forward (409, and the new route) reaches a handler that reads the sentence off
+either shape.
+
+**Backend first strands a diner, narrowly but completely.** A deployed client
+handles exactly two refusal codes and falls through for everything else, so a
+`quote_expired` or `purchase_needs_review` refusal surfaces the sentence with a
+Retry — and Retry REPLAYS the same acceptance (D04's issued-command record is
+still outstanding, because only `quote_ref_stale` settles it), which is refused
+identically. `reserveIntent` answers `outstanding`, so that diner cannot start a
+fresh checkout either. It needs a draft left open past the 30-minute lifetime,
+or a catalogue edit inside the checkout window, so it is uncommon — and it has
+no in-app escape, which is what makes the ordering worth respecting rather than
+treating as a preference.
+
+**§15 went the other way for a reason that does not apply here**: there the
+client had to send a precondition the old client did not have, so an old writer
+against a new server was a correctness problem. Here the client only has to
+UNDERSTAND answers it may not receive yet.
+
+### Frontend work required
+
+1. Branch on the machine `reason` rather than the sentence, and treat the four
+   transient codes and the terminal ones differently — a terminal refusal must
+   lead to a re-price, and a transient one must not.
+2. Render the deadline from `order_details.quote_policy.expires_at`, gated on
+   `quote_protocol >= 1`. Treat an absent `quote_protocol` as 0 and promise
+   nothing — in particular it does **not** mean quotes never expire.
+3. Use `PUT orders/retire-quote/` before minting a replacement quote, rather than
+   discarding the old one locally.
+4. Add the new route to the diner capability header allowlist
+   (`_security/diner-capability-contract.ts`) — the session header must ride it,
+   and that file is method-exact, so it fails closed until it is added.
+
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

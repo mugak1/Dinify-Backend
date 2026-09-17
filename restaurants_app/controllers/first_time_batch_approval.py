@@ -63,6 +63,11 @@ def first_time_batch_approval(
             'message': 'Invalid decision. Please try again.'
         }
 
+    # The exact set of columns this decision is entitled to write; see the
+    # `save(update_fields=...)` call below for why it is built rather than
+    # assumed.
+    approval_columns = []
+
     with transaction.atomic():
         message = 'The restaurant menu has been submitted.'
         if approval_decision in ['approve', 'submit']:
@@ -120,6 +125,7 @@ def first_time_batch_approval(
                         }
 
                 restaurant.first_time_menu_approval = True
+                approval_columns.append('first_time_menu_approval')
                 # bulk update the menu sections
                 sections = MenuSection.objects.filter(restaurant=restaurant)
                 sections.update(approved=True, enabled=True)
@@ -133,7 +139,30 @@ def first_time_batch_approval(
                 items.update(approved=True, enabled=True)
 
             restaurant.first_time_menu_approval_decision = approval_decision
-            restaurant.save()
+            approval_columns.append('first_time_menu_approval_decision')
+            # ONLY THE COLUMNS THIS DECISION OWNS (D06). It used to be a bare
+            # `restaurant.save()`, which writes EVERY field from an instance
+            # loaded before the transaction opened — so a menu approval silently
+            # reverted whatever else had been committed to that restaurant in the
+            # meantime. Two of those reverts are serious:
+            #
+            #   * `accepting_orders`. An owner pausing ordering mid-service had
+            #     the pause undone by a manager approving the menu, with nothing
+            #     reported to either of them. Since D06 both order boundaries
+            #     enforce that pause, so reverting it silently resumes trading.
+            #   * `status`. The commercial lifecycle has exactly ONE writer
+            #     (`transition_restaurant`), enforced by keeping the field out of
+            #     EDIT_INFORMATION and read-only on the serializer — and a
+            #     full-row save walked straight past both walls, restoring a
+            #     state an administrator had deliberately left.
+            #
+            # NARROWING THE WRITE IS THE FIX HERE, NOT A LOCK. This block holds a
+            # transaction across a MongoDB query (the submitter lookup above), and
+            # a `Restaurant` row lock taken around that would stall every order at
+            # the restaurant behind a remote call — the PR #306 lesson. A writer
+            # that only writes what it decided cannot revert anything, whether or
+            # not it is serialized against the writer it used to trample.
+            restaurant.save(update_fields=approval_columns)
 
             save_action(
                 affected_model='restaurant-menu-approval',

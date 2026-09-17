@@ -168,6 +168,13 @@ ALLOWED_ROUTES = {
     #       administrator's own records.
     #   the anonymous diner channel (orders/journey/*, v2 initiate, reviews/submit)
     #       untouched — it authenticates by diner capability, not by request.user.
+    #   orders/submit/ and orders/retire-quote/ (D06)  both act on ONE diner's
+    #       saved draft and both are authorised by the diner's table session or
+    #       by a staff caller's tables module — neither of which a delegated
+    #       administrator holds. `submit` places an order; `retire-quote` writes
+    #       a durable, IRREVERSIBLE record that a diner's quote may never be
+    #       accepted, which is a decision about that diner's purchase and not a
+    #       support action. Named here so their absence reads as deliberate.
 }
 
 

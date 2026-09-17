@@ -1,3 +1,4 @@
+import uuid
 from decimal import Decimal
 
 from django.db import models
@@ -372,3 +373,100 @@ class OrderAcceptance(models.Model):
 
     def __str__(self):                             # pragma: no cover
         return f'acceptance of {self.order_id} at {self.accepted_at}'
+
+
+#: D06 quote-closure reasons. Module level because a `CheckConstraint` in a
+#: nested `Meta` cannot see the enclosing class body, and because the vocabulary
+#: is imported by the closure service — one spelling, two readers.
+#:
+#: EXPIRED is MONOTONE: time only moves forward, so a quote expired at one
+#: instant is expired at every later one, which is what makes closing on it
+#: irreversible by nature rather than by decree. PURCHASE_CHANGED is NOT monotone
+#: — stock can come back — which is exactly why the fact has to be recorded
+#: durably instead of re-derived later from a catalogue that has moved on.
+QUOTE_CLOSURE_REASON_EXPIRED = 'quote_expired'
+QUOTE_CLOSURE_REASON_PURCHASE_CHANGED = 'purchase_needs_review'
+QUOTE_CLOSURE_REASONS = (
+    QUOTE_CLOSURE_REASON_EXPIRED,
+    QUOTE_CLOSURE_REASON_PURCHASE_CHANGED,
+)
+
+
+class OrderQuoteClosure(models.Model):
+    """
+    D06 — THE DURABLE FACT THAT AN UNACCEPTED QUOTE MAY NEVER BE ACCEPTED.
+
+    WHAT IT MEANS, EXACTLY. This previously unaccepted draft is permanently
+    barred from first acceptance under the supported protocol. That is the
+    whole claim.
+
+    WHAT IT DOES NOT MEAN, and the distinctions are the reason it is its own
+    table rather than a reused status. It is NOT a service cancellation: no
+    meal was cancelled, because no meal was ever ordered — the kitchen never
+    saw this draft and never will. It is NOT a payment event: nothing was
+    charged and nothing is refunded. It is NOT a statement that the diner was
+    told: a closure can commit and its response be lost, which is precisely
+    the case the recovery read exists for. And it is NOT evidence about
+    acceptance in either direction — ``OrderAcceptance`` remains the only
+    positive evidence, and its absence still means what D04 says it means.
+
+    WHY NOT ``order_status = 'cancelled'``. That column records a COMMERCIAL
+    outcome, and the kitchen's cancellation path writes it together with
+    ``cancelled_at`` / ``cancelled_by`` / ``cancellation_reason``. Writing it
+    here would file "the diner's price went stale" as "the restaurant
+    cancelled an order", would make a draft indistinguishable from a real
+    cancellation in every report and audit that reads that axis, and — worse
+    in the other direction — would let an OLD cancelled row with no acceptance
+    evidence be mistaken for a D06 closure by any code that later learns to
+    look for one. A distinct table cannot be confused with a history it was
+    not present for: absence here means "unknown, or not closed", never
+    "accepted" and never "already safe to replace".
+
+    WRITTEN ONCE, BY ONE SERVICE. ``OneToOneField`` makes at-most-one a
+    database fact; ``quote_closure`` is the only writer and never updates an
+    existing row, so a repeat closes nothing twice and the original reason,
+    moment and reference survive verbatim. A caller arriving with a different
+    reference gets a controlled answer rather than a rewritten history.
+
+    IT IS A SEPARATE ROW FOR THE REASON ``OrderAcceptance`` IS. Django's
+    ``save()`` writes every field from the in-memory instance, so a caller
+    holding an ``Order`` loaded before the closure would write the pre-closure
+    values back — silently. A separate row makes that impossible rather than
+    merely currently-unreached, and the same argument applied to positive
+    acceptance evidence in D04.
+    """
+
+    REASON_EXPIRED = QUOTE_CLOSURE_REASON_EXPIRED
+    REASON_PURCHASE_CHANGED = QUOTE_CLOSURE_REASON_PURCHASE_CHANGED
+    REASONS = QUOTE_CLOSURE_REASONS
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order = models.OneToOneField(
+        Order, on_delete=models.CASCADE, related_name='quote_closure',
+    )
+    #: When the closure COMMITTED. Distinct from `time_last_updated`, which
+    #: every unrelated write moves.
+    closed_at = models.DateTimeField(db_index=True)
+    #: The exact saved reference this closure retires. A later caller naming a
+    #: different one is not repeating this closure.
+    quote_ref = models.CharField(max_length=128)
+    #: Why, from the frozen vocabulary above.
+    reason = models.CharField(max_length=32, choices=[(r, r) for r in REASONS])
+    #: WHICH policy decided it. A future policy version must be able to say
+    #: that a closure was made under an earlier rule rather than silently
+    #: inheriting today's meaning.
+    policy_version = models.PositiveSmallIntegerField()
+
+    class Meta:
+        db_table = 'order_quote_closures'
+        constraints = [
+            # The vocabulary is a database fact, not merely `choices=`. A row
+            # that cannot say why a quote was retired is worse than no row.
+            models.CheckConstraint(
+                condition=models.Q(reason__in=QUOTE_CLOSURE_REASONS),
+                name='order_quote_closure_reason_vocabulary',
+            ),
+        ]
+
+    def __str__(self):                             # pragma: no cover
+        return f'quote closure of {self.order_id} ({self.reason})'
