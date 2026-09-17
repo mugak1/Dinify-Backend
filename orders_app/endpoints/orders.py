@@ -38,6 +38,20 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
     # are opposite decisions with opposite consequences, and which one a request
     # made should be readable from the path rather than from a body. The same
     # reasoning the admin plane applies to reissue vs cancel.
+    #
+    # SHARING ONE AUTHORITY MODEL INCLUDES THE LIVENESS GATE, and that is the
+    # part a reader is most likely to want to carve out. `resolve_table_session`
+    # re-checks `Table.is_available_for_scan()` live, so a diner holding a quote
+    # at a table that has since been soft-deleted, disabled, deactivated or taken
+    # out of service is refused HERE, with the channel's opaque 404, and
+    # `retire_quote_for_review` is never entered. That is deliberate: a revoked
+    # session must not drive a durable write, and D06's own eligibility rule
+    # makes table liveness bind every provenance for exactly the same reason.
+    # The diner loses nothing they could otherwise have — no replacement quote
+    # can be minted at that table either — and the client treats the 404 as an
+    # unanswered round trip, so it retries rather than submitting. The full
+    # reasoning is on `retire_quote_for_review`; do not add a second, laxer
+    # capability resolution for this one action.
     _DRAFT_ACTIONS = ('submit', 'retire-quote')
 
     def put(self, request, action):

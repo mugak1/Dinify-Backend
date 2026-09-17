@@ -1011,11 +1011,21 @@ a question.
 409 {"status": 409, "reason": "order_already_accepted", "checkout": {...}}
 ```
 
-It consults no lifecycle state and no operational rule, takes no admission
-advisory lock and changes no order status: a restaurant that has paused, or a
-table taken out of service, is exactly when a client most needs to establish that
-its held quote is dead. Same asymmetry the admin plane's owner-invitation cancel
-already draws.
+The controller consults no lifecycle state and no operational rule, takes no
+admission advisory lock and changes no order status: a restaurant that has
+PAUSED is exactly when a client most needs to establish that its held quote is
+dead. Same asymmetry the admin plane's owner-invitation cancel already draws.
+A suspension, an offboarding and a soft-deleted restaurant reach it too — none
+of them touches the table, so the diner's session stays live.
+
+An UNAVAILABLE TABLE is the one case the route cannot answer, and that is the
+capability channel's rule rather than this controller's: a soft-deleted,
+disabled, deactivated or out-of-service table revokes the diner's table session,
+so the endpoint answers the channel's opaque 404 and the controller is never
+entered. Deliberate — a revoked session must not drive a durable write, and no
+replacement quote can be minted at that table either, so there is no purchase
+for a closure to protect. A client should treat the 404 as an unanswered round
+trip and retry rather than submitting.
 
 ### New response keys (additive, on the existing order read)
 

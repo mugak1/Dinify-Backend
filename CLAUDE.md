@@ -806,12 +806,28 @@ so keep it current when conventions change.
     Both alternatives are worse: minting a replacement unilaterally leaves the old
     quote acceptable, and attempting an acceptance to read the refusal SUCCEEDS
     when the quote is fine, claiming a table and sending food to a kitchen in
-    order to ask a question. It consults no lifecycle state and no operational
-    rule and takes NO admission advisory lock — a paused restaurant or an
-    out-of-service table is exactly when a client most needs to establish that
-    its held quote is dead, the same asymmetry Step 2E's owner-invitation cancel
-    draws. LOCK ORDER `Table -> Order`, the kitchen's shape and the tail of
-    acceptance's
+    order to ask a question. The CONTROLLER consults no lifecycle state and no
+    operational rule and takes NO admission advisory lock — a PAUSED restaurant
+    is exactly when a client most needs to establish that its held quote is
+    dead, the same asymmetry Step 2E's owner-invitation cancel draws, and
+    `accepting_orders`, a suspension, an offboarding and a soft-deleted
+    restaurant all leave the diner's session live, so the route is reachable
+    through every one of them. **AN UNAVAILABLE TABLE IS THE ONE CASE IT CANNOT
+    ANSWER, and that is the CHANNEL's rule rather than the controller's**: a
+    diner arrives on a table session, `_resolve_table` re-checks
+    `is_available_for_scan()` live on every use, so a soft-deleted, disabled,
+    deactivated or out-of-service table REVOKES the session and the endpoint
+    answers the capability channel's opaque 404 before the controller is
+    entered. Do NOT add a retirement-specific resolution that skips that gate —
+    it would let a revoked session drive a durable write, contradict D06's own
+    rule that table liveness binds every provenance, add a SECOND capability
+    resolution, and buy the diner nothing, since no replacement quote can be
+    minted at that table either and the old one cannot be accepted through any
+    channel. The client reads the 404 as a round trip that did not answer and
+    retries rather than submitting. Pinned by
+    `RetiringAtAnUnavailableTableTests`, whose two controls (a live session, a
+    paused restaurant) must keep passing. LOCK ORDER `Table -> Order`, the
+    kitchen's shape and the tail of acceptance's
   - **THE CAPABILITY IS RE-VERIFIED UNDER THE LOCK**
     (`diner_capability.TableCapability` / `assert_capability_current`). The
     endpoint resolves the diner session in autocommit and the transition then

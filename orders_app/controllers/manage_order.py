@@ -862,13 +862,39 @@ def retire_quote_for_review(order: Order,
     changes their mind edits their basket, which is a different operation on a
     different draft.
 
-    **IT IS NOT A LIFECYCLE OR AVAILABILITY OPERATION**, deliberately, and this
-    is the same asymmetry the admin owner-invitation cancel already draws: a
-    restaurant that has paused, or a table taken out of service, is exactly when
-    a client most needs to be able to establish that its held quote is dead. It
-    therefore consults no admission verdict and no operational rule, takes no
-    admission advisory lock, and changes no order status: a retired draft stays
-    an ``initiated`` draft, still the diner's, still readable.
+    **IT IS NOT A LIFECYCLE OPERATION**, deliberately, and this is the same
+    asymmetry the admin owner-invitation cancel already draws: a restaurant that
+    has PAUSED is exactly when a client most needs to be able to establish that
+    its held quote is dead. It therefore consults no admission verdict and no
+    operational rule, takes no admission advisory lock, and changes no order
+    status: a retired draft stays an ``initiated`` draft, still the diner's,
+    still readable. ``accepting_orders``, a suspension, an offboarding and a
+    soft-deleted restaurant all leave the diner's table session live, so this
+    route is reachable through every one of them.
+
+    **AN UNAVAILABLE TABLE IS THE ONE CASE IT CANNOT ANSWER, AND THAT IS THE
+    CHANNEL'S RULE RATHER THAN AN OVERSIGHT.** A diner reaches this route through
+    a table session, and ``_resolve_table`` re-checks ``is_available_for_scan()``
+    live on every use — so once the table is soft-deleted, disabled, deactivated
+    or taken out of service the session is REVOKED and the endpoint answers the
+    capability channel's opaque 404 before this function is entered. (An earlier
+    draft of this docstring claimed an out-of-service table was reachable here.
+    It is not; the claim was wrong, not the code.)
+
+    Do NOT add a retirement-specific resolution that skips that gate. Four
+    reasons, in the order they bite. It would let a REVOKED session drive a
+    durable write, which is exactly what the live re-check exists to stop. It
+    would contradict this very change's central rule — ``order_eligibility``
+    makes table liveness bind EVERY provenance, staff included, because an
+    unavailable table is not a place an order can exist — so the carve-out would
+    undercut one layer down what D06 establishes here. It would be a SECOND
+    capability resolution, the kind of second opinion this design exists to
+    prevent. And it would buy the diner nothing: a closure is what makes minting
+    a REPLACEMENT quote safe, and at an unavailable table no replacement can be
+    minted (creation is refused for that table by the same rule), nor can the old
+    quote be accepted through any channel. The client treats the 404 as a round
+    trip that did not answer — it surfaces a retry and never submits — which is
+    the honest outcome. Pinned by ``RetiringAtAnUnavailableTableTests``.
 
     LOCK ORDER: ``Table -> Order``, the tail of acceptance's
     ``advisory -> Table -> Order`` — the same shape a kitchen command takes, and

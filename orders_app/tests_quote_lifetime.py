@@ -17,6 +17,7 @@ The twelve dimensions, and where each lives:
   8. closure durability .............. `AClosureIsDurableAndTerminalTests`
   9. transient refusals close nothing  `ATransientRefusalClosesNothingTests`
  10. the retire-for-review path ...... `RetireForReviewTests`
+ 10a. what it cannot reach ......... `RetiringAtAnUnavailableTableTests`
  11. capability re-verification ...... `TheCapabilityIsRecheckedUnderTheLockTests`
  12. the response contract ........... `TheResponseContractTests`
 
@@ -913,3 +914,101 @@ class RetiringSaysNothingItDidNotDoTests(QuoteFixture):
         result = retire_quote_for_review(order, quote_ref(order))
         self.assertEqual(result.get('status'), 200, result)
         self.assertEqual(result['outcome'], quote_closure.OUTCOME_CLOSED)
+
+
+# ---------------------------------------------------------------------------
+# 10a. WHAT RETIRE-FOR-REVIEW CANNOT REACH, AND WHY THAT IS THE CHANNEL'S RULE
+# ---------------------------------------------------------------------------
+
+class RetiringAtAnUnavailableTableTests(QuoteFixture):
+    """The limit of the retire-for-review route, pinned so the carve-out that
+    would remove it cannot be added by accident.
+
+    `retire_quote_for_review` itself consults no operational rule — dimension 10
+    proves that through a PAUSED restaurant, and that is the load-bearing case.
+    But a diner reaches it through a table SESSION, and `_resolve_table`
+    re-checks `is_available_for_scan()` live on every use, so once the table is
+    soft-deleted, disabled, deactivated or out of service the session is REVOKED
+    and the endpoint answers the capability channel's opaque 404 before the
+    controller is entered.
+
+    That is deliberate. Skipping the gate for this one action would let a revoked
+    session drive a durable write, and would contradict D06's own rule that table
+    liveness binds every provenance. It costs the diner nothing they could
+    otherwise have: no replacement quote can be minted at that table either, so
+    there is no purchase for a closure to protect.
+
+    THESE DRIVE THE REAL ENDPOINT. A controller-level call cannot see this — the
+    gate is the endpoint's session resolution, which is exactly why the earlier
+    wording got it wrong.
+    """
+
+    URL = '/api/v1/orders/retire-quote/'
+
+    def _retire_over_http(self, order, ref):
+        return self.client.put(
+            self.URL,
+            data={'order': str(order.pk), 'quote_ref': ref},
+            content_type='application/json',
+            headers={'x-diner-session': issue_table_session(self.table)},
+        )
+
+    def test_a_live_session_reaches_the_controller(self):
+        """THE CONTROL. Without this the assertions below would pass for a
+        route that never worked at all."""
+        order = self._age_draft(self._draft_order(), minutes=45)
+
+        response = self._retire_over_http(order, quote_ref(order))
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            response.data['outcome'], quote_closure.OUTCOME_CLOSED)
+        self.assertTrue(OrderQuoteClosure.objects.filter(order=order).exists())
+
+    def test_a_PAUSED_restaurant_still_retires_over_HTTP(self):
+        """The half of the claim that IS true, proved end to end rather than at
+        the controller: `accepting_orders` does not touch the table, so the
+        session stays live and the route answers."""
+        order = self._age_draft(self._draft_order(), minutes=45)
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(
+            accepting_orders=False)
+
+        response = self._retire_over_http(order, quote_ref(order))
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            response.data['outcome'], quote_closure.OUTCOME_CLOSED)
+
+    def test_an_out_of_service_table_is_refused_at_the_door(self):
+        """The stated limit. A carve-out that let this through would fail here,
+        which is the point of pinning it."""
+        order = self._age_draft(self._draft_order(), minutes=45)
+        Table.objects.filter(pk=self.table.pk).update(
+            status='out_of_service', is_active=False)
+
+        response = self._retire_over_http(order, quote_ref(order))
+
+        self.assertEqual(response.status_code, 404, response.data)
+        self.assertFalse(OrderQuoteClosure.objects.filter(order=order).exists())
+
+    def test_a_soft_deleted_table_is_refused_the_same_way(self):
+        order = self._age_draft(self._draft_order(), minutes=45)
+        Table.objects.filter(pk=self.table.pk).update(deleted=True)
+
+        response = self._retire_over_http(order, quote_ref(order))
+
+        self.assertEqual(response.status_code, 404, response.data)
+        self.assertFalse(OrderQuoteClosure.objects.filter(order=order).exists())
+
+    def test_the_refusal_discloses_nothing_about_the_order(self):
+        """It is the channel's own 404, so a revoked session cannot use this
+        route to learn whether an order exists or what state it is in."""
+        order = self._age_draft(self._draft_order(), minutes=45)
+        Table.objects.filter(pk=self.table.pk).update(
+            status='out_of_service', is_active=False)
+
+        response = self._retire_over_http(order, quote_ref(order))
+
+        self.assertEqual(set(response.data), {'status', 'message'})
+        self.assertNotIn('outcome', response.data)
+        self.assertNotIn('quote_closure', response.data)
