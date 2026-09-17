@@ -18,6 +18,8 @@ imports are limited to ``django.core.signing`` / ``settings``; the ``Table`` loo
 function-local to avoid the ``restaurants_app`` <-> ``orders_app`` import cycle. It
 NEVER reads ``request.user`` — staff JWT auth is a completely separate channel.
 """
+from dataclasses import dataclass
+
 from django.conf import settings
 from django.core import signing
 
@@ -137,6 +139,88 @@ def resolve_table_session(token, max_age=None):
         max_age = settings.DINER_SESSION_TTL_SECONDS
     payload = _load(token, SESSION_SALT, max_age=max_age)
     return _resolve_table(payload)
+
+
+# --- carrying a verified capability to a protected boundary ----------------
+
+@dataclass(frozen=True)
+class TableCapability:
+    """What a capability that has ALREADY been verified asserted, in a form a
+    transaction can re-check against a row it holds a lock on.
+
+    WHY IT EXISTS. ``resolve_table_session`` verifies the signature, the expiry,
+    the generation and the table's availability — in autocommit, at the endpoint,
+    before any transaction opens. The write that follows then WAITS for the
+    admission advisory lock, the table row and the order row, and a QR
+    regeneration committing inside that wait revokes the session the caller is
+    holding. Nothing downstream knew what generation had been presented, so
+    nothing could notice.
+
+    It carries THREE facts and no token: a capability is a credential and must not
+    travel further into the application than the point that verifies it. These are
+    conclusions drawn from one, which is why re-checking them can only ever refuse
+    — it can never admit a request that was not already admitted at the door.
+
+    ``qr_generation`` is the table's ``qr_version`` AS VERIFIED, not as stored now.
+    ``_resolve_table`` has just proved the two were equal, so reading it off the
+    resolved table is reading the presented value; it is stored separately here so
+    that remains true if either side of that equality ever moves.
+    """
+
+    restaurant_id: str
+    table_id: str
+    qr_generation: int
+
+
+def capability_from_table(table) -> TableCapability:
+    """The context to carry, built from a table a capability has just resolved to.
+
+    MUST be called only on the result of ``resolve_table_session`` /
+    ``resolve_qr_credential``. Building one from a table nobody presented a
+    capability for would manufacture an authorization fact.
+    """
+    return TableCapability(
+        restaurant_id=str(table.restaurant_id),
+        table_id=str(table.id),
+        qr_generation=int(table.qr_version),
+    )
+
+
+def assert_capability_current(capability, table):
+    """Re-verify a carried capability against a row the caller has LOCKED.
+
+    Raises ``DinerCapabilityDenied`` — the same non-disclosing 404 the door
+    answers with — so a revocation that lands mid-request is indistinguishable
+    from a session that never resolved. It re-checks exactly the AUTHORIZATION
+    facts and no others:
+
+      * the table is the one the capability names (a defensive identity check;
+        the caller already scoped its lookup by it),
+      * the GENERATION still matches, i.e. the QR has not been regenerated.
+
+    It deliberately does NOT re-check ``is_available_for_scan()``. A table taken
+    out of service is an OPERATIONAL fact that binds every provenance, staff
+    included, and ``order_eligibility`` owns it and answers it with a refusal a
+    diner can read. Answering it here as well would give one fact two answers
+    depending on how the caller authenticated, and would report a table the owner
+    took out of service as though the diner's session were forged.
+
+    ``capability`` of ``None`` means no capability channel was used (a staff
+    caller on the module gate), and this is a no-op: there is nothing to revoke.
+    """
+    if capability is None:
+        return
+    if table is None:
+        raise DinerCapabilityDenied()
+    if str(table.id) != capability.table_id:
+        raise DinerCapabilityDenied()
+    if str(table.restaurant_id) != capability.restaurant_id:
+        raise DinerCapabilityDenied()
+    if int(table.qr_version) != capability.qr_generation:
+        # The QR was regenerated while this request waited on its locks. That is
+        # a deliberate revocation by the owner, and it revokes retroactively:
+        # a request already in flight is not grandfathered in.
+        raise DinerCapabilityDenied()
 
 
 # --- request helpers -------------------------------------------------------

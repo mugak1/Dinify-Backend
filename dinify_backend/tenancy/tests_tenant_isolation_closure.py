@@ -93,6 +93,7 @@ ORDER_DETAILS_URL = '/api/v1/orders/journey/order-details/'
 PAYMENT_DETAILS_URL = '/api/v1/orders/journey/payment-details/'
 INITIATE_URL = '/api/v2/orders/initiate/'
 SUBMIT_URL = '/api/v1/orders/submit/'
+RETIRE_QUOTE_URL = '/api/v1/orders/retire-quote/'
 REVIEW_SUBMIT_URL = '/api/v1/reviews/submit/'
 REGENERATE_QR_URL = '/api/v1/restaurant-setup/table-actions/regenerate-qr/'
 DETAIL_URL = '/api/v1/restaurant-setup/details/'
@@ -2078,8 +2079,18 @@ class ContractParityClosureTests(SimpleTestCase):
     def test_scan_and_session_gated_routes(self):
         self.assertEqual(SCAN_URL, '/api/v1/orders/journey/table-scan/')
         for route in (ORDER_DETAILS_URL, PAYMENT_DETAILS_URL, INITIATE_URL,
-                      SUBMIT_URL, REVIEW_SUBMIT_URL):
+                      SUBMIT_URL, RETIRE_QUOTE_URL, REVIEW_SUBMIT_URL):
             self.assertTrue(route.startswith('/api/'))
+
+    def test_the_d06_retire_route_is_session_gated_like_submit(self):
+        """Its counterpart entry is in the frontend's
+        `_security/diner-capability-contract.ts`, whose parity spec pins the
+        same six routes. The route is METHOD-EXACT and version-pinned on both
+        sides, and the classifier there fails CLOSED — so an entry missing from
+        either repository does not degrade, it stops carrying the session."""
+        self.assertEqual(RETIRE_QUOTE_URL, '/api/v1/orders/retire-quote/')
+        self.assertTrue(RETIRE_QUOTE_URL.endswith('/'))
+        self.assertNotEqual(RETIRE_QUOTE_URL, SUBMIT_URL)
 
     def test_credential_and_session_are_never_encrypted(self):
         # The tokens are signed, not encrypted — a parity check that the design

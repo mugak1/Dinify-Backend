@@ -574,8 +574,18 @@ class WhatTheEvidenceCostsTests(AcceptanceFixture):
         return len(captured.captured_queries), result
 
     def test_a_first_submission_costs_two_more_than_before(self):
-        """One SELECT to ask whether evidence exists, one INSERT to write it.
-        Nothing per line, and no second read of anything already in hand."""
+        """D04 added two (ask for evidence, write it); D06 added two more.
+
+        The D06 pair is the closure read and ONE catalogue statement for the
+        whole purchase — the same single-statement contract `catalogue_snapshot`
+        already holds on the create path, so this is flat in the size of the
+        order rather than per line, which is what the flatness case beside this
+        one exists to prove. Nothing else was added: the operational verdict is
+        decided from facts already carried on the admission verdict and the row
+        this transaction already locked, the expiry rule reads no database at
+        all, and the purchase check reuses the population the reference check
+        had already fetched.
+        """
         self._submit(self._draft())                   # warm
         order = self._draft(table=self.table_b)
         # the reference is computed OUTSIDE the measurement, as a real client
@@ -585,7 +595,7 @@ class WhatTheEvidenceCostsTests(AcceptanceFixture):
         ref = quote_ref(order)
         count, result = self._measure(lambda: self._submit(order, ref))
         self.assertEqual(result.get('status'), 200, result)
-        self.assertEqual(count, 12)
+        self.assertEqual(count, 14)
 
     def test_a_replay_costs_less_than_a_submission(self):
         """It returns at the evidence read: no occupancy query, no quote

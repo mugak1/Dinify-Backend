@@ -19,6 +19,7 @@ tenant flag is read in the SAME locked query as the lifecycle status, inside
 loaded before the transaction would reproduce, on a different field, exactly the
 stale-read bug the advisory lock was introduced to close.
 """
+from dataclasses import replace
 from unittest.mock import patch
 
 from django.db import transaction
@@ -164,14 +165,16 @@ class TestTenantAuthoritativeReadTests(LaunchBoundaryFixture):
 
         def _admit_reporting_test_tenant(**kwargs):
             verdict = real_admit(**kwargs)
-            # What `admit` would have returned had the flag been set under the lock.
-            return AdmissionVerdict(
-                allowed=verdict.allowed,
-                status=verdict.status,
-                message=verdict.message,
-                code=verdict.code,
-                restaurant_is_test=True,
-            )
+            # What `admit` would have returned had the flag been set under the
+            # lock. `replace` rather than a field-by-field rebuild, and that is
+            # the point of this helper rather than a style choice: a rebuild
+            # silently drops every field added to the verdict afterwards to its
+            # DEFAULT, and those defaults fail closed. When D06 added the two
+            # operational facts, this stand-in started reporting the restaurant
+            # as soft-deleted and the order was refused — a test failure that
+            # described the test, not the path. `admit` itself uses `replace`
+            # for the same reason.
+            return replace(verdict, restaurant_is_test=True)
 
         with patch(
             'orders_app.controllers.services.create_order.admit',

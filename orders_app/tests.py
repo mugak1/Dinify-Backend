@@ -1137,13 +1137,24 @@ class TestOrderingAvailabilityGates(TestCase):
         self.assertEqual(response['message'], 'This table is not available for ordering')
         self.assertEqual(Order.objects.count(), before)
 
-    def test_staff_order_bypasses_inactive_table_gate(self):
+    def test_staff_order_does_not_bypass_the_inactive_table_gate(self):
+        """D06 CONTRACT CHANGE, and the counterpart of the two tests above.
+
+        TABLE LIVENESS BINDS EVERY PROVENANCE. `accepting_orders` and `qr_mode`
+        are ordering policy for the QR public and staff still walk past them
+        (the two tests above pin that, unchanged); an inactive table is not
+        policy, it is absence, and an order cannot be placed onto something that
+        is not there.
+        """
         self.table.is_active = False
         self.table.save(update_fields=['is_active'])
         before = Order.objects.count()
         response = self._order(created_by=self.staff)
-        self.assertEqual(response['status'], 200)
-        self.assertEqual(Order.objects.count(), before + 1)
+        self.assertEqual(response['status'], 400, response)
+        self.assertEqual(
+            response['message'], 'This table is not available for ordering')
+        self.assertEqual(response['reason'], 'table_unavailable')
+        self.assertEqual(Order.objects.count(), before)
 
     # --- Happy path --------------------------------------------------------
 
@@ -1454,13 +1465,30 @@ class AdminSourceOrderInitiationAuthTests(TestCase):
         self.assertEqual(resp.status_code, 404, resp.content)
         self.assertEqual(Order.objects.count(), before)
 
-    def test_out_of_service_table_staff_admin_source_still_bypasses(self):
+    def test_out_of_service_table_refuses_a_staff_admin_source_order_too(self):
+        """D06 CONTRACT CHANGE. It used to succeed; the staff exception does not
+        reach here any more, and that is the point rather than a casualty.
+
+        The three availability gates were one undifferentiated block that staff
+        skipped wholesale, but they are not one kind of fact. A PAUSE and a
+        menu-only QR are ORDERING POLICY for the public — a member of staff
+        taking an order on a diner's behalf is exactly what they are meant to
+        permit. A table that is out of service (or disabled, inactive or
+        soft-deleted) is not policy at all: it is a place an order cannot
+        exist, and the same is true whoever is asking. Letting a staff-origin
+        order onto it produced a real kitchen ticket for a table nobody is
+        working.
+
+        `order_eligibility` splits the two, so the staff exception is
+        PRESERVED where it means something (see the two gates below) and
+        withdrawn where it never did.
+        """
         self.table_b.status = 'out_of_service'
         self.table_b.save()
+        before = Order.objects.count()
         resp = self._initiate(self.staff_b, self.restaurant_b, self.table_b, self.item_b)
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(
-            Order.objects.get(id=self._order_id(resp)).created_by_id, self.staff_b.id)
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertEqual(Order.objects.count(), before)
 
     # --- 6. the legacy platform role reaches no restaurant --------------
     def test_legacy_platform_role_admin_source_denied(self):

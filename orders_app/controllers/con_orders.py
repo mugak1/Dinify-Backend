@@ -19,6 +19,7 @@ from orders_app.serializers import SerializerPutOrderItem
 from finance_app.models import DinifyTransaction
 from orders_app.controllers.orders.serializers import serialize_order_details
 from orders_app.controllers.services.create_order import _create_order
+from orders_app.controllers.services import order_eligibility as eligibility
 from restaurants_app.controllers.menu_publication import (
     NOT_ON_MENU_MESSAGE, validate_order_selections,
 )
@@ -1400,36 +1401,29 @@ class ConOrder:
                     'message': preflight_admission.message
                 }
 
-            # availability: a diner cannot place an order while the restaurant has
-            # paused ordering (accepting_orders=False). Staff/admin orders
-            # (created_by set) are a management action and bypass this gate.
-            if created_by is None and not restaurant.accepting_orders:
-                return {
-                    'status': 400,
-                    'message': 'This restaurant is not currently accepting orders'
-                }
-
-            # availability: a diner may only order at a table whose QR mode permits
-            # ordering. Whitelist the ordering modes so any future non-ordering mode
-            # fails safe rather than accidentally permitting orders. Staff/admin
-            # orders (created_by set) bypass this gate.
-            ORDERING_QR_MODES = ('order_pay', 'order_only')  # 'menu_only' is view-only
-            if created_by is None and table.qr_mode not in ORDERING_QR_MODES:
-                return {
-                    'status': 400,
-                    'message': 'Ordering is not available at this table'
-                }
-
-            # availability: a diner cannot order at a table that is not available
-            # for a scan (soft-deleted, disabled, inactive, or out of service).
-            # Reuse the same predicate the diner QR-scan flow uses so the two stay
-            # consistent. (Redundant for a diner, whose session could not have
-            # resolved otherwise — kept as defence for any future caller.)
-            if created_by is None and not table.is_available_for_scan():
-                return {
-                    'status': 400,
-                    'message': 'This table is not available for ordering'
-                }
+            # OPERATIONAL ELIGIBILITY (D06), PREFLIGHT ONLY: may new work happen
+            # at this restaurant, at this table, right now? These three gates used
+            # to be written out here, and here ONLY — three `created_by is None`
+            # branches over `restaurant.accepting_orders`, `table.qr_mode` and
+            # `table.is_available_for_scan()`, decided on instances loaded in
+            # autocommit before any transaction opened. Nothing re-read them after
+            # the blocking table-lock acquisition, and nothing consulted them at
+            # ACCEPTANCE at all, so a pause was not a pause: a draft already
+            # initiated still reached the kitchen.
+            #
+            # The rule now lives in `order_eligibility` and BOTH authoritative
+            # boundaries ask the same function — `_create_order` after the table
+            # lock, `_submit_order` after the table and order locks. This call is
+            # the fast-feedback half of the established preflight/authoritative
+            # split and is deliberately NOT load-bearing; it may be stale by the
+            # time the transaction opens, which is precisely why the other two
+            # exist.
+            #
+            # The messages are byte-identical to the three it replaces, and the
+            # machine `reason` is additive.
+            operational = eligibility.evaluate_rows(restaurant, table, created_by)
+            if not operational.allowed:
+                return operational.as_refusal()
 
             # Canonical selection validation (preflight, FAST FEEDBACK): one
             # authority for tenant ownership, diner publication (anonymous only),

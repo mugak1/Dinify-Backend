@@ -50,6 +50,9 @@ from orders_app.controllers.services.create_order import (
 from orders_app.controllers.services.order_input import (
     MAX_QUANTITY_PER_LINE, validate_order_items,
 )
+from orders_app.controllers.services.order_eligibility import (
+    REASON_RESTAURANT_PAUSED,
+)
 from orders_app.controllers.services.order_intent import (
     ABSENT, FINGERPRINT_VERSION, MATCH, MISMATCH, OUT_OF_SCOPE, UNSUPPORTED,
     REASON_INTENT_BINDING_UNAVAILABLE, REASON_INTENT_MISMATCH,
@@ -702,12 +705,21 @@ class AReplaySkipsTheNewOrderGatesTests(IntentFixture):
 
     def test_a_new_order_is_still_refused_at_a_paused_restaurant(self):
         """The negative control: skipping the gates for a REPLAY must not
-        weaken them for a genuinely new request."""
+        weaken them for a genuinely new request.
+
+        It used to assert `reason` was ABSENT, as a proxy for "this is the
+        availability refusal, not a D04 intent conflict". D06 gives every
+        refusal on this path a machine code, so the discriminator is now stated
+        POSITIVELY — which is what the assertion was reaching for anyway, and is
+        a stronger claim: it pins WHICH refusal answered, not merely that the
+        answer came from somewhere other than the intent policy.
+        """
         Restaurant.objects.filter(pk=self.restaurant.pk).update(
             accepting_orders=False)
         refused = self._initiate(uuid.uuid4())
         self.assertEqual(refused.get('status'), 400, refused)
-        self.assertNotIn('reason', refused)
+        self.assertEqual(refused.get('reason'), REASON_RESTAURANT_PAUSED)
+        self.assertNotEqual(refused.get('reason'), REASON_INTENT_MISMATCH)
 
 
 # ---------------------------------------------------------------------------

@@ -220,15 +220,50 @@ class TableActionsEndpoint(APIView):
         ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
-        old_status = table.status
-        table.status = new_status
+        # THE ROW IS RE-READ UNDER A LOCK AND ONLY TWO COLUMNS ARE WRITTEN
+        # (D06). It used to decide from the unlocked instance above and then
+        # `table.save()` — a FULL-ROW write of every column on an instance
+        # loaded before the decision — so any concurrent write to the same table
+        # was silently reverted by whichever request saved last. Two of those
+        # reverts matter enough to name:
+        #
+        #   * `qr_version`. Regenerating a table's QR bumps it, and that bump is
+        #     what REVOKES every diner credential and session outstanding for the
+        #     table. A status change loaded before the regeneration wrote the old
+        #     generation back, un-revoking them all — a security control undone
+        #     by an unrelated operator action, with nothing reported.
+        #   * `qr_mode` / `enabled` / `deleted`. The facts the order path now
+        #     consults at creation AND at acceptance; reverting one re-opens
+        #     ordering at a table somebody had just closed.
+        #
+        # The lock also makes this writer participate in the order path's
+        # serialization rather than running beside it: both order boundaries take
+        # this exact row `FOR UPDATE`, so a status change and an order either
+        # happen in a definite order or one waits.
+        #
+        # LOCK ORDER: the `Table` row and nothing else. It takes no `Restaurant`
+        # row and never reaches for the admission advisory lock, so it can block
+        # an order path but cannot cycle against it or against the lifecycle
+        # transition.
+        with transaction.atomic():
+            try:
+                table = Table.objects.select_for_update().get(pk=table.pk)
+            except Table.DoesNotExist:
+                return Response(
+                    {'status': 404, 'message': 'Table not found'}, status=404)
 
-        if new_status == 'out_of_service':
-            table.is_active = False
-        elif old_status == 'out_of_service':
-            table.is_active = True
+            old_status = table.status
+            table.status = new_status
 
-        table.save()
+            if new_status == 'out_of_service':
+                table.is_active = False
+            elif old_status == 'out_of_service':
+                table.is_active = True
+
+            # `update_fields` is the fix, not the lock: a lock stops a
+            # CONCURRENT revert, and writing only what this action decides stops
+            # this action from reverting anything at all.
+            table.save(update_fields=['status', 'is_active'])
 
         return Response({
             'status': 200,

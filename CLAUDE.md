@@ -709,6 +709,169 @@ so keep it current when conventions change.
   pass are the compatibility controls that must NOT change; of the 8 added for the
   two Codex P2 findings, 4 fail against the head that carried them, and each of the
   three fixes has its own negative control). See `BREAKING_CHANGES.md` §14
+- A SAVED QUOTE HAS A LIFETIME, AND ACCEPTANCE RE-CHECKS THE AGREED PURCHASE
+  (D06): ✅ the conditions under which a draft may become a NEWLY ACCEPTED order
+  are now defined in one place and enforced at the AUTHORITATIVE boundary rather
+  than at a preflight. Four new services, one new table
+  (`orders_app/0041_order_quote_closure`, `CreateModel` only), one new route.
+  **Every defect below was reproduced over real HTTP on unmodified `main`.**
+  Three whole classes of condition were read ONCE, in `ConOrder.initiate_order`,
+  off instances loaded in autocommit before any transaction opened, and only for
+  anonymous diners. **So a pause did not pause**: an owner setting
+  `accepting_orders=False` mid-service stopped new drafts and every draft already
+  initiated still reached the kitchen — the settings copy said the switch stopped
+  ordering and it stopped roughly half of it. A table taken out of service,
+  disabled or switched to `menu_only` still accepted an order initiated while it
+  was usable, and the staff/internal entry points checked no table fact AT ALL.
+  **No catalogue fact was re-read at acceptance**, so a draft priced against a
+  dish since sold out, unpublished, re-configured or re-tagged for allergens was
+  accepted unchanged and the kitchen worked from a definition nobody agreed to.
+  And a saved quote had no lifetime — a draft priced last week was acceptable at
+  last week's prices, indefinitely.
+  - `orders_app/controllers/services/order_eligibility.py` — ONE PURE RULE ASKED
+    AT THREE MOMENTS (the controller preflight, `_create_order` after the table
+    lock, `_submit_order` after the table and order locks). The three cannot
+    drift because they call the SAME function; they differ only in WHICH snapshot
+    of the facts they hand it. **THREE FACTS, AND THE DIFFERENCE DECIDES WHO THEY
+    BIND.** `accepting_orders` is a COMMERCIAL PAUSE on new diner ordering and
+    `qr_mode` is ORDERING POLICY for the QR public — an authorized member of staff
+    taking an order on a diner's behalf walks past both, which is what that
+    exemption is for and it is PRESERVED. Table and restaurant LIVENESS are
+    neither: a soft-deleted, disabled, inactive or out-of-service table is not a
+    place an order can exist, so it binds EVERY provenance, **staff included —
+    that is the one behaviour change, and two tests that pinned the old bypass
+    were updated rather than deleted**. PROVENANCE IS THE ORDER'S, NEVER THE
+    REQUESTER'S: acceptance passes `order.created_by_id`, exactly as `admit`
+    does, so a diner's draft stays a diner's draft however senior the person who
+    taps submit. The three legacy messages are BYTE-IDENTICAL; the machine
+    `reason` is additive
+  - `orders_app/controllers/services/quote_policy.py` — THE LIFETIME.
+    `QUOTE_POLICY_VERSION = 1` names ONE complete rule: **anchor
+    `Order.time_created`, 30 minutes, `now < anchor + lifetime` so the exact
+    deadline instant is EXPIRED**. `time_created` is `auto_now_add` and no later
+    write moves it (not a D04 replay, not the submit save, not a kitchen
+    `update_fields` save, not `determine-customers`' full save) — which is
+    exactly why `time_last_updated` is not the anchor. NO NEW COLUMN: the
+    deadline is DERIVED, so an existing draft gets the rule from the timestamp it
+    already carries and a rollback removes the rule rather than stranding data.
+    **THE VERSION IS FROZEN** — a future change of duration is a NEW version with
+    its own number, never an edit to a constant under this one. `assess` takes
+    `now` and READS NO CLOCK ITSELF, so the requirement that the comparison
+    happen after every lock wait cannot be quietly bypassed. **AN UNUSABLE ANCHOR
+    IS ITS OWN ANSWER** (`quote_unverifiable`): never silently fresh (an
+    indefinite quote) and never silently expired (refusing a diner over a data
+    fault they did not cause), and it closes nothing
+  - `orders_app/controllers/services/purchase_integrity.py` — IS THIS STILL THE
+    SAME PURCHASE? The saved lines against the catalogue as it is now, reusing
+    `build_snapshot` so the whole order resolves in **exactly ONE statement** at
+    ONE captured `now` rather than becoming a second catalogue reader. The saved
+    MONEY is honoured — that is the lifetime's promise; what is refused is
+    preparing food from a definition that changed. One controlled diner message
+    plus a bounded classification and a truncated item id in the log — never
+    catalogue JSON, amounts or order contents
+  - `orders_app/controllers/services/quote_closure.py` + `OrderQuoteClosure` —
+    THE DURABLE HALF OF A TERMINAL REFUSAL. A refusal message is one process's
+    opinion at one moment; it is not durable and another worker holding a stale
+    request knows nothing about it. So minting a replacement quote is only safe
+    if the first can NEVER later execute, and a committed row is what makes that
+    true: every acceptance path reads it under the same locks before it can
+    accept anything. **ONLY TWO REASONS CLOSE A QUOTE** (`quote_expired`,
+    `purchase_needs_review`) and the vocabulary is a `CheckConstraint` precisely
+    so a future caller cannot widen it — a pause, a menu-only table, a lost
+    response or a permission failure says "not now", never "finished", and
+    closing on one would destroy a perfectly good quote. Expiry is MONOTONE,
+    which is what makes it safe to act on irreversibly; availability is NOT,
+    which is why it must be recorded (stock comes back, and an unrecorded refusal
+    would let a queued acceptance execute the moment it did). Re-closing returns
+    the ORIGINAL row unchanged; an accepted order can never be closed
+    (acceptance is resolved FIRST) and a non-draft with no evidence is D04's
+    `evidence_unavailable`, refused for review rather than converted into a
+    terminal fact
+  **THE ACCEPTANCE SEQUENCE, AND ITS ORDER IS THE CONTRACT**: capability
+  re-verification → D04 replay → closure → admission verdict → `initiated` →
+  operational eligibility → occupancy → acknowledgement (`_quote_acknowledgement`)
+  → expiry → purchase integrity → transition. Authorization is FIRST, ahead even
+  of the replay: a revoked capability may not read an acceptance any more than it
+  may create one. The TRANSIENT checks precede the TERMINAL ones, so an
+  irreversible write is never made on behalf of a request the operational rules
+  would have refused anyway. And the ACKNOWLEDGEMENT precedes both terminal
+  checks, because **a closure retires ONE named reference** — a caller holding a
+  stale one is told their order changed and re-reads it, and nothing is retired
+  on an assertion they did not make. `_quote_acknowledgement` is shared with the
+  retire route so "is this the quote you mean?" has exactly one answer
+  - **THE SECOND ENTRY PATH**: `PUT api/v1/orders/retire-quote/`
+    (`retire_quote_for_review`), same authority as `submit`. It asks whether a
+    saved quote can still be honoured and retires it if not, and **it never
+    retires one that is still good** — the client supplies no reason and cannot.
+    Both alternatives are worse: minting a replacement unilaterally leaves the old
+    quote acceptable, and attempting an acceptance to read the refusal SUCCEEDS
+    when the quote is fine, claiming a table and sending food to a kitchen in
+    order to ask a question. It consults no lifecycle state and no operational
+    rule and takes NO admission advisory lock — a paused restaurant or an
+    out-of-service table is exactly when a client most needs to establish that
+    its held quote is dead, the same asymmetry Step 2E's owner-invitation cancel
+    draws. LOCK ORDER `Table -> Order`, the kitchen's shape and the tail of
+    acceptance's
+  - **THE CAPABILITY IS RE-VERIFIED UNDER THE LOCK**
+    (`diner_capability.TableCapability` / `assert_capability_current`). The
+    endpoint resolves the diner session in autocommit and the transition then
+    WAITS for three locks; a QR regeneration inside that wait revokes the
+    session, and nothing downstream knew what generation had been presented. It
+    carries THREE facts and NO TOKEN — a credential must not travel past the
+    point that verifies it — and re-checks the GENERATION and nothing else, so
+    it can only ever refuse. It deliberately does NOT re-check
+    `is_available_for_scan()`: that is an operational fact binding every
+    provenance, and answering it here too would give one fact two answers
+    depending on how the caller authenticated. The refusal is the capability
+    channel's own opaque 404
+  - **THREE WRITERS NOW PARTICIPATE, AND TWO OF THEM WERE REVERTING COMMITTED
+    POLICY.** `first_time_batch_approval` did a full-row `restaurant.save()` from
+    an instance loaded before its transaction, so a menu approval silently
+    reverted `accepting_orders` AND `status` — walking straight past the two
+    walls (`EDIT_INFORMATION` + `read_only`) that make lifecycle single-writer.
+    It now writes only the two columns it decides; **narrowing the write is the
+    fix, not a lock**, because that block holds a transaction across a MongoDB
+    query and a `Restaurant` row lock there would stall every order behind a
+    remote call (the PR #306 lesson). `table_actions._update_status` did a
+    full-row `table.save()` from an unlocked read, so a concurrent QR
+    regeneration was reverted — **un-revoking every diner credential the owner
+    had just revoked** — and it now re-reads under `select_for_update` and writes
+    `update_fields=['status', 'is_active']`. The `tables` DELETE blocker was
+    evaluated in autocommit while Secretary opened its own transaction to write
+    the soft-delete, so an order accepted in the gap was invisible; it now runs
+    in `_delete_table`, deciding and deleting under the same row lock
+  - **THE PAUSE WRITER TAKES THE EXCLUSIVE ADMISSION LOCK.** A `restaurants` PUT
+    now takes `lock_admission_exclusive` FIRST, before Secretary's row lock —
+    the lifecycle transition's exact order. A `Restaurant` ROW lock would not do:
+    `admit` reads `accepting_orders` with a plain `values_list().get()` and under
+    MVCC that read does not block on a row held FOR UPDATE, so a pause could
+    commit while an admission that had already read `True` was still waiting on
+    the table lock. Same reasoning `mark_restaurant_test` records for `is_test`,
+    which rides the same protected read. SCOPED TO `restaurants` ONLY — taking a
+    per-restaurant exclusive lock for a menu-item rename would queue every diner
+    order behind an edit no admission reads
+  - **`AdmissionVerdict` NOW CARRIES FOUR VALUES FROM ONE QUERY** — `status`,
+    `is_test`, `accepting_orders`, `deleted` — so the operational rule is asked
+    about the same protected instant the lifecycle was decided at, and **at no
+    extra query**. The two new fields FAIL CLOSED in the opposite direction from
+    `restaurant_is_test`: a verdict that never touched the database must not be
+    able to claim a restaurant is open and present
+  - **RESPONSE CONTRACT**: `order_details.quote_protocol` (level 1) and
+    `order_details.quote_policy` `{version, status, expires_at}`, both additive.
+    **`checkout_protocol` STAYS 3 and is untouched** — D04 answers "can an
+    uncertain checkout be retried and recovered", D06 answers "may this quote
+    still be accepted", and raising the first for a change that added nothing to
+    what it promises would be #661 in the direction that matters most. The
+    refusals are HTTP 400 with the established `{status, message, reason}`
+    envelope, so the deployed `ErrorInterceptor` forwarding rule already delivers
+    the code to the basket. `quote_policy` is a DEADLINE, NOT A RESERVATION: the
+    dish can still sell out inside the window, which is the other question
+    entirely
+  - COST: submit **12 → 14** (the closure read plus ONE catalogue statement,
+    flat in the size of the order); a REPLAY is unchanged at **7**, returning at
+    the evidence read before any of this; the create path is unchanged, since the
+    operational verdict is decided from facts already in hand. See
+    `BREAKING_CHANGES.md` §16
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one
@@ -1794,7 +1957,17 @@ so keep it current when conventions change.
   database is unreachable** (`status: degraded`, `database: unreachable`) — a
   consumer must read the body, never the status code. Distinct from the admin
   plane's own `admin/v1/` health route
-- `api/v1/orders/` → v1 orders (urls.py) — only `submit` (PUT) is live; the
+- `api/v1/orders/` → v1 orders (urls.py) — `submit` and `retire-quote` (both
+  PUT) are live. **`retire-quote` is a SEPARATE ACTION, never a flag on
+  `submit`** (D06): placing an order and establishing that it can no longer be
+  placed are opposite decisions with opposite consequences, and which one a
+  request made should be readable from the path rather than from a body — the
+  same reasoning the admin plane applies to reissue vs cancel. Both share ONE
+  authority resolution (the diner table session bound to the order's table, or a
+  staff caller with the `tables` module) and both carry the verified capability
+  to the protected boundary; what they do with the draft is where they differ,
+  and that difference lives in the controller rather than in two copies of the
+  authority code. The
   orphaned, unscoped `prepare`/`cancel`/`update-item` write actions were
   RETIRED (finding H3, PR #181) and any retired/unknown action now 404s
   (hardened dispatch, no fallthrough to 500). Superseded by `api/v1/kitchen/`,
@@ -4931,7 +5104,7 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
   "Restaurant Lifecycle"; 0057 adds the platform-owned `Restaurant.is_test` flag,
   additive with NO backfill — see "Canonical Data Shapes"),
-  `orders_app/migrations/0040_order_fulfilment_revision.py` (0034 removed the
+  `orders_app/migrations/0041_order_quote_closure.py` (0034 removed the
   inline review fields; 0035 adds the launch-boundary `Order.is_test` flag; 0036
   adds the D01 `quantity >= 0` CHECK constraint, additive and reversible with NO
   `RunPython`; 0037 adds `Order.pricing_version`, one `AddField` carrying BOTH
@@ -4958,7 +5131,16 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   catalogue and therefore WAITS behind any open transaction on `orders`; that
   wait is a property of the deployment, which this repository cannot observe, so
   do not describe it as instantaneous. Deliberately NO index — nothing filters or
-  orders by it),
+  orders by it; 0041 creates the D06 `OrderQuoteClosure` table and NOTHING else
+  — no existing table touched, no `RunPython`, no backfill and none possible,
+  since a draft predating it was never closed under this protocol and an absent
+  row means "unknown, or not closed", never "safe to replace". `CreateModel` is
+  the safest shape for the SCHEMA under the expand-only rule — old code neither
+  reads nor writes the table and its index is built on an empty one — but **the
+  BEHAVIOURAL direction needs an operational decision rather than a revert**:
+  old code does not consult closures, so while it runs, a draft this build has
+  permanently closed could be accepted by it. Prefer a forward fix; hold a
+  rollback across this change),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
   `users_app/migrations/0014_customer_access_state.py` (0010 adds

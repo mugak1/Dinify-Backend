@@ -29,10 +29,16 @@ preserved.
 import logging
 from decimal import Decimal
 
+from django.utils import timezone
+
 from misc_app.controllers.money import format_money, working_context
 from orders_app.models import Order, OrderItem
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
+)
+from orders_app.controllers.services.quote_protocol import QUOTE_PROTOCOL
+from orders_app.controllers.services.quote_policy import (
+    assess as assess_quote_age,
 )
 from orders_app.controllers.services.checkout_protocol import (
     CHECKOUT_PROTOCOL,
@@ -80,6 +86,34 @@ def _legacy_total(rows, corrected):
     with working_context():
         total = sum((_legacy_view(r, corrected)[1] for r in rows), Decimal('0'))
     return total
+
+
+def quote_policy_projection(order):
+    """What the D06 lifetime rule says about this saved quote, right now.
+
+    READ-ONLY AND ADVISORY. This is a serializer: it takes no lock, opens no
+    transaction and writes nothing, so what it publishes is a snapshot the
+    client may act on but must never treat as a decision. The DECISION is made
+    inside the acceptance transaction, from a clock sampled after its locks —
+    the two can legitimately disagree by the width of a request, and when they
+    do the transaction is right.
+
+    That is exactly why a client is given the DEADLINE rather than a boolean:
+    a boolean computed here would be a verdict this code is in no position to
+    reach, while `expires_at` stays true for as long as the quote exists and
+    lets the client decide for itself when to stop waiting.
+
+    It reads no database — `quote_policy.assess` is pure over a column the
+    caller already has — so it adds no query to a read whose cost is pinned.
+    """
+    age = assess_quote_age(order, timezone.now())
+    return {
+        'version': age.policy_version,
+        'status': age.status,
+        'expires_at': (
+            age.expires_at.isoformat() if age.expires_at is not None else None
+        ),
+    }
 
 
 def serialize_order_details(order: Order) -> dict:
@@ -192,6 +226,24 @@ def serialize_order_details(order: Order) -> dict:
         # lesson about collapsing two contract introductions into one flag.
         # An ABSENT value means level 0: promise nothing.
         'checkout_protocol': CHECKOUT_PROTOCOL,
+
+        # ADDITIVE (D06): WHAT THIS DEPLOYMENT CAN PROMISE about the life of
+        # this saved quote, and what the rule currently says about THIS one.
+        #
+        # A SEPARATE LEVEL FROM `checkout_protocol`, deliberately — that one
+        # answers "can an uncertain checkout be retried and recovered", this one
+        # answers "may this quote still be accepted". A client can want either
+        # without the other, and widening level 3 to cover a promise it never
+        # made would be #661 in the direction that matters most.
+        #
+        # `quote_policy` is a DEADLINE, not a reservation: it says when the
+        # reviewed amount stops being honoured, and says nothing about whether
+        # the dish will still be available when the diner gets there. `status`
+        # is the verdict at the instant this response was built — a client that
+        # renders a countdown from `expires_at` is doing the right thing; one
+        # that treats `live` as a guarantee of acceptance is not.
+        'quote_protocol': QUOTE_PROTOCOL,
+        'quote_policy': quote_policy_projection(order),
 
         'no_items': len(parent_items),
         'no_unavailable_items': len(unavailable_parent_items),

@@ -80,12 +80,33 @@ class AdmissionVerdict:
     It defaults to ``False`` so a verdict built by ``evaluate`` alone — the pure
     preflight, which has no database and therefore no authority over this — cannot
     be mistaken for a statement about the tenant. Only ``admit`` sets it.
+
+    ``restaurant_accepting_orders`` and ``restaurant_deleted`` (D06) ride the
+    SAME protected read, for the same reason and to answer a different
+    question. They are OPERATIONAL facts an order path acts on, an operator can
+    change either at any moment, and reading them off an instance loaded before
+    the transaction is exactly the stale read this module exists to close — on
+    two more fields. ONE query, ONE protected instant, four values: splitting
+    them would put a window between them that the lock does not cover.
+
+    They are NOT admission inputs. Whether a restaurant is paused says nothing
+    about its lifecycle, and ``evaluate`` neither sees nor uses them — they are
+    carried so that ``order_eligibility``, which owns that rule, can be asked
+    about the same instant the lifecycle was decided at.
+
+    **THEIR DEFAULTS FAIL CLOSED, in the opposite direction from
+    ``restaurant_is_test``.** A verdict that never touched the database must not
+    be able to claim a restaurant is open and present, so an accidental
+    preflight verdict refuses every order loudly rather than admitting one
+    quietly.
     """
     allowed: bool
     status: Optional[str]
     message: str = ''
     code: str = ''
     restaurant_is_test: bool = False
+    restaurant_accepting_orders: bool = False
+    restaurant_deleted: bool = True
 
 
 def evaluate(status, created_by, stage: str) -> AdmissionVerdict:
@@ -168,9 +189,15 @@ def admit(*, restaurant_id, created_by, stage: str) -> AdmissionVerdict:
         # ONE query, so both values describe the same protected instant. Splitting
         # them into two reads would put a window between them that the lock does not
         # close, which is the whole failure this function exists to prevent.
-        status, restaurant_is_test = (
+        (
+            status,
+            restaurant_is_test,
+            restaurant_accepting_orders,
+            restaurant_deleted,
+        ) = (
             Restaurant.objects
-            .values_list('status', 'is_test')
+            .values_list(
+                'status', 'is_test', 'accepting_orders', 'deleted')
             .get(pk=restaurant_id)
         )
     except (Restaurant.DoesNotExist, ValidationError, ValueError, TypeError):
@@ -185,7 +212,12 @@ def admit(*, restaurant_id, created_by, stage: str) -> AdmissionVerdict:
         )
 
     verdict = evaluate(status, created_by, stage)
-    # `evaluate` is pure and knows nothing about the tenant flag; the authoritative
-    # read attaches it. Rebuilt rather than mutated — the dataclass is frozen, which
+    # `evaluate` is pure and knows nothing about the tenant flag or the
+    # operational facts; the authoritative read attaches them. Rebuilt rather than mutated — the dataclass is frozen, which
     # is what stops a later caller from "correcting" a verdict after the fact.
-    return replace(verdict, restaurant_is_test=bool(restaurant_is_test))
+    return replace(
+        verdict,
+        restaurant_is_test=bool(restaurant_is_test),
+        restaurant_accepting_orders=bool(restaurant_accepting_orders),
+        restaurant_deleted=bool(restaurant_deleted),
+    )

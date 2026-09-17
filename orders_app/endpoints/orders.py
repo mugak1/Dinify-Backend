@@ -6,7 +6,9 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from django.core.exceptions import ValidationError
 from orders_app.models import Order
-from orders_app.controllers.manage_order import update_order_status
+from orders_app.controllers.manage_order import (
+    retire_quote_for_review, update_order_status,
+)
 from dinify_backend.configss.string_definitions import OrderStatus_Pending, MODULE_TABLES
 from orders_app.controllers.con_orders import ConOrder
 from orders_app.controllers.services.order_input import validate_order_request
@@ -17,6 +19,7 @@ from restaurants_app.controllers.diner_capability import (
     require_table_session, resolve_table_session, session_token_from_request,
     DinerCapabilityError,
 )
+from restaurants_app.controllers import diner_capability
 
 
 class OrdersEndpoint(NoStoreResponseMixin, APIView):
@@ -25,15 +28,28 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
     """
     permission_classes = [AllowAny]
 
+    # ACTIONS THAT ACT ON ONE SAVED DRAFT AND SHARE ONE AUTHORITY MODEL. Both
+    # resolve the order the same way and both carry the same capability context;
+    # what they do with the draft is where they differ, and that difference lives
+    # in the controller rather than in two copies of the authority code.
+    #
+    # `retire-quote` is deliberately a SEPARATE action rather than a flag on
+    # `submit`: placing an order and establishing that it can no longer be placed
+    # are opposite decisions with opposite consequences, and which one a request
+    # made should be readable from the path rather than from a body. The same
+    # reasoning the admin plane applies to reissue vs cancel.
+    _DRAFT_ACTIONS = ('submit', 'retire-quote')
+
     def put(self, request, action):
         # Only `submit` (the anonymous diner placing their already-initiated
-        # order) survives. `prepare`, `cancel` and `update-item` were retired:
-        # they were orphaned (no caller) and resolved the order from a
-        # body-supplied id with NO restaurant / ownership / module scope, so any
-        # authenticated user could transition another restaurant's order. Live
-        # order fulfilment lives in the kitchen module (api/v1/kitchen/), which
-        # gates every write.
-        if action == 'submit':
+        # order) and `retire-quote` (D06 — asking whether that draft's saved
+        # quote can still be honoured, and retiring it if it cannot) are live.
+        # `prepare`, `cancel` and `update-item` were retired: they were orphaned
+        # (no caller) and resolved the order from a body-supplied id with NO
+        # restaurant / ownership / module scope, so any authenticated user could
+        # transition another restaurant's order. Live order fulfilment lives in
+        # the kitchen module (api/v1/kitchen/), which gates every write.
+        if action in self._DRAFT_ACTIONS:
             data = request.data
 
             order_id = data.get('order')
@@ -69,6 +85,14 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                         {'status': 404, 'message': 'Order not found'}, status=404,
                     )
                 user = None  # anonymous diner — attribution stays null
+                # CARRY WHAT THIS SESSION ASSERTED to the protected boundary
+                # (D06). The checks above ran in autocommit; the transition then
+                # waits for three locks, and a QR regeneration inside that wait
+                # revokes this session. The transition re-checks the generation
+                # on the row it locks and answers with the same opaque 404 this
+                # branch does. It is context, not authority — the authority
+                # decision is the one just made here.
+                capability = diner_capability.capability_from_table(table)
             else:
                 # No diner session: fall back to an authorised staff caller.
                 try:
@@ -89,6 +113,10 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                 ):
                     return Response({'status': 404, 'message': 'Not found'}, status=404)
                 user = request.user
+                # No capability channel was used, so there is nothing to
+                # re-verify. A staff caller's authority is the module gate above,
+                # which is not revoked by a QR regeneration.
+                capability = None
 
             # THE QUOTE ACKNOWLEDGEMENT (D02/P9). The submission must name the
             # exact server-priced draft it is accepting; the transition validates
@@ -102,12 +130,25 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
             # handling, not seamless backward compatibility: auto-submitting a
             # freshly calculated amount such a client never displayed is exactly
             # what this contract exists to stop.
-            response = update_order_status(
-                order=order,
-                new_status=OrderStatus_Pending,
-                user=user,
-                quote_ref=data.get('quote_ref'),
-            )
+            #
+            # `retire-quote` requires it for the same reason and a sharper one:
+            # a closure retires ONE named reference, so a request that cannot
+            # name the quote it means must not be allowed to retire whatever
+            # happens to be current.
+            if action == 'retire-quote':
+                response = retire_quote_for_review(
+                    order,
+                    supplied_quote_ref=data.get('quote_ref'),
+                    capability=capability,
+                )
+            else:
+                response = update_order_status(
+                    order=order,
+                    new_status=OrderStatus_Pending,
+                    user=user,
+                    quote_ref=data.get('quote_ref'),
+                    capability=capability,
+                )
             return Response(response, status=response.get('status', 200))
 
         # Retired actions (prepare / cancel / update-item) and any unknown
