@@ -338,8 +338,11 @@ mistake it for a defect.
 * **No merge, no deploy, no live or UAT access, no venue action, no historical
   data repair, no repository-setting change, no workflow dispatch, no payment or
   provider access.** Every run was against disposable local infrastructure.
-* **No delegation-scope change.** The `qr_credential` delegated-disclosure item
-  is tracked SEPARATELY and is not part of this diff.
+* **No delegation-scope change.** The `qr_credential` delegated-disclosure item is
+  tracked SEPARATELY in `DELEGATED_QR_TRIAGE.md`, measured by
+  `platform_admin_app/tests_delegated_qr_disclosure.py`, and is not part of this
+  diff. That file is a CHARACTERIZATION of today's behaviour — it asserts the
+  exposure rather than closing it, and changes nothing.
 * **No migration**, so nothing here changes the rollback posture recorded for
   `orders_app/0041`.
 * **The kitchen-draft producer of D04's `evidence_unavailable` is still open** —
