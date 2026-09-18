@@ -107,14 +107,39 @@ def resolve_public_restaurant(restaurant_ref):
     return restaurant, None
 
 
+# --- liveness: the half of structural publication that is not policy --------
+#
+# D06 completion, G2-C. Structural publication is two different kinds of fact
+# wearing one name. `deleted` is LIVENESS — a soft-deleted section is not a
+# place a dish can exist, which is true whoever is asking, exactly as D06 says
+# of a soft-deleted table. `approved` / `enabled` are PUBLICATION POLICY FOR THE
+# QR PUBLIC, and an authorized member of staff taking an order on a diner's
+# behalf walks past them (`enforce_publication=False` on the create path).
+#
+# Callers that must bind every provenance ask for LIVENESS; callers deciding
+# what the public may see or order ask for PUBLICATION. `section_structurally_
+# published` is composed from the liveness predicate rather than restating
+# `not deleted`, so the two cannot drift into disagreeing about what deleted
+# means.
+
+def section_live(section) -> bool:
+    """Not soft-deleted. Binds EVERY provenance."""
+    return not bool(section.deleted)
+
+
+def group_live(group) -> bool:
+    """Not soft-deleted. Binds EVERY provenance."""
+    return not bool(group.deleted)
+
+
 # --- structural publication (identical read + order) -----------------------
 
 def section_structurally_published(section) -> bool:
-    return bool(section.approved and section.enabled and not section.deleted)
+    return bool(section.approved and section.enabled and section_live(section))
 
 
 def group_structurally_published(group) -> bool:
-    return bool(group.approved and group.enabled and not group.deleted)
+    return bool(group.approved and group.enabled and group_live(group))
 
 
 def item_structurally_published(item) -> bool:
@@ -188,18 +213,26 @@ def item_visible_in_menu(item, now) -> bool:
     return True
 
 
-def item_orderable(item, now) -> bool:
-    """
-    ORDER path (publication only): a parent item is orderable when it is
-    structurally published, in a currently visible section, and group-less or
-    under a currently visible group. The item's OWN ``available``/``in_stock`` are
-    DELIBERATELY excluded — those route to the established zero-and-flag
-    reconciliation (the line is neither prepared nor charged) rather than a hard
-    publication rejection.
+def item_published_now(item, now) -> bool:
+    """Is this item PUBLISHED to the ordering public at ``now``?
+
+    Publication and scheduling only: structurally published, in a currently
+    visible section, and group-less or under a currently visible group. It asks
+    NOTHING about money.
+
+    D06 completion, G2-C split this out of ``item_orderable`` for one caller:
+    acceptance re-checks whether a saved quote may still be PREPARED, and that
+    question is answered at the amounts the diner already agreed to. Folding
+    priceability into it meant an operator mistyping a discount AFTER the review
+    destroyed the quote over a figure nobody was going to charge. Creating a NEW
+    order is the opposite case — it has to price the line — so ``item_orderable``
+    below is unchanged and is still what the create path asks.
+
+    The item's OWN ``available``/``in_stock`` are DELIBERATELY excluded — those
+    route to the established zero-and-flag reconciliation (the line is neither
+    prepared nor charged) rather than a hard publication rejection.
     """
     if not item_structurally_published(item):
-        return False
-    if not item_priceable(item, now):
         return False
     if not section_operationally_visible(item.section, now):
         return False
@@ -208,6 +241,14 @@ def item_orderable(item, now) -> bool:
     ):
         return False
     return True
+
+
+def item_orderable(item, now) -> bool:
+    """
+    ORDER path (publication only): a parent item is orderable when it is
+    published to the ordering public at ``now`` AND its stored price can be read.
+    """
+    return item_published_now(item, now) and item_priceable(item, now)
 
 
 # --- nested extras ---------------------------------------------------------

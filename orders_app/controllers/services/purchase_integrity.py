@@ -27,16 +27,39 @@ dish came back into stock. The diner reviewed a quote without it.
 
 WHAT COUNTS AS A CHANGE — the approved decision table, in the order applied:
 
-  availability      the item is gone, hidden or sold out            -> review
-  publication       (diner-origin only) no longer orderable now      -> review
+  liveness          the item, its section or its group has been
+                    soft-deleted, or the item is sold out /
+                    unavailable (EVERY provenance)                   -> review
+  publication       (diner-origin only) no longer published to the
+                    ordering public at `now` — the item, its section
+                    or its group unapproved, disabled, marked
+                    unavailable, or out of schedule                  -> review
   extras            an extra is no longer attachable, or the
                     parent's extras minimum/maximum no longer holds  -> review
   selection         a selected modifier group or choice no longer
                     exists, or the group's own rules no longer hold  -> review
   allergens         the declared allergen set changed                -> review
-  price/discount    honoured at the saved amount                     -> accept
+  price/discount    honoured at the saved amount, INCLUDING a price
+                    or discount that has since become unreadable     -> accept
   labels, order     a rename, a recolour, a reorder, an added
                     OPTIONAL choice, an unrelated item               -> accept
+
+LIVENESS AND PUBLICATION ARE DIFFERENT KINDS OF FACT, and `section_structurally_
+published` used to wear both names at once: it is `approved AND enabled AND not
+deleted`. Calling it unconditionally here bound two thirds of a publication rule
+to every provenance, which stranded the exemption the paragraph below promises —
+a member of staff ordering against a menu that has not been approved yet created
+the draft happily and then could never place it, because the refusal CLOSES the
+quote. Deletion binds everyone (a soft-deleted section is not a place a dish can
+exist, exactly as D06 says of a table); `approved` / `enabled` / `available` /
+the schedule bind the diner path, which is the line the create path already
+draws.
+
+AND PRICE READABILITY IS NEITHER. `item_orderable` requires `item_priceable` —
+a live read of `primary_price` and `discount_details` — so an operator mistyping
+a discount AFTER the review destroyed the quote over a figure nobody was going
+to charge. Acceptance asks `item_published_now` instead. Creating a NEW order
+still asks `item_orderable`, because the create path has to price the line.
 
 IDENTITY, NOT LABELS — and the limit that leaves. A selection is identified by its
 GROUP AND CHOICE IDS, not by the words shown beside them, because the approved
@@ -72,11 +95,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 from restaurants_app.controllers.menu_publication import (
-    group_structurally_published,
-    item_orderable,
-    item_structurally_published,
+    group_live,
+    item_published_now,
     normalize_extras_applicable,
-    section_structurally_published,
+    section_live,
     extra_publishable,
 )
 from restaurants_app.controllers.modifier_definition import (
@@ -216,12 +238,16 @@ def _check_parent(parent, children, snapshot, *, restaurant_id, now,
         return IntegrityRefusal(CLASS_ITEM_MISSING, str(parent.item_id))
     menu_item = resolved.menu_item
 
-    # --- availability, every provenance ------------------------------------
+    # --- liveness, every provenance -----------------------------------------
+    # DELETION ONLY. `approved` / `enabled` / `available` and the schedule are
+    # publication policy and belong below; this block asks whether the dish and
+    # the containers it lives in still EXIST, which binds every provenance for
+    # the same reason a soft-deleted table does.
     if menu_item.deleted:
         return IntegrityRefusal(CLASS_ITEM_DELETED, str(parent.item_id))
-    if not section_structurally_published(menu_item.section):
+    if not section_live(menu_item.section):
         return IntegrityRefusal(CLASS_SECTION_GONE, str(parent.item_id))
-    if menu_item.section_group_id is not None and not group_structurally_published(
+    if menu_item.section_group_id is not None and not group_live(
         menu_item.section_group
     ):
         return IntegrityRefusal(CLASS_SECTION_GONE, str(parent.item_id))
@@ -232,7 +258,13 @@ def _check_parent(parent, children, snapshot, *, restaurant_id, now,
         return IntegrityRefusal(CLASS_ITEM_SOLD_OUT, str(parent.item_id))
 
     # --- publication, diner-origin only -------------------------------------
-    if enforce_publication and not item_orderable(menu_item, now):
+    # `item_published_now`, NOT `item_orderable`: the latter also requires the
+    # CURRENT price to be readable, and this boundary honours the price it
+    # SAVED. A discount mistyped after the diner reviewed their order changes
+    # neither what is prepared nor what is charged, so destroying the quote over
+    # it would refuse a diner for a data fault they did not cause — and closing
+    # a quote cannot be undone.
+    if enforce_publication and not item_published_now(menu_item, now):
         return IntegrityRefusal(CLASS_ITEM_UNPUBLISHED, str(parent.item_id))
 
     # --- the extras relationship, every provenance --------------------------
