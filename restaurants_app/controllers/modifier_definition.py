@@ -314,3 +314,109 @@ def inspect_modifier_definition(options, max_choices_per_group=None,
         max_choices_in_a_group=max_choices_in_a_group,
         required_selection_entries=required_selection_entries,
     )
+
+
+# ---------------------------------------------------------------------------
+# RESOLVING A SELECTION AGAINST A DEFINITION
+#
+# D06 completion, G2-B. Two callers need to know which choices a selection names
+# and what those choices SAY: the checkout traversal that labels and prices a
+# line, and the acceptance boundary that asks whether the saved quote still
+# describes the same preparation. They must not resolve it differently — a
+# second traversal is exactly how the label a diner reviewed and the label the
+# comparison re-derives come to disagree — so the resolution lives here, beside
+# the definition it reads, and the money is layered on top by the one caller
+# that needs it.
+#
+# IT READS NO MONEY. `additionalCost` is never touched, so a cost that has
+# changed or become unreadable since a quote was saved cannot make the saved
+# quote unreadable. That is the same rule G2-C established for an item's own
+# price: an accepted quote is honoured at the amounts it recorded.
+# ---------------------------------------------------------------------------
+
+#: Why a selection could not be resolved. The checkout caller maps these onto
+#: its own established diner messages; nothing here invents one.
+SELECTION_DEFINITION_INVALID = 'definition_invalid'
+SELECTION_GROUP_MISSING = 'group_missing'
+SELECTION_CHOICE_MISSING = 'choice_missing'
+
+
+class SelectionResolution:
+    """Which groups and raw choices one selection names, or why it cannot."""
+
+    __slots__ = ('groups', 'reason')
+
+    def __init__(self, groups=None, reason=None):
+        #: list of ``(GroupSpec, [raw choice mapping, ...])`` in the order the
+        #: SELECTION names them, repeats collapsed, empty groups omitted.
+        self.groups = list(groups or [])
+        self.reason = reason
+
+    @property
+    def ok(self):
+        return self.reason is None
+
+
+def resolve_selected_choices(verdict, selected_modifiers):
+    """Resolve one selection against an already-inspected definition.
+
+    Groups are visited in the order the SELECTION names them — never the
+    catalogue's — because the stored selection is canonicalised at creation and
+    is what both callers are asking about. Reordering the definition afterwards
+    therefore changes nothing here, which is what the decision table's "a
+    reorder -> accept" requires.
+
+    A repeated choice is collapsed to one occurrence, first position kept: it is
+    validated, labelled and charged exactly once. An unusable identifier is
+    REFUSED rather than dropped — silently ignoring one would resolve a
+    selection the diner did not make.
+    """
+    selected_modifiers = selected_modifiers or {}
+    if verdict.is_invalid:
+        return SelectionResolution(reason=SELECTION_DEFINITION_INVALID)
+    if not verdict.is_active or not selected_modifiers:
+        return SelectionResolution()
+
+    groups_by_id = {group.group_id: group for group in verdict.groups}
+    resolved = []
+    for group_id, choice_ids in selected_modifiers.items():
+        group = groups_by_id.get(group_id)
+        if group is None:
+            return SelectionResolution(reason=SELECTION_GROUP_MISSING)
+        if any(not usable_identifier(c) for c in (choice_ids or [])):
+            return SelectionResolution(reason=SELECTION_CHOICE_MISSING)
+        choices = []
+        for choice_id in dict.fromkeys(choice_ids or []):
+            choice = group.choices_by_id.get(choice_id)
+            if choice is None:
+                return SelectionResolution(reason=SELECTION_CHOICE_MISSING)
+            choices.append(choice)
+        if not choices:
+            continue
+        resolved.append((group, choices))
+    return SelectionResolution(groups=resolved)
+
+
+def group_display_name(group):
+    """The group's own label, exactly as stored. Never defaulted."""
+    return group.raw.get('name')
+
+
+def choices_display(choices):
+    """The selected choices' labels, joined as the order snapshot joins them."""
+    return ', '.join(choice.get('name', '') for choice in choices)
+
+
+def selection_meaning(verdict, selected_modifiers):
+    """What a selection SAYS, in the exact strings ``modifiers_snapshot`` holds.
+
+    Returns ``None`` when the selection cannot be resolved — the caller already
+    has its own answer for that case and must not be handed a partial one.
+    """
+    resolution = resolve_selected_choices(verdict, selected_modifiers)
+    if not resolution.ok:
+        return None
+    return [
+        f'{group_display_name(group)}: {choices_display(choices)}'
+        for group, choices in resolution.groups
+    ]

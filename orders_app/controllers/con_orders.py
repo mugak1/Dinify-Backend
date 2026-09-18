@@ -24,7 +24,9 @@ from restaurants_app.controllers.menu_publication import (
     NOT_ON_MENU_MESSAGE, validate_order_selections,
 )
 from restaurants_app.controllers.modifier_definition import (
-    inspect_modifier_definition, usable_identifier,
+    SELECTION_DEFINITION_INVALID, SELECTION_GROUP_MISSING, choices_display,
+    group_display_name, inspect_modifier_definition, resolve_selected_choices,
+    usable_identifier,
 )
 from orders_app.controllers.services.order_input import (
     client_order_id_rejection, quantity_error, validate_order_items,
@@ -326,43 +328,34 @@ class ConOrder:
         """
         selected_modifiers = selected_modifiers or {}
         definition = inspect_modifier_definition(menu_item.options)
-        if definition.is_invalid:
-            return {
-                'status': 400,
-                'message': MODIFIER_CONFIG_MESSAGE.format(name=menu_item.name),
-            }
-        if not definition.is_active or not selected_modifiers:
-            return {'status': 200, 'adjustments': [], 'options': []}
-
-        groups_by_id = {group.group_id: group for group in definition.groups}
-        adjustments = []
-        options = []
-        for group_id, choice_ids in selected_modifiers.items():
-            group = groups_by_id.get(group_id)
-            if group is None:
+        # WHICH CHOICES WERE NAMED IS RESOLVED ONCE, in the module that owns the
+        # definition, so this traversal and the acceptance boundary's
+        # re-derivation of the saved snapshot cannot disagree about a selection
+        # (D06 G2-B). The refusal REASONS are mapped back onto this path's
+        # established diner messages — the shared resolver deliberately invents
+        # none of its own.
+        resolution = resolve_selected_choices(definition, selected_modifiers)
+        if not resolution.ok:
+            if resolution.reason == SELECTION_DEFINITION_INVALID:
+                return {
+                    'status': 400,
+                    'message': MODIFIER_CONFIG_MESSAGE.format(
+                        name=menu_item.name),
+                }
+            if resolution.reason == SELECTION_GROUP_MISSING:
                 return {
                     'status': 400,
                     'message': f'Invalid modifier group for item, {menu_item.name}'
                 }
-            # An unusable member is REFUSED, never dropped: silently ignoring it
-            # would price a selection the diner did not make. Checked before the
-            # hash the de-duplication below would otherwise raise on.
-            if any(not usable_identifier(c) for c in (choice_ids or [])):
-                return {
-                    'status': 400,
-                    'message': f'Invalid modifier choice for item, {menu_item.name}'
-                }
-            # De-dupe per group: a repeated choice is validated, labelled and
-            # charged exactly once.
-            resolved_choices = []
-            for choice_id in dict.fromkeys(choice_ids or []):
-                choice = group.choices_by_id.get(choice_id)
-                if choice is None:
-                    return {
-                        'status': 400,
-                        'message': f'Invalid modifier choice for item, {menu_item.name}'
-                    }
-                resolved_choices.append(choice)
+            return {
+                'status': 400,
+                'message': f'Invalid modifier choice for item, {menu_item.name}'
+            }
+
+        adjustments = []
+        options = []
+        for group, resolved_choices in resolution.groups:
+            group_id = group.group_id
 
             # UNDER THE MODULE'S OWN DECIMAL CONTEXT. This accumulation is
             # composite Decimal arithmetic on money, so the same rule that
@@ -399,11 +392,9 @@ class ConOrder:
                 with working_context():
                     group_total += adjustment
 
-            if not resolved_choices:
-                continue
             group_total = quantize_money(group_total)
             options.append({
-                'name': group.raw.get('name'),
+                'name': group_display_name(group),
                 # LEGACY SHAPE, DELIBERATELY KEPT: `cost` stays a JSON number so
                 # any existing reader of this persisted blob is unaffected. It is
                 # now derived from an already-canonical 2dp Decimal rather than
@@ -419,7 +410,7 @@ class ConOrder:
                 # `options` is not part of the quote fingerprint, so no existing
                 # value and no `quote_ref` moves.
                 'cost_amount': format_money(group_total, field='cost_amount'),
-                'choices': ', '.join(c.get('name', '') for c in resolved_choices),
+                'choices': choices_display(resolved_choices),
             })
         return {'status': 200, 'adjustments': adjustments, 'options': options}
 

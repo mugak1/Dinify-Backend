@@ -41,8 +41,12 @@ WHAT COUNTS AS A CHANGE — the approved decision table, in the order applied:
   allergens         the declared allergen set changed                -> review
   price/discount    honoured at the saved amount, INCLUDING a price
                     or discount that has since become unreadable     -> accept
-  labels, order     a rename, a recolour, a reorder, an added
-                    OPTIONAL choice, an unrelated item               -> accept
+  meaning           a SELECTED modifier group or choice now carries
+                    different text — the same id saying something
+                    else to the kitchen                             -> review
+  labels, order     a DISH rename, a recolour, a reorder, a rename
+                    of an UNSELECTED choice, an added OPTIONAL
+                    choice, an unrelated item                       -> accept
 
 LIVENESS AND PUBLICATION ARE DIFFERENT KINDS OF FACT, and `section_structurally_
 published` used to wear both names at once: it is `approved AND enabled AND not
@@ -61,13 +65,25 @@ a discount AFTER the review destroyed the quote over a figure nobody was going
 to charge. Acceptance asks `item_published_now` instead. Creating a NEW order
 still asks `item_orderable`, because the create path has to price the line.
 
-IDENTITY, NOT LABELS — and the limit that leaves. A selection is identified by its
-GROUP AND CHOICE IDS, not by the words shown beside them, because the approved
-rule keeps a pure presentation edit from invalidating a purchase ("keep the saved
-description"). The consequence is stated rather than hidden: an operator who
-edits a choice's LABEL so that the same id now means something else has changed
-the preparation in a way no stored field records, and this check cannot see it.
-Allergens are the one declaration compared by value, because that is the one
+IDENTITY FIRST, THEN MEANING (D06 G2-B corrected the second half of this).
+A selection is identified by its GROUP AND CHOICE IDS, so a pure presentation
+edit elsewhere on the menu cannot invalidate a purchase ("keep the saved
+description"). This file used to stop there and say so:
+
+  "an operator who edits a choice's LABEL so that the same id now means
+   something else has changed the preparation in a way no stored field records,
+   and this check cannot see it."
+
+The premise was wrong. `OrderItem.modifiers_snapshot` DOES record it — the
+resolved text of the selection, written at creation, immutable afterwards,
+already inside the quote fingerprint, and the exact strings the kitchen ticket
+renders. So the SELECTED groups' text is re-derived from the SAVED selection
+against the definition as it stands and compared; nothing about today's
+catalogue is treated as past intent, and no column, digest or backfill is added.
+The dish's own name stays out of scope: the table below accepts a rename, and
+comparing it would refuse an order for every menu tidy-up.
+
+Allergens are the other declaration compared by value, because that is the one
 whose silent change is dangerous rather than untidy. Nothing here verifies real
 ingredients; it verifies that the restaurant's own recorded declaration has not
 moved.
@@ -102,7 +118,7 @@ from restaurants_app.controllers.menu_publication import (
     extra_publishable,
 )
 from restaurants_app.controllers.modifier_definition import (
-    inspect_modifier_definition,
+    inspect_modifier_definition, selection_meaning,
 )
 from orders_app.controllers.services.catalogue_snapshot import build_snapshot
 
@@ -135,6 +151,7 @@ CLASS_MODIFIERS_INVALID = 'modifier_definition_invalid'
 CLASS_GROUP_MISSING = 'modifier_group_missing'
 CLASS_CHOICE_MISSING = 'modifier_choice_missing'
 CLASS_GROUP_BOUNDS = 'modifier_group_bounds_no_longer_met'
+CLASS_SELECTION_MEANING_CHANGED = 'modifier_selection_meaning_changed'
 CLASS_ALLERGENS_CHANGED = 'allergen_declaration_changed'
 
 
@@ -186,7 +203,12 @@ def _allergen_names(labels):
 
 
 def _check_selection(row, menu_item):
-    """Do the saved modifier selections still name real, currently valid choices?"""
+    """Do the saved selections still name valid choices, and still SAY the same?
+
+    Two questions, in that order. The structural one is about ids and rules; the
+    second is about the words those ids now carry, which is what the kitchen
+    prepares from. Neither reads money.
+    """
     selected = row.selected_modifiers or {}
     verdict = inspect_modifier_definition(menu_item.options)
 
@@ -224,6 +246,29 @@ def _check_selection(row, menu_item):
     for group_id, group in groups.items():
         if (group.min_selections or 0) > 0 and not (selected.get(group_id) or []):
             return CLASS_GROUP_BOUNDS
+
+    # --- the meaning of the selection, not only its ids ---------------------
+    # D06 G2-B. The ids can all still resolve while saying something else
+    # entirely: "no onions" relabelled to "extra chilli" under the same id is a
+    # different instruction to the kitchen. `modifiers_snapshot` is the resolved
+    # text written at creation — the exact strings the kitchen ticket renders —
+    # so re-deriving it from the SAVED selection against the definition as it is
+    # now answers the question without adding a column, a digest or a backfill.
+    #
+    # SCOPE STOPS AT THE SELECTED GROUPS. The dish's own name is deliberately
+    # excluded: the decision table accepts a rename and comparing it would
+    # refuse an order for every menu tidy-up. A renamed GROUP does trip this,
+    # which is the same deliberate false positive a renamed allergen tag
+    # already carries — the safe direction, bounded to the drafts open inside a
+    # thirty-minute window.
+    meaning = selection_meaning(verdict, selected)
+    if meaning is None:
+        # Unreachable behind the checks above, which have already resolved every
+        # named group and choice. Kept because a resolver that cannot answer
+        # must never be read as agreement.
+        return CLASS_MODIFIERS_INVALID
+    if meaning != list(row.modifiers_snapshot or []):
+        return CLASS_SELECTION_MEANING_CHANGED
 
     return None
 
