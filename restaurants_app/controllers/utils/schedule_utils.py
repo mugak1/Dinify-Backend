@@ -47,7 +47,28 @@ def is_section_currently_active(section, now: Optional[datetime] = None) -> bool
     ('mon'..'sun'). Time windows handle overnight spans (e.g. 22:00-02:00).
     Evaluation uses settings.TIME_ZONE.
 
-    The optional `now` parameter is for testing; production callers omit it.
+    THE SUPPLIED INSTANT IS CONVERTED, NOT TRUSTED (D06 completion, G2-A). A
+    schedule is a statement about the restaurant's own wall clock — "we serve
+    lunch from 12:00" — so the day and hour must be read in `settings.TIME_ZONE`
+    whatever zone the caller's instant is expressed in. This used to be the
+    CALLER's job and only one caller knew it: `handle_show_menu` passes
+    `timezone.localtime()`, while D06's acceptance and retire-for-review
+    boundaries pass `timezone.now()` (UTC). At UTC+3 that read every window three
+    hours out at the moment a draft becomes food — refusing an order at 12:30
+    local because 09:30 UTC is before noon, and accepting one at 15:30 local
+    because 12:30 UTC is not yet three.
+
+    Converting HERE rather than at each call site is deliberate: it is one
+    boundary that cannot be forgotten by the next caller, and it is a no-op for
+    the read path, which already hands over a local instant. It does NOT sample a
+    second clock — the caller's protected decision instant is preserved exactly,
+    only re-expressed — so a decision still describes the single moment its
+    locks were held at.
+
+    A NAIVE value is read as already-local, which is what it meant before; only
+    test callers supply one, and raising would turn a tolerated input into a 500.
+
+    `now` is optional: production callers on the schedule-display path omit it.
     """
     if section.availability != 'scheduled':
         return True
@@ -56,9 +77,11 @@ def is_section_currently_active(section, now: Optional[datetime] = None) -> bool
     if not schedules or not isinstance(schedules, list):
         return True  # Scheduled mode with no slots: keep section visible.
 
+    tz = ZoneInfo(settings.TIME_ZONE)
     if now is None:
-        tz = ZoneInfo(settings.TIME_ZONE)
         now = datetime.now(tz)
+    elif now.tzinfo is not None:
+        now = now.astimezone(tz)
 
     current_code = ISO_WEEKDAY_TO_CODE.get(now.isoweekday())
     current_min = now.hour * 60 + now.minute
