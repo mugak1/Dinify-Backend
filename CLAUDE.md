@@ -788,7 +788,8 @@ so keep it current when conventions change.
     `evidence_unavailable`, refused for review rather than converted into a
     terminal fact
   **THE ACCEPTANCE SEQUENCE, AND ITS ORDER IS THE CONTRACT**: capability
-  re-verification → D04 replay → closure → admission verdict → `initiated` →
+  re-verification → STAFF AUTHORITY re-verification → D04 replay → closure →
+  admission verdict → `initiated` →
   operational eligibility → occupancy → acknowledgement (`_quote_acknowledgement`)
   → expiry → purchase integrity → transition. Authorization is FIRST, ahead even
   of the replay: a revoked capability may not read an acceptance any more than it
@@ -826,7 +827,10 @@ so keep it current when conventions change.
     channel. The client reads the 404 as a round trip that did not answer and
     retries rather than submitting. Pinned by
     `RetiringAtAnUnavailableTableTests`, whose two controls (a live session, a
-    paused restaurant) must keep passing. LOCK ORDER `Table -> Order`, the
+    paused restaurant) must keep passing. **AND IT IS NOW RE-ASKED UNDER THE
+    LOCK** (G1b): the endpoint gate runs in autocommit, so a table going out of
+    service inside the wait used to reach nothing at all here — see
+    `session_still_admissible` below. LOCK ORDER `Table -> Order`, the
     kitchen's shape and the tail of acceptance's
   - **THE CAPABILITY IS RE-VERIFIED UNDER THE LOCK**
     (`diner_capability.TableCapability` / `assert_capability_current`). The
@@ -840,6 +844,38 @@ so keep it current when conventions change.
     provenance, and answering it here too would give one fact two answers
     depending on how the caller authenticated. The refusal is the capability
     channel's own opaque 404
+  - **AND THE STAFF CHANNEL IS RE-ASKED TOO** (D06 completion, G1b —
+    `orders_app/controllers/services/order_authority.py`). The endpoint comment
+    used to say why it was not: *"No capability channel was used, so there is
+    nothing to re-verify. A staff caller's authority is the module gate above,
+    which is not revoked by a QR regeneration."* True, and beside the point — it
+    IS revoked by a membership being deactivated, a role being removed or the
+    restaurant leaving `portal_access_states()`, any of which can commit inside
+    the same wait, after which an order reaches a kitchen on authority nobody
+    holds. `StaffAuthority` is the capability's shape exactly: THREE FACTS AND NO
+    CREDENTIAL (the principal, the SERVER-RESOLVED restaurant read off the order,
+    the module the endpoint gated on), re-running the SAME
+    `can_user_access_module` call, so it can only ever REFUSE and cannot widen
+    anything. There is no token, no client-selectable actor field and no
+    trusted-caller switch. The principal travels as the OBJECT rather than an id
+    because a delegation is an in-memory attribute the middleware set on it
+    (`permissions_check._DELEGATION_ATTR`), so re-fetching the row would silently
+    ask a different question. Asked immediately after the capability check so
+    both channels LINEARIZE AT ONE POINT, and answered with the endpoint's own
+    non-disclosing 404. As at D05's kitchen boundary, a revocation committed
+    before that point is respected and one committing after it can still overlap
+    — stated rather than claimed away
+  - **RETIREMENT RE-ASKS WHETHER THE SESSION STILL EXISTS** (same change).
+    `retire_quote_for_review` runs no eligibility rule by design, so the
+    table-liveness fact reached NOTHING inside it — while the route writes a
+    CLOSURE, which is irreversible. `diner_capability.session_still_admissible`
+    is that one question under the lock, kept a SEPARATE named predicate from
+    `assert_capability_current` precisely so acceptance goes on answering it with
+    the sentence a diner can read. It returns True for a caller with no
+    capability: a staff principal holds no table session, so there is none for a
+    table going out of service to revoke. The answer is this route's established
+    one — the channel's opaque 404 — which is what keeps it STABLE across the
+    lock wait instead of depending on when the operator happened to click
   - **THREE WRITERS NOW PARTICIPATE, AND TWO OF THEM WERE REVERTING COMMITTED
     POLICY.** `first_time_batch_approval` did a full-row `restaurant.save()` from
     an instance loaded before its transaction, so a menu approval silently
@@ -872,8 +908,9 @@ so keep it current when conventions change.
     extra query**. The two new fields FAIL CLOSED in the opposite direction from
     `restaurant_is_test`: a verdict that never touched the database must not be
     able to claim a restaurant is open and present
-  - **RESPONSE CONTRACT**: `order_details.quote_protocol` (level 1) and
-    `order_details.quote_policy` `{version, status, expires_at}`, both additive.
+  - **RESPONSE CONTRACT**: `order_details.quote_protocol` (level **2** as of
+    G3a) and `order_details.quote_policy` `{version, status, expires_at}`, both
+    additive.
     **`checkout_protocol` STAYS 3 and is untouched** — D04 answers "can an
     uncertain checkout be retried and recovered", D06 answers "may this quote
     still be accepted", and raising the first for a change that added nothing to
@@ -883,6 +920,52 @@ so keep it current when conventions change.
     the code to the basket. `quote_policy` is a DEADLINE, NOT A RESERVATION: the
     dish can still sell out inside the window, which is the other question
     entirely
+  - **A RETIRED QUOTE IS READABLE BACK, AND THE LEVEL IS 2 (G3a).** A closure is
+    the DURABLE half of a terminal refusal, and it was published on exactly one
+    response — the refusal that created it, which is the one thing a client can
+    lose. The diner's own order read published NEITHER the level, the deadline
+    nor the closure (those three were added to the INITIATE response only), so a
+    quote retired for `purchase_needs_review` INSIDE its window was invisible on
+    every surface a recovering client could reach and its only remaining move was
+    to attempt an acceptance — precisely what `retire-quote` exists to avoid,
+    since when the quote IS good that attempt succeeds, claims a table and sends
+    food to a kitchen in order to ask a question. `GET orders/journey/
+    order-details/` now carries all three on BOTH selectors, through the SAME
+    constant and the SAME projections the initiate response uses (the rule D04/U1
+    applied to `quote_total`/`quote_complete` on that serializer), and
+    `quote_closure` joins the initiate response too because a D04 REPLAY returns
+    an order created earlier whose quote may have been retired since. **THE
+    DEADLINE AND THE CLOSURE ARE INDEPENDENT FACTS AND ARE LABELLED APART**, for
+    the reason D04 keeps `current` apart from `acceptance`: a quote closed for a
+    changed purchase is finished while `quote_policy.status` legitimately still
+    reads `live`, and the CLOSURE is what decides acceptability. The projection is
+    bounded to `{closed_at, reason, quote_ref, policy_version}` — no actor, no
+    amounts, no catalogue detail. **A NEW LEVEL, NEVER A NEW MEANING FOR 1**, and
+    the raise was CHECKED against the deployed client rather than assumed: it
+    gates with `level < REQUIRED_QUOTE_PROTOCOL` (1), so 2 passes and it keeps
+    consulting the deadline unchanged. **IT COSTS NO QUERY** — the diner read
+    folds the relation (`select_related('acceptance', 'quote_closure')`) and the
+    initiate re-read replaced a plain `refresh_from_db`; that is a CORRECTNESS
+    rule before a cost one, the same READ COMMITTED lesson D04 records. Pinned by
+    `orders_app/tests_quote_closure_recovery.py` (26 tests; 14 of the first 19
+    failed on the pre-change tree)
+  - **THE ENQUIRY'S ANSWER SAYS WHAT IT IS ABOUT (G4).** `retire-quote`'s
+    answers named nothing — no order, no reference — and `quote_still_valid` is
+    the answer that leads to SUBMITTING an order, so a client had no way to
+    establish that a 200 in its hand was the reply to the enquiry it sent and a
+    late or misrouted one read exactly like the right one. D04 closed that for
+    acceptance answers and the enquiry was left behind. Every answer that states
+    an `outcome` or a `reason` now carries `order`, the caller's `quote_ref` and
+    `quote_protocol`. It is CORRELATION, NOT AUTHORIZATION — the caller has
+    already established it may act on this order, and it discloses only what that
+    caller just named. **THE OPAQUE 404 IS NEVER STAMPED**, and the rule is
+    STRUCTURAL rather than a status list: a body stating no `outcome` and no
+    `reason` has said nothing about a quote, so there is nothing for it to be
+    about — naming an order inside the channel's non-disclosing refusal would
+    turn it into the existence oracle it exists not to be. The echoed
+    `quote_ref` is what the CALLER named and can legitimately differ from
+    `quote_closure.quote_ref`, which names what the server really retired; both
+    are true and they are deliberately not collapsed
   - COST: submit **12 → 14** (the closure read plus ONE catalogue statement,
     flat in the size of the order); a REPLAY is unchanged at **7**, returning at
     the evidence read before any of this; the create path is unchanged, since the

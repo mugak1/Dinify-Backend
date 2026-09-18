@@ -1,6 +1,8 @@
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from misc_app.controllers.money import format_money
-from orders_app.controllers.orders.serializers import _quote_line
+from orders_app.controllers.orders.serializers import (
+    _quote_line, quote_policy_projection,
+)
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
 )
@@ -10,6 +12,10 @@ from orders_app.controllers.services.acceptance_result import (
 from orders_app.controllers.services.checkout_protocol import (
     CHECKOUT_PROTOCOL,
 )
+from orders_app.controllers.services.quote_closure import (
+    closure_projection, read_closure,
+)
+from orders_app.controllers.services.quote_protocol import QUOTE_PROTOCOL
 from orders_app.controllers.services.order_quote import group_live_children
 from orders_app.models import Order, OrderItem
 
@@ -133,6 +139,9 @@ class SerializerPublicOrderDetails(ModelSerializer):
     accepted_at = SerializerMethodField()
     checkout_protocol = SerializerMethodField()
     checkout = SerializerMethodField()
+    quote_protocol = SerializerMethodField()
+    quote_policy = SerializerMethodField()
+    quote_closure = SerializerMethodField()
 
     class Meta:
         model = Order
@@ -150,6 +159,9 @@ class SerializerPublicOrderDetails(ModelSerializer):
             'accepted', 'accepted_at', 'checkout_protocol',
             # D04 completion — the correlated projection. See `get_checkout`.
             'checkout',
+            # D06 completion, G3a — the quote's own life, on the one surface a
+            # client that lost a response can still reach. See `get_quote_closure`.
+            'quote_protocol', 'quote_policy', 'quote_closure',
         )
 
     def _rows(self, order):
@@ -290,6 +302,60 @@ class SerializerPublicOrderDetails(ModelSerializer):
         the money was calculated.
         """
         return CHECKOUT_PROTOCOL
+
+    def get_quote_protocol(self, order):
+        """What THIS server can promise about the LIFE of a saved quote.
+
+        The same constant the initiate response carries, for the same reason
+        `checkout_protocol` is here: this is the surface a RECOVERING client
+        reads, and the promise has to be readable from whichever response it
+        actually holds. A SEPARATE level from `checkout_protocol` — that one
+        answers "can an uncertain checkout be retried and recovered", this one
+        "may this quote still be accepted" — and an ABSENT value is level 0,
+        which promises nothing rather than meaning "quotes never expire here".
+        """
+        return QUOTE_PROTOCOL
+
+    def get_quote_policy(self, order):
+        """The DEADLINE, read through the same projection the initiate response
+        uses so the two cannot become two opinions about one rule.
+
+        ADVISORY, as it is everywhere: the decision is made inside the
+        acceptance transaction from a clock sampled after its locks, and the two
+        can legitimately disagree by the width of a request. That is why a
+        client is given `expires_at` rather than a boolean.
+        """
+        return quote_policy_projection(order)
+
+    def get_quote_closure(self, order):
+        """HAS THIS QUOTE BEEN RETIRED? `null` when it has not.
+
+        THE GAP THIS CLOSES (D06 completion, G3a). A closure is the durable half
+        of a terminal refusal — it is what makes minting a replacement quote
+        safe, because an acceptance still in flight for the old one can never
+        execute afterwards. It was published ONLY on the refusal response, which
+        is the one thing a client can lose; this read published neither the
+        deadline nor the closure, so a quote retired for `purchase_needs_review`
+        INSIDE its window was invisible on every surface a recovering client
+        could reach. Its only remaining move was to attempt an acceptance — the
+        exact thing `retire-quote` exists to avoid, because when the quote IS
+        still good that attempt succeeds, claims a table and sends food to a
+        kitchen in order to ask a question.
+
+        THE SAME PROJECTION THE REFUSAL CARRIES, from the same function, so a
+        response that says closed and a read that says nothing is not a state
+        this code can reach. Bounded deliberately: what happened, when, to which
+        reference, under which policy — no actor, no amounts, no catalogue
+        detail, no order contents.
+
+        IT COSTS NO QUERY on the diner's read, which folds the relation into the
+        order fetch. That is a CORRECTNESS rule before it is a cost one, and the
+        same lesson D04 records: under READ COMMITTED each statement takes its
+        OWN snapshot, so reading the order in one statement and the closure in
+        another lets a closure commit between them and publishes a correlated
+        answer describing a moment that never existed.
+        """
+        return closure_projection(read_closure(order))
 
     def get_checkout(self, order):
         """THE CORRELATED ANSWER, identical to the one the submit result

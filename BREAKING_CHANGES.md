@@ -1124,6 +1124,50 @@ UNDERSTAND answers it may not receive yet.
    (`_security/diner-capability-contract.ts`) — the session header must ride it,
    and that file is method-exact, so it fails closed until it is added.
 
+### 16a. `quote_protocol` is now 2, and a retired quote is readable back (G3a)
+
+**ADDITIVE. No request shape changes and no existing key changes meaning.**
+
+At level 1 a closure was published on ONE response — the refusal that created
+it, which is the single thing a client can lose. The diner's own order read
+published neither the level, the deadline nor the closure, so a quote retired
+for `purchase_needs_review` INSIDE its window was invisible on every surface a
+recovering client could reach, and its only remaining move was to attempt an
+acceptance. That is exactly what `retire-quote` exists to avoid: when the quote
+IS still good, the attempt SUCCEEDS, claims a table and sends food to a kitchen
+in order to ask a question.
+
+What is added, all of it optional to read:
+
+* `GET orders/journey/order-details/` (BOTH selectors) now carries
+  `quote_protocol`, `quote_policy` and `quote_closure` — the same constant and
+  the same two projections the initiate response uses, never a second
+  definition.
+* `order_details.quote_closure` joins the initiate response too, because a D04
+  REPLAY returns an order created earlier whose quote may have been retired
+  since. `null` when nothing has been retired; the key is always present.
+* `quote_closure` is bounded to `{closed_at, reason, quote_ref, policy_version}`
+  — no actor, no amounts, no catalogue detail, no order contents.
+
+**THE LEVEL RAISE IS SAFE FOR THE DEPLOYED CLIENT, and that was checked rather
+than assumed:** `quote-transition.ts` gates with `level < REQUIRED_QUOTE_PROTOCOL`
+(1), so a server reporting 2 still passes and the deployed client keeps
+consulting the deadline exactly as it did. A client pinned to 1 gains nothing and
+loses nothing — it was RIGHT that level 1 said nothing about reading a closure
+back, which is why this is a NEW LEVEL and not a new meaning for the old one.
+
+**THE DEADLINE AND THE CLOSURE ARE INDEPENDENT FACTS.** A quote retired because
+the purchase changed is finished while its deadline has not passed, so
+`quote_policy.status` legitimately reads `live` beside a closure. A client must
+treat the CLOSURE as the answer to "may this still be accepted".
+
+**IT COSTS NO QUERY** on either surface: the diner read folds the relation into
+the order fetch (`select_related('acceptance', 'quote_closure')`) and the
+initiate path's re-read replaced a plain `refresh_from_db`. That is a
+CORRECTNESS rule before a cost one — under READ COMMITTED each statement takes
+its own snapshot, so reading the order in one statement and the closure in
+another publishes a correlated answer describing a moment that never existed.
+
 
 ## Summary of frontend changes needed before merge
 

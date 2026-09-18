@@ -8,6 +8,7 @@ from typing import Union
 from django.db import transaction
 from django.utils import timezone
 from users_app.models import User
+from orders_app.controllers.services.quote_protocol import QUOTE_PROTOCOL
 from orders_app.controllers.services.acceptance_result import (
     OUTCOME_ALREADY_ACCEPTED, OUTCOME_NEWLY_ACCEPTED, acceptance_result,
 )
@@ -29,6 +30,7 @@ def update_order_status(
     user: Union[User, None],
     quote_ref: Union[str, None] = None,
     capability=None,
+    authority=None,
 ) -> dict:
     """
     update an order
@@ -39,6 +41,12 @@ def update_order_status(
     act on this order, and the transition re-checks it only so a revocation that
     commits while the request waits on its locks is honoured. A caller cannot
     gain anything by supplying one — every check it feeds can only refuse.
+
+    ``authority`` is the STAFF channel's counterpart, a ``StaffAuthority``
+    naming the principal, the server-resolved restaurant and the module the
+    endpoint gated on (D06 completion, G1b). Exactly one of the two is populated
+    on a real request; both are optional, so an in-process caller that carried
+    nothing before keeps exactly the guarantees it had.
     """
     try:
         # SUBMIT (initiated -> pending) is the transition that turns a draft
@@ -46,7 +54,8 @@ def update_order_status(
         # It is handled by its own transactional helper; every other status
         # change below is left exactly as it was (no new locking/transaction).
         if new_status == OrderStatus_Pending:
-            return _submit_order(order, user, quote_ref, capability)
+            return _submit_order(
+                order, user, quote_ref, capability, authority)
         # an unauthenticated diner arrives as AnonymousUser (not None); never
         # assign it to a User FK — normalise to None so attribution stays null.
         if user is not None and user.is_anonymous:
@@ -553,7 +562,7 @@ def _acceptance_replay(order, supplied_quote_ref):
 
 def _submit_order(order: Order, user: Union[User, None],
                   supplied_quote_ref: Union[str, None] = None,
-                  capability=None) -> dict:
+                  capability=None, authority=None) -> dict:
     """
     Submit a draft order (order_status 'initiated' -> 'pending').
 
@@ -589,6 +598,9 @@ def _submit_order(order: Order, user: Union[User, None],
     from restaurants_app.controllers.diner_capability import DinerCapabilityError
     from orders_app.controllers.services import order_eligibility as eligibility
     from orders_app.controllers.services import quote_closure
+    from orders_app.controllers.services.order_authority import (
+        StaffAuthorityError, assert_authority_current,
+    )
 
     # an unauthenticated diner arrives as AnonymousUser (not None); never
     # assign it to a User FK — normalise to None so attribution stays null.
@@ -655,6 +667,19 @@ def _submit_order(order: Order, user: Union[User, None],
         try:
             diner_capability.assert_capability_current(capability, locked_table)
         except DinerCapabilityError as exc:
+            return {'status': exc.status, 'message': exc.message}
+
+        # AND THE STAFF SIDE OF THE SAME QUESTION (D06 completion, G1b). The
+        # endpoint's module gate ran in autocommit, before the three waits above.
+        # A membership deactivated, a role removed or a restaurant leaving the
+        # portal-access states inside that wait revokes the authority this
+        # request is still acting on — and unlike a QR regeneration, nothing
+        # downstream noticed. Asked immediately after the capability check, so
+        # both channels linearize at the same point, and answered with the
+        # endpoint's own non-disclosing 404.
+        try:
+            assert_authority_current(authority)
+        except StaffAuthorityError as exc:
             return {'status': exc.status, 'message': exc.message}
 
         # THE DECISION CLOCK, SAMPLED HERE AND NOWHERE ELSE (D06). Every lock
@@ -838,7 +863,62 @@ MESSAGE_QUOTE_RETIRED = (
 
 def retire_quote_for_review(order: Order,
                             supplied_quote_ref: Union[str, None] = None,
-                            capability=None) -> dict:
+                            capability=None, authority=None) -> dict:
+    """The retire-for-review route, with its answer CORRELATED to the enquiry.
+
+    D06 completion, G4. The work is `_retire_quote_answer`; this states what the
+    answer is ABOUT.
+
+    WHY IT HAD TO BE ADDED. A client asks this route whether a saved quote may
+    still be honoured, and `quote_still_valid` is the answer that leads to
+    SUBMITTING an order. The answers named nothing — no order, no reference — so
+    a client had no way to establish that a 200 in its hand was the reply to the
+    enquiry it sent, and a late or misrouted one read exactly like the right one.
+    D04 closed that for acceptance answers and the enquiry was left behind.
+
+    It is CORRELATION, NOT AUTHORIZATION: the caller has already established
+    that it may act on this order (the diner table session, or the staff module
+    gate), and this discloses only what that caller just named.
+    """
+    answer = _retire_quote_answer(
+        order, supplied_quote_ref, capability=capability, authority=authority)
+    return _correlate_quote_answer(answer, order, supplied_quote_ref)
+
+
+def _correlate_quote_answer(answer, order, supplied_quote_ref):
+    """Stamp an answer with the enquiry it answers.
+
+    NOT STAMPED: the capability channel's opaque 404. That refusal is exactly
+    two keys by design — unknown, out of scope and revoked are indistinguishable
+    in status and in body — and naming an order in it would turn it into the
+    existence oracle it exists not to be. The rule is structural rather than a
+    list of statuses: a body that states no `outcome` and no `reason` has said
+    nothing about a quote, so there is nothing for it to be about.
+
+    `quote_ref` echoes what the CALLER named, which is what makes this a
+    correlation. Where a closure is also present it names the reference the
+    server really retired, and the two can legitimately differ — a caller naming
+    a foreign reference is told about the closure that exists, and the echo is
+    what lets them see the request they sent was not the one it describes.
+    """
+    if not isinstance(answer, dict):                 # pragma: no cover
+        return answer
+    if 'outcome' not in answer and 'reason' not in answer:
+        return answer
+
+    answer['order'] = str(order.pk)
+    if isinstance(supplied_quote_ref, str) and supplied_quote_ref:
+        answer['quote_ref'] = supplied_quote_ref
+    # The LEVEL, on the surface a client reaches when its quote may be dead —
+    # so it can tell a server that publishes closures from one whose silence
+    # about them means nothing, without having to have read an order first.
+    answer['quote_protocol'] = QUOTE_PROTOCOL
+    return answer
+
+
+def _retire_quote_answer(order: Order,
+                         supplied_quote_ref: Union[str, None] = None,
+                         capability=None, authority=None) -> dict:
     """Check whether a saved quote can still be honoured, and retire it if not.
 
     WHY IT EXISTS. A client that has decided its quote is stale — the deadline it
@@ -866,11 +946,26 @@ def retire_quote_for_review(order: Order,
     asymmetry the admin owner-invitation cancel already draws: a restaurant that
     has PAUSED is exactly when a client most needs to be able to establish that
     its held quote is dead. It therefore consults no admission verdict and no
-    operational rule, takes no admission advisory lock, and changes no order
-    status: a retired draft stays an ``initiated`` draft, still the diner's,
-    still readable. ``accepting_orders``, a suspension, an offboarding and a
-    soft-deleted restaurant all leave the diner's table session live, so this
-    route is reachable through every one of them.
+    operational rule, and changes no order status: a retired draft stays an
+    ``initiated`` draft, still the diner's, still readable. ``accepting_orders``,
+    a suspension, an offboarding and a soft-deleted restaurant all leave the
+    diner's table session live, so this route is reachable through every one of
+    them.
+
+    **IT DOES TAKE THE ADMISSION LOCK SHARED, AND THAT IS NOT A CONTRADICTION**
+    (D06 completion, G1a). An earlier draft of this docstring said it "takes no
+    admission advisory lock", which conflated two different things the module
+    keeps apart on purpose: ``lock_admission_shared`` is SYNCHRONISATION —
+    hold this restaurant's admission-relevant state steady for the rest of this
+    transaction — while ``order_admission.admit`` is POLICY, the question of
+    whether NEW work may be admitted. This route asks the second question of
+    nobody and still needs the first, because it runs the very same purchase
+    integrity check acceptance runs, and it writes something acceptance does not:
+    a CLOSURE, which is irreversible. A catalogue edit committing inside that
+    decision would retire a diner's perfectly good quote on the strength of a
+    read that was already stale — the worst version of this race, since an
+    acceptance racing the same edit merely sends the order back for review.
+    Shared, so it never blocks an order and never blocks another retirement.
 
     **AN UNAVAILABLE TABLE IS THE ONE CASE IT CANNOT ANSWER, AND THAT IS THE
     CHANNEL'S RULE RATHER THAN AN OVERSIGHT.** A diner reaches this route through
@@ -896,21 +991,30 @@ def retire_quote_for_review(order: Order,
     trip that did not answer — it surfaces a retry and never submits — which is
     the honest outcome. Pinned by ``RetiringAtAnUnavailableTableTests``.
 
-    LOCK ORDER: ``Table -> Order``, the tail of acceptance's
-    ``advisory -> Table -> Order`` — the same shape a kitchen command takes, and
-    for the same reason. The advisory lock governs whether NEW work may be
-    admitted; retiring a quote admits nothing. Taking the two rows in the
-    established order is what makes an acceptance and a retirement racing for one
-    draft resolve in the database rather than by arrival: whichever holds the
-    ``Order`` row first wins, and the loser reads what the winner committed.
+    LOCK ORDER: ``advisory SHARED -> Table -> Order`` — acceptance's order
+    exactly, which is what lets this join an ordering already proven acyclic
+    rather than adding one. Taking the two rows in the established order is what
+    makes an acceptance and a retirement racing for one draft resolve in the
+    database rather than by arrival: whichever holds the ``Order`` row first
+    wins, and the loser reads what the winner committed.
     """
     from restaurants_app.models import Table
     from restaurants_app.controllers import diner_capability
     from restaurants_app.controllers.diner_capability import DinerCapabilityError
     from orders_app.controllers.services import quote_closure
     from orders_app.controllers.services import quote_policy
+    from restaurants_app.controllers.admission_lock import lock_admission_shared
+    from orders_app.controllers.services.order_authority import (
+        StaffAuthorityError, assert_authority_current,
+    )
 
     with transaction.atomic():
+        # SYNCHRONISATION, NOT POLICY, and FIRST — before either row lock, which
+        # is the documented `advisory -> rows` order. See the docstring: this
+        # route decides on the same catalogue facts acceptance decides on, and
+        # writes an irreversible closure from that decision.
+        lock_admission_shared(order.restaurant_id)
+
         locked_table = None
         if order.table_id is not None:
             locked_table = (
@@ -924,6 +1028,27 @@ def retire_quote_for_review(order: Order,
         try:
             diner_capability.assert_capability_current(capability, locked_table)
         except DinerCapabilityError as exc:
+            return {'status': exc.status, 'message': exc.message}
+
+        # THE SESSION'S OTHER HALF, RE-ASKED UNDER THE LOCK (D06 completion,
+        # G1b). A table that stops being scannable REVOKES every session on it —
+        # that is why `_resolve_table` re-checks it live on every use and this
+        # route's endpoint answers the channel's opaque 404. Acceptance re-reads
+        # the same fact off the same locked row through `order_eligibility` and
+        # refuses with a sentence a diner can read; this route runs no
+        # eligibility rule by design, so without this the fact reached nothing at
+        # all here — and a retirement writes a CLOSURE, which cannot be undone.
+        # Answering with the 404 keeps this route's answer STABLE across the lock
+        # wait rather than depending on when the operator happened to click.
+        if not diner_capability.session_still_admissible(
+            capability, locked_table
+        ):
+            return {'status': 404, 'message': 'Not found'}
+
+        # The staff channel's equivalent, for the same reason as at acceptance.
+        try:
+            assert_authority_current(authority)
+        except StaffAuthorityError as exc:
             return {'status': exc.status, 'message': exc.message}
 
         now = timezone.now()

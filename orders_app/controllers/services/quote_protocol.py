@@ -50,6 +50,23 @@ second.
 #: exists.
 QUOTE_PROTOCOL_ENFORCED = 1
 
+#: 2 RECOVERABLE. Everything level 1 promised, plus: a quote that has been
+#: retired is DISCOVERABLE on the diner's own authorized order read, under both
+#: of its selectors, so a client that LOST the refusal can still learn that its
+#: saved quote is finished without attempting an acceptance to find out.
+#:
+#: That last clause is the whole point of the level. At level 1 the closure was
+#: published only on the response to the request that created it — the one thing
+#: a client can lose — so a recovering client's only remaining move was to try
+#: the acceptance, which is exactly what `retire-quote` exists to avoid: when the
+#: quote IS still good that attempt SUCCEEDS, claims a table and sends food to a
+#: kitchen in order to ask a question.
+#:
+#: A NEW LEVEL, NOT A NEW MEANING FOR 1. A client pinned to 1 keeps precisely the
+#: promises 1 made and is RIGHT that level 1 said nothing about reading a closure
+#: back; only a client that recognises 2 may rely on the read carrying one.
+QUOTE_PROTOCOL_RECOVERABLE = 2
+
 #: WHAT THIS BUILD ACTUALLY SUPPORTS. Raised only by the change that makes the
 #: next level true — never in advance of it.
-QUOTE_PROTOCOL = QUOTE_PROTOCOL_ENFORCED
+QUOTE_PROTOCOL = QUOTE_PROTOCOL_RECOVERABLE

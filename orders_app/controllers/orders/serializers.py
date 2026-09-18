@@ -36,6 +36,9 @@ from orders_app.models import Order, OrderItem
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
 )
+from orders_app.controllers.services.quote_closure import (
+    closure_projection, read_closure,
+)
 from orders_app.controllers.services.quote_protocol import QUOTE_PROTOCOL
 from orders_app.controllers.services.quote_policy import (
     assess as assess_quote_age,
@@ -244,6 +247,25 @@ def serialize_order_details(order: Order) -> dict:
         # that treats `live` as a guarantee of acceptance is not.
         'quote_protocol': QUOTE_PROTOCOL,
         'quote_policy': quote_policy_projection(order),
+
+        # ADDITIVE (D06 completion, G3a): HAS THIS QUOTE BEEN RETIRED? `null`
+        # for every quote that has not, and the key is ALWAYS present so a
+        # client never has to branch on whether a field exists to learn that
+        # nothing has happened.
+        #
+        # A FRESH DRAFT CANNOT HAVE ONE — but this assembler also answers a D04
+        # REPLAY, which returns an order created earlier, and that one's quote
+        # may have been retired since. Publishing it here is what stops a replay
+        # handing a client a review screen for a purchase that can no longer be
+        # placed.
+        #
+        # The DEADLINE and the CLOSURE are INDEPENDENT FACTS and are labelled
+        # apart, for the reason D04 keeps `current` apart from `acceptance`: a
+        # quote retired because the purchase changed is finished while its
+        # deadline has NOT passed, so `quote_policy.status` legitimately reads
+        # `live` beside a closure. That is not a contradiction; it is two
+        # questions, and the CLOSURE is the one that decides acceptability.
+        'quote_closure': closure_projection(read_closure(order)),
 
         'no_items': len(parent_items),
         'no_unavailable_items': len(unavailable_parent_items),

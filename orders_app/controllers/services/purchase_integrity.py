@@ -27,24 +27,63 @@ dish came back into stock. The diner reviewed a quote without it.
 
 WHAT COUNTS AS A CHANGE — the approved decision table, in the order applied:
 
-  availability      the item is gone, hidden or sold out            -> review
-  publication       (diner-origin only) no longer orderable now      -> review
+  liveness          the item, its section or its group has been
+                    soft-deleted, or the item is sold out /
+                    unavailable (EVERY provenance)                   -> review
+  publication       (diner-origin only) no longer published to the
+                    ordering public at `now` — the item, its section
+                    or its group unapproved, disabled, marked
+                    unavailable, or out of schedule                  -> review
   extras            an extra is no longer attachable, or the
                     parent's extras minimum/maximum no longer holds  -> review
   selection         a selected modifier group or choice no longer
                     exists, or the group's own rules no longer hold  -> review
   allergens         the declared allergen set changed                -> review
-  price/discount    honoured at the saved amount                     -> accept
-  labels, order     a rename, a recolour, a reorder, an added
-                    OPTIONAL choice, an unrelated item               -> accept
+  price/discount    honoured at the saved amount, INCLUDING a price
+                    or discount that has since become unreadable     -> accept
+  meaning           a SELECTED modifier group or choice now carries
+                    different text — the same id saying something
+                    else to the kitchen                             -> review
+  labels, order     a DISH rename, a recolour, a reorder, a rename
+                    of an UNSELECTED choice, an added OPTIONAL
+                    choice, an unrelated item                       -> accept
 
-IDENTITY, NOT LABELS — and the limit that leaves. A selection is identified by its
-GROUP AND CHOICE IDS, not by the words shown beside them, because the approved
-rule keeps a pure presentation edit from invalidating a purchase ("keep the saved
-description"). The consequence is stated rather than hidden: an operator who
-edits a choice's LABEL so that the same id now means something else has changed
-the preparation in a way no stored field records, and this check cannot see it.
-Allergens are the one declaration compared by value, because that is the one
+LIVENESS AND PUBLICATION ARE DIFFERENT KINDS OF FACT, and `section_structurally_
+published` used to wear both names at once: it is `approved AND enabled AND not
+deleted`. Calling it unconditionally here bound two thirds of a publication rule
+to every provenance, which stranded the exemption the paragraph below promises —
+a member of staff ordering against a menu that has not been approved yet created
+the draft happily and then could never place it, because the refusal CLOSES the
+quote. Deletion binds everyone (a soft-deleted section is not a place a dish can
+exist, exactly as D06 says of a table); `approved` / `enabled` / `available` /
+the schedule bind the diner path, which is the line the create path already
+draws.
+
+AND PRICE READABILITY IS NEITHER. `item_orderable` requires `item_priceable` —
+a live read of `primary_price` and `discount_details` — so an operator mistyping
+a discount AFTER the review destroyed the quote over a figure nobody was going
+to charge. Acceptance asks `item_published_now` instead. Creating a NEW order
+still asks `item_orderable`, because the create path has to price the line.
+
+IDENTITY FIRST, THEN MEANING (D06 G2-B corrected the second half of this).
+A selection is identified by its GROUP AND CHOICE IDS, so a pure presentation
+edit elsewhere on the menu cannot invalidate a purchase ("keep the saved
+description"). This file used to stop there and say so:
+
+  "an operator who edits a choice's LABEL so that the same id now means
+   something else has changed the preparation in a way no stored field records,
+   and this check cannot see it."
+
+The premise was wrong. `OrderItem.modifiers_snapshot` DOES record it — the
+resolved text of the selection, written at creation, immutable afterwards,
+already inside the quote fingerprint, and the exact strings the kitchen ticket
+renders. So the SELECTED groups' text is re-derived from the SAVED selection
+against the definition as it stands and compared; nothing about today's
+catalogue is treated as past intent, and no column, digest or backfill is added.
+The dish's own name stays out of scope: the table below accepts a rename, and
+comparing it would refuse an order for every menu tidy-up.
+
+Allergens are the other declaration compared by value, because that is the one
 whose silent change is dangerous rather than untidy. Nothing here verifies real
 ingredients; it verifies that the restaurant's own recorded declaration has not
 moved.
@@ -72,15 +111,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 from restaurants_app.controllers.menu_publication import (
-    group_structurally_published,
-    item_orderable,
-    item_structurally_published,
+    group_live,
+    item_published_now,
     normalize_extras_applicable,
-    section_structurally_published,
+    section_live,
     extra_publishable,
 )
 from restaurants_app.controllers.modifier_definition import (
-    inspect_modifier_definition,
+    inspect_modifier_definition, meaning_matches, selection_meaning,
 )
 from orders_app.controllers.services.catalogue_snapshot import build_snapshot
 
@@ -113,6 +151,7 @@ CLASS_MODIFIERS_INVALID = 'modifier_definition_invalid'
 CLASS_GROUP_MISSING = 'modifier_group_missing'
 CLASS_CHOICE_MISSING = 'modifier_choice_missing'
 CLASS_GROUP_BOUNDS = 'modifier_group_bounds_no_longer_met'
+CLASS_SELECTION_MEANING_CHANGED = 'modifier_selection_meaning_changed'
 CLASS_ALLERGENS_CHANGED = 'allergen_declaration_changed'
 
 
@@ -164,7 +203,12 @@ def _allergen_names(labels):
 
 
 def _check_selection(row, menu_item):
-    """Do the saved modifier selections still name real, currently valid choices?"""
+    """Do the saved selections still name valid choices, and still SAY the same?
+
+    Two questions, in that order. The structural one is about ids and rules; the
+    second is about the words those ids now carry, which is what the kitchen
+    prepares from. Neither reads money.
+    """
     selected = row.selected_modifiers or {}
     verdict = inspect_modifier_definition(menu_item.options)
 
@@ -203,6 +247,33 @@ def _check_selection(row, menu_item):
         if (group.min_selections or 0) > 0 and not (selected.get(group_id) or []):
             return CLASS_GROUP_BOUNDS
 
+    # --- the meaning of the selection, not only its ids ---------------------
+    # D06 G2-B. The ids can all still resolve while saying something else
+    # entirely: "no onions" relabelled to "extra chilli" under the same id is a
+    # different instruction to the kitchen. `modifiers_snapshot` is the resolved
+    # text written at creation — the exact strings the kitchen ticket renders —
+    # so re-deriving it from the SAVED selection against the definition as it is
+    # now answers the question without adding a column, a digest or a backfill.
+    #
+    # SCOPE STOPS AT THE SELECTED GROUPS. The dish's own name is deliberately
+    # excluded: the decision table accepts a rename and comparing it would
+    # refuse an order for every menu tidy-up. A renamed GROUP does trip this,
+    # which is the same deliberate false positive a renamed allergen tag
+    # already carries — the safe direction, bounded to the drafts open inside a
+    # thirty-minute window.
+    meaning = selection_meaning(verdict, selected)
+    if meaning is None:
+        # Unreachable behind the checks above, which have already resolved every
+        # named group and choice. Kept because a resolver that cannot answer
+        # must never be read as agreement.
+        return CLASS_MODIFIERS_INVALID
+    # COMPARED AS A MULTISET, NOT AS A SEQUENCE. `selected_modifiers` is jsonb,
+    # which does not preserve an object's key order, so the derived list is
+    # ordered by whatever the database handed back while the snapshot is
+    # ordered by creation — see `meaning_matches`, which owns that reasoning.
+    if not meaning_matches(meaning, row.modifiers_snapshot):
+        return CLASS_SELECTION_MEANING_CHANGED
+
     return None
 
 
@@ -216,12 +287,16 @@ def _check_parent(parent, children, snapshot, *, restaurant_id, now,
         return IntegrityRefusal(CLASS_ITEM_MISSING, str(parent.item_id))
     menu_item = resolved.menu_item
 
-    # --- availability, every provenance ------------------------------------
+    # --- liveness, every provenance -----------------------------------------
+    # DELETION ONLY. `approved` / `enabled` / `available` and the schedule are
+    # publication policy and belong below; this block asks whether the dish and
+    # the containers it lives in still EXIST, which binds every provenance for
+    # the same reason a soft-deleted table does.
     if menu_item.deleted:
         return IntegrityRefusal(CLASS_ITEM_DELETED, str(parent.item_id))
-    if not section_structurally_published(menu_item.section):
+    if not section_live(menu_item.section):
         return IntegrityRefusal(CLASS_SECTION_GONE, str(parent.item_id))
-    if menu_item.section_group_id is not None and not group_structurally_published(
+    if menu_item.section_group_id is not None and not group_live(
         menu_item.section_group
     ):
         return IntegrityRefusal(CLASS_SECTION_GONE, str(parent.item_id))
@@ -232,7 +307,13 @@ def _check_parent(parent, children, snapshot, *, restaurant_id, now,
         return IntegrityRefusal(CLASS_ITEM_SOLD_OUT, str(parent.item_id))
 
     # --- publication, diner-origin only -------------------------------------
-    if enforce_publication and not item_orderable(menu_item, now):
+    # `item_published_now`, NOT `item_orderable`: the latter also requires the
+    # CURRENT price to be readable, and this boundary honours the price it
+    # SAVED. A discount mistyped after the diner reviewed their order changes
+    # neither what is prepared nor what is charged, so destroying the quote over
+    # it would refuse a diner for a data fault they did not cause — and closing
+    # a quote cannot be undone.
+    if enforce_publication and not item_published_now(menu_item, now):
         return IntegrityRefusal(CLASS_ITEM_UNPUBLISHED, str(parent.item_id))
 
     # --- the extras relationship, every provenance --------------------------

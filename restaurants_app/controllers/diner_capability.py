@@ -205,6 +205,16 @@ def assert_capability_current(capability, table):
     depending on how the caller authenticated, and would report a table the owner
     took out of service as though the diner's session were forged.
 
+    THAT HOLDS WHERE AN ELIGIBILITY RULE RUNS, which is the create and acceptance
+    boundaries. ``retire_quote_for_review`` deliberately runs none — it is not a
+    lifecycle operation — so the fact reaches no rule there at all, and the
+    answer its ENDPOINT gives a moment earlier is this channel's own 404, because
+    ``_resolve_table`` treats a table that has stopped being scannable as a
+    REVOKED SESSION. ``session_still_admissible`` below is that question asked
+    again under the lock, kept as a separate named predicate rather than folded
+    in here precisely so acceptance keeps answering with the sentence a diner can
+    read (D06 completion, G1b).
+
     ``capability`` of ``None`` means no capability channel was used (a staff
     caller on the module gate), and this is a no-op: there is nothing to revoke.
     """
@@ -221,6 +231,27 @@ def assert_capability_current(capability, table):
         # a deliberate revocation by the owner, and it revokes retroactively:
         # a request already in flight is not grandfathered in.
         raise DinerCapabilityDenied()
+
+
+def session_still_admissible(capability, table) -> bool:
+    """Would this table still MINT the session the caller is holding?
+
+    The scannability half of the door's rule, as a predicate rather than a
+    refusal, so the route that asks it answers in its own established
+    vocabulary. ``True`` for a caller with no capability: a staff principal holds
+    no table session, so there is no session for a table going out of service to
+    revoke — and refusing them would buy the diner nothing, since a quote at an
+    unavailable table cannot be accepted through any channel either.
+
+    It asks the MODEL predicate, never a re-spelling of it: ``_resolve_table``
+    and ``order_eligibility`` both read the same one, and a third copy would
+    disagree the first time a field is added to any of them.
+    """
+    if capability is None:
+        return True
+    if table is None:
+        return False
+    return bool(table.is_available_for_scan())
 
 
 # --- request helpers -------------------------------------------------------

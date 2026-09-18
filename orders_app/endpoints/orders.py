@@ -12,6 +12,7 @@ from orders_app.controllers.manage_order import (
 from dinify_backend.configss.string_definitions import OrderStatus_Pending, MODULE_TABLES
 from orders_app.controllers.con_orders import ConOrder
 from orders_app.controllers.services.order_input import validate_order_request
+from orders_app.controllers.services.order_authority import StaffAuthority
 from users_app.controllers.permissions_check import can_user_access_module
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from misc_app.controllers.http import NoStoreResponseMixin
@@ -107,6 +108,8 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                 # branch does. It is context, not authority — the authority
                 # decision is the one just made here.
                 capability = diner_capability.capability_from_table(table)
+                # No staff module gate was used, so there is none to re-assert.
+                authority = None
             else:
                 # No diner session: fall back to an authorised staff caller.
                 try:
@@ -127,10 +130,34 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                 ):
                     return Response({'status': 404, 'message': 'Not found'}, status=404)
                 user = request.user
-                # No capability channel was used, so there is nothing to
-                # re-verify. A staff caller's authority is the module gate above,
-                # which is not revoked by a QR regeneration.
+                # NO CAPABILITY CHANNEL WAS USED, so there is no QR generation to
+                # re-verify. That is NOT the same as having nothing to re-ask,
+                # which is what this comment used to claim (D06 completion, G1b):
+                # "A staff caller's authority is the module gate above, which is
+                # not revoked by a QR regeneration." True, and beside the point.
+                # The module gate immediately above ran in AUTOCOMMIT; the
+                # transition then WAITS for the admission advisory lock, the
+                # table row and the order row. A membership deactivated, a role
+                # removed or the restaurant leaving the portal-access states
+                # inside that wait revokes exactly the authority this request is
+                # still acting on, and nothing downstream noticed.
+                #
+                # So the MINIMAL RECORD of what was authorized travels to the
+                # protected boundary, which asks the SAME resolver the SAME
+                # question about the state as it is then. Three facts and NO
+                # CREDENTIAL — a credential must not travel past the point that
+                # verifies it — and `restaurant_id` is the SERVER-RESOLVED one,
+                # read off the order rather than the body. The principal is
+                # carried as the OBJECT and not an id: a delegation is an
+                # in-memory attribute the middleware set on it, so re-fetching
+                # the row would silently ask a different question and refuse
+                # somebody this endpoint correctly admitted.
                 capability = None
+                authority = StaffAuthority(
+                    user=request.user,
+                    restaurant_id=str(order.restaurant_id),
+                    module=MODULE_TABLES,
+                )
 
             # THE QUOTE ACKNOWLEDGEMENT (D02/P9). The submission must name the
             # exact server-priced draft it is accepting; the transition validates
@@ -154,6 +181,7 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                     order,
                     supplied_quote_ref=data.get('quote_ref'),
                     capability=capability,
+                    authority=authority,
                 )
             else:
                 response = update_order_status(
@@ -162,6 +190,7 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                     user=user,
                     quote_ref=data.get('quote_ref'),
                     capability=capability,
+                    authority=authority,
                 )
             return Response(response, status=response.get('status', 200))
 
