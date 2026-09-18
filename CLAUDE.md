@@ -788,7 +788,8 @@ so keep it current when conventions change.
     `evidence_unavailable`, refused for review rather than converted into a
     terminal fact
   **THE ACCEPTANCE SEQUENCE, AND ITS ORDER IS THE CONTRACT**: capability
-  re-verification → D04 replay → closure → admission verdict → `initiated` →
+  re-verification → STAFF AUTHORITY re-verification → D04 replay → closure →
+  admission verdict → `initiated` →
   operational eligibility → occupancy → acknowledgement (`_quote_acknowledgement`)
   → expiry → purchase integrity → transition. Authorization is FIRST, ahead even
   of the replay: a revoked capability may not read an acceptance any more than it
@@ -826,7 +827,10 @@ so keep it current when conventions change.
     channel. The client reads the 404 as a round trip that did not answer and
     retries rather than submitting. Pinned by
     `RetiringAtAnUnavailableTableTests`, whose two controls (a live session, a
-    paused restaurant) must keep passing. LOCK ORDER `Table -> Order`, the
+    paused restaurant) must keep passing. **AND IT IS NOW RE-ASKED UNDER THE
+    LOCK** (G1b): the endpoint gate runs in autocommit, so a table going out of
+    service inside the wait used to reach nothing at all here — see
+    `session_still_admissible` below. LOCK ORDER `Table -> Order`, the
     kitchen's shape and the tail of acceptance's
   - **THE CAPABILITY IS RE-VERIFIED UNDER THE LOCK**
     (`diner_capability.TableCapability` / `assert_capability_current`). The
@@ -840,6 +844,38 @@ so keep it current when conventions change.
     provenance, and answering it here too would give one fact two answers
     depending on how the caller authenticated. The refusal is the capability
     channel's own opaque 404
+  - **AND THE STAFF CHANNEL IS RE-ASKED TOO** (D06 completion, G1b —
+    `orders_app/controllers/services/order_authority.py`). The endpoint comment
+    used to say why it was not: *"No capability channel was used, so there is
+    nothing to re-verify. A staff caller's authority is the module gate above,
+    which is not revoked by a QR regeneration."* True, and beside the point — it
+    IS revoked by a membership being deactivated, a role being removed or the
+    restaurant leaving `portal_access_states()`, any of which can commit inside
+    the same wait, after which an order reaches a kitchen on authority nobody
+    holds. `StaffAuthority` is the capability's shape exactly: THREE FACTS AND NO
+    CREDENTIAL (the principal, the SERVER-RESOLVED restaurant read off the order,
+    the module the endpoint gated on), re-running the SAME
+    `can_user_access_module` call, so it can only ever REFUSE and cannot widen
+    anything. There is no token, no client-selectable actor field and no
+    trusted-caller switch. The principal travels as the OBJECT rather than an id
+    because a delegation is an in-memory attribute the middleware set on it
+    (`permissions_check._DELEGATION_ATTR`), so re-fetching the row would silently
+    ask a different question. Asked immediately after the capability check so
+    both channels LINEARIZE AT ONE POINT, and answered with the endpoint's own
+    non-disclosing 404. As at D05's kitchen boundary, a revocation committed
+    before that point is respected and one committing after it can still overlap
+    — stated rather than claimed away
+  - **RETIREMENT RE-ASKS WHETHER THE SESSION STILL EXISTS** (same change).
+    `retire_quote_for_review` runs no eligibility rule by design, so the
+    table-liveness fact reached NOTHING inside it — while the route writes a
+    CLOSURE, which is irreversible. `diner_capability.session_still_admissible`
+    is that one question under the lock, kept a SEPARATE named predicate from
+    `assert_capability_current` precisely so acceptance goes on answering it with
+    the sentence a diner can read. It returns True for a caller with no
+    capability: a staff principal holds no table session, so there is none for a
+    table going out of service to revoke. The answer is this route's established
+    one — the channel's opaque 404 — which is what keeps it STABLE across the
+    lock wait instead of depending on when the operator happened to click
   - **THREE WRITERS NOW PARTICIPATE, AND TWO OF THEM WERE REVERTING COMMITTED
     POLICY.** `first_time_batch_approval` did a full-row `restaurant.save()` from
     an instance loaded before its transaction, so a menu approval silently
