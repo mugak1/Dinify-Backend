@@ -908,8 +908,9 @@ so keep it current when conventions change.
     extra query**. The two new fields FAIL CLOSED in the opposite direction from
     `restaurant_is_test`: a verdict that never touched the database must not be
     able to claim a restaurant is open and present
-  - **RESPONSE CONTRACT**: `order_details.quote_protocol` (level 1) and
-    `order_details.quote_policy` `{version, status, expires_at}`, both additive.
+  - **RESPONSE CONTRACT**: `order_details.quote_protocol` (level **2** as of
+    G3a) and `order_details.quote_policy` `{version, status, expires_at}`, both
+    additive.
     **`checkout_protocol` STAYS 3 and is untouched** — D04 answers "can an
     uncertain checkout be retried and recovered", D06 answers "may this quote
     still be accepted", and raising the first for a change that added nothing to
@@ -919,6 +920,35 @@ so keep it current when conventions change.
     the code to the basket. `quote_policy` is a DEADLINE, NOT A RESERVATION: the
     dish can still sell out inside the window, which is the other question
     entirely
+  - **A RETIRED QUOTE IS READABLE BACK, AND THE LEVEL IS 2 (G3a).** A closure is
+    the DURABLE half of a terminal refusal, and it was published on exactly one
+    response — the refusal that created it, which is the one thing a client can
+    lose. The diner's own order read published NEITHER the level, the deadline
+    nor the closure (those three were added to the INITIATE response only), so a
+    quote retired for `purchase_needs_review` INSIDE its window was invisible on
+    every surface a recovering client could reach and its only remaining move was
+    to attempt an acceptance — precisely what `retire-quote` exists to avoid,
+    since when the quote IS good that attempt succeeds, claims a table and sends
+    food to a kitchen in order to ask a question. `GET orders/journey/
+    order-details/` now carries all three on BOTH selectors, through the SAME
+    constant and the SAME projections the initiate response uses (the rule D04/U1
+    applied to `quote_total`/`quote_complete` on that serializer), and
+    `quote_closure` joins the initiate response too because a D04 REPLAY returns
+    an order created earlier whose quote may have been retired since. **THE
+    DEADLINE AND THE CLOSURE ARE INDEPENDENT FACTS AND ARE LABELLED APART**, for
+    the reason D04 keeps `current` apart from `acceptance`: a quote closed for a
+    changed purchase is finished while `quote_policy.status` legitimately still
+    reads `live`, and the CLOSURE is what decides acceptability. The projection is
+    bounded to `{closed_at, reason, quote_ref, policy_version}` — no actor, no
+    amounts, no catalogue detail. **A NEW LEVEL, NEVER A NEW MEANING FOR 1**, and
+    the raise was CHECKED against the deployed client rather than assumed: it
+    gates with `level < REQUIRED_QUOTE_PROTOCOL` (1), so 2 passes and it keeps
+    consulting the deadline unchanged. **IT COSTS NO QUERY** — the diner read
+    folds the relation (`select_related('acceptance', 'quote_closure')`) and the
+    initiate re-read replaced a plain `refresh_from_db`; that is a CORRECTNESS
+    rule before a cost one, the same READ COMMITTED lesson D04 records. Pinned by
+    `orders_app/tests_quote_closure_recovery.py` (26 tests; 14 of the first 19
+    failed on the pre-change tree)
   - COST: submit **12 → 14** (the closure read plus ONE catalogue statement,
     flat in the size of the order); a REPLAY is unchanged at **7**, returning at
     the evidence read before any of this; the create path is unchanged, since the

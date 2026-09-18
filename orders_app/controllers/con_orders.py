@@ -1461,7 +1461,15 @@ class ConOrder:
             return result
 
         order_rec = result['order']
-        order_rec.refresh_from_db()
+        # RE-READ WITH THE CLOSURE JOINED, which replaces the plain refresh at
+        # NO extra cost — one statement either way. A fresh draft has no closure
+        # and this join finds none; a D04 REPLAY returns an order created
+        # earlier, whose quote may have been retired since, and joining it is
+        # what keeps the answer ONE snapshot rather than an order read in one
+        # statement and a closure in another (the D04 lesson, recorded on
+        # `handle_show_order_details`).
+        order_rec = Order.objects.select_related('quote_closure').get(
+            pk=order_rec.pk)
 
         order_details = serialize_order_details(order=order_rec)
         return {
