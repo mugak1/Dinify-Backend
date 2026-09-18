@@ -8,6 +8,7 @@ from typing import Union
 from django.db import transaction
 from django.utils import timezone
 from users_app.models import User
+from orders_app.controllers.services.quote_protocol import QUOTE_PROTOCOL
 from orders_app.controllers.services.acceptance_result import (
     OUTCOME_ALREADY_ACCEPTED, OUTCOME_NEWLY_ACCEPTED, acceptance_result,
 )
@@ -863,6 +864,61 @@ MESSAGE_QUOTE_RETIRED = (
 def retire_quote_for_review(order: Order,
                             supplied_quote_ref: Union[str, None] = None,
                             capability=None, authority=None) -> dict:
+    """The retire-for-review route, with its answer CORRELATED to the enquiry.
+
+    D06 completion, G4. The work is `_retire_quote_answer`; this states what the
+    answer is ABOUT.
+
+    WHY IT HAD TO BE ADDED. A client asks this route whether a saved quote may
+    still be honoured, and `quote_still_valid` is the answer that leads to
+    SUBMITTING an order. The answers named nothing — no order, no reference — so
+    a client had no way to establish that a 200 in its hand was the reply to the
+    enquiry it sent, and a late or misrouted one read exactly like the right one.
+    D04 closed that for acceptance answers and the enquiry was left behind.
+
+    It is CORRELATION, NOT AUTHORIZATION: the caller has already established
+    that it may act on this order (the diner table session, or the staff module
+    gate), and this discloses only what that caller just named.
+    """
+    answer = _retire_quote_answer(
+        order, supplied_quote_ref, capability=capability, authority=authority)
+    return _correlate_quote_answer(answer, order, supplied_quote_ref)
+
+
+def _correlate_quote_answer(answer, order, supplied_quote_ref):
+    """Stamp an answer with the enquiry it answers.
+
+    NOT STAMPED: the capability channel's opaque 404. That refusal is exactly
+    two keys by design — unknown, out of scope and revoked are indistinguishable
+    in status and in body — and naming an order in it would turn it into the
+    existence oracle it exists not to be. The rule is structural rather than a
+    list of statuses: a body that states no `outcome` and no `reason` has said
+    nothing about a quote, so there is nothing for it to be about.
+
+    `quote_ref` echoes what the CALLER named, which is what makes this a
+    correlation. Where a closure is also present it names the reference the
+    server really retired, and the two can legitimately differ — a caller naming
+    a foreign reference is told about the closure that exists, and the echo is
+    what lets them see the request they sent was not the one it describes.
+    """
+    if not isinstance(answer, dict):                 # pragma: no cover
+        return answer
+    if 'outcome' not in answer and 'reason' not in answer:
+        return answer
+
+    answer['order'] = str(order.pk)
+    if isinstance(supplied_quote_ref, str) and supplied_quote_ref:
+        answer['quote_ref'] = supplied_quote_ref
+    # The LEVEL, on the surface a client reaches when its quote may be dead —
+    # so it can tell a server that publishes closures from one whose silence
+    # about them means nothing, without having to have read an order first.
+    answer['quote_protocol'] = QUOTE_PROTOCOL
+    return answer
+
+
+def _retire_quote_answer(order: Order,
+                         supplied_quote_ref: Union[str, None] = None,
+                         capability=None, authority=None) -> dict:
     """Check whether a saved quote can still be honoured, and retire it if not.
 
     WHY IT EXISTS. A client that has decided its quote is stale — the deadline it

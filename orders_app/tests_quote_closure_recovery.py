@@ -54,7 +54,7 @@ from orders_app.tests_quote_lifetime import QuoteFixtureMixin
 from restaurants_app.controllers.diner_capability import (
     SESSION_HEADER, capability_from_table, issue_table_session,
 )
-from restaurants_app.models import MenuItem
+from restaurants_app.models import MenuItem, Table
 
 DETAILS_URL = '/api/v1/orders/journey/order-details/'
 
@@ -480,3 +480,94 @@ class AReplayOfAClosedOrderSaysSoTests(ClosureReadFixture):
             and ' JOIN ' not in q['sql'].upper()
         ]
         self.assertEqual(standalone, [])
+
+
+class TheEnquiryAnswerSaysWhatItIsAboutTests(ClosureReadFixture):
+    """D06 completion, G4 — the retire answer is CORRELATED to the enquiry.
+
+    `quote_still_valid` is the answer that leads to SUBMITTING an order, and the
+    answers named nothing at all: no order, no reference. A client had no way to
+    establish that a 200 in its hand was the reply to the enquiry it sent, so a
+    late or misrouted one read exactly like the right one. D04 closed this for
+    acceptance answers; the enquiry was left behind.
+    """
+
+    def test_a_still_valid_answer_names_the_order_and_the_reference(self):
+        order = self._draft_order()
+        reference = quote_ref(order)
+        answer = self._retire(order)
+
+        self.assertEqual(answer['outcome'], 'quote_still_valid')
+        self.assertEqual(answer['order'], str(order.pk))
+        self.assertEqual(answer['quote_ref'], reference)
+
+    def test_a_closed_answer_names_them_too(self):
+        order = self._draft_order()
+        reference = quote_ref(order)
+        answer = self._close_by_expiry(order)
+
+        self.assertEqual(answer['order'], str(order.pk))
+        self.assertEqual(answer['quote_ref'], reference)
+
+    def test_every_answer_states_the_level(self):
+        order = self._draft_order()
+        self.assertEqual(self._retire(order)['quote_protocol'], QUOTE_PROTOCOL)
+
+    def test_the_echo_is_what_the_CALLER_named_beside_what_was_retired(self):
+        """Two facts, both true, deliberately not collapsed. The echo says which
+        request this answers; the closure says which reference the server really
+        retired — and a caller naming a foreign one needs to see both to
+        understand that the answer is not about the request it sent."""
+        order = self._draft_order()
+        retired = quote_ref(order)
+        self._close_by_expiry(order)
+
+        answer = self._retire(order, ref='0' * 64)
+        self.assertEqual(answer['quote_ref'], '0' * 64)
+        self.assertEqual(answer['quote_closure']['quote_ref'], retired)
+
+    def test_a_business_refusal_is_correlated_as_well(self):
+        """An acceptance-conflict answer is about a quote too, and a client that
+        cannot tell which order it concerns cannot act on it."""
+        order = self._draft_order()
+        self.assertEqual(
+            self._submit(order, capability=capability_from_table(self.table))
+            .get('status'), 200)
+
+        answer = self._retire(order)
+        self.assertEqual(answer.get('status'), 409, answer)
+        self.assertEqual(answer['order'], str(order.pk))
+
+    def test_THE_OPAQUE_404_IS_NEVER_STAMPED(self):
+        """The one refusal that must stay exactly two keys.
+
+        Unknown, out of scope and revoked are indistinguishable in status AND in
+        body by design; naming an order inside one would turn the channel's
+        non-disclosing answer into the existence oracle it exists not to be. The
+        rule is structural rather than a list of statuses — a body stating no
+        `outcome` and no `reason` has said nothing about a quote, so there is
+        nothing for it to be about.
+        """
+        order = self._draft_order()
+        Table.objects.filter(pk=self.table.pk).update(
+            status='out_of_service', is_active=False)
+
+        from orders_app.controllers.manage_order import retire_quote_for_review
+        from restaurants_app.controllers.diner_capability import (
+            capability_from_table as cap,
+        )
+        refused = retire_quote_for_review(
+            order, quote_ref(order), capability=cap(self.table))
+
+        self.assertEqual(set(refused), {'status', 'message'}, refused)
+
+    def test_the_correlation_costs_no_query(self):
+        """It reads the order it was handed and a constant — nothing else."""
+        order = self._draft_order()
+        with CaptureQueriesContext(connection) as captured:
+            self._retire(order)
+        self.assertNotIn(
+            'order_quote_closures',
+            ''.join(q['sql'] for q in captured if ' JOIN ' not in q['sql'].upper()
+                    and 'SELECT' not in q['sql'].upper()),
+        )

@@ -949,6 +949,23 @@ so keep it current when conventions change.
     rule before a cost one, the same READ COMMITTED lesson D04 records. Pinned by
     `orders_app/tests_quote_closure_recovery.py` (26 tests; 14 of the first 19
     failed on the pre-change tree)
+  - **THE ENQUIRY'S ANSWER SAYS WHAT IT IS ABOUT (G4).** `retire-quote`'s
+    answers named nothing — no order, no reference — and `quote_still_valid` is
+    the answer that leads to SUBMITTING an order, so a client had no way to
+    establish that a 200 in its hand was the reply to the enquiry it sent and a
+    late or misrouted one read exactly like the right one. D04 closed that for
+    acceptance answers and the enquiry was left behind. Every answer that states
+    an `outcome` or a `reason` now carries `order`, the caller's `quote_ref` and
+    `quote_protocol`. It is CORRELATION, NOT AUTHORIZATION — the caller has
+    already established it may act on this order, and it discloses only what that
+    caller just named. **THE OPAQUE 404 IS NEVER STAMPED**, and the rule is
+    STRUCTURAL rather than a status list: a body stating no `outcome` and no
+    `reason` has said nothing about a quote, so there is nothing for it to be
+    about — naming an order inside the channel's non-disclosing refusal would
+    turn it into the existence oracle it exists not to be. The echoed
+    `quote_ref` is what the CALLER named and can legitimately differ from
+    `quote_closure.quote_ref`, which names what the server really retired; both
+    are true and they are deliberately not collapsed
   - COST: submit **12 → 14** (the closure read plus ONE catalogue statement,
     flat in the size of the order); a REPLAY is unchanged at **7**, returning at
     the evidence read before any of this; the create path is unchanged, since the
