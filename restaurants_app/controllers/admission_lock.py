@@ -36,24 +36,48 @@ by the COMMIT or ROLLBACK that ends the caller's transaction, with nothing to
 remember to unlock.
 
 LOCK ORDER — this lock is a single TOP level, taken before any row lock, so the
-ordering across the four transactions that take it stays acyclic by construction:
+ordering across every transaction that takes it stays acyclic by construction:
 
     order create           SHARED    -> Table -> Counter -> Order -> OrderItem
     order submit           SHARED    -> Table -> Order
+    retire-for-review      SHARED    -> Table -> Order
     lifecycle transition   EXCLUSIVE -> Restaurant -> AdminAuditLog
     test classification    EXCLUSIVE -> Restaurant -> AdminAuditLog
+    restaurants PUT        EXCLUSIVE -> Restaurant
+    menu PUT / DELETE      EXCLUSIVE -> MenuSection | SectionGroup | MenuItem
+    kitchen 86 (in_stock)  EXCLUSIVE -> MenuItem
+    tag rename / delete    EXCLUSIVE -> RestaurantTag (-> MenuItemTag cascade)
 
 Take it FIRST or not at all. A transaction that takes a row lock and then reaches
-for this one reintroduces the cycle this ordering exists to prevent.
+for this one reintroduces the cycle this ordering exists to prevent. A caller
+holding locks for SEVERAL restaurants takes every advisory lock it needs up
+front, in a deterministic (sorted) order — see ``catalogue_admission``.
 
-The fourth entry is ``manage.py mark_restaurant_test``, the operator command that
-writes ``Restaurant.is_test``. It takes the same locks in the same order as the
+``manage.py mark_restaurant_test``, the operator command that writes
+``Restaurant.is_test``, takes the same locks in the same order as the
 transition, so it joins an ordering already proven acyclic rather than adding a
 level. It needs the lock for the same reason the transition does and for a reason
 worth stating plainly, because the row lock beside it looks sufficient and is not:
 ``order_admission.admit`` reads ``is_test`` with a PLAIN ``values_list().get()``,
 never a ``select_for_update``, so under MVCC that read does not block on a row held
 FOR UPDATE. The advisory lock is the only thing the two transactions share.
+
+THE LAST FOUR ENTRIES ARE THE D06 COMPLETION (G1a), and they exist because D06
+changed what an admission READS. Until then this lock guarded three
+restaurant-level columns; ``purchase_integrity`` made acceptance re-read the
+CATALOGUE, so a menu edit became something an admission reads and the two
+transactions once again shared nothing. ``retire-for-review`` joined on the
+SHARED side for the sharper version of the same reason: it decides on the same
+catalogue facts and writes an irreversible closure from the result, so a stale
+read there destroys a quote that was never stale. It takes the lock for
+SYNCHRONISATION and still applies no admission POLICY — those are different
+questions and ``lock_admission_shared`` / ``order_admission.admit`` are
+deliberately different functions.
+
+WHICH CATALOGUE WRITERS ARE IN, AND WHICH ARE OUT WITH REASONS, is an inventory
+with a test per exemption: ``restaurants_app/tests_catalogue_admission.py``
+(CATALOGUE-ADMISSION-00). A module that starts taking this lock without being
+named there fails that scan.
 
 KEEP THAT TABLE EXHAUSTIVE — it has been wrong before. Delegation redemption used to
 take an undeclared EXCLUSIVE lock on a ``Restaurant`` row — and on a ``User`` row —

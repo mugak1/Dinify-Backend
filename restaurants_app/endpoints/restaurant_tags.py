@@ -33,6 +33,9 @@ from dinify_backend.configss.edit_information import EI_RESTAURANT_TAG
 from dinify_backend.configss.string_definitions import MODULE_MENU
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from misc_app.controllers.secretary import Secretary
+from restaurants_app.controllers.catalogue_admission import (
+    lock_catalogue_for_write,
+)
 from restaurants_app.models import Restaurant, RestaurantTag
 from restaurants_app.serializers import SerializerRestaurantTag
 from users_app.controllers.permissions_check import can_user_access_module
@@ -178,7 +181,15 @@ class RestaurantTagDetailEndpoint(APIView):
             # exact row so it can never resolve a foreign tag from a spoofed id.
             'instance_queryset': RestaurantTag.objects.filter(pk=tag.pk),
         }
-        response = Secretary(secretary_args).update()
+        # THE ADMISSION BARRIER, FIRST (D06 G1a). A tag's NAME is what an order
+        # line's allergen snapshot is compared against at acceptance, and that
+        # one declaration is compared BY VALUE precisely because its silent
+        # change is dangerous rather than untidy. Renaming a tag mid-service
+        # therefore changes an eligibility fact, and without this lock the rename
+        # could commit between an acceptance's catalogue read and its transition.
+        with transaction.atomic():
+            lock_catalogue_for_write(tag.restaurant_id)
+            response = Secretary(secretary_args).update()
 
         if response.get('status') == 200:
             tag.refresh_from_db()
@@ -205,7 +216,15 @@ class RestaurantTagDetailEndpoint(APIView):
         # Hard delete so dependent MenuItemTag rows cascade away. The
         # legacy soft-delete pattern is intentionally not used here:
         # frontend filters expect the catalog row to disappear.
-        tag.delete()
+        #
+        # UNDER THE ADMISSION BARRIER (D06 G1a): the cascade REMOVES allergen
+        # labels from every item carrying this tag, which is the same declared
+        # set acceptance compares. A delete landing inside an acceptance's
+        # decision would send a ticket to a kitchen describing allergens the
+        # restaurant no longer declares.
+        with transaction.atomic():
+            lock_catalogue_for_write(tag.restaurant_id)
+            tag.delete()
         return Response({
             'status': 200,
             'message': 'Restaurant tag deleted successfully',

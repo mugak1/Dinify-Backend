@@ -5,8 +5,8 @@ Refactoring needed to make it more maintainable.
 import ast
 import logging
 from django.db import transaction
-from restaurants_app.controllers.admission_lock import (
-    lock_admission_exclusive,
+from restaurants_app.controllers.catalogue_admission import (
+    lock_catalogue_for_write,
 )
 from django.db.models import Max
 from rest_framework.response import Response
@@ -240,6 +240,24 @@ _RECORD_MODULE = {
     'tables':        MODULE_TABLES,
     'diningareas':   MODULE_TABLES,
 }
+
+
+#: The records whose WRITES an order admission reads, and which therefore take
+#: the exclusive admission barrier. `restaurants` is the pause writer
+#: (`accepting_orders`); the three menu records are what `purchase_integrity`
+#: re-reads at acceptance. CREATE is deliberately absent: a row that does not
+#: exist yet cannot be named by a saved quote line, so creating one changes no
+#: verdict — and it is where `Secretary.create()`'s one SYNCHRONOUS MongoDB
+#: notification lives, which must never sit inside this lock.
+_ADMISSION_BARRIER_RECORDS = frozenset({
+    'restaurants', 'menusections', 'sectiongroups', 'menuitems',
+})
+
+#: The catalogue records whose DELETE runs its blocker and its soft-delete under
+#: one transaction and one barrier.
+_CATALOGUE_DELETE_BLOCKERS = frozenset({
+    'menusections', 'sectiongroups', 'menuitems',
+})
 
 
 def check_permission(user, record: str, action: str, request_data) -> bool:
@@ -1307,12 +1325,22 @@ class RestaurantSetupEndpoint(APIView):
         # adding a level. Taking it AFTER the row lock would invert that ordering
         # and reintroduce the cycle it exists to prevent.
         #
-        # SCOPED TO `restaurants` ONLY. Every other record this endpoint writes
-        # (tables, menu, employees) is serialized by its own row lock or its own
-        # barrier, and taking a per-restaurant exclusive lock for a menu-item
-        # rename would queue every diner order at the restaurant behind an edit
-        # that no admission reads.
-        if config_detail == 'restaurants':
+        # THE MENU RECORDS JOINED IT IN THE D06 COMPLETION (G1a), AND THE
+        # SENTENCE THAT USED TO SIT HERE IS WHY THEY HAD TO. It read: "taking a
+        # per-restaurant exclusive lock for a menu-item rename would queue every
+        # diner order at the restaurant behind an edit that no admission reads."
+        # True when admission read three restaurant columns; FALSE the moment
+        # D06's own `purchase_integrity` made acceptance re-read the catalogue,
+        # which happened in the same change. An edit committing after that read
+        # and before the transition put an order on a kitchen board against a
+        # dish that had just been withdrawn.
+        #
+        # `tables` and `employees` stay out, and still for their own reasons:
+        # both order boundaries take the `Table` row `FOR UPDATE`, and a
+        # membership write takes the parent-`Restaurant` barrier. Neither needs
+        # this lock, and a record that changes nothing an admission reads must
+        # not take it — see `catalogue_admission` for the field inventory.
+        if config_detail in _ADMISSION_BARRIER_RECORDS:
             admission_target = _resolve_target_restaurant_id(
                 config_detail, 'update', put_data)
             with transaction.atomic():
@@ -1322,8 +1350,7 @@ class RestaurantSetupEndpoint(APIView):
                 # the permission gate above has already refused — but the lock is
                 # skipped rather than guessed at, and Secretary's scoped queryset
                 # is what answers.
-                if admission_target:
-                    lock_admission_exclusive(admission_target)
+                lock_catalogue_for_write(admission_target)
                 response = Secretary(secretary_args).update()
         else:
             response = Secretary(secretary_args).update()
@@ -1396,21 +1423,16 @@ class RestaurantSetupEndpoint(APIView):
             return self._delete_table(
                 request, auth, data, serializer[config_detail],
             )
-        elif config_detail == 'menuitems':
-            item = MenuItem.objects.filter(id=data.get('id')).first()
-            blocker = item.deletion_blockers() if item else None
-            if blocker:
-                return Response({'status': 409, 'message': blocker}, status=409)
-        elif config_detail == 'menusections':
-            section = MenuSection.objects.filter(id=data.get('id')).first()
-            blocker = section.deletion_blockers() if section else None
-            if blocker:
-                return Response({'status': 409, 'message': blocker}, status=409)
-        elif config_detail == 'sectiongroups':
-            group = SectionGroup.objects.filter(id=data.get('id')).first()
-            blocker = group.deletion_blockers() if group else None
-            if blocker:
-                return Response({'status': 409, 'message': blocker}, status=409)
+        # A CATALOGUE SOFT-DELETE IS AN ELIGIBILITY WRITE, so it takes the
+        # admission barrier and decides its blocker under it (D06 G1a) — the
+        # same treatment `_delete_table` already gives the tables branch, and
+        # for the same reason: reading the blocker in autocommit and then
+        # handing off to a transaction Secretary opens leaves a window an
+        # acceptance can commit in.
+        if config_detail in _CATALOGUE_DELETE_BLOCKERS:
+            return self._delete_catalogue_record(
+                request, auth, data, serializer[config_detail], config_detail,
+            )
 
         # A membership soft-delete changes the owner-consistency predicate, so it
         # runs under the parent-Restaurant barrier in its own branch.
@@ -1431,21 +1453,62 @@ class RestaurantSetupEndpoint(APIView):
                 request.user, config_detail, serializer[config_detail].Meta.model,
             ),
         }
-        # The menu-item soft-delete runs the referenced-extra lifecycle guard inside
-        # SerializerPutMenuItem.validate(), which takes a select_for_update row lock —
-        # so it MUST execute in a transaction (the generic Secretary.delete() is not
-        # transactional). Scoping one here also serialises a concurrent delete-extra
-        # vs assign-extra on the extra's own row, closing that race.
-        if config_detail == 'menuitems':
-            with transaction.atomic():
-                response = Secretary(secretary_args).delete()
-        else:
-            response = Secretary(secretary_args).delete()
+        response = Secretary(secretary_args).delete()
 
         return Response(
             response,
             status=response['status']
         )
+
+    def _delete_catalogue_record(self, request, auth, data, write_serializer,
+                                 config_detail):
+        """Soft-delete a menu record under the admission barrier.
+
+        THE BARRIER IS THE FIRST STATEMENT of the transaction, before the
+        blocker read and before Secretary takes its row — the documented
+        ``advisory -> rows`` order. Taking it after a row lock would invert that
+        ordering; taking it after the blocker read would leave the very window
+        this branch exists to close.
+
+        The blocker itself now runs INSIDE the transaction. It used to be read
+        in autocommit while Secretary opened its own, so a delete could be
+        allowed on evidence that had already changed — the defect D06 fixed for
+        tables and did not carry across to the menu.
+
+        The menu-item soft-delete additionally runs the referenced-extra
+        lifecycle guard inside ``SerializerPutMenuItem.validate()``, which takes
+        a ``select_for_update`` row lock and so must execute in a transaction;
+        that requirement is unchanged and is now satisfied for all three
+        records rather than one.
+        """
+        model = {
+            'menuitems': MenuItem,
+            'menusections': MenuSection,
+            'sectiongroups': SectionGroup,
+        }[config_detail]
+
+        with transaction.atomic():
+            lock_catalogue_for_write(
+                _resolve_target_restaurant_id(config_detail, 'delete', data))
+
+            record = model.objects.filter(id=data.get('id')).first()
+            blocker = record.deletion_blockers() if record else None
+            if blocker:
+                return Response({'status': 409, 'message': blocker}, status=409)
+
+            secretary_args = {
+                'serializer': write_serializer,
+                'data': data,
+                'user_id': auth['id'],
+                'username': auth['username'],
+                'user': request.user,
+                'instance_queryset': build_scoped_instance_queryset(
+                    request.user, config_detail, write_serializer.Meta.model,
+                ),
+            }
+            response = Secretary(secretary_args).delete()
+
+        return Response(response, status=response['status'])
 
     def get_detail(self, request):
         try:

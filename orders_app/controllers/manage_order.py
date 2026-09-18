@@ -866,11 +866,26 @@ def retire_quote_for_review(order: Order,
     asymmetry the admin owner-invitation cancel already draws: a restaurant that
     has PAUSED is exactly when a client most needs to be able to establish that
     its held quote is dead. It therefore consults no admission verdict and no
-    operational rule, takes no admission advisory lock, and changes no order
-    status: a retired draft stays an ``initiated`` draft, still the diner's,
-    still readable. ``accepting_orders``, a suspension, an offboarding and a
-    soft-deleted restaurant all leave the diner's table session live, so this
-    route is reachable through every one of them.
+    operational rule, and changes no order status: a retired draft stays an
+    ``initiated`` draft, still the diner's, still readable. ``accepting_orders``,
+    a suspension, an offboarding and a soft-deleted restaurant all leave the
+    diner's table session live, so this route is reachable through every one of
+    them.
+
+    **IT DOES TAKE THE ADMISSION LOCK SHARED, AND THAT IS NOT A CONTRADICTION**
+    (D06 completion, G1a). An earlier draft of this docstring said it "takes no
+    admission advisory lock", which conflated two different things the module
+    keeps apart on purpose: ``lock_admission_shared`` is SYNCHRONISATION —
+    hold this restaurant's admission-relevant state steady for the rest of this
+    transaction — while ``order_admission.admit`` is POLICY, the question of
+    whether NEW work may be admitted. This route asks the second question of
+    nobody and still needs the first, because it runs the very same purchase
+    integrity check acceptance runs, and it writes something acceptance does not:
+    a CLOSURE, which is irreversible. A catalogue edit committing inside that
+    decision would retire a diner's perfectly good quote on the strength of a
+    read that was already stale — the worst version of this race, since an
+    acceptance racing the same edit merely sends the order back for review.
+    Shared, so it never blocks an order and never blocks another retirement.
 
     **AN UNAVAILABLE TABLE IS THE ONE CASE IT CANNOT ANSWER, AND THAT IS THE
     CHANNEL'S RULE RATHER THAN AN OVERSIGHT.** A diner reaches this route through
@@ -896,21 +911,27 @@ def retire_quote_for_review(order: Order,
     trip that did not answer — it surfaces a retry and never submits — which is
     the honest outcome. Pinned by ``RetiringAtAnUnavailableTableTests``.
 
-    LOCK ORDER: ``Table -> Order``, the tail of acceptance's
-    ``advisory -> Table -> Order`` — the same shape a kitchen command takes, and
-    for the same reason. The advisory lock governs whether NEW work may be
-    admitted; retiring a quote admits nothing. Taking the two rows in the
-    established order is what makes an acceptance and a retirement racing for one
-    draft resolve in the database rather than by arrival: whichever holds the
-    ``Order`` row first wins, and the loser reads what the winner committed.
+    LOCK ORDER: ``advisory SHARED -> Table -> Order`` — acceptance's order
+    exactly, which is what lets this join an ordering already proven acyclic
+    rather than adding one. Taking the two rows in the established order is what
+    makes an acceptance and a retirement racing for one draft resolve in the
+    database rather than by arrival: whichever holds the ``Order`` row first
+    wins, and the loser reads what the winner committed.
     """
     from restaurants_app.models import Table
     from restaurants_app.controllers import diner_capability
     from restaurants_app.controllers.diner_capability import DinerCapabilityError
     from orders_app.controllers.services import quote_closure
     from orders_app.controllers.services import quote_policy
+    from restaurants_app.controllers.admission_lock import lock_admission_shared
 
     with transaction.atomic():
+        # SYNCHRONISATION, NOT POLICY, and FIRST — before either row lock, which
+        # is the documented `advisory -> rows` order. See the docstring: this
+        # route decides on the same catalogue facts acceptance decides on, and
+        # writes an irreversible closure from that decision.
+        lock_admission_shared(order.restaurant_id)
+
         locked_table = None
         if order.table_id is not None:
             locked_table = (

@@ -366,19 +366,37 @@ class KitchenMenuItemStockView(APIView):
                 status=403,
             )
 
-        if 'in_stock' in request.data:
-            item.in_stock = bool(request.data.get('in_stock'))
-        else:
-            item.in_stock = not item.in_stock
-
         # ONE transaction for the write and its audit. This is one of the two tenant
         # writes a delegated administrator can reach, and the audit used to be written
         # by the middleware after this view had already returned — too late to unwind
         # anything. Recording it here means a failed audit rolls the toggle back.
         # A no-op for ordinary staff: the helper returns False and writes nothing.
         from platform_admin_app.delegated_audit import audit_delegated_write
+        from restaurants_app.controllers.catalogue_admission import (
+            lock_catalogue_for_write,
+        )
 
         with transaction.atomic():
+            # THE ADMISSION BARRIER, FIRST (D06 G1a). `in_stock` is read at
+            # acceptance — a line that is sold out sends the whole order back for
+            # review rather than being silently zeroed — so an 86 committing
+            # between an acceptance's catalogue read and its transition put a
+            # dish the kitchen had just run out of onto the kitchen's own board.
+            lock_catalogue_for_write(item.section.restaurant_id)
+
+            # RE-READ UNDER THE LOCK, because the ABSENT-value branch below
+            # derives the new value from the old one. `item` was resolved in
+            # autocommit, so two boards toggling at once would both read the
+            # same state and the second would undo the first without either
+            # being told. The explicit branch does not need it and is harmless
+            # either way; asking once keeps the two on one path.
+            item = MenuItem.objects.select_for_update().get(pk=item.pk)
+
+            if 'in_stock' in request.data:
+                item.in_stock = bool(request.data.get('in_stock'))
+            else:
+                item.in_stock = not item.in_stock
+
             item.save(update_fields=['in_stock', 'time_last_updated'])
             audit_delegated_write(request, after_state={
                 'resource': 'MenuItem',
