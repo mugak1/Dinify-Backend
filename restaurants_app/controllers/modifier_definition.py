@@ -402,9 +402,77 @@ def group_display_name(group):
     return group.raw.get('name')
 
 
+def _label_text(value):
+    """One stored label as TEXT, total over every JSON value.
+
+    `MenuItem.options` is an unvalidated `JSONField`, so a label can be `null`,
+    a number, a list or a mapping, and NOTHING upstream refuses it —
+    `inspect_modifier_definition` reads ids and bounds and never looks at a
+    name. `', '.join(...)` over a non-string therefore raised `TypeError`
+    straight out of checkout and, since G2-B, out of acceptance and
+    `retire-quote` as well: a 500 in place of the controlled
+    `purchase_needs_review` this module exists to produce (Codex P2 on #323).
+
+    IT STRINGIFIES RATHER THAN INVALIDATING, and the asymmetry it removes is
+    the argument. The GROUP side already renders any value through an f-string,
+    so a null group name has always produced `'None'`; only the choice side
+    crashed. A label is not STRUCTURAL — it changes nothing about which ids
+    resolve — so failing the line closed would make a catalogue with a numeric
+    label unsellable rather than merely oddly labelled, which is not the
+    direction D01 chose for unreadable-but-resolvable definitions.
+
+    AN ABSENT NAME STAYS `''`, deliberately: that is the established rendering
+    and a test pins a blanked label as a CHANGE. Nothing here invents a
+    fallback label from an id.
+
+    A changed label of any type is still caught by the comparison, because both
+    producers go through this one function — so the derived text moves exactly
+    when the stored text would have.
+    """
+    return value if isinstance(value, str) else f'{value}'
+
+
 def choices_display(choices):
     """The selected choices' labels, joined as the order snapshot joins them."""
-    return ', '.join(choice.get('name', '') for choice in choices)
+    return ', '.join(
+        _label_text(choice['name']) if 'name' in choice else ''
+        for choice in choices
+    )
+
+
+def meaning_matches(derived, stored):
+    """Do a re-derived meaning and a stored snapshot SAY the same thing?
+
+    ORDER-INDEPENDENT AT THE GROUP LEVEL, and that is a correctness rule rather
+    than a tolerance (Codex P1 on #323).
+
+    `OrderItem.selected_modifiers` is a `JSONField`, which is **jsonb** on
+    PostgreSQL, and jsonb does NOT preserve an object's key order — it stores
+    keys sorted by length and then bytewise. A selection written in
+    menu-definition order comes back in jsonb's order, so `selection_meaning`,
+    which visits groups in the order the SELECTION names them, produces the
+    right labels in a different sequence. `modifiers_snapshot` is a jsonb
+    ARRAY, where order IS preserved. Comparing the two directly therefore put a
+    list ordered by the reloaded mapping beside one ordered at creation, and for
+    a line naming two or more groups they agreed only by luck — classifying an
+    UNCHANGED purchase as changed and, because that reason is TERMINAL,
+    permanently closing a quote nobody touched.
+
+    NEITHER ITERATION ORDER IS THE FIX. Visiting the DEFINITION's groups instead
+    would break the approved decision table's "a reorder -> accept": an operator
+    who merely reorders the groups would move the derived list and refuse the
+    order. Comparing as MULTISETS satisfies both — a jsonb reorder and a
+    catalogue reorder are each accepted, while a relabel still changes an
+    element and is refused.
+
+    A PURE PERMUTATION IS ACCEPTED, and that is the same rule stated once more:
+    the snapshot is the set of instructions a kitchen ticket renders, and the
+    sequence of those lines is not itself an instruction.
+
+    Ordering WITHIN a group is untouched and needs no rule — a group's choices
+    are a JSON ARRAY, which jsonb preserves.
+    """
+    return sorted(derived or []) == sorted(stored or [])
 
 
 def selection_meaning(verdict, selected_modifiers):

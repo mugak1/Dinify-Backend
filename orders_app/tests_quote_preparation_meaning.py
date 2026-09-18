@@ -322,3 +322,198 @@ class TheStructuralRulesStillApplyFirstTests(PreparationMeaningFixture):
         order = self._ordered()
         self._redefine({'hasModifiers': True, 'groups': 'not-a-list'})
         self._assert_needs_review(order)
+
+
+class TheComparisonSurvivesTheDatabaseRoundTripTests(QuoteFixtureMixin, TestCase):
+    """Codex P1 on PR #323, and a defect every other test in this file is
+    structurally unable to see.
+
+    `OrderItem.selected_modifiers` is a Django `JSONField`, which is **jsonb**
+    on PostgreSQL — and jsonb does NOT preserve an object's key order. It
+    stores keys sorted by length and then bytewise, so a selection WRITTEN as
+    `{'g-size': [...], 'g-a': [...]}` is READ BACK as
+    `{'g-a': [...], 'g-size': [...]}`. Measured on the cluster, not assumed.
+
+    `modifiers_snapshot` is a jsonb ARRAY, and arrays DO keep their order. So
+    `selection_meaning(...) != row.modifiers_snapshot` put a list whose order
+    came from the RELOADED MAPPING beside a list whose order was fixed at
+    CREATION — and for a line naming two or more groups those agree only by
+    luck.
+
+    The consequence is the worst one available here: an UNCHANGED purchase is
+    classified `purchase_needs_review`, which is a TERMINAL reason, so the
+    quote is permanently CLOSED and the diner is sent to re-price an order
+    nobody touched. A false negative would merely let an edit through; this is
+    a false POSITIVE on an irreversible write.
+
+    Why the existing coverage misses it: `TheTwoProducersAgreeByConstruction`
+    compares the two producers IN MEMORY from one Python dict, which keeps
+    insertion order, and every other case here selects a SINGLE group, where
+    one ordering cannot differ from another.
+    """
+
+    #: Menu-definition order is `g-size` then `g-a`; jsonb returns the SHORTER
+    #: key first, so the reloaded mapping is `g-a` then `g-size`. Two groups is
+    #: the smallest case that can disagree.
+    SELECTION = {'g-size': ['c-large'], 'g-a': ['c-x']}
+
+    SECOND_GROUP = {
+        'id': 'g-a',
+        'name': 'Heat',
+        'minSelections': 1,
+        'maxSelections': 1,
+        'choices': [{'id': 'c-x', 'name': 'Mild', 'additionalCost': 0}],
+    }
+
+    def setUp(self):
+        super().setUp()
+        MenuItem.objects.filter(pk=self.item.pk).update(
+            options=_options(extra_group=self.SECOND_GROUP))
+        self.item.refresh_from_db()
+
+    def _ordered(self):
+        return self._draft_order(items=[{
+            'item': str(self.item.pk), 'quantity': 1,
+            'selected_modifiers': dict(self.SELECTION),
+        }])
+
+    def test_THE_PREMISE_the_database_really_reorders_the_keys(self):
+        """Stated first so a failure below reads as what it is.
+
+        If this ever stops holding — a different backend, or the column moving
+        to `json` — the test underneath stops discriminating and should be
+        re-derived rather than deleted.
+        """
+        order = self._ordered()
+        row = OrderItem.objects.get(order=order, parent_item__isnull=True)
+
+        self.assertEqual(
+            sorted(row.selected_modifiers), ['g-a', 'g-size'],
+            'both groups were saved')
+        self.assertEqual(
+            list(row.selected_modifiers), ['g-a', 'g-size'],
+            'jsonb hands the SHORTER key back first, whatever order it was '
+            'written in')
+
+    def test_an_UNCHANGED_two_group_purchase_is_still_acceptable(self):
+        """THE REGRESSION. Nothing about the catalogue moves between the draft
+        and the acceptance — the only thing that changed is which process read
+        the mapping back."""
+        order = self._ordered()
+
+        result = self._submit(order)
+
+        self.assertEqual(
+            result.get('status'), 200,
+            'an untouched two-group order was refused: %r' % (result,))
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, OrderStatus_Pending)
+        self.assertFalse(
+            OrderQuoteClosure.objects.filter(order=order).exists(),
+            'and its quote must not have been permanently closed')
+
+    def test_CONTROL_a_relabelled_choice_in_a_two_group_line_is_still_caught(self):
+        """The comparison must survive the fix, not be loosened by it."""
+        order = self._ordered()
+        MenuItem.objects.filter(pk=self.item.pk).update(
+            options=_options(
+                size_choices=[
+                    {'id': 'c-large', 'name': 'Extra chilli', 'additionalCost': 0},
+                    {'id': 'c-small', 'name': 'Small', 'additionalCost': 0},
+                ],
+                extra_group=self.SECOND_GROUP,
+            ))
+
+        result = self._submit(order)
+
+        self.assertEqual(result.get('status'), 400, result)
+        self.assertEqual(result.get('reason'), REASON_PURCHASE_NEEDS_REVIEW)
+
+
+class ALabelOfAnyTypeIsTextNotACrashTests(PreparationMeaningFixture):
+    """Codex P2 on PR #323.
+
+    `MenuItem.options` is an unvalidated `JSONField` and `inspect_modifier_
+    definition` reads ids and bounds only — it never looks at a label. So a
+    choice name can be `null`, a number, a list or a mapping, and
+    `', '.join(...)` over one raised `TypeError` straight out of the request:
+    a 500 where this module's whole contract is a controlled refusal.
+
+    G2-B made it reachable on the ACCEPTANCE and `retire-quote` paths; it was
+    already reachable at CHECKOUT, because both producers call the one shared
+    `choices_display`. Fixing that helper closes both, which is the payoff of
+    their being shared rather than parallel.
+
+    THE ANSWER IS "the text changed", NOT "the definition is invalid". A label
+    is not structural — it changes nothing about which ids resolve — and
+    failing the line closed would make a catalogue with a numeric label
+    unsellable rather than merely oddly labelled.
+    """
+
+    def _relabel(self, name):
+        self._redefine(_options(size_choices=[
+            {'id': 'c-large', 'name': name, 'additionalCost': 0},
+            {'id': 'c-small', 'name': 'Small', 'additionalCost': 0},
+        ]))
+
+    def test_a_NULL_label_is_a_controlled_refusal_not_a_500(self):
+        order = self._ordered()
+        self._relabel(None)
+
+        result = self._submit(order)          # must not raise
+
+        self.assertEqual(result.get('status'), 400, result)
+        self.assertEqual(result.get('reason'), REASON_PURCHASE_NEEDS_REVIEW)
+
+    def test_a_NUMERIC_label_is_a_controlled_refusal_not_a_500(self):
+        order = self._ordered()
+        self._relabel(5)
+
+        result = self._submit(order)
+
+        self.assertEqual(result.get('status'), 400, result)
+        self.assertEqual(result.get('reason'), REASON_PURCHASE_NEEDS_REVIEW)
+
+    def test_a_STRUCTURED_label_is_a_controlled_refusal_not_a_500(self):
+        order = self._ordered()
+        self._relabel({'en': 'Large'})
+
+        result = self._submit(order)
+
+        self.assertEqual(result.get('status'), 400, result)
+        self.assertEqual(result.get('reason'), REASON_PURCHASE_NEEDS_REVIEW)
+
+    def test_CHECKOUT_survives_one_too_and_records_the_text(self):
+        """The creation half. A dish whose label was already a non-string used
+        to 500 the diner's checkout; it now prices and records the rendering."""
+        self._relabel(None)
+
+        order = self._ordered()
+
+        row = OrderItem.objects.get(order=order, parent_item__isnull=True)
+        self.assertEqual(row.modifiers_snapshot, ['Size: None'])
+
+    def test_AND_SUCH_AN_ORDER_IS_STILL_ACCEPTABLE(self):
+        """Both producers went through the one formatter, so an untouched order
+        whose label was always a non-string still agrees with itself."""
+        self._relabel(None)
+        order = self._ordered()
+
+        result = self._submit(order)
+
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertFalse(OrderQuoteClosure.objects.filter(order=order).exists())
+
+    def test_CONTROL_an_absent_name_still_renders_as_blank(self):
+        """Unchanged behaviour, and deliberately NOT folded into the
+        stringification: an absent label and an explicit null are different
+        facts about the catalogue."""
+        self._redefine(_options(size_choices=[
+            {'id': 'c-large', 'additionalCost': 0},
+            {'id': 'c-small', 'name': 'Small', 'additionalCost': 0},
+        ]))
+
+        order = self._ordered()
+
+        row = OrderItem.objects.get(order=order, parent_item__isnull=True)
+        self.assertEqual(row.modifiers_snapshot, ['Size: '])

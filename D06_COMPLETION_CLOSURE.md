@@ -171,6 +171,41 @@ the one reading, shared by `option_breakdown` and the integrity check, and the
 comparison is against the saved `modifiers_snapshot`. It reads NO money: D02
 owns pricing and this is a statement about preparation.
 
+**(B) took two corrections in review, both Codex findings on #323 and both
+valid.**
+
+*The comparison is a MULTISET, not a sequence* (P1). `OrderItem.selected_
+modifiers` is a `JSONField`, which is **jsonb** on PostgreSQL, and jsonb does
+not preserve an object's key order — it stores keys sorted by length then
+bytewise, measured on the cluster rather than assumed. `selection_meaning`
+visits groups in the order the SELECTION names them, so a line saved in
+menu-definition order was re-derived in jsonb's order, while `modifiers_
+snapshot` is a jsonb ARRAY whose order IS preserved. For a line naming two or
+more groups the two agreed only by luck, and a disagreement classifies an
+UNCHANGED purchase `purchase_needs_review` — a TERMINAL reason, so the quote is
+permanently CLOSED. **Neither iteration order is the fix**: visiting the
+DEFINITION's groups instead would break the decision table's "a reorder ->
+accept". `meaning_matches` compares as multisets, so a jsonb reorder and a
+catalogue reorder are both accepted while a relabel still changes an element.
+Every existing test missed it because they compare the two producers IN MEMORY
+from one Python dict, or select a single group.
+
+*A label of any type is TEXT, not a crash* (P2). `options` is unvalidated and
+`inspect_modifier_definition` never reads a name, so a label set to `null`, a
+number or a mapping reached `', '.join(...)` and raised `TypeError` — a 500
+where this module's whole contract is a controlled refusal. It stringifies
+rather than invalidating: a label is not structural, and failing the line closed
+would make a catalogue with a numeric label unsellable rather than oddly
+labelled. Both producers call the one `choices_display`, so the fix closes the
+checkout path as well as acceptance — the payoff of their being shared rather
+than parallel. An ABSENT name still renders `''`, which an explicit null must
+not be folded into.
+
+Pinned by nine tests in `tests_quote_preparation_meaning.py`. Under mutation the
+order fix fails exactly 1 of 27 (the regression, every control holding) and the
+label fix fails 5 of 6, the sixth being the absent-name control that must not
+change.
+
 **(C) The staff exemption and non-monetary eligibility.** `item_orderable`
 conflated publication with priceability, so the staff parent-publication
 exemption could not be expressed without also exempting the price.

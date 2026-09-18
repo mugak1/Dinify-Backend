@@ -118,7 +118,7 @@ from restaurants_app.controllers.menu_publication import (
     extra_publishable,
 )
 from restaurants_app.controllers.modifier_definition import (
-    inspect_modifier_definition, selection_meaning,
+    inspect_modifier_definition, meaning_matches, selection_meaning,
 )
 from orders_app.controllers.services.catalogue_snapshot import build_snapshot
 
@@ -267,7 +267,11 @@ def _check_selection(row, menu_item):
         # named group and choice. Kept because a resolver that cannot answer
         # must never be read as agreement.
         return CLASS_MODIFIERS_INVALID
-    if meaning != list(row.modifiers_snapshot or []):
+    # COMPARED AS A MULTISET, NOT AS A SEQUENCE. `selected_modifiers` is jsonb,
+    # which does not preserve an object's key order, so the derived list is
+    # ordered by whatever the database handed back while the snapshot is
+    # ordered by creation — see `meaning_matches`, which owns that reasoning.
+    if not meaning_matches(meaning, row.modifiers_snapshot):
         return CLASS_SELECTION_MEANING_CHANGED
 
     return None
