@@ -554,7 +554,12 @@ class IntentBindingCostsTwoFlatQueriesTests(OrderPathBase):
     def test_a_matched_replay_costs_one_select(self):
         """Recovery has to be cheap or a client cannot use it. A replay takes
         the step-1 lookup and returns — no lock, no admission, no snapshot, no
-        counter, no INSERT."""
+        counter, no INSERT.
+
+        A1 ADDED AN AUTHORIZATION CHECK BEFORE THE DISCLOSURE AND IT IS FREE
+        HERE. The table row it needs is read ONLY when a capability channel was
+        used; this caller presented none, so the check is a no-op and costs
+        nothing. The diner case is pinned separately below, at two."""
         key = uuid.uuid4()
         self.measure(self.lines(count=1), 0)              # warm
         self.measure(self.lines(count=1), 1, key)
@@ -574,3 +579,43 @@ class IntentBindingCostsTwoFlatQueriesTests(OrderPathBase):
         # the savepoint pair the outer atomic opens, and nothing else
         self.assertEqual(len(captured.captured_queries), 3,
                          [q['sql'][:90] for q in captured.captured_queries])
+
+    def test_a_DINER_replay_costs_exactly_one_more(self):
+        """A1(B) — AUTHORIZATION BEFORE DISCLOSURE, at one query.
+
+        A replay hands back an existing order and the closure recorded against
+        it, so the one thing that must still hold is that the caller may see
+        either. The table is re-read WITHOUT a lock: a plain statement takes its
+        own snapshot under READ COMMITTED and therefore sees a committed
+        regeneration, which is the whole question, and taking the lock to answer
+        it would make every recovery queue behind live ordering.
+
+        ONE, AND ONLY ON AN ACTUAL REPLAY. The hot create paths reach the table
+        row lock, where the same check is free.
+        """
+        from restaurants_app.controllers.diner_capability import (
+            capability_from_table,
+        )
+        key = uuid.uuid4()
+        table = self.tables[1]
+        capability = capability_from_table(table)
+        self.measure(self.lines(count=1), 0)              # warm
+        first = _create_order(
+            restaurant=self.restaurant, table=table,
+            items=self.lines(count=1), created_by=None,
+            client_order_id=key, capability=capability,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+
+        with CaptureQueriesContext(connection) as captured:
+            replay = _create_order(
+                restaurant=self.restaurant, table=table,
+                items=self.lines(count=1), created_by=None,
+                client_order_id=key, capability=capability,
+            )
+        self.assertTrue(replay['idempotent'], replay)
+        selects = [
+            q for q in captured.captured_queries
+            if q['sql'].lstrip().upper().startswith('SELECT')
+        ]
+        self.assertEqual(len(selects), 2, [q['sql'][:90] for q in selects])

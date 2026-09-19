@@ -37,6 +37,9 @@ from orders_app.controllers.services.order_input import (
     client_order_id_rejection, validate_order_items,
     validate_service_client_order_id,
 )
+from orders_app.controllers.services.order_authority import (
+    StaffAuthorityError, assert_authority_current,
+)
 from orders_app.controllers.services.order_intent import (
     REFUSALS, fingerprint, resolve_intent,
 )
@@ -208,9 +211,33 @@ def _insert_order(*, restaurant, table, customer, created_by, order_source,
     )
 
 
+def _table_row_now(table_pk):
+    """The table AS IT IS NOW, with no lock taken.
+
+    For the one question a replay needs answered — has the QR generation moved?
+    A plain statement takes its own snapshot under READ COMMITTED, so a
+    regeneration that has COMMITTED is visible; one committing a moment later is
+    not, and that is stated rather than claimed away, exactly as the acceptance
+    boundary states it about the point its own checks linearize at.
+
+    ``None`` when the row is gone, which `assert_capability_current` reads as a
+    revocation — correctly: a table a diner's session names and that no longer
+    exists is not a table they hold a session for.
+    """
+    from restaurants_app.models import Table
+    try:
+        return Table.objects.get(pk=table_pk)
+    except Exception:
+        # A missing row, a malformed pk — both mean "not a table this capability
+        # can still be current against". Narrow by construction: the only caller
+        # passes the pk of a row it already loaded.
+        return None
+
+
 def _create_order(*, restaurant, table, items,
                   customer=None, created_by=None,
-                  order_source=ORDER_SOURCE_DINER, client_order_id=None):
+                  order_source=ORDER_SOURCE_DINER, client_order_id=None,
+                  capability=None, authority=None):
     """
     Create an order (and its items) atomically.
 
@@ -220,6 +247,30 @@ def _create_order(*, restaurant, table, items,
     item chokepoint when any item/extra is rejected — in which case the WHOLE
     transaction has rolled back (no order, no items, no counter increment; see
     OrderItemRejected).
+
+    A1 — ``capability`` AND ``authority`` ARE THE AUTHORITY THIS REQUEST
+    PRESENTED, carried here so it can be RE-ASKED where the decision is made.
+
+    The acceptance boundary has done this since D06/G1b; creation had neither.
+    The endpoint resolves a diner's table session, or gates a staff caller on
+    the ``tables`` module, IN AUTOCOMMIT — and this transaction then waits for
+    the admission advisory lock and the table row. A QR regeneration, a
+    membership deactivated, a role removed or a restaurant leaving the
+    portal-access states committing inside that wait revokes exactly the
+    authority this request is still acting on, and nothing here noticed: the
+    draft was written, a daily ticket number was spent on it, and only the
+    acceptance boundary later refused it.
+
+    BOTH ARE CONTEXT, NOT AUTHORITY, and neither carries a credential. They are
+    conclusions a verifying step already drew, so re-checking them can only ever
+    REFUSE — never admit a request the door did not. ``None`` means that channel
+    was not used and the check is a no-op, so an in-process caller keeps exactly
+    the guarantees it had.
+
+    NOTHING HERE IS TAKEN FROM A REQUEST BODY. The capability's facts come from
+    the table a session resolved to; the authority names the principal the
+    endpoint authorized and the module it gated on, and its restaurant is
+    cross-checked against the row THIS service loaded before it is trusted.
     """
     # imported lazily to avoid a circular import (con_orders imports this module)
     from orders_app.controllers.con_orders import ConOrder
@@ -272,6 +323,55 @@ def _create_order(*, restaurant, table, items,
     #    purchase was different because the restaurant edited a dish.
     request_fingerprint = fingerprint(items)
 
+    # A1 — ONE RE-ASSERTION, ASKED AT EVERY POINT THAT DISCLOSES OR WRITES.
+    #
+    # Written once and called from three places rather than inlined at each,
+    # because that is exactly how an invariant ends up added to one branch and
+    # not the others — the lesson `_submit_order` records about its own pair of
+    # branches. It returns a refusal dict or `None`, so callers stay in this
+    # service's established plain-dict contract.
+    #
+    # THE ORDER IS CAPABILITY THEN STAFF, matching the acceptance boundary, so
+    # both channels linearize at one point wherever this is called. Each answers
+    # with ITS OWN non-disclosing 404 — the diner channel's, and the endpoint's
+    # — so a revocation landing mid-request is indistinguishable from a
+    # principal that never had access, and this cannot become an oracle.
+    def _authority_refusal(table_row):
+        # Imported here for the same reason the Table import below is: this
+        # module sits in the middle of the order import graph.
+        from restaurants_app.controllers import diner_capability
+        from restaurants_app.controllers.diner_capability import (
+            DinerCapabilityError,
+        )
+        # `table_row` MAY BE A CALLABLE, and is evaluated only when a capability
+        # channel was actually used. The row is needed by the capability half
+        # and by nothing else, so a caller that presented none — a staff request,
+        # or an in-process caller — must not pay a query for a check that is a
+        # no-op for it. That is what keeps the pinned replay budget where it was
+        # for everyone except the one caller the check is about.
+        if capability is not None:
+            row = table_row() if callable(table_row) else table_row
+            try:
+                diner_capability.assert_capability_current(capability, row)
+            except DinerCapabilityError as exc:
+                return {'status': exc.status, 'message': exc.message}
+        if authority is not None and str(authority.restaurant_id) != str(
+                restaurant.pk):
+            # A DEFENSIVE IDENTITY CHECK, the staff counterpart of the one
+            # `assert_capability_current` makes. The endpoint authorized a
+            # principal against ONE restaurant; this service loaded the
+            # restaurant it is about to create at. If the two are not the same
+            # row, the carried context is not about this order and re-asking the
+            # module gate would authorize the wrong thing. That is what makes
+            # the restaurant SERVER-DERIVED here rather than merely
+            # server-checked at the door.
+            return {'status': 404, 'message': 'Not found'}
+        try:
+            assert_authority_current(authority)
+        except StaffAuthorityError as exc:
+            return {'status': exc.status, 'message': exc.message}
+        return None
+
     # The try/except sits AROUND the atomic block (the same idiom as the two
     # nested savepoints inside it): OrderItemRejected must unwind through
     # atomic.__exit__ so the whole transaction rolls back BEFORE it is
@@ -300,6 +400,37 @@ def _create_order(*, restaurant, table, items,
                 for_update=True,
             )
             if verdict_intent.is_match:
+                # A1(B) — AUTHORIZATION BEFORE DISCLOSURE, and nothing else.
+                #
+                # A replay hands back an existing order AND (since G3a) the
+                # closure recorded against it. Authorization is the one thing
+                # that must still hold for that: a revoked session may not read
+                # an acceptance any more than it may create one, which is the
+                # rule `_submit_order` states about its own replay.
+                #
+                # IT IS ONLY AUTHORIZATION. A replay stays exempt from every
+                # NEW-ORDER business rule — the pause, menu-only ordering, an
+                # item that has since sold out, a quote that has since expired —
+                # because refusing an order that was already created and
+                # acknowledged on the strength of a rule about NEW work is the
+                # retroactive refusal D04 exists to stop. That is why this is
+                # here and the admission verdict is not.
+                #
+                # THE TABLE IS RE-READ WITHOUT A LOCK, deliberately. This return
+                # is before step 1b on purpose, so a replay never waits on the
+                # table row or takes the advisory lock; a plain statement takes
+                # its own snapshot under READ COMMITTED and therefore sees any
+                # committed revocation, which is the whole question. Taking the
+                # lock here to answer it would invert nothing but would make
+                # every recovery queue behind live ordering.
+                #
+                # IT COSTS ONE QUERY, AND ONLY ON AN ACTUAL REPLAY. The hot
+                # create paths reach step 1b, where the locked row is already in
+                # hand and the same check is free.
+                refusal = _authority_refusal(
+                    lambda: _table_row_now(table.pk))
+                if refusal is not None:
+                    return refusal
                 return {'status': 200, 'order': verdict_intent.order,
                         'idempotent': True}
             if verdict_intent.outcome in REFUSALS:
@@ -348,6 +479,23 @@ def _create_order(*, restaurant, table, items,
                 table = Table.objects.select_for_update().get(pk=table.pk)
             except Table.DoesNotExist:
                 return {'status': 400, 'message': 'Invalid table for this restaurant'}
+
+            # 1b'. A1(A) — THE AUTHORITY, RE-ASKED ON THE ROW THIS TRANSACTION
+            #      NOW HOLDS.
+            #
+            #      Every wait is behind us: the advisory lock at 1a and the table
+            #      row above. This is the first point at which the question "does
+            #      the caller still hold what they presented?" can be answered
+            #      about state nothing else can move — and it is asked BEFORE the
+            #      step-1c replay return, the admission verdict, the eligibility
+            #      rules, the daily counter and the INSERT, so no disclosure and
+            #      no write happens on revoked authority.
+            #
+            #      IT COSTS NO QUERY. The locked row above is the re-read, and
+            #      the staff half re-runs a resolver that reads no table at all.
+            refusal = _authority_refusal(table)
+            if refusal is not None:
+                return refusal
 
             # 1c. THE POST-WAIT RECHECK. The step-1 lookup ran BEFORE the table
             #     lock, so a competing request carrying the same key may have

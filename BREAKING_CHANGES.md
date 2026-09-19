@@ -1169,6 +1169,51 @@ its own snapshot, so reading the order in one statement and the closure in
 another publishes a correlated answer describing a moment that never existed.
 
 
+### 16b. Creation re-asks the caller's authority under the lock (A1)
+
+**NO REQUEST SHAPE CHANGES. One new refusal, on a request that was already
+acting on authority it no longer held.**
+
+`api/v2/orders/initiate/` resolves its caller in AUTOCOMMIT — a diner's table
+session, or a staff caller's `tables` module gate — and the transaction that
+writes the draft then WAITS for the admission advisory lock and the table row.
+A QR regeneration, a membership deactivated, a role removed or a restaurant
+leaving the portal-access states committing inside that wait revokes exactly the
+authority the request is still acting on. The ACCEPTANCE boundary has re-asked
+that question since G1b; creation asked neither half of it, so the draft was
+written and a daily ticket number spent on it, and only the later acceptance
+refused it.
+
+Both channels are now carried to the boundary and re-asked there — the same
+three-facts-and-no-credential records G1b introduced (`TableCapability`,
+`StaffAuthority`). Nothing is taken from a request body: the capability's facts
+come from the table the session resolved to, and the authority's restaurant is
+cross-checked against the `Restaurant` row the create service itself loaded
+before the module gate is re-consulted.
+
+**A REPLAY IS AUTHORIZED BEFORE IT IS DISCLOSED, AND EXEMPT FROM NOTHING ELSE.**
+The idempotent branch hands back an existing order and (since §16a) the closure
+recorded against it, so authorization must still hold for that — a revoked
+session may not read an acceptance any more than it may create one. It stays
+exempt from every NEW-ORDER rule: a pause, menu-only ordering, an item that has
+since sold out and a quote that has since expired all leave a replay untouched,
+because refusing an order that was already created and acknowledged on the
+strength of a rule about new work is the retroactive refusal D04 exists to stop.
+
+**WHAT A CLIENT SEES.** The refusal is each channel's existing non-disclosing
+404 — the diner capability channel's, and the endpoint's — so a revocation
+landing mid-request is indistinguishable from a principal that never had access.
+A client already handles both: a denied diner credential drives the rescan panel,
+and a 404 on the staff path is the established answer. **No new code is
+required.**
+
+COST: unchanged on every create path. The one added query is a lock-free table
+re-read, paid ONLY on a matched replay by a caller that presented a diner
+capability (1 SELECT -> 2). A keyless caller, a staff caller and every new-order
+path pay nothing: the new-order path re-uses the row it locks anyway, and the
+capability half is skipped outright when no capability was presented.
+
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

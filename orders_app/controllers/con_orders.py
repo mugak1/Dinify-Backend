@@ -1254,7 +1254,9 @@ class ConOrder:
         customer: Union[User, None] = None,
         created_by: Union[User, None] = None,
         order_source: str = 'diner_self_service',
-        client_order_id: Optional[str] = None
+        client_order_id: Optional[str] = None,
+        capability=None,
+        authority=None,
     ):
         try:
             restaurant = Restaurant.objects.get(pk=restaurant_id)
@@ -1456,6 +1458,14 @@ class ConOrder:
             created_by=created_by,
             order_source=order_source,
             client_order_id=client_order_id,
+            # A1 — CARRY WHAT THE ENDPOINT VERIFIED to the protected boundary.
+            # This controller's own gates are PREFLIGHTS on instances loaded in
+            # autocommit, exactly like its eligibility and publication checks;
+            # `_create_order` re-asks the authority question where the locks are
+            # held. Passed through unexamined and unmodified — this layer neither
+            # builds nor widens an authority fact, it only relays one.
+            capability=capability,
+            authority=authority,
         )
         if result.get('status') != 200:
             return result

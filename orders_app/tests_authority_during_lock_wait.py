@@ -38,7 +38,9 @@ resolver call the endpoint made. It can only ever REFUSE.
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.db import transaction
 from django.test import TestCase
+from django.utils import timezone
 
 from dinify_backend.configss.string_definitions import (
     MODULE_TABLES, OrderStatus_Pending, RESTAURANT_OWNER, RestaurantStatus_Live,
@@ -49,11 +51,13 @@ from orders_app.controllers.manage_order import (
 from orders_app.controllers.services import order_eligibility as eligibility
 from orders_app.controllers.services.order_authority import StaffAuthority
 from orders_app.controllers.services.order_quote import quote_ref
-from orders_app.models import OrderAcceptance, OrderQuoteClosure
+from orders_app.models import Order, OrderAcceptance, OrderQuoteClosure
 from orders_app.tests_quote_lifetime import QuoteFixtureMixin
 from restaurants_app.controllers import diner_capability
 from restaurants_app.controllers.diner_capability import capability_from_table
-from restaurants_app.models import RestaurantEmployee, Table
+from restaurants_app.models import (
+    MenuItem, Restaurant, RestaurantEmployee, Table,
+)
 
 
 def _during_the_wait(effect):
@@ -404,3 +408,312 @@ class TheEndpointCarriesTheAuthorityTests(AuthorityFixture):
             **{header: issue_table_session(self.table)},
         )
         self.assertEqual(response.status_code, 200, response.content)
+
+
+def _after_the_intent_lookup(effect):
+    """Fire ``effect`` between ``_create_order``'s intent lookup and its
+    authority re-check, which is the window a REPLAY disclosure sits in.
+
+    WHY NOT `_during_the_wait`. That helper wraps the admission advisory lock,
+    which `_create_order` takes at step 1a — AFTER step 1's replay lookup and
+    the return it can make. A replay never reaches the advisory lock at all (it
+    is deliberately exempt, so recovery never queues behind live ordering), so
+    an effect injected there would never fire for the case under test and the
+    suite would pass by not running.
+
+    `resolve_intent` is the last thing before the disclosure, so wrapping it
+    lands the revocation exactly where a real one lands: after this request
+    decided it has a replay to hand back, before it decides whether the caller
+    may still see it. Patched in `create_order`'s own namespace, because that is
+    the binding the service calls through.
+    """
+    from orders_app.controllers.services import create_order as service
+
+    state = {'fired': False}
+    real = service.resolve_intent
+
+    def _wrapped(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if not state['fired'] and getattr(result, 'is_match', False):
+            state['fired'] = True
+            effect()
+        return result
+
+    return patch.object(service, 'resolve_intent', _wrapped)
+
+
+class CreationReAsksTheAuthorityUnderTheLockTests(AuthorityFixture):
+    """A1(A) — THE REGRESSION. Creation carried no authority at all.
+
+    The acceptance boundary has re-asked this question since G1b; creation had
+    neither half of it. So a draft was written — and a daily ticket number spent
+    on it — for a diner whose session the owner had just revoked, or a staff
+    member whose membership had just been deactivated, and only the LATER
+    acceptance refused it.
+    """
+
+    def _regenerate_qr(self):
+        Table.objects.filter(pk=self.table.pk).update(
+            qr_version=self.table.qr_version + 1)
+
+    def _create_as_diner(self, **kwargs):
+        from orders_app.controllers.services.create_order import _create_order
+        return _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            capability=capability_from_table(self.table),
+            **kwargs,
+        )
+
+    def _create_as_staff(self, **kwargs):
+        from orders_app.controllers.services.create_order import _create_order
+        return _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            created_by=self.owner,
+            authority=StaffAuthority(
+                user=self.owner, restaurant_id=str(self.restaurant.pk),
+                module=MODULE_TABLES,
+            ),
+            **kwargs,
+        )
+
+    # -- the diner half ----------------------------------------------------
+
+    def test_a_QR_regenerated_during_the_wait_refuses_the_creation(self):
+        before = Order.objects.count()
+        with _during_the_wait(self._regenerate_qr):
+            refused = self._create_as_diner()
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertEqual(Order.objects.count(), before,
+                         'a revoked session must not write a draft')
+
+    def test_and_spends_no_daily_ticket_number(self):
+        """The counter is a CREATION EFFECT. A refusal that still consumed one
+        would leave a gap in the restaurant's numbering for an order nobody
+        placed — the same reasoning D04 records about a replay."""
+        from orders_app.models import RestaurantDailyOrderCounter
+        with _during_the_wait(self._regenerate_qr):
+            self._create_as_diner()
+
+        self.assertFalse(
+            RestaurantDailyOrderCounter.objects.filter(
+                restaurant=self.restaurant).exists(),
+            'no number may be allocated for a refused creation',
+        )
+
+    def test_the_refusal_is_the_capability_channels_own_opaque_404(self):
+        with _during_the_wait(self._regenerate_qr):
+            refused = self._create_as_diner()
+
+        self.assertEqual(set(refused), {'status', 'message'})
+        self.assertEqual(refused['status'], 404)
+
+    # -- the staff half ----------------------------------------------------
+
+    def test_a_membership_deactivated_during_the_wait_refuses_the_creation(self):
+        before = Order.objects.count()
+        with _during_the_wait(self._revoke_membership):
+            refused = self._create_as_staff()
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertEqual(Order.objects.count(), before)
+
+    def test_roles_taken_away_during_the_wait_refuse_the_creation(self):
+        with _during_the_wait(self._strip_roles):
+            refused = self._create_as_staff()
+        self.assertEqual(refused.get('status'), 404, refused)
+
+    def test_a_carried_authority_naming_ANOTHER_restaurant_is_refused(self):
+        """The staff counterpart of `assert_capability_current`'s identity check.
+
+        The endpoint authorized a principal against ONE restaurant; this service
+        loaded the restaurant it is about to create at. Re-asking the module gate
+        about a different row would authorize the wrong thing, so the two must
+        name the same restaurant before the gate is consulted at all.
+        """
+        from orders_app.controllers.services.create_order import _create_order
+        other = Restaurant.objects.create(
+            name='Elsewhere', location='loc', owner=self.owner,
+            status=RestaurantStatus_Live, accepting_orders=True,
+        )
+        refused = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            created_by=self.owner,
+            authority=StaffAuthority(
+                user=self.owner, restaurant_id=str(other.pk),
+                module=MODULE_TABLES,
+            ),
+        )
+        self.assertEqual(refused.get('status'), 404, refused)
+
+    # -- the controls ------------------------------------------------------
+
+    def test_the_control_an_intact_session_still_creates(self):
+        result = self._create_as_diner()
+        self.assertEqual(result.get('status'), 200, result)
+
+    def test_the_control_intact_staff_authority_still_creates(self):
+        result = self._create_as_staff()
+        self.assertEqual(result.get('status'), 200, result)
+
+    def test_the_control_a_caller_that_carries_NEITHER_is_unchanged(self):
+        """An in-process caller keeps exactly the guarantees it had. This is a
+        RE-assertion, never a new requirement to hold a credential."""
+        result = self._draft()
+        self.assertEqual(result.get('status'), 200, result)
+
+    def test_the_control_a_revocation_AFTER_the_check_is_not_claimed_away(self):
+        """The honest limit, stated rather than implied: the decision linearizes
+        at the re-check, so a revocation committing after it can still overlap.
+        What is promised is that nothing decided BEFORE that point is acted on."""
+        result = self._create_as_diner()
+        self.assertEqual(result.get('status'), 200, result)
+        self._regenerate_qr()
+        # The draft stands — and the acceptance boundary is what refuses it.
+        self.assertEqual(Order.objects.filter(pk=result['order'].pk).count(), 1)
+
+
+class ReplayDisclosureIsAuthorizedTests(AuthorityFixture):
+    """A1(B) — A REPLAY IS EXEMPT FROM NEW-ORDER POLICY, NOT FROM AUTHORIZATION.
+
+    The replay branch returns an existing order, and since G3a the closure
+    recorded against it. It did so without re-asking whether the caller may
+    still see either — so a revoked session could read back an order and its
+    retirement, on a credential the owner had just killed.
+
+    The exemption it keeps is the right one: a pause, menu-only ordering, an
+    item that has sold out and a quote that has expired are all statements about
+    NEW work, and refusing an order that was already created and acknowledged on
+    the strength of them is the retroactive refusal D04 exists to stop.
+    """
+
+    def _with_key(self):
+        from orders_app.controllers.services.create_order import _create_order
+        result = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id='11111111-1111-4111-8111-111111111111',
+            capability=capability_from_table(self.table),
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        return result['order']
+
+    def _replay(self, **kwargs):
+        from orders_app.controllers.services.create_order import _create_order
+        return _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id='11111111-1111-4111-8111-111111111111',
+            **kwargs,
+        )
+
+    def test_THE_REGRESSION_a_revoked_session_is_not_handed_the_replay(self):
+        order = self._with_key()
+        Table.objects.filter(pk=self.table.pk).update(
+            qr_version=self.table.qr_version + 1)
+
+        refused = self._replay(capability=capability_from_table(self.table))
+        # The capability was built from the PRE-regeneration row, which is what
+        # a client holding a session presents.
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('order', refused)
+        self.assertEqual(Order.objects.filter(pk=order.pk).count(), 1,
+                         'the refusal changes nothing about the order')
+
+    def test_a_revocation_landing_INSIDE_the_replay_window_is_caught(self):
+        order = self._with_key()
+        capability = capability_from_table(self.table)
+
+        with _after_the_intent_lookup(
+            lambda: Table.objects.filter(pk=self.table.pk).update(
+                qr_version=self.table.qr_version + 1)
+        ):
+            refused = self._replay(capability=capability)
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertEqual(Order.objects.filter(pk=order.pk).count(), 1)
+
+    def test_a_staff_membership_revoked_before_a_replay_is_refused(self):
+        # THE ORIGINAL IS CREATED BY THE SAME PRINCIPAL. D04's intent binding
+        # includes PROVENANCE, so a diner-origin order replayed as staff is a
+        # `checkout_intent_mismatch` long before authorization is reached —
+        # correct, and a different rule from the one under test here.
+        from orders_app.controllers.services.create_order import _create_order
+        staff_authority = StaffAuthority(
+            user=self.owner, restaurant_id=str(self.restaurant.pk),
+            module=MODULE_TABLES,
+        )
+        first = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id='11111111-1111-4111-8111-111111111111',
+            created_by=self.owner, authority=staff_authority,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        self._revoke_membership()
+
+        refused = self._replay(
+            created_by=self.owner, authority=staff_authority,
+        )
+        self.assertEqual(refused.get('status'), 404, refused)
+
+    # -- what a replay must STILL be exempt from ---------------------------
+
+    def test_a_PAUSED_restaurant_still_replays(self):
+        """`accepting_orders` is a statement about NEW diner ordering. An order
+        already created and acknowledged is not new work."""
+        order = self._with_key()
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(
+            accepting_orders=False)
+
+        result = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+        self.assertEqual(result['order'].pk, order.pk)
+
+    def test_a_table_taken_out_of_service_still_replays(self):
+        order = self._with_key()
+        self._unscannable()
+
+        result = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(result['order'].pk, order.pk)
+
+    def test_an_item_gone_out_of_stock_still_replays(self):
+        order = self._with_key()
+        MenuItem.objects.filter(pk=self.item.pk).update(in_stock=False)
+
+        result = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(result['order'].pk, order.pk)
+
+    def test_a_RETIRED_quote_still_replays_and_the_closure_is_disclosed(self):
+        """The recovery this exists for. A closure is exactly what a client that
+        lost the refusal needs to learn, and it learns it HERE."""
+        from orders_app.controllers.services import quote_closure
+        order = self._with_key()
+        with transaction.atomic():
+            quote_closure.close(
+                order, quote_ref=quote_ref(order),
+                reason=quote_closure.REASON_EXPIRED,
+                now=timezone.now(), evidence=None,
+            )
+
+        result = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(result['order'].pk, order.pk)
+
+    def test_the_control_a_keyless_caller_reaches_no_replay_check(self):
+        """No key, no replay: the check costs nothing and changes nothing on the
+        path a diner without an idempotency key takes."""
+        from orders_app.controllers.services.create_order import _create_order
+        result = _create_order(
+            restaurant=self.restaurant, table=self.table_b,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            capability=capability_from_table(self.table_b),
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertFalse(result.get('idempotent'))

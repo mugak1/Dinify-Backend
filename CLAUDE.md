@@ -982,6 +982,69 @@ so keep it current when conventions change.
     `outstanding` to a fresh checkout — a stuck diner with no in-app escape.
     Uncommon, and completely avoidable by ordering. See `BREAKING_CHANGES.md`
     §16
+- CREATION RE-ASKS THE AUTHORITY, AND A REPLAY IS AUTHORIZED BEFORE IT IS
+  DISCLOSED (D06/A1): ✅ the acceptance boundary has re-verified its caller under
+  the lock since G1b; CREATION asked neither half of it. The endpoint resolves a
+  diner's table session or gates a staff caller on the `tables` module IN
+  AUTOCOMMIT, and `_create_order`'s transaction then waits for the admission
+  advisory lock and the table row — so a QR regeneration, a membership
+  deactivated, a role removed or a restaurant leaving `portal_access_states()`
+  committing inside that wait revoked exactly the authority the request was still
+  acting on. The draft was written and a daily ticket number spent on it, and
+  only the LATER acceptance refused it. Both channels now travel through
+  `initiate_order` to `_create_order` as the SAME three-facts-and-no-credential
+  records G1b introduced (`TableCapability`, `StaffAuthority`), and one shared
+  `_authority_refusal` is asked at every point that DISCLOSES or WRITES —
+  written once and called from three places, because that is exactly how an
+  invariant ends up added to one branch and not the others.
+  **NOTHING IS TAKEN FROM A REQUEST BODY.** The capability's facts come from the
+  table the session resolved to; the authority names the principal the endpoint
+  authorized and the module it gated on, and its `restaurant_id` is
+  CROSS-CHECKED against the `Restaurant` row `_create_order` itself loaded before
+  the module gate is re-consulted — the staff counterpart of the identity check
+  `assert_capability_current` already makes. There is no actor field, no trust
+  flag and no `trusted=True` switch.
+  **A REPLAY IS EXEMPT FROM NEW-ORDER POLICY, NOT FROM AUTHORIZATION.** The
+  idempotent branch hands back an existing order and (since G3a) the closure
+  recorded against it, so a revoked session may not read an acceptance any more
+  than it may create one. It stays exempt from EVERY new-order rule — a pause,
+  menu-only ordering, an item that has since sold out, a quote that has since
+  expired — because refusing an order that was already created and acknowledged
+  on the strength of a rule about NEW work is the retroactive refusal D04 exists
+  to stop. That is why the authority check is there and the admission verdict is
+  not.
+  **THE TABLE IS RE-READ WITHOUT A LOCK ON THE REPLAY PATH, deliberately.** That
+  return is before the table lock on purpose, so recovery never queues behind
+  live ordering; a plain statement takes its own snapshot under READ COMMITTED
+  and therefore sees any COMMITTED revocation, which is the whole question. A
+  revocation committing a moment later can still overlap, and that is stated
+  rather than claimed away — the same honest limit the acceptance boundary states
+  about where its checks linearize.
+  **COST: UNCHANGED ON EVERY CREATE PATH.** The new-order check runs on the row
+  step 1b already locks, so it is free; the capability half is skipped outright
+  when no capability was presented. The one added query is the lock-free table
+  re-read, paid ONLY on a matched replay by a caller that presented a diner
+  capability — **1 SELECT → 2**, pinned by its own test beside the unchanged
+  keyless one. Every other pinned count in `tests_order_path_queries.py` is
+  untouched.
+  **THE CLOSURE SERVICE'S STATED PRECONDITIONS ARE NOW VERIFIED, AND ONE
+  OVERCLAIM CORRECTED.** `quote_closure.close`'s docstring said "inside the
+  caller's transaction, holding the locks an acceptance takes — asserted rather
+  than assumed" about the whole sentence, and only the TRANSACTION half is
+  asserted. The lock half is not assertable: PostgreSQL records a row lock on
+  the tuple rather than in `pg_locks`, so no query answers "do I hold FOR UPDATE
+  on this row", and a `FOR UPDATE NOWAIT` probe succeeds exactly when nobody
+  holds it. The guarantee is STRUCTURAL instead — every production path takes
+  `Order.objects.select_for_update()` first, and `tests_closure_preconditions.py`
+  scans the source to keep that true rather than leaving it a convention nobody
+  checks, the same shape as the membership-serialization and ambient-authority
+  ratchets. There is deliberately NO caller-supplied "already locked" flag: a
+  trusted switch would let the one caller that gets it wrong assert its way past
+  the only barrier there is. Pinned by
+  `orders_app/tests_authority_during_lock_wait.py` (16 new tests; **9 of them
+  fail when the check is neutralised and the other 7 are the controls that must
+  not change**) and `orders_app/tests_closure_preconditions.py` (12). See
+  `BREAKING_CHANGES.md` §16b
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one
