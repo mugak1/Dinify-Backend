@@ -598,6 +598,42 @@ def _create_order(*, restaurant, table, items,
                     for_update=True,
                 )
                 if verdict_intent.is_match:
+                    # A1b — AND ON THIS RETURN TOO.
+                    #
+                    # THE SAME DISCLOSURE, REACHED BY THE OTHER DOOR. The
+                    # step-1 lookup found nothing, so this request never took
+                    # that branch; a competing request carrying the same key
+                    # committed while this one waited, and the answer here is
+                    # an existing order and (since G3a) the closure recorded
+                    # against it.
+                    #
+                    # Step 1b' above re-asked the capability's GENERATION and
+                    # the staff module gate on this locked row. Neither answers
+                    # whether the table is still a place a diner can be, and
+                    # going out of service bumps no `qr_version` — so a table
+                    # disabled inside the wait passed 1b' and was disclosed
+                    # here. That is the one branch A1b's first cut did not
+                    # reach (Codex P1 on PR #325, valid), and it is exactly the
+                    # shape this file warns about above: an invariant added to
+                    # one branch and not the others.
+                    #
+                    # IT COSTS NO QUERY. `table` IS the row locked at step 1b,
+                    # so this reads the authoritative snapshot already in hand
+                    # rather than the lock-free re-read the step-1 branch pays
+                    # for. The answer is the capability channel's own opaque
+                    # 404, for the reason that branch records — never
+                    # `order_eligibility`'s diner-readable 400, which stays the
+                    # answer for a FIRST creation at step 1e.
+                    #
+                    # THE THIRD RETURN-EXISTING SITE — the unique-conflict
+                    # recovery below — needs nothing: it sits AFTER step 1e,
+                    # which evaluates table liveness on this same locked row
+                    # for EVERY provenance, so an unscannable table has already
+                    # been refused there and the row cannot move while this
+                    # transaction holds it.
+                    refusal = _session_refusal(table)
+                    if refusal is not None:
+                        return refusal
                     return {'status': 200, 'order': verdict_intent.order,
                             'idempotent': True}
                 if verdict_intent.outcome in REFUSALS:

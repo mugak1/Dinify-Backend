@@ -1091,6 +1091,22 @@ so keep it current when conventions change.
   BEFORE the table lock deliberately, so recovery never queues behind live
   ordering and nothing reaches for `Table` or the advisory lock after an `Order`
   is already held. The acceptance path asks inside the locks it already holds.
+  **AND THE CREATE PATH HAS TWO REPLAY RETURNS, NOT ONE** (Codex P1 on PR #325,
+  valid). The first cut reached the step-1 branch only. A request whose key has
+  not been used yet does not take that branch at all: it waits for the advisory
+  lock and the table row, and step 1c asks again UNDER the lock precisely
+  because a competing request carrying the same key may have committed inside
+  that wait. That second return is the SAME disclosure reached by the other
+  door. Step 1b' re-asks the capability's GENERATION on the locked row and the
+  staff module gate, and **going out of service bumps no `qr_version`** — so a
+  table disabled inside the wait passed 1b' and was disclosed at 1c. It asks
+  `_session_refusal(table)` now, on the row step 1b already locked, so it costs
+  NO query. **THE THIRD RETURN-EXISTING SITE NEEDS NOTHING**: the
+  unique-conflict recovery sits AFTER step 1e, which evaluates table liveness on
+  that same locked row for EVERY provenance, and the row cannot move while the
+  transaction holds it. **THE SESSION QUESTION STAYS OFF STEP 1b'**, where it
+  would look tidier — asking it beside the authority check would replace a FIRST
+  creation's diner-readable 400 with an opaque 404, and that control is pinned.
   **WHERE IT LINEARIZES IS STATED RATHER THAN CLAIMED AWAY**: under READ
   COMMITTED the lock-free statement takes its own snapshot and therefore sees any
   COMMITTED revocation, and one committing a moment later can still overlap.
@@ -1101,8 +1117,10 @@ so keep it current when conventions change.
   keyless/internal, staff, paused-restaurant, menu-only, stock-change and
   valid-rescan controls are all kept separately, because an internal call with NO
   capability is not an oracle for a public request carrying a revoked one. Pinned
-  by `orders_app/tests_authority_during_lock_wait.py` (60 tests across six
-  classes). See `BREAKING_CHANGES.md` §16c and `D06_CONSUMER_GATES_CLOSURE.md`
+  by `orders_app/tests_authority_during_lock_wait.py` (67 tests across seven
+  classes; the 7 added for the post-wait branch reproduce it as 3 FAILED / 4
+  controls on the head that carried it). See `BREAKING_CHANGES.md` §16c and
+  `D06_CONSUMER_GATES_CLOSURE.md`
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one

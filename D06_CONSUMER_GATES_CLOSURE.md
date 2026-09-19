@@ -329,6 +329,102 @@ Re-seeding is not enough — the seed does not remove orders.
 
 ---
 
+## Codex review of this pair — three findings, all valid, all fixed
+
+`415b360` (backend) and `477c6af` (frontend) each drew findings, and all three
+are the SAME shape as what these gates are about: a rule implemented at one
+consumer and not the next.
+
+| # | Where | Severity | What it was |
+|---|---|---|---|
+| 1 | `create_order.py` step 1c | **P1** | A1b reached ONE of the create path's two replay returns |
+| 2 | `checkout-coordinator.service.ts` `closedOr` | P2 | an asserted-but-unusable closure collapsed to the `draft` fallback |
+| 3 | `checkout-coordinator.service.ts` legacy accepted branch | P2 | the accepted-and-closed gate ran only inside the level-3 branch |
+
+**1 — THE POST-WAIT REPLAY.** `_create_order` has three return-existing sites.
+A1b added `_session_refusal` to the step-1 lookup, which a request whose key has
+not been used yet never reaches: it waits for the advisory lock and the table
+row, and **step 1c asks again under the lock precisely because a competing
+request carrying the same key may have committed inside that wait**. That second
+return is the same disclosure — an existing order and the closure recorded
+against it — reached by the other door. Step 1b' re-asks the capability's
+GENERATION and the staff module gate, and **going out of service bumps no
+`qr_version`**, so a table disabled inside the wait passed 1b' and was disclosed
+at 1c. It asks `_session_refusal(table)` now, on the row step 1b already locked,
+so it costs **no query**.
+
+The THIRD site — the unique-conflict recovery — needs nothing, and the reason is
+recorded in the source rather than left to be rediscovered: it sits AFTER step
+1e, which evaluates table liveness on that same locked row for EVERY provenance,
+and the row cannot move while the transaction holds it.
+
+**The session question stays OFF step 1b'**, where it would look tidier. Asking
+it beside the authority check would give a FIRST creation at an unscannable
+table the capability channel's opaque 404 instead of `order_eligibility`'s
+diner-readable 400 — and `test_the_control_a_FIRST_creation_still_answers_the_
+ELIGIBILITY_400` is the discriminating control for exactly that wrong fix.
+
+**2 — ASSERTED BUT UNUSABLE IS NOT ABSENT, AT THE RECOVERY CONSUMER.** E1's rule
+is stated in the approval: *a malformed or wrong-reference closure is not
+permission to treat the quote as open, resend an acceptance, discard evidence or
+create another intent.* It reached `handleSubmitFailure` and
+`renewAfterClosure`; `closedOr` promoted only a VALID closure and handed back
+the `draft` fallback for the rest — and `draft` is proof of non-execution, so
+`replayIssuedCommand` re-sent the acceptance for a quote that may already be
+retired, the server refused it identically, the refusal filed as `unknown`, and
+Retry returned there. `closure-unreadable` is now its own outcome: the attempt
+is kept, nothing is minted or settled, the CTA is blocked and the notice names
+the one remedy this build can.
+
+It is **kept apart from `inconsistent` deliberately** — that one is the server
+contradicting itself (accepted AND closed), this one is a single coherent
+statement this build cannot read. Same remedy today, different causes, and one
+word for two facts is how the next reader mis-diagnoses.
+
+**3 — AND THE CONTRADICTION GATE REACHES BOTH ACCEPTED RETURNS.** The two
+protocol levels are independent by design: `quote_protocol` says whether
+closures are published, `checkout_protocol` whether the correlated projection
+is. So a server publishing a level-2 closure while answering below level 3 is
+exactly the shape the gate exists for — and the gate ran only inside the level-3
+branch, so the legacy `accepted === true` return announced the acceptance,
+cleared the basket and deleted the record. A gate applied to one of two accepted
+returns is not a gate.
+
+### Discriminating regressions, and what each reintroduced defect breaks
+
+| revert | fails | file |
+|---|---|---|
+| step 1c `_session_refusal` | **3 of 67** (4 controls hold) | `orders_app/tests_authority_during_lock_wait.py` |
+| `closedOr` asserted-but-unusable | **3 of 21** | `basket-body.closure-recovery.spec.ts` |
+| legacy accepted contradiction gate | **1 of 21** | `basket-body.closure-recovery.spec.ts` |
+
+The backend regression was reproduced FIRST, against the unfixed tree: **3
+FAILED / 4 controls PASS**, the failures showing `200 … idempotent: True` where
+the opaque 404 belongs.
+
+### ONE PRE-EXISTING CONTROL CORRECTED — called out, not silently rewritten
+
+`CONTROL: a closure from a server that never promised to publish one is not a
+verdict` priced through an initiate declaring `quote_protocol: 2` and then read
+`quote_protocol: 1`. That is a DOWNGRADE, not an older server, and
+`readPublishedClosure` has answered `malformed('level')` for it since E1b — so
+the control was passing on `closedOr`'s swallow rather than on the
+compatibility it names. **The fixture now states level 1 throughout**, which is
+the case the control is actually for, and the downgrade keeps its own
+regression beside it (`THE REGRESSION: a server that DEMONSTRATED level 2 and
+then answers below it is broken, not old`). The rule was not relaxed.
+
+### Verification after the three fixes
+
+* Backend `./scripts/verify.sh` — see **Commands and results** above for the
+  count; the authority suite is **67** (60 + 7) and the pinned order-path query
+  budgets are untouched.
+* Frontend `type-check` clean, `lint` **0 errors / 9 warnings** (unchanged),
+  `test:tenant-boundary` **306**, `test:ci` **2510** (2503 + 7), `build:prod`
+  PASS.
+
+---
+
 ## Remaining operational gates — unchanged by this work
 
 * `DELEGATED_QR_TRIAGE.md` — a delegated read-only view receives live table QR

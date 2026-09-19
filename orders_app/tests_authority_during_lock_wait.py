@@ -910,6 +910,169 @@ class ReplayDisclosureIsAuthorizedTests(AuthorityFixture):
         self.assertFalse(result.get('idempotent'))
 
 
+class PostWaitReplayDisclosureRespectsTheSessionTests(AuthorityFixture):
+    """A1b, THE BRANCH THE FIRST CUT DID NOT REACH — the post-wait recheck.
+
+    `_create_order` has THREE return-existing sites and A1b reached one. Step
+    1's lookup runs BEFORE the table lock, so a request whose key has not been
+    used yet does not take that branch at all: it goes on to wait for the
+    advisory lock and the table row, and step 1c asks again UNDER the lock
+    precisely because a competing request carrying the same key may have
+    committed inside that wait. That second return is the same disclosure — an
+    existing order and, since G3a, the closure recorded against it — reached by
+    the other door.
+
+    Step 1b' re-asks the capability's GENERATION on the locked row and the staff
+    module gate. Neither answers whether the table is still a place a diner can
+    be, and **going out of service bumps no `qr_version`** — so a table disabled
+    inside the wait passed 1b' and disclosed at 1c. Found by Codex on PR #325;
+    valid, and exactly the shape this work keeps warning about: an invariant
+    added to one branch and not the others.
+
+    THE THIRD SITE NEEDS NOTHING, and the control below says why rather than
+    leaving it to be rediscovered: the unique-conflict recovery sits AFTER step
+    1e, which evaluates table liveness on this same locked row for EVERY
+    provenance, and the row cannot move while this transaction holds it.
+    """
+
+    KEY = '22222222-2222-4222-8222-222222222222'
+
+    def _competing_commit(self):
+        """The winner of the race, written inside the wait: the same key, the
+        same purchase, the same scope — exactly what step 1c exists to find."""
+        from orders_app.controllers.services.create_order import _create_order
+        result = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id=self.KEY,
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        return result['order']
+
+    def _race(self, effect, **kwargs):
+        """Fire ``effect`` in the real window — after the advisory lock, before
+        the table row is locked and re-read — and return what the racing
+        request is answered."""
+        from orders_app.controllers.services.create_order import _create_order
+        with _during_the_wait(effect):
+            return _create_order(
+                restaurant=self.restaurant, table=self.table,
+                items=[{'item': str(self.item.pk), 'quantity': 1}],
+                client_order_id=self.KEY,
+                **kwargs,
+            )
+
+    def _orders_for_key(self):
+        return Order.objects.filter(
+            restaurant=self.restaurant, client_order_id=self.KEY)
+
+    def test_THE_REGRESSION_the_post_wait_replay_asks_about_the_session(self):
+        state = {}
+
+        def effect():
+            state['winner'] = self._competing_commit()
+            self._unscannable()
+
+        refused = self._race(
+            effect, capability=capability_from_table(self.table))
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('order', refused)
+        self.assertEqual(
+            self._orders_for_key().count(), 1,
+            'the refusal writes nothing and disturbs nothing',
+        )
+
+    def test_the_refusal_is_the_channels_own_404_not_a_new_word(self):
+        def effect():
+            self._competing_commit()
+            self._unscannable()
+
+        refused = self._race(
+            effect, capability=capability_from_table(self.table))
+        self.assertEqual(set(refused), {'status', 'message'}, refused)
+
+    def test_a_RETIRED_quote_is_not_disclosed_on_this_branch_either(self):
+        """What makes the disclosure matter: since G3a the replay carries the
+        closure recorded against the order."""
+        from orders_app.controllers.services import quote_closure
+
+        def effect():
+            winner = self._competing_commit()
+            quote_closure.close(
+                winner, quote_ref=quote_ref(winner),
+                reason=quote_closure.REASON_EXPIRED,
+                now=timezone.now(), evidence=None,
+            )
+            self._unscannable()
+
+        refused = self._race(
+            effect, capability=capability_from_table(self.table))
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('quote_closure', refused)
+        self.assertEqual(
+            OrderQuoteClosure.objects.count(), 1,
+            'the closure the server wrote is left exactly as it was',
+        )
+
+    # -- the controls --------------------------------------------------------
+
+    def test_the_control_an_intact_session_still_gets_the_post_wait_replay(self):
+        state = {}
+
+        def effect():
+            state['winner'] = self._competing_commit()
+
+        result = self._race(
+            effect, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+        self.assertEqual(result['order'].pk, state['winner'].pk)
+
+    def test_the_control_a_keyless_caller_still_gets_the_post_wait_replay(self):
+        """No capability presented, so there is no session for a table to
+        revoke — and this must never become a requirement to present one."""
+        def effect():
+            self._competing_commit()
+            self._unscannable()
+
+        result = self._race(effect)
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_PAUSED_restaurant_still_gets_the_post_wait_replay(self):
+        """The exemption a replay keeps. A pause is a statement about NEW work
+        and this order was already created and acknowledged."""
+        def effect():
+            self._competing_commit()
+            Restaurant.objects.filter(pk=self.restaurant.pk).update(
+                accepting_orders=False)
+
+        result = self._race(
+            effect, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_FIRST_creation_still_answers_the_ELIGIBILITY_400(self):
+        """THE DISCRIMINATING CONTROL FOR THE WRONG FIX.
+
+        Answering this at step 1b' — beside the authority check, where it would
+        look tidier — would apply the capability channel's opaque 404 to a FIRST
+        creation too, replacing a refusal a diner can read with one that
+        discloses nothing. The session question belongs on the branch where no
+        eligibility rule runs, and nowhere else.
+        """
+        result = self._race(self._unscannable,
+                            capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 400, result)
+        self.assertEqual(result.get('reason'),
+                         eligibility.REASON_TABLE_UNAVAILABLE, result)
+        self.assertEqual(result.get('message'),
+                         eligibility.MESSAGE_TABLE_UNAVAILABLE, result)
+        self.assertFalse(self._orders_for_key().exists(),
+                         'a refused first creation writes no draft')
+
+
 class AcceptedSubmissionReplayRespectsTheSessionTests(AuthorityFixture):
     """A1b, the other half — THE ACCEPTED-SUBMISSION REPLAY.
 

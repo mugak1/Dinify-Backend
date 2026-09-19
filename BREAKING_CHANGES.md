@@ -1241,7 +1241,13 @@ but both REPLAY branches return before any eligibility rule runs, so that fact
 reached nothing inside them:
 
 * `_create_order`'s idempotent replay hands back the existing order and the
-  closure recorded against it;
+  closure recorded against it — and it has **TWO** such returns, not one: the
+  step-1 lookup before the locks, and the step-1c POST-WAIT RECHECK, which is
+  how a request whose key was unused when it arrived is answered when a
+  competing request carrying that key commits inside the wait. Step 1b'
+  re-asks the capability's GENERATION on the locked row and the staff module
+  gate; neither asks whether the table is still scannable, and going out of
+  service bumps no `qr_version`;
 * `_submit_order`'s accepted-submission replay hands back a 200 `idempotent`
   acceptance result.
 
@@ -1273,8 +1279,16 @@ client whose table is still scannable.
 
 COST: unchanged. The create path re-uses the single lock-free row read §16b
 already pays for on a capability-carrying replay (memoised, so one statement
-answers both questions); the acceptance path reads the table row it has already
-locked.
+answers both questions); the post-wait return reads the row step 1b already
+locked; the acceptance path reads the table row it has already locked.
+
+**THE THIRD RETURN-EXISTING SITE IS DELIBERATELY UNCHANGED.** The
+unique-conflict recovery sits AFTER the authoritative eligibility check, which
+evaluates table liveness on the locked row for EVERY provenance, so an
+unscannable table has already been refused there — with the diner-readable 400,
+which is the right answer for work that is genuinely new. **The session question
+is equally deliberately NOT asked beside the authority check**: doing so would
+replace a FIRST creation's readable refusal with the opaque 404.
 
 **ONE ORACLE MOVED, AND IT IS RECORDED RATHER THAN REWRITTEN.**
 `test_a_table_taken_out_of_service_still_replays` asserted the OPPOSITE of this
