@@ -254,6 +254,34 @@ def session_still_admissible(capability, table) -> bool:
     return bool(table.is_available_for_scan())
 
 
+def denial_envelope() -> dict:
+    """THE capability channel's one non-disclosing refusal, as a plain dict.
+
+    DERIVED from ``DinerCapabilityDenied`` and never re-spelled. A service that
+    answers "the capability channel's own opaque 404" has to answer with the
+    channel's own BYTES: both order endpoints render a raised
+    ``DinerCapabilityDenied`` as ``exc.message``, so a literal written out
+    beside it is one edit away from becoming a discriminator — and it was.
+    ``session_still_admissible``'s three refusal sites spelled it
+    ``'Not found'`` while the door spells it ``'Not found.'``, so on ONE route a
+    client could tell a revocation that landed at the door from one that landed
+    inside the lock wait, and liveness revocation from generation revocation.
+
+    That is not only an oracle in a channel built for non-disclosure. The
+    deployed client matches the body EXACTLY
+    (``DinerSessionService.CAPABILITY_DENIED_404``), so the periodless form was
+    not recognised as a capability denial at all: the diner whose table went out
+    of service mid-request was never shown the rescan panel.
+
+    The STAFF channel is deliberately NOT this. Its door is the orders
+    endpoints' own periodless ``'Not found'`` and ``StaffAuthorityError``
+    already matches it; routing it through here would introduce on the staff
+    side exactly the mismatch this removes on the diner side.
+    """
+    denied = DinerCapabilityDenied()
+    return {'status': denied.status, 'message': denied.message}
+
+
 # --- request helpers -------------------------------------------------------
 
 def credential_from_request(request):

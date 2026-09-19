@@ -1061,6 +1061,94 @@ so keep it current when conventions change.
   entirely when no capability was presented (which is what keeps that pinned
   query budget flat). Reverting to `except Exception` fails exactly the two
   propagation cases. See `BREAKING_CHANGES.md` §16b
+- A REPLAY DISCLOSURE ASKS WHETHER THE SESSION STILL EXISTS (D06/A1b): ✅ G1b
+  re-asked whether the presented CAPABILITY was still the current generation;
+  that is one half of a diner's session, and the other half is whether the table
+  is still a place a diner can be. `_resolve_table` re-checks
+  `is_available_for_scan()` live on every ordinary use, so a soft-deleted,
+  disabled, deactivated or out-of-service table revokes the session at the door
+  — but the TWO REPLAY BRANCHES return before any eligibility rule runs, so that
+  fact reached NOTHING inside them: `_create_order`'s idempotent replay handed
+  back the order and the closure recorded against it, and `_submit_order`'s
+  accepted-submission replay handed back a 200 `idempotent` acceptance result.
+  Both now ask `diner_capability.session_still_admissible(capability, table_row)`
+  and answer the capability channel's OWN OPAQUE 404 — never
+  `order_eligibility`'s diner-readable 400, which stays the answer for a FIRST
+  submission, because a refusal that must be stable across a lock wait cannot
+  depend on when the operator happened to click.
+  **A CALLER THAT PRESENTED NO CAPABILITY IS UNAFFECTED** — a staff principal
+  holds no table session, so there is none for a table going out of service to
+  revoke, and the predicate returns True for them by definition. **THE EXEMPTION
+  A REPLAY KEEPS IS STILL THE RIGHT ONE**: a pause, menu-only ordering, an item
+  that has since sold out and a quote that has since expired all leave it
+  untouched (the retroactive refusal D04 exists to stop), because table and
+  restaurant LIVENESS is not a new-order rule — a table that is not a place an
+  order can exist is not a place one can be read back either.
+  **NO NEW LOCK AND NO NEW QUERY.** The create path re-uses the single lock-free
+  row read A1 already pays for on a capability-carrying replay, memoised by a
+  module-level `_once`, so ONE snapshot answers both the authority question and
+  the session question and the pinned counts move by nothing; that return sits
+  BEFORE the table lock deliberately, so recovery never queues behind live
+  ordering and nothing reaches for `Table` or the advisory lock after an `Order`
+  is already held. The acceptance path asks inside the locks it already holds.
+  **AND THE CREATE PATH HAS TWO REPLAY RETURNS, NOT ONE** (Codex P1 on PR #325,
+  valid). The first cut reached the step-1 branch only. A request whose key has
+  not been used yet does not take that branch at all: it waits for the advisory
+  lock and the table row, and step 1c asks again UNDER the lock precisely
+  because a competing request carrying the same key may have committed inside
+  that wait. That second return is the SAME disclosure reached by the other
+  door. Step 1b' re-asks the capability's GENERATION on the locked row and the
+  staff module gate, and **going out of service bumps no `qr_version`** — so a
+  table disabled inside the wait passed 1b' and was disclosed at 1c. It asks
+  `_session_refusal(table)` now, on the row step 1b already locked, so it costs
+  NO query. **THE THIRD RETURN-EXISTING SITE NEEDS NOTHING**: the
+  unique-conflict recovery sits AFTER step 1e, which evaluates table liveness on
+  that same locked row for EVERY provenance, and the row cannot move while the
+  transaction holds it. **THE SESSION QUESTION STAYS OFF STEP 1b'**, where it
+  would look tidier — asking it beside the authority check would replace a FIRST
+  creation's diner-readable 400 with an opaque 404, and that control is pinned.
+  **WHERE IT LINEARIZES IS STATED RATHER THAN CLAIMED AWAY**: under READ
+  COMMITTED the lock-free statement takes its own snapshot and therefore sees any
+  COMMITTED revocation, and one committing a moment later can still overlap.
+  **ONE ORACLE MOVED AND IS RECORDED RATHER THAN REWRITTEN** —
+  `test_a_table_taken_out_of_service_still_replays` asserted the OPPOSITE through
+  a carried diner capability and is replaced by
+  `test_THE_REGRESSION_an_unscannable_table_does_not_replay_to_a_diner`; the
+  keyless/internal, staff, paused-restaurant, menu-only, stock-change and
+  valid-rescan controls are all kept separately, because an internal call with NO
+  capability is not an oracle for a public request carrying a revoked one. Pinned
+  by `orders_app/tests_authority_during_lock_wait.py` (72 tests across eight
+  classes; the 7 added for the post-wait branch reproduce it as 3 FAILED / 4
+  controls on the head that carried it).
+  **AND THE REFUSAL IS THE DOOR'S REFUSAL, BYTE FOR BYTE** (Codex P2 on PR #325,
+  valid). Every one of these boundaries is documented as answering "the
+  capability channel's OWN opaque 404", and three of them answered something
+  else: the door raises `DinerCapabilityDenied` and both order endpoints render
+  it as `exc.message` — `'Not found.'` — while `_session_refusal`, the
+  accepted-submission replay and `retire_quote_for_review` each wrote out
+  `'Not found'` by hand. ONE route, two spellings, decided by WHEN the
+  revocation landed. As an oracle that separates a door refusal from a
+  post-wait one, and liveness revocation from generation revocation, in a
+  channel whose whole design is non-disclosure — **but the consequence that
+  reaches a diner is larger than that**: the deployed client matches the body
+  EXACTLY (`DinerSessionService.CAPABILITY_DENIED_404`, compared with `===`
+  after a `trim()` that does not strip a period), so the periodless form was
+  not recognised as a capability denial at all and **the rescan panel never
+  appeared** — six production call sites consult that predicate, the checkout
+  handlers among them. `diner_capability.denial_envelope()` is now the ONE
+  answer, DERIVED from the exception rather than re-spelled, and the third site
+  (`retire_quote_for_review`, which Codex did not name) is fixed with the other
+  two. **THE STAFF CHANNEL IS DELIBERATELY NOT THIS**: its door is the orders
+  endpoints' own periodless `'Not found'` and `StaffAuthorityError` already
+  matches it, so routing staff through the diner envelope would introduce there
+  exactly the mismatch this removes here — pinned by its own control.
+  **WHY THE SUITE DID NOT SEE IT**: four tests named "the channel's own 404,
+  NOT A NEW WORD" compared only the KEY SET, never the word — the half that had
+  drifted. They now go through `assertChannelEnvelope`, and the new
+  byte-identity regression drives BOTH refusals over real HTTP on one route and
+  compares the responses to each other, so it names no literal and cannot be
+  satisfied by two copies that happen to agree. Reverting the three sites fails
+  6 of 72. See `BREAKING_CHANGES.md` §16c and `D06_CONSUMER_GATES_CLOSURE.md`
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one

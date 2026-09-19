@@ -60,6 +60,21 @@ from restaurants_app.models import (
 )
 
 
+def _door_envelope():
+    """What the ENDPOINT renders when the DOOR refuses a diner capability.
+
+    Built from a RAISED ``DinerCapabilityDenied`` exactly as
+    ``orders_app/endpoints/orders.py`` builds it -- ``{'status': exc.status,
+    'message': exc.message}`` -- and deliberately NOT from
+    ``diner_capability.denial_envelope()``, which is the thing under test:
+    comparing that helper against itself would pass whatever it returned.
+    """
+    try:
+        raise diner_capability.DinerCapabilityDenied()
+    except diner_capability.DinerCapabilityError as exc:
+        return {'status': exc.status, 'message': exc.message}
+
+
 def _during_the_wait(effect):
     """Fire ``effect`` in the real window: after the admission advisory lock and
     BEFORE the table and order rows are locked and read.
@@ -143,6 +158,23 @@ class AuthorityFixture(QuoteFixtureMixin, TestCase):
     def _unscannable(self):
         Table.objects.filter(pk=self.table.pk).update(
             status='out_of_service', is_active=False)
+
+    def assertChannelEnvelope(self, refused):
+        """The refusal is the capability channel's own answer, WORD INCLUDED.
+
+        Four tests here were named "the channel's own 404, not a new word" and
+        compared only the KEY SET, which is how three sites came to answer
+        "Not found" while the door answers "Not found." -- and the word was the
+        half that mattered: the deployed client matches the body exactly to
+        decide whether a 404 means "rescan", so the periodless copy was not
+        recognised as a capability denial at all.
+        """
+        self.assertEqual(set(refused), {'status', 'message'}, refused)
+        self.assertEqual(
+            refused, _door_envelope(),
+            'a post-lock refusal must be byte-identical to the door refusal, '
+            'or a client can tell which one refused it',
+        )
 
     def _submit_as_staff(self, order):
         return update_order_status(
@@ -280,7 +312,7 @@ class ScanAvailabilityIsCheckedAtTheProtectedDecisionTests(AuthorityFixture):
         order = self._draft_order()
         with _during_the_wait(self._unscannable):
             refused = self._retire_as_diner(order)
-        self.assertEqual(set(refused), {'status', 'message'}, refused)
+        self.assertChannelEnvelope(refused)
 
     # -- the controls ------------------------------------------------------
 
@@ -674,11 +706,129 @@ class ReplayDisclosureIsAuthorizedTests(AuthorityFixture):
         self.assertTrue(result.get('idempotent'))
         self.assertEqual(result['order'].pk, order.pk)
 
-    def test_a_table_taken_out_of_service_still_replays(self):
+    # -- A1b: SCANNABILITY REVOKES A SESSION, AND A REPLAY IS A DISCLOSURE --
+    #
+    # THE ORACLE THAT USED TO LIVE HERE ASSERTED THE OPPOSITE. It was called
+    # `test_a_table_taken_out_of_service_still_replays` and it filed
+    # scannability under "what a replay must STILL be exempt from", beside the
+    # pause and the sold-out item. Those two really are statements about NEW
+    # work. Scannability is not: `_resolve_table` re-reads it live on every use
+    # and treats a table that has stopped being scannable as a REVOKED SESSION,
+    # answering the channel's opaque 404 — so the endpoint refuses such a
+    # request outright, and the branch below is reachable only when the table
+    # goes out of service after that resolution. Disclosing an order and its
+    # closure to a session the door would no longer admit is an authorization
+    # failure, not an exemption.
+    #
+    # The old test was still asserting something TRUE, about a caller it was
+    # not written for: an in-process call carries no capability, so there is no
+    # session for a table to revoke. That case is preserved below, as a control
+    # saying which caller it is an oracle for.
+
+    def test_THE_REGRESSION_an_unscannable_table_does_not_replay_to_a_diner(self):
         order = self._with_key()
         self._unscannable()
 
+        refused = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('order', refused)
+        self.assertEqual(
+            Order.objects.filter(pk=order.pk).count(), 1,
+            'the refusal changes nothing about the order',
+        )
+
+    def test_the_replay_refusal_is_the_channels_own_404_not_a_new_word(self):
+        self._with_key()
+        self._unscannable()
+        refused = self._replay(capability=capability_from_table(self.table))
+        self.assertChannelEnvelope(refused)
+
+    def test_a_table_going_out_of_service_INSIDE_the_window_is_caught(self):
+        """The window this actually sits in. The endpoint resolved a scannable
+        table; the change commits while `resolve_intent` waits on the order row."""
+        order = self._with_key()
+        capability = capability_from_table(self.table)
+
+        with _after_the_intent_lookup(self._unscannable):
+            refused = self._replay(capability=capability)
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertEqual(Order.objects.filter(pk=order.pk).count(), 1)
+
+    def test_a_RETIRED_quote_is_not_disclosed_to_a_revoked_session_either(self):
+        """The disclosure that made this matter: since G3a a replay carries the
+        closure recorded against the order, which is the one thing a client that
+        lost the refusal needs. A session the door would no longer admit may not
+        read it."""
+        from orders_app.controllers.services import quote_closure
+        order = self._with_key()
+        with transaction.atomic():
+            quote_closure.close(
+                order, quote_ref=quote_ref(order),
+                reason=quote_closure.REASON_EXPIRED,
+                now=timezone.now(), evidence=None,
+            )
+        self._unscannable()
+
+        refused = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('quote_closure', refused)
+
+    def test_the_control_an_unscannable_table_STILL_replays_with_NO_capability(self):
+        """What the old oracle was really about. An in-process caller holds no
+        table session, so scannability has nothing to revoke — and this is a
+        RE-assertion, never a new requirement to present a credential."""
+        order = self._with_key()
+        self._unscannable()
+
+        result = self._replay()
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+        self.assertEqual(result['order'].pk, order.pk)
+
+    def test_the_control_an_unscannable_table_STILL_replays_for_STAFF(self):
+        """A staff caller is authorized by the module gate, not by a table
+        session, so the same reasoning applies — and refusing would buy the
+        diner nothing."""
+        from orders_app.controllers.services.create_order import _create_order
+        staff_authority = StaffAuthority(
+            user=self.owner, restaurant_id=str(self.restaurant.pk),
+            module=MODULE_TABLES,
+        )
+        first = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id='11111111-1111-4111-8111-111111111111',
+            created_by=self.owner, authority=staff_authority,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        self._unscannable()
+
+        result = self._replay(created_by=self.owner, authority=staff_authority)
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(result['order'].pk, first['order'].pk)
+
+    def test_the_control_a_MENU_ONLY_table_still_replays(self):
+        """`qr_mode` is ORDERING POLICY, which `is_available_for_scan` does not
+        read and `order_eligibility` owns. A menu-only table still MINTS
+        sessions, so nothing about the caller's session has been revoked."""
+        order = self._with_key()
+        Table.objects.filter(pk=self.table.pk).update(qr_mode='menu_only')
+
         result = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(result['order'].pk, order.pk)
+
+    def test_the_control_a_valid_RESCAN_still_replays(self):
+        """The refusal is about the SESSION, not about the replay. A diner who
+        re-scans the regenerated code holds a current capability and recovers
+        the order they already placed."""
+        order = self._with_key()
+        Table.objects.filter(pk=self.table.pk).update(
+            qr_version=self.table.qr_version + 1)
+        rescanned = capability_from_table(Table.objects.get(pk=self.table.pk))
+
+        result = self._replay(capability=rescanned)
         self.assertEqual(result.get('status'), 200, result)
         self.assertEqual(result['order'].pk, order.pk)
 
@@ -790,3 +940,473 @@ class ReplayDisclosureIsAuthorizedTests(AuthorityFixture):
         )
         self.assertEqual(result.get('status'), 200, result)
         self.assertFalse(result.get('idempotent'))
+
+
+class PostWaitReplayDisclosureRespectsTheSessionTests(AuthorityFixture):
+    """A1b, THE BRANCH THE FIRST CUT DID NOT REACH — the post-wait recheck.
+
+    `_create_order` has THREE return-existing sites and A1b reached one. Step
+    1's lookup runs BEFORE the table lock, so a request whose key has not been
+    used yet does not take that branch at all: it goes on to wait for the
+    advisory lock and the table row, and step 1c asks again UNDER the lock
+    precisely because a competing request carrying the same key may have
+    committed inside that wait. That second return is the same disclosure — an
+    existing order and, since G3a, the closure recorded against it — reached by
+    the other door.
+
+    Step 1b' re-asks the capability's GENERATION on the locked row and the staff
+    module gate. Neither answers whether the table is still a place a diner can
+    be, and **going out of service bumps no `qr_version`** — so a table disabled
+    inside the wait passed 1b' and disclosed at 1c. Found by Codex on PR #325;
+    valid, and exactly the shape this work keeps warning about: an invariant
+    added to one branch and not the others.
+
+    THE THIRD SITE NEEDS NOTHING, and the control below says why rather than
+    leaving it to be rediscovered: the unique-conflict recovery sits AFTER step
+    1e, which evaluates table liveness on this same locked row for EVERY
+    provenance, and the row cannot move while this transaction holds it.
+    """
+
+    KEY = '22222222-2222-4222-8222-222222222222'
+
+    def _competing_commit(self):
+        """The winner of the race, written inside the wait: the same key, the
+        same purchase, the same scope — exactly what step 1c exists to find."""
+        from orders_app.controllers.services.create_order import _create_order
+        result = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id=self.KEY,
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        return result['order']
+
+    def _race(self, effect, **kwargs):
+        """Fire ``effect`` in the real window — after the advisory lock, before
+        the table row is locked and re-read — and return what the racing
+        request is answered."""
+        from orders_app.controllers.services.create_order import _create_order
+        with _during_the_wait(effect):
+            return _create_order(
+                restaurant=self.restaurant, table=self.table,
+                items=[{'item': str(self.item.pk), 'quantity': 1}],
+                client_order_id=self.KEY,
+                **kwargs,
+            )
+
+    def _orders_for_key(self):
+        return Order.objects.filter(
+            restaurant=self.restaurant, client_order_id=self.KEY)
+
+    def test_THE_REGRESSION_the_post_wait_replay_asks_about_the_session(self):
+        state = {}
+
+        def effect():
+            state['winner'] = self._competing_commit()
+            self._unscannable()
+
+        refused = self._race(
+            effect, capability=capability_from_table(self.table))
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('order', refused)
+        self.assertEqual(
+            self._orders_for_key().count(), 1,
+            'the refusal writes nothing and disturbs nothing',
+        )
+
+    def test_the_refusal_is_the_channels_own_404_not_a_new_word(self):
+        def effect():
+            self._competing_commit()
+            self._unscannable()
+
+        refused = self._race(
+            effect, capability=capability_from_table(self.table))
+        self.assertChannelEnvelope(refused)
+
+    def test_a_RETIRED_quote_is_not_disclosed_on_this_branch_either(self):
+        """What makes the disclosure matter: since G3a the replay carries the
+        closure recorded against the order."""
+        from orders_app.controllers.services import quote_closure
+
+        def effect():
+            winner = self._competing_commit()
+            quote_closure.close(
+                winner, quote_ref=quote_ref(winner),
+                reason=quote_closure.REASON_EXPIRED,
+                now=timezone.now(), evidence=None,
+            )
+            self._unscannable()
+
+        refused = self._race(
+            effect, capability=capability_from_table(self.table))
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('quote_closure', refused)
+        self.assertEqual(
+            OrderQuoteClosure.objects.count(), 1,
+            'the closure the server wrote is left exactly as it was',
+        )
+
+    # -- the controls --------------------------------------------------------
+
+    def test_the_control_an_intact_session_still_gets_the_post_wait_replay(self):
+        state = {}
+
+        def effect():
+            state['winner'] = self._competing_commit()
+
+        result = self._race(
+            effect, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+        self.assertEqual(result['order'].pk, state['winner'].pk)
+
+    def test_the_control_a_keyless_caller_still_gets_the_post_wait_replay(self):
+        """No capability presented, so there is no session for a table to
+        revoke — and this must never become a requirement to present one."""
+        def effect():
+            self._competing_commit()
+            self._unscannable()
+
+        result = self._race(effect)
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_PAUSED_restaurant_still_gets_the_post_wait_replay(self):
+        """The exemption a replay keeps. A pause is a statement about NEW work
+        and this order was already created and acknowledged."""
+        def effect():
+            self._competing_commit()
+            Restaurant.objects.filter(pk=self.restaurant.pk).update(
+                accepting_orders=False)
+
+        result = self._race(
+            effect, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_FIRST_creation_still_answers_the_ELIGIBILITY_400(self):
+        """THE DISCRIMINATING CONTROL FOR THE WRONG FIX.
+
+        Answering this at step 1b' — beside the authority check, where it would
+        look tidier — would apply the capability channel's opaque 404 to a FIRST
+        creation too, replacing a refusal a diner can read with one that
+        discloses nothing. The session question belongs on the branch where no
+        eligibility rule runs, and nowhere else.
+        """
+        result = self._race(self._unscannable,
+                            capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 400, result)
+        self.assertEqual(result.get('reason'),
+                         eligibility.REASON_TABLE_UNAVAILABLE, result)
+        self.assertEqual(result.get('message'),
+                         eligibility.MESSAGE_TABLE_UNAVAILABLE, result)
+        self.assertFalse(self._orders_for_key().exists(),
+                         'a refused first creation writes no draft')
+
+
+class AcceptedSubmissionReplayRespectsTheSessionTests(AuthorityFixture):
+    """A1b, the other half — THE ACCEPTED-SUBMISSION REPLAY.
+
+    `_submit_order` re-verifies the capability's GENERATION under the lock and
+    then answers D04's replay before any eligibility rule runs. Generation is
+    only half of what revokes a session: a table taken out of service stops
+    minting sessions altogether, which is why `_resolve_table` re-reads
+    `is_available_for_scan()` on every use and answers the channel's opaque 404.
+
+    So a diner whose table went out of service during the lock wait was still
+    handed back the acceptance and its correlated projection — order id, table,
+    restaurant, the exact `quote_ref` the diner confirmed — on a session the
+    door would no longer admit. `retire_quote_for_review` already asks this
+    question under the lock (G1b); the acceptance replay did not, for the same
+    reason retirement did not: no eligibility rule runs before the return.
+
+    THE EXEMPTION IT KEEPS IS UNCHANGED. A pause, menu-only ordering, a dish
+    that has since sold out and a quote that has since expired are all
+    statements about NEW work, and a replay stays exempt from every one of them.
+    """
+
+    def _accepted(self, capability=None):
+        order = self._draft_order()
+        ref = quote_ref(order)
+        result = update_order_status(
+            order, OrderStatus_Pending, None,
+            quote_ref=ref, capability=capability,
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(OrderAcceptance.objects.filter(order=order).exists())
+        order.refresh_from_db()
+        return order, ref
+
+    def _replay(self, order, ref, **kwargs):
+        return update_order_status(
+            order, OrderStatus_Pending, None, quote_ref=ref, **kwargs)
+
+    def test_THE_REGRESSION_an_unscannable_table_is_not_handed_the_replay(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+
+        with _during_the_wait(self._unscannable):
+            refused = self._replay(
+                order, ref, capability=capability_from_table(self.table))
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('checkout', refused)
+        self.assertNotIn('idempotent', refused)
+
+    def test_the_refusal_is_the_channels_own_404_not_a_new_word(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+        with _during_the_wait(self._unscannable):
+            refused = self._replay(
+                order, ref, capability=capability_from_table(self.table))
+        self.assertChannelEnvelope(refused)
+
+    def test_the_acceptance_evidence_is_untouched_by_the_refusal(self):
+        """A refusal is not a second acceptance and not a retraction of the
+        first: the submission DID land, and the row that says so never moves."""
+        order, ref = self._accepted(capability_from_table(self.table))
+        before = OrderAcceptance.objects.get(order=order)
+
+        with _during_the_wait(self._unscannable):
+            self._replay(
+                order, ref, capability=capability_from_table(self.table))
+
+        after = OrderAcceptance.objects.get(order=order)
+        self.assertEqual(
+            OrderAcceptance.objects.filter(order=order).count(), 1)
+        self.assertEqual(after.accepted_at, before.accepted_at)
+        self.assertEqual(after.quote_ref, before.quote_ref)
+        self.assertFalse(
+            OrderQuoteClosure.objects.filter(order=order).exists(),
+            'a refused replay writes nothing',
+        )
+
+    def test_a_table_already_out_of_service_is_refused_too(self):
+        """The boundary self-guards rather than trusting the endpoint that
+        normally refuses this a moment earlier — the same rule `_create_order`
+        follows for menu publication and lifecycle."""
+        order, ref = self._accepted(capability_from_table(self.table))
+        self._unscannable()
+
+        refused = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(refused.get('status'), 404, refused)
+
+    # -- the controls ------------------------------------------------------
+
+    def test_the_control_an_intact_session_still_replays(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+
+        result = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+        self.assertIn('checkout', result)
+
+    def test_the_control_a_PAUSED_restaurant_still_replays(self):
+        """D04's rule, unchanged: refusing an acceptance that already happened
+        because NEW work is now disallowed is the retroactive refusal it exists
+        to stop."""
+        order, ref = self._accepted(capability_from_table(self.table))
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(
+            accepting_orders=False)
+
+        result = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_MENU_ONLY_table_still_replays(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+        Table.objects.filter(pk=self.table.pk).update(qr_mode='menu_only')
+
+        result = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+
+    def test_the_control_an_item_gone_out_of_stock_still_replays(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+        MenuItem.objects.filter(pk=self.item.pk).update(in_stock=False)
+
+        result = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+
+    def test_the_control_a_caller_with_NO_capability_is_unchanged(self):
+        """An in-process caller holds no table session, so there is none to
+        revoke — and this must not become a new requirement to hold one."""
+        order, ref = self._accepted()
+        self._unscannable()
+
+        result = self._replay(order, ref)
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_STAFF_replay_is_not_bound_by_the_session_rule(self):
+        order = self._draft_order(created_by=self.owner)
+        ref = quote_ref(order)
+        authority = self._staff_authority(order)
+        first = update_order_status(
+            order, OrderStatus_Pending, self.owner,
+            quote_ref=ref, authority=authority,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        order.refresh_from_db()
+        self._unscannable()
+
+        result = update_order_status(
+            order, OrderStatus_Pending, self.owner,
+            quote_ref=ref, authority=authority,
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_valid_RESCAN_still_replays(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+        Table.objects.filter(pk=self.table.pk).update(
+            qr_version=self.table.qr_version + 1)
+        rescanned = capability_from_table(Table.objects.get(pk=self.table.pk))
+
+        result = self._replay(order, ref, capability=rescanned)
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+
+class TheRefusalIsTheChannelsOwnEnvelopeTests(AuthorityFixture):
+    """A1b/E — THE POST-LOCK REFUSAL IS THE DOOR'S REFUSAL, BYTE FOR BYTE.
+
+    Every one of these boundaries is documented as answering "the capability
+    channel's OWN opaque 404", and three of them answered something else: the
+    door raises ``DinerCapabilityDenied`` and both order endpoints render it as
+    ``exc.message`` -- ``'Not found.'`` -- while ``_session_refusal`` (create),
+    the accepted-submission replay and ``retire_quote_for_review`` each wrote
+    out ``'Not found'`` by hand. One route, two spellings, decided by WHEN the
+    revocation landed.
+
+    TWO CONSEQUENCES, and the second is the one that reaches a diner. As an
+    oracle it lets a client separate a refusal that landed at the door from one
+    that landed inside the lock wait, and liveness revocation from generation
+    revocation, in a channel whose whole design is that it discloses nothing.
+    And the deployed client matches the body EXACTLY
+    (``DinerSessionService.CAPABILITY_DENIED_404``, compared with ``===`` after
+    a ``trim()`` that does not strip a period), so the periodless form was not
+    recognised as a capability denial at all -- the diner whose table went out
+    of service mid-request was shown no rescan panel and left with an
+    unexplained failure.
+
+    WHY THE SUITE DID NOT SEE IT. Four tests here are named "the channel's own
+    404, not a new word" and every one of them compared the KEY SET only. The
+    word was never asserted, which is exactly the half that had drifted; they
+    now go through ``assertChannelEnvelope``.
+    """
+
+    RETIRE_URL = '/api/v1/orders/retire-quote/'
+
+    def _diner_put(self, url, order, session):
+        import json
+        header = 'HTTP_' + diner_capability.SESSION_HEADER.upper().replace(
+            '-', '_')
+        return self.client.put(
+            url,
+            data=json.dumps({
+                'order': str(order.pk), 'quote_ref': quote_ref(order),
+            }),
+            content_type='application/json',
+            **{header: session},
+        )
+
+    def test_THE_REGRESSION_the_door_and_the_post_wait_answer_are_identical(self):
+        """The strongest form of the rule, over REAL HTTP on ONE route: drive
+        both refusals and compare the responses to each other.
+
+        Nothing here names a literal, so it cannot be satisfied by two copies
+        of a string that happen to agree -- only by the two paths genuinely
+        answering the same thing.
+        """
+        # BOTH drafts and BOTH sessions are made while the table is still
+        # live -- the second case has to be prepared before the first runs,
+        # because the first is what takes the table out of service.
+        post_wait_order = self._draft_order()
+        door_order = self._draft_order()
+        post_wait_session = diner_capability.issue_table_session(self.table)
+        door_session = diner_capability.issue_table_session(self.table)
+
+        # B: refused INSIDE the lock wait -- live at the door, revoked while
+        #    the transaction waited.
+        with _during_the_wait(self._unscannable):
+            post_wait = self._diner_put(
+                self.RETIRE_URL, post_wait_order, post_wait_session)
+
+        # A: refused AT THE DOOR -- the table is already unavailable when the
+        #    request arrives, so `_resolve_table` denies on its live re-check.
+        door = self._diner_put(self.RETIRE_URL, door_order, door_session)
+
+        self.assertEqual(door.status_code, 404, door.content)
+        self.assertEqual(post_wait.status_code, 404, post_wait.content)
+        self.assertEqual(
+            post_wait.json(), door.json(),
+            'a client must not be able to tell WHICH of the two refused it',
+        )
+
+    def test_the_create_path_replay_refusal_is_the_doors(self):
+        """The third site, which Codex did not name: `_create_order`'s
+        `_session_refusal`. Fixing two of the three would be the same
+        one-consumer-not-the-next shape this whole pass is about."""
+        from orders_app.controllers.services.create_order import _create_order
+
+        key = '11111111-1111-4111-8111-111111111111'
+        first = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id=key,
+            capability=capability_from_table(self.table),
+        )
+        self.assertEqual(first.get('status'), 200, first)
+
+        self._unscannable()
+        refused = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id=key,
+            capability=capability_from_table(self.table),
+        )
+        self.assertChannelEnvelope(refused)
+
+    def test_the_envelope_is_derived_from_the_exception_not_restated(self):
+        """`denial_envelope` must READ `DinerCapabilityDenied`, so changing the
+        channel's word moves every site at once. A second literal is how the
+        three drifted in the first place."""
+        with patch.object(
+            diner_capability.DinerCapabilityDenied, '__init__',
+            lambda self: diner_capability.DinerCapabilityError.__init__(
+                self, message='CHANGED.', status=404),
+        ):
+            self.assertEqual(
+                diner_capability.denial_envelope(),
+                {'status': 404, 'message': 'CHANGED.'},
+            )
+
+    # -- the controls ------------------------------------------------------
+
+    def test_the_control_the_STAFF_refusal_is_NOT_the_diner_envelope(self):
+        """The staff channel keeps its own word, and that is not an oversight.
+
+        Its door is the orders endpoints' own periodless `'Not found'` and
+        `StaffAuthorityError` already matches it, so routing staff through the
+        diner envelope would introduce on that side exactly the mismatch this
+        change removes on this one.
+        """
+        order = self._draft_order()
+        with _during_the_wait(self._revoke_membership):
+            refused = self._submit_as_staff(order)
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertEqual(refused.get('message'), 'Not found')
+        self.assertNotEqual(refused, _door_envelope())
+
+    def test_the_control_a_live_session_still_retires_over_HTTP(self):
+        """The envelope can only ever be an answer to a REFUSAL; an unchanged
+        world is unchanged."""
+        order = self._draft_order()
+        session = diner_capability.issue_table_session(self.table)
+        response = self._diner_put(self.RETIRE_URL, order, session)
+        self.assertEqual(response.status_code, 200, response.content)
