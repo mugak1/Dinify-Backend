@@ -1213,6 +1213,19 @@ capability (1 SELECT -> 2). A keyless caller, a staff caller and every new-order
 path pay nothing: the new-order path re-uses the row it locks anyway, and the
 capability half is skipped outright when no capability was presented.
 
+**ONE CORRECTION TO THAT REFUSAL, AND IT IS THE OPPOSITE OF A NEW ONE.** The
+lock-free replay read first shipped behind a bare `except Exception`, which
+returned `None` for a database error as readily as for a missing row — and
+`None` is read as a REVOCATION, so a dropped connection, a statement timeout or
+a query defect answered with the capability channel's opaque 404. That is the
+identical answer a killed session gets: a diner would be told their table
+session was no longer valid, and we would see an authorization event, for an
+outage. The handler now catches only what it is for (`Table.DoesNotExist`, and
+the three a malformed key raises) and everything else propagates, so such a
+failure surfaces as a 500 and reaches ordinary error handling. **A CLIENT NEEDS
+NO CHANGE**: the 404 contract for a genuinely revoked or vanished table is
+unchanged, and a 500 was always the honest answer for a database that is down.
+
 
 ## Summary of frontend changes needed before merge
 

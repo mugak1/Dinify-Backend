@@ -224,13 +224,25 @@ def _table_row_now(table_pk):
     revocation — correctly: a table a diner's session names and that no longer
     exists is not a table they hold a session for.
     """
+    from django.core.exceptions import ValidationError as DjangoValidationError
     from restaurants_app.models import Table
     try:
         return Table.objects.get(pk=table_pk)
-    except Exception:
-        # A missing row, a malformed pk — both mean "not a table this capability
-        # can still be current against". Narrow by construction: the only caller
-        # passes the pk of a row it already loaded.
+    except (Table.DoesNotExist, DjangoValidationError, ValueError, TypeError):
+        # A missing row, or a pk that is not one — both mean "not a table this
+        # capability can still be current against", which is what the caller
+        # reads ``None`` as.
+        #
+        # NARROW ON PURPOSE. This used to be a bare ``except Exception``, which
+        # also swallowed ``OperationalError``, ``InterfaceError`` and
+        # ``ProgrammingError`` — a lost connection, a statement timeout or a
+        # query defect — and reported every one of them as the capability
+        # channel's opaque 404. That is the same answer a REVOKED session gets,
+        # so an outage would have read to a diner as "your table session is no
+        # longer valid" and to us as an authorization event rather than the
+        # infrastructure failure it was. An unexpected database error is not
+        # evidence about authority and must propagate to ordinary error
+        # handling, exactly as it does on every other read in this service.
         return None
 
 

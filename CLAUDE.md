@@ -1043,8 +1043,24 @@ so keep it current when conventions change.
   the only barrier there is. Pinned by
   `orders_app/tests_authority_during_lock_wait.py` (16 new tests; **9 of them
   fail when the check is neutralised and the other 7 are the controls that must
-  not change**) and `orders_app/tests_closure_preconditions.py` (12). See
-  `BREAKING_CHANGES.md` §16b
+  not change**) and `orders_app/tests_closure_preconditions.py` (12).
+  **AND AN UNEXPECTED DATABASE ERROR IS NOT AN AUTHORIZATION ANSWER** (Codex P2
+  on PR #324, valid). `_table_row_now` caught a bare `Exception` and returned
+  `None`, which `assert_capability_current` reads as a REVOCATION — so an
+  `OperationalError`, `InterfaceError` or `ProgrammingError` (a dropped
+  connection, a statement timeout, a query defect) came back as the capability
+  channel's opaque 404. That is the identical answer a revoked session gets, so
+  an outage would have read to a diner as "your table session is no longer
+  valid" and to us as an authorization event, indefinitely. The handler now
+  names the two conditions its own docstring claimed —
+  `(Table.DoesNotExist, ValidationError, ValueError, TypeError)`, a missing row
+  or a pk that is not one — and everything else propagates to ordinary error
+  handling, as it does on every other read in this service. Pinned by four tests
+  beside the existing ones: two propagation cases, the vanished-table control
+  that must STAY a 404, and a keyless control proving the read is skipped
+  entirely when no capability was presented (which is what keeps that pinned
+  query budget flat). Reverting to `except Exception` fails exactly the two
+  propagation cases. See `BREAKING_CHANGES.md` §16b
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one

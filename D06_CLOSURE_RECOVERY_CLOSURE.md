@@ -70,13 +70,40 @@ than swallowed.
 
 ---
 
+## The review round (four Codex P2, all valid)
+
+Each is the same shape as the findings this work exists to close: a rule already
+established here, reaching only part of the code it governs.
+
+| # | where | what it was | what closes it |
+|---|---|---|---|
+| F1 | `basket-body.component.ts` — `renewQuote` retired branch | renewed **whatever record is current when the answer lands**, which is the one input `renewAfterClosure`'s `superseded` check can never refuse. A mount holding a stale O1/Q1 sheet could take Q1's closure and abandon the live K2 successor another mount had minted. `settles(owner)` cannot see it: the owner is frozen when the *enquiry* is issued, which is after the renewal | `reviewedQuote` carries the **key it was priced under** — the only thing that distinguishes two attempts at one purchase, since a renewal carries `request` and `scope` across unchanged — and one gate covers both branches that act |
+| F2 | `basket-body.component.ts` — `resendIssuedCommand` | guarded on `issued.seq`, a **component** counter that never moves for another instance and does not exist once this one is destroyed. A resend outliving its component wrote to the shared record: a refusal settled a command and recorded a closure against whatever attempt was current | both callbacks clear `!destroyed && settles(owner)`, after releasing the flight. A null owner fails closed |
+| F3 | `quote-transition.ts` — `readQuoteAnswer` | at a demonstrated level 2, refused only when **both** correlation fields were absent — so an answer naming the order and omitting `quote_ref` authorized a submission. Naming the order says nothing about *which quote* of it, which is the whole question | refuse when **either** is missing. The backend stamps `order` unconditionally and echoes `quote_ref` whenever the caller named one, and this client always does |
+| B1 | `create_order.py` — `_table_row_now` | `except Exception` turned an `OperationalError` / `ProgrammingError` into `None`, which reads as a **revocation** — so an outage answered with the capability channel's opaque 404, indistinguishable from a killed session | catch the two conditions the docstring already named; everything else propagates |
+
+Mutation-proved one fix at a time, controls held throughout:
+
+```
+F3 reverted   3 fail / 11 pass     (both level-2 controls hold)
+F1 reverted   2 fail / 12 pass
+F2 reverted   2 fail / 12 pass
+B1 reverted   2 fail / 10 pass     (vanished-table + keyless controls hold)
+```
+
+`basket-body.stale-answer.spec.ts` (14) drives the real component through the
+real coordinator and storage; the backend cases sit in
+`tests_authority_during_lock_wait.py` beside the ones they extend.
+
+---
+
 ## Commands and results
 
 ```
-Backend   ./scripts/verify.sh                   4507 tests, all gates PASS
+Backend   ./scripts/verify.sh                   4511 tests, all gates PASS
 Frontend  npm run type-check / lint             clean
-          npm run test:tenant-boundary          PASS
-          npm run test:ci                       2450
+          npm run test:tenant-boundary          306 PASS
+          npm run test:ci                       2464
           npm run build:prod                    PASS
 Browser   e2e/checkout-journey/journey.mjs      42/42
           e2e/checkout-journey/recovery.mjs     68/68   (was 47/47)

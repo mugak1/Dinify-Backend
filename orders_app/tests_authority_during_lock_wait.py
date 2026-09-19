@@ -706,6 +706,79 @@ class ReplayDisclosureIsAuthorizedTests(AuthorityFixture):
         self.assertEqual(result.get('status'), 200, result)
         self.assertEqual(result['order'].pk, order.pk)
 
+    # -- an unexpected database error is NOT an authorization answer ------
+
+    def test_an_OPERATIONAL_error_on_the_replay_table_read_PROPAGATES(self):
+        """A lost connection is not a revoked capability.
+
+        The lock-free replay read used to sit behind a bare ``except
+        Exception``, so an ``OperationalError`` — a dropped connection, a
+        statement timeout — became ``None``, which `assert_capability_current`
+        reads as a revocation and the endpoint answers with the capability
+        channel's opaque 404. The diner would be told their table session was no
+        longer valid, and we would see an authorization event, for an outage.
+
+        The handler names the two conditions it is actually for; everything else
+        must reach ordinary error handling.
+        """
+        from django.db import OperationalError
+        self._with_key()
+        capability = capability_from_table(self.table)
+
+        with patch.object(
+            Table.objects, 'get',
+            side_effect=OperationalError('server closed the connection'),
+        ):
+            with self.assertRaises(OperationalError):
+                self._replay(capability=capability)
+
+    def test_a_PROGRAMMING_error_on_the_replay_table_read_PROPAGATES(self):
+        """The same for a query defect: a 404 would hide it indefinitely."""
+        from django.db import ProgrammingError
+        self._with_key()
+        capability = capability_from_table(self.table)
+
+        with patch.object(
+            Table.objects, 'get',
+            side_effect=ProgrammingError('column does not exist'),
+        ):
+            with self.assertRaises(ProgrammingError):
+                self._replay(capability=capability)
+
+    def test_THE_CONTROL_a_vanished_table_is_still_the_opaque_404(self):
+        """The condition the handler IS for, unchanged by narrowing it.
+
+        A table a diner's session names and that no longer exists is not a table
+        they hold a session for, so this stays a revocation rather than an
+        error.
+        """
+        self._with_key()
+        capability = capability_from_table(self.table)
+
+        with patch.object(
+            Table.objects, 'get', side_effect=Table.DoesNotExist,
+        ):
+            refused = self._replay(capability=capability)
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('order', refused)
+
+    def test_THE_CONTROL_a_keyless_replay_never_reads_the_table_at_all(self):
+        """No capability presented, so the read is skipped and an error in it
+        cannot be reached — which is what keeps the pinned query budget flat for
+        a keyless caller."""
+        from django.db import OperationalError
+        self._with_key()
+
+        with patch.object(
+            Table.objects, 'get',
+            side_effect=OperationalError('must not be reached'),
+        ):
+            result = self._replay()
+
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
     def test_the_control_a_keyless_caller_reaches_no_replay_check(self):
         """No key, no replay: the check costs nothing and changes nothing on the
         path a diner without an idempotency key takes."""
