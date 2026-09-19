@@ -246,6 +246,26 @@ def _table_row_now(table_pk):
         return None
 
 
+def _once(produce):
+    """Memoise a zero-argument producer.
+
+    The replay branch asks TWO questions about the same non-locking snapshot of
+    the table — is the capability still current, and would this table still mint
+    the session at all — and neither may pay for the read when no capability was
+    presented. Fetching twice would cost a second query AND, worse, let the two
+    answers describe two different moments, which is the half-observed snapshot
+    `catalogue_snapshot` exists to rule out.
+    """
+    cache = {}
+
+    def _get():
+        if 'row' not in cache:
+            cache['row'] = produce()
+        return cache['row']
+
+    return _get
+
+
 def _create_order(*, restaurant, table, items,
                   customer=None, created_by=None,
                   order_source=ORDER_SOURCE_DINER, client_order_id=None,
@@ -337,7 +357,7 @@ def _create_order(*, restaurant, table, items,
 
     # A1 — ONE RE-ASSERTION, ASKED AT EVERY POINT THAT DISCLOSES OR WRITES.
     #
-    # Written once and called from three places rather than inlined at each,
+    # Written once and called from both points rather than inlined at each,
     # because that is exactly how an invariant ends up added to one branch and
     # not the others — the lesson `_submit_order` records about its own pair of
     # branches. It returns a refusal dict or `None`, so callers stay in this
@@ -383,6 +403,41 @@ def _create_order(*, restaurant, table, items,
         except StaffAuthorityError as exc:
             return {'status': exc.status, 'message': exc.message}
         return None
+
+    # A1b — WOULD THIS TABLE STILL MINT THE SESSION THE CALLER IS HOLDING?
+    #
+    # A SEPARATE NAMED PREDICATE, asked on exactly ONE branch, and the scoping
+    # is the whole design rather than an oversight.
+    # `assert_capability_current` re-checks the QR GENERATION and deliberately
+    # nothing else, because a table taken out of service is an OPERATIONAL fact
+    # that binds every provenance and `order_eligibility` owns it — answering it
+    # in the capability channel too would give one fact two answers depending on
+    # how the caller authenticated. That holds wherever an eligibility rule runs,
+    # which on the CREATE path is step 1e, on the locked row.
+    #
+    # THE REPLAY RETURN IS THE BRANCH WHERE NONE RUNS. It is exempt from every
+    # new-order rule by design, so it never reaches 1e and this fact reached
+    # nothing at all — while the return itself is a disclosure: an existing order
+    # and, since G3a, the closure recorded against it. `_resolve_table` re-reads
+    # `is_available_for_scan()` live on every use and treats a table that has
+    # stopped being scannable as a REVOKED SESSION, answering this channel's
+    # opaque 404, so a request reaching here at all is one where the table went
+    # out of service after that resolution. The answer is that same 404, which is
+    # what keeps it stable across the wait instead of depending on when the
+    # operator happened to click. `retire_quote_for_review` asks the identical
+    # question under its lock for the identical reason (G1b).
+    #
+    # `True` for a caller with no capability, so a staff or in-process replay is
+    # untouched: there is no session for a table to revoke, and this must never
+    # become a new requirement to present one.
+    def _session_refusal(table_row):
+        from restaurants_app.controllers import diner_capability
+        if capability is None:
+            return None
+        row = table_row() if callable(table_row) else table_row
+        if diner_capability.session_still_admissible(capability, row):
+            return None
+        return {'status': 404, 'message': 'Not found'}
 
     # The try/except sits AROUND the atomic block (the same idiom as the two
     # nested savepoints inside it): OrderItemRejected must unwind through
@@ -439,8 +494,16 @@ def _create_order(*, restaurant, table, items,
                 # IT COSTS ONE QUERY, AND ONLY ON AN ACTUAL REPLAY. The hot
                 # create paths reach step 1b, where the locked row is already in
                 # hand and the same check is free.
-                refusal = _authority_refusal(
-                    lambda: _table_row_now(table.pk))
+                #
+                # TWO QUESTIONS, ONE SNAPSHOT: is the capability still current
+                # (generation), and would this table still mint a session at all
+                # (scannability). `_once` is what keeps them describing the same
+                # moment and the same single query.
+                table_now = _once(lambda: _table_row_now(table.pk))
+                refusal = (
+                    _authority_refusal(table_now)
+                    or _session_refusal(table_now)
+                )
                 if refusal is not None:
                     return refusal
                 return {'status': 200, 'order': verdict_intent.order,

@@ -696,6 +696,37 @@ def _submit_order(order: Order, user: Union[User, None],
         # response as a failure.
         replay = _acceptance_replay(order, supplied_quote_ref)
         if replay is not None:
+            # A1b — AND THE SESSION'S OTHER HALF, ON THE ONE BRANCH NO
+            # ELIGIBILITY RULE WILL REACH.
+            #
+            # `assert_capability_current` above re-checks the QR GENERATION and
+            # deliberately nothing else: a table taken out of service is an
+            # OPERATIONAL fact binding every provenance, and `order_eligibility`
+            # owns it and answers it with a sentence a diner can read. That
+            # reasoning holds for a FIRST submission, which reaches that rule a
+            # few lines below.
+            #
+            # A REPLAY NEVER DOES. It is exempt from every new-order rule by
+            # design, so the fact reached nothing at all here — and the answer it
+            # returns is a disclosure: the order id, the server-resolved
+            # restaurant and table, and the exact `quote_ref` the diner
+            # confirmed. `_resolve_table` re-reads `is_available_for_scan()` live
+            # on every use and treats a table that has stopped being scannable as
+            # a REVOKED SESSION, answering this channel's opaque 404 — so a
+            # request that reaches here at all is one where the table went out of
+            # service inside the lock wait, and handing back the acceptance would
+            # answer a session the door would no longer admit.
+            #
+            # The answer is that same 404, which is what keeps it STABLE across
+            # the wait rather than depending on when the operator happened to
+            # click. `retire_quote_for_review` asks this question under its lock
+            # for the same reason and through the same predicate; it is `True`
+            # for a caller with no capability, so a staff or in-process replay is
+            # untouched — there is no session for a table to revoke.
+            if not diner_capability.session_still_admissible(
+                capability, locked_table
+            ):
+                return {'status': 404, 'message': 'Not found'}
             return replay
 
         # D06: HAS THIS DRAFT'S QUOTE ALREADY BEEN RETIRED? Asked second, and

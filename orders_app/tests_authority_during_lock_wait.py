@@ -674,11 +674,129 @@ class ReplayDisclosureIsAuthorizedTests(AuthorityFixture):
         self.assertTrue(result.get('idempotent'))
         self.assertEqual(result['order'].pk, order.pk)
 
-    def test_a_table_taken_out_of_service_still_replays(self):
+    # -- A1b: SCANNABILITY REVOKES A SESSION, AND A REPLAY IS A DISCLOSURE --
+    #
+    # THE ORACLE THAT USED TO LIVE HERE ASSERTED THE OPPOSITE. It was called
+    # `test_a_table_taken_out_of_service_still_replays` and it filed
+    # scannability under "what a replay must STILL be exempt from", beside the
+    # pause and the sold-out item. Those two really are statements about NEW
+    # work. Scannability is not: `_resolve_table` re-reads it live on every use
+    # and treats a table that has stopped being scannable as a REVOKED SESSION,
+    # answering the channel's opaque 404 — so the endpoint refuses such a
+    # request outright, and the branch below is reachable only when the table
+    # goes out of service after that resolution. Disclosing an order and its
+    # closure to a session the door would no longer admit is an authorization
+    # failure, not an exemption.
+    #
+    # The old test was still asserting something TRUE, about a caller it was
+    # not written for: an in-process call carries no capability, so there is no
+    # session for a table to revoke. That case is preserved below, as a control
+    # saying which caller it is an oracle for.
+
+    def test_THE_REGRESSION_an_unscannable_table_does_not_replay_to_a_diner(self):
         order = self._with_key()
         self._unscannable()
 
+        refused = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('order', refused)
+        self.assertEqual(
+            Order.objects.filter(pk=order.pk).count(), 1,
+            'the refusal changes nothing about the order',
+        )
+
+    def test_the_replay_refusal_is_the_channels_own_404_not_a_new_word(self):
+        self._with_key()
+        self._unscannable()
+        refused = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(set(refused), {'status', 'message'}, refused)
+
+    def test_a_table_going_out_of_service_INSIDE_the_window_is_caught(self):
+        """The window this actually sits in. The endpoint resolved a scannable
+        table; the change commits while `resolve_intent` waits on the order row."""
+        order = self._with_key()
+        capability = capability_from_table(self.table)
+
+        with _after_the_intent_lookup(self._unscannable):
+            refused = self._replay(capability=capability)
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertEqual(Order.objects.filter(pk=order.pk).count(), 1)
+
+    def test_a_RETIRED_quote_is_not_disclosed_to_a_revoked_session_either(self):
+        """The disclosure that made this matter: since G3a a replay carries the
+        closure recorded against the order, which is the one thing a client that
+        lost the refusal needs. A session the door would no longer admit may not
+        read it."""
+        from orders_app.controllers.services import quote_closure
+        order = self._with_key()
+        with transaction.atomic():
+            quote_closure.close(
+                order, quote_ref=quote_ref(order),
+                reason=quote_closure.REASON_EXPIRED,
+                now=timezone.now(), evidence=None,
+            )
+        self._unscannable()
+
+        refused = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('quote_closure', refused)
+
+    def test_the_control_an_unscannable_table_STILL_replays_with_NO_capability(self):
+        """What the old oracle was really about. An in-process caller holds no
+        table session, so scannability has nothing to revoke — and this is a
+        RE-assertion, never a new requirement to present a credential."""
+        order = self._with_key()
+        self._unscannable()
+
+        result = self._replay()
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+        self.assertEqual(result['order'].pk, order.pk)
+
+    def test_the_control_an_unscannable_table_STILL_replays_for_STAFF(self):
+        """A staff caller is authorized by the module gate, not by a table
+        session, so the same reasoning applies — and refusing would buy the
+        diner nothing."""
+        from orders_app.controllers.services.create_order import _create_order
+        staff_authority = StaffAuthority(
+            user=self.owner, restaurant_id=str(self.restaurant.pk),
+            module=MODULE_TABLES,
+        )
+        first = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id='11111111-1111-4111-8111-111111111111',
+            created_by=self.owner, authority=staff_authority,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        self._unscannable()
+
+        result = self._replay(created_by=self.owner, authority=staff_authority)
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(result['order'].pk, first['order'].pk)
+
+    def test_the_control_a_MENU_ONLY_table_still_replays(self):
+        """`qr_mode` is ORDERING POLICY, which `is_available_for_scan` does not
+        read and `order_eligibility` owns. A menu-only table still MINTS
+        sessions, so nothing about the caller's session has been revoked."""
+        order = self._with_key()
+        Table.objects.filter(pk=self.table.pk).update(qr_mode='menu_only')
+
         result = self._replay(capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(result['order'].pk, order.pk)
+
+    def test_the_control_a_valid_RESCAN_still_replays(self):
+        """The refusal is about the SESSION, not about the replay. A diner who
+        re-scans the regenerated code holds a current capability and recovers
+        the order they already placed."""
+        order = self._with_key()
+        Table.objects.filter(pk=self.table.pk).update(
+            qr_version=self.table.qr_version + 1)
+        rescanned = capability_from_table(Table.objects.get(pk=self.table.pk))
+
+        result = self._replay(capability=rescanned)
         self.assertEqual(result.get('status'), 200, result)
         self.assertEqual(result['order'].pk, order.pk)
 
@@ -790,3 +908,169 @@ class ReplayDisclosureIsAuthorizedTests(AuthorityFixture):
         )
         self.assertEqual(result.get('status'), 200, result)
         self.assertFalse(result.get('idempotent'))
+
+
+class AcceptedSubmissionReplayRespectsTheSessionTests(AuthorityFixture):
+    """A1b, the other half — THE ACCEPTED-SUBMISSION REPLAY.
+
+    `_submit_order` re-verifies the capability's GENERATION under the lock and
+    then answers D04's replay before any eligibility rule runs. Generation is
+    only half of what revokes a session: a table taken out of service stops
+    minting sessions altogether, which is why `_resolve_table` re-reads
+    `is_available_for_scan()` on every use and answers the channel's opaque 404.
+
+    So a diner whose table went out of service during the lock wait was still
+    handed back the acceptance and its correlated projection — order id, table,
+    restaurant, the exact `quote_ref` the diner confirmed — on a session the
+    door would no longer admit. `retire_quote_for_review` already asks this
+    question under the lock (G1b); the acceptance replay did not, for the same
+    reason retirement did not: no eligibility rule runs before the return.
+
+    THE EXEMPTION IT KEEPS IS UNCHANGED. A pause, menu-only ordering, a dish
+    that has since sold out and a quote that has since expired are all
+    statements about NEW work, and a replay stays exempt from every one of them.
+    """
+
+    def _accepted(self, capability=None):
+        order = self._draft_order()
+        ref = quote_ref(order)
+        result = update_order_status(
+            order, OrderStatus_Pending, None,
+            quote_ref=ref, capability=capability,
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(OrderAcceptance.objects.filter(order=order).exists())
+        order.refresh_from_db()
+        return order, ref
+
+    def _replay(self, order, ref, **kwargs):
+        return update_order_status(
+            order, OrderStatus_Pending, None, quote_ref=ref, **kwargs)
+
+    def test_THE_REGRESSION_an_unscannable_table_is_not_handed_the_replay(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+
+        with _during_the_wait(self._unscannable):
+            refused = self._replay(
+                order, ref, capability=capability_from_table(self.table))
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertNotIn('checkout', refused)
+        self.assertNotIn('idempotent', refused)
+
+    def test_the_refusal_is_the_channels_own_404_not_a_new_word(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+        with _during_the_wait(self._unscannable):
+            refused = self._replay(
+                order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(set(refused), {'status', 'message'}, refused)
+
+    def test_the_acceptance_evidence_is_untouched_by_the_refusal(self):
+        """A refusal is not a second acceptance and not a retraction of the
+        first: the submission DID land, and the row that says so never moves."""
+        order, ref = self._accepted(capability_from_table(self.table))
+        before = OrderAcceptance.objects.get(order=order)
+
+        with _during_the_wait(self._unscannable):
+            self._replay(
+                order, ref, capability=capability_from_table(self.table))
+
+        after = OrderAcceptance.objects.get(order=order)
+        self.assertEqual(
+            OrderAcceptance.objects.filter(order=order).count(), 1)
+        self.assertEqual(after.accepted_at, before.accepted_at)
+        self.assertEqual(after.quote_ref, before.quote_ref)
+        self.assertFalse(
+            OrderQuoteClosure.objects.filter(order=order).exists(),
+            'a refused replay writes nothing',
+        )
+
+    def test_a_table_already_out_of_service_is_refused_too(self):
+        """The boundary self-guards rather than trusting the endpoint that
+        normally refuses this a moment earlier — the same rule `_create_order`
+        follows for menu publication and lifecycle."""
+        order, ref = self._accepted(capability_from_table(self.table))
+        self._unscannable()
+
+        refused = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(refused.get('status'), 404, refused)
+
+    # -- the controls ------------------------------------------------------
+
+    def test_the_control_an_intact_session_still_replays(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+
+        result = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+        self.assertIn('checkout', result)
+
+    def test_the_control_a_PAUSED_restaurant_still_replays(self):
+        """D04's rule, unchanged: refusing an acceptance that already happened
+        because NEW work is now disallowed is the retroactive refusal it exists
+        to stop."""
+        order, ref = self._accepted(capability_from_table(self.table))
+        Restaurant.objects.filter(pk=self.restaurant.pk).update(
+            accepting_orders=False)
+
+        result = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_MENU_ONLY_table_still_replays(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+        Table.objects.filter(pk=self.table.pk).update(qr_mode='menu_only')
+
+        result = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+
+    def test_the_control_an_item_gone_out_of_stock_still_replays(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+        MenuItem.objects.filter(pk=self.item.pk).update(in_stock=False)
+
+        result = self._replay(
+            order, ref, capability=capability_from_table(self.table))
+        self.assertEqual(result.get('status'), 200, result)
+
+    def test_the_control_a_caller_with_NO_capability_is_unchanged(self):
+        """An in-process caller holds no table session, so there is none to
+        revoke — and this must not become a new requirement to hold one."""
+        order, ref = self._accepted()
+        self._unscannable()
+
+        result = self._replay(order, ref)
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_STAFF_replay_is_not_bound_by_the_session_rule(self):
+        order = self._draft_order(created_by=self.owner)
+        ref = quote_ref(order)
+        authority = self._staff_authority(order)
+        first = update_order_status(
+            order, OrderStatus_Pending, self.owner,
+            quote_ref=ref, authority=authority,
+        )
+        self.assertEqual(first.get('status'), 200, first)
+        order.refresh_from_db()
+        self._unscannable()
+
+        result = update_order_status(
+            order, OrderStatus_Pending, self.owner,
+            quote_ref=ref, authority=authority,
+        )
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))
+
+    def test_the_control_a_valid_RESCAN_still_replays(self):
+        order, ref = self._accepted(capability_from_table(self.table))
+        Table.objects.filter(pk=self.table.pk).update(
+            qr_version=self.table.qr_version + 1)
+        rescanned = capability_from_table(Table.objects.get(pk=self.table.pk))
+
+        result = self._replay(order, ref, capability=rescanned)
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertTrue(result.get('idempotent'))

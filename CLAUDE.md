@@ -1061,6 +1061,48 @@ so keep it current when conventions change.
   entirely when no capability was presented (which is what keeps that pinned
   query budget flat). Reverting to `except Exception` fails exactly the two
   propagation cases. See `BREAKING_CHANGES.md` §16b
+- A REPLAY DISCLOSURE ASKS WHETHER THE SESSION STILL EXISTS (D06/A1b): ✅ G1b
+  re-asked whether the presented CAPABILITY was still the current generation;
+  that is one half of a diner's session, and the other half is whether the table
+  is still a place a diner can be. `_resolve_table` re-checks
+  `is_available_for_scan()` live on every ordinary use, so a soft-deleted,
+  disabled, deactivated or out-of-service table revokes the session at the door
+  — but the TWO REPLAY BRANCHES return before any eligibility rule runs, so that
+  fact reached NOTHING inside them: `_create_order`'s idempotent replay handed
+  back the order and the closure recorded against it, and `_submit_order`'s
+  accepted-submission replay handed back a 200 `idempotent` acceptance result.
+  Both now ask `diner_capability.session_still_admissible(capability, table_row)`
+  and answer the capability channel's OWN OPAQUE 404 — never
+  `order_eligibility`'s diner-readable 400, which stays the answer for a FIRST
+  submission, because a refusal that must be stable across a lock wait cannot
+  depend on when the operator happened to click.
+  **A CALLER THAT PRESENTED NO CAPABILITY IS UNAFFECTED** — a staff principal
+  holds no table session, so there is none for a table going out of service to
+  revoke, and the predicate returns True for them by definition. **THE EXEMPTION
+  A REPLAY KEEPS IS STILL THE RIGHT ONE**: a pause, menu-only ordering, an item
+  that has since sold out and a quote that has since expired all leave it
+  untouched (the retroactive refusal D04 exists to stop), because table and
+  restaurant LIVENESS is not a new-order rule — a table that is not a place an
+  order can exist is not a place one can be read back either.
+  **NO NEW LOCK AND NO NEW QUERY.** The create path re-uses the single lock-free
+  row read A1 already pays for on a capability-carrying replay, memoised by a
+  module-level `_once`, so ONE snapshot answers both the authority question and
+  the session question and the pinned counts move by nothing; that return sits
+  BEFORE the table lock deliberately, so recovery never queues behind live
+  ordering and nothing reaches for `Table` or the advisory lock after an `Order`
+  is already held. The acceptance path asks inside the locks it already holds.
+  **WHERE IT LINEARIZES IS STATED RATHER THAN CLAIMED AWAY**: under READ
+  COMMITTED the lock-free statement takes its own snapshot and therefore sees any
+  COMMITTED revocation, and one committing a moment later can still overlap.
+  **ONE ORACLE MOVED AND IS RECORDED RATHER THAN REWRITTEN** —
+  `test_a_table_taken_out_of_service_still_replays` asserted the OPPOSITE through
+  a carried diner capability and is replaced by
+  `test_THE_REGRESSION_an_unscannable_table_does_not_replay_to_a_diner`; the
+  keyless/internal, staff, paused-restaurant, menu-only, stock-change and
+  valid-rescan controls are all kept separately, because an internal call with NO
+  capability is not an oracle for a public request carrying a revoked one. Pinned
+  by `orders_app/tests_authority_during_lock_wait.py` (60 tests across six
+  classes). See `BREAKING_CHANGES.md` §16c and `D06_CONSUMER_GATES_CLOSURE.md`
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one
