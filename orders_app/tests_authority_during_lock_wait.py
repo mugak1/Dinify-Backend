@@ -60,6 +60,21 @@ from restaurants_app.models import (
 )
 
 
+def _door_envelope():
+    """What the ENDPOINT renders when the DOOR refuses a diner capability.
+
+    Built from a RAISED ``DinerCapabilityDenied`` exactly as
+    ``orders_app/endpoints/orders.py`` builds it -- ``{'status': exc.status,
+    'message': exc.message}`` -- and deliberately NOT from
+    ``diner_capability.denial_envelope()``, which is the thing under test:
+    comparing that helper against itself would pass whatever it returned.
+    """
+    try:
+        raise diner_capability.DinerCapabilityDenied()
+    except diner_capability.DinerCapabilityError as exc:
+        return {'status': exc.status, 'message': exc.message}
+
+
 def _during_the_wait(effect):
     """Fire ``effect`` in the real window: after the admission advisory lock and
     BEFORE the table and order rows are locked and read.
@@ -143,6 +158,23 @@ class AuthorityFixture(QuoteFixtureMixin, TestCase):
     def _unscannable(self):
         Table.objects.filter(pk=self.table.pk).update(
             status='out_of_service', is_active=False)
+
+    def assertChannelEnvelope(self, refused):
+        """The refusal is the capability channel's own answer, WORD INCLUDED.
+
+        Four tests here were named "the channel's own 404, not a new word" and
+        compared only the KEY SET, which is how three sites came to answer
+        "Not found" while the door answers "Not found." -- and the word was the
+        half that mattered: the deployed client matches the body exactly to
+        decide whether a 404 means "rescan", so the periodless copy was not
+        recognised as a capability denial at all.
+        """
+        self.assertEqual(set(refused), {'status', 'message'}, refused)
+        self.assertEqual(
+            refused, _door_envelope(),
+            'a post-lock refusal must be byte-identical to the door refusal, '
+            'or a client can tell which one refused it',
+        )
 
     def _submit_as_staff(self, order):
         return update_order_status(
@@ -280,7 +312,7 @@ class ScanAvailabilityIsCheckedAtTheProtectedDecisionTests(AuthorityFixture):
         order = self._draft_order()
         with _during_the_wait(self._unscannable):
             refused = self._retire_as_diner(order)
-        self.assertEqual(set(refused), {'status', 'message'}, refused)
+        self.assertChannelEnvelope(refused)
 
     # -- the controls ------------------------------------------------------
 
@@ -709,7 +741,7 @@ class ReplayDisclosureIsAuthorizedTests(AuthorityFixture):
         self._with_key()
         self._unscannable()
         refused = self._replay(capability=capability_from_table(self.table))
-        self.assertEqual(set(refused), {'status', 'message'}, refused)
+        self.assertChannelEnvelope(refused)
 
     def test_a_table_going_out_of_service_INSIDE_the_window_is_caught(self):
         """The window this actually sits in. The endpoint resolved a scannable
@@ -990,7 +1022,7 @@ class PostWaitReplayDisclosureRespectsTheSessionTests(AuthorityFixture):
 
         refused = self._race(
             effect, capability=capability_from_table(self.table))
-        self.assertEqual(set(refused), {'status', 'message'}, refused)
+        self.assertChannelEnvelope(refused)
 
     def test_a_RETIRED_quote_is_not_disclosed_on_this_branch_either(self):
         """What makes the disclosure matter: since G3a the replay carries the
@@ -1126,7 +1158,7 @@ class AcceptedSubmissionReplayRespectsTheSessionTests(AuthorityFixture):
         with _during_the_wait(self._unscannable):
             refused = self._replay(
                 order, ref, capability=capability_from_table(self.table))
-        self.assertEqual(set(refused), {'status', 'message'}, refused)
+        self.assertChannelEnvelope(refused)
 
     def test_the_acceptance_evidence_is_untouched_by_the_refusal(self):
         """A refusal is not a second acceptance and not a retraction of the
@@ -1237,3 +1269,144 @@ class AcceptedSubmissionReplayRespectsTheSessionTests(AuthorityFixture):
         result = self._replay(order, ref, capability=rescanned)
         self.assertEqual(result.get('status'), 200, result)
         self.assertTrue(result.get('idempotent'))
+
+
+class TheRefusalIsTheChannelsOwnEnvelopeTests(AuthorityFixture):
+    """A1b/E — THE POST-LOCK REFUSAL IS THE DOOR'S REFUSAL, BYTE FOR BYTE.
+
+    Every one of these boundaries is documented as answering "the capability
+    channel's OWN opaque 404", and three of them answered something else: the
+    door raises ``DinerCapabilityDenied`` and both order endpoints render it as
+    ``exc.message`` -- ``'Not found.'`` -- while ``_session_refusal`` (create),
+    the accepted-submission replay and ``retire_quote_for_review`` each wrote
+    out ``'Not found'`` by hand. One route, two spellings, decided by WHEN the
+    revocation landed.
+
+    TWO CONSEQUENCES, and the second is the one that reaches a diner. As an
+    oracle it lets a client separate a refusal that landed at the door from one
+    that landed inside the lock wait, and liveness revocation from generation
+    revocation, in a channel whose whole design is that it discloses nothing.
+    And the deployed client matches the body EXACTLY
+    (``DinerSessionService.CAPABILITY_DENIED_404``, compared with ``===`` after
+    a ``trim()`` that does not strip a period), so the periodless form was not
+    recognised as a capability denial at all -- the diner whose table went out
+    of service mid-request was shown no rescan panel and left with an
+    unexplained failure.
+
+    WHY THE SUITE DID NOT SEE IT. Four tests here are named "the channel's own
+    404, not a new word" and every one of them compared the KEY SET only. The
+    word was never asserted, which is exactly the half that had drifted; they
+    now go through ``assertChannelEnvelope``.
+    """
+
+    RETIRE_URL = '/api/v1/orders/retire-quote/'
+
+    def _diner_put(self, url, order, session):
+        import json
+        header = 'HTTP_' + diner_capability.SESSION_HEADER.upper().replace(
+            '-', '_')
+        return self.client.put(
+            url,
+            data=json.dumps({
+                'order': str(order.pk), 'quote_ref': quote_ref(order),
+            }),
+            content_type='application/json',
+            **{header: session},
+        )
+
+    def test_THE_REGRESSION_the_door_and_the_post_wait_answer_are_identical(self):
+        """The strongest form of the rule, over REAL HTTP on ONE route: drive
+        both refusals and compare the responses to each other.
+
+        Nothing here names a literal, so it cannot be satisfied by two copies
+        of a string that happen to agree -- only by the two paths genuinely
+        answering the same thing.
+        """
+        # BOTH drafts and BOTH sessions are made while the table is still
+        # live -- the second case has to be prepared before the first runs,
+        # because the first is what takes the table out of service.
+        post_wait_order = self._draft_order()
+        door_order = self._draft_order()
+        post_wait_session = diner_capability.issue_table_session(self.table)
+        door_session = diner_capability.issue_table_session(self.table)
+
+        # B: refused INSIDE the lock wait -- live at the door, revoked while
+        #    the transaction waited.
+        with _during_the_wait(self._unscannable):
+            post_wait = self._diner_put(
+                self.RETIRE_URL, post_wait_order, post_wait_session)
+
+        # A: refused AT THE DOOR -- the table is already unavailable when the
+        #    request arrives, so `_resolve_table` denies on its live re-check.
+        door = self._diner_put(self.RETIRE_URL, door_order, door_session)
+
+        self.assertEqual(door.status_code, 404, door.content)
+        self.assertEqual(post_wait.status_code, 404, post_wait.content)
+        self.assertEqual(
+            post_wait.json(), door.json(),
+            'a client must not be able to tell WHICH of the two refused it',
+        )
+
+    def test_the_create_path_replay_refusal_is_the_doors(self):
+        """The third site, which Codex did not name: `_create_order`'s
+        `_session_refusal`. Fixing two of the three would be the same
+        one-consumer-not-the-next shape this whole pass is about."""
+        from orders_app.controllers.services.create_order import _create_order
+
+        key = '11111111-1111-4111-8111-111111111111'
+        first = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id=key,
+            capability=capability_from_table(self.table),
+        )
+        self.assertEqual(first.get('status'), 200, first)
+
+        self._unscannable()
+        refused = _create_order(
+            restaurant=self.restaurant, table=self.table,
+            items=[{'item': str(self.item.pk), 'quantity': 1}],
+            client_order_id=key,
+            capability=capability_from_table(self.table),
+        )
+        self.assertChannelEnvelope(refused)
+
+    def test_the_envelope_is_derived_from_the_exception_not_restated(self):
+        """`denial_envelope` must READ `DinerCapabilityDenied`, so changing the
+        channel's word moves every site at once. A second literal is how the
+        three drifted in the first place."""
+        with patch.object(
+            diner_capability.DinerCapabilityDenied, '__init__',
+            lambda self: diner_capability.DinerCapabilityError.__init__(
+                self, message='CHANGED.', status=404),
+        ):
+            self.assertEqual(
+                diner_capability.denial_envelope(),
+                {'status': 404, 'message': 'CHANGED.'},
+            )
+
+    # -- the controls ------------------------------------------------------
+
+    def test_the_control_the_STAFF_refusal_is_NOT_the_diner_envelope(self):
+        """The staff channel keeps its own word, and that is not an oversight.
+
+        Its door is the orders endpoints' own periodless `'Not found'` and
+        `StaffAuthorityError` already matches it, so routing staff through the
+        diner envelope would introduce on that side exactly the mismatch this
+        change removes on this one.
+        """
+        order = self._draft_order()
+        with _during_the_wait(self._revoke_membership):
+            refused = self._submit_as_staff(order)
+
+        self.assertEqual(refused.get('status'), 404, refused)
+        self.assertEqual(refused.get('message'), 'Not found')
+        self.assertNotEqual(refused, _door_envelope())
+
+    def test_the_control_a_live_session_still_retires_over_HTTP(self):
+        """The envelope can only ever be an answer to a REFUSAL; an unchanged
+        world is unchanged."""
+        order = self._draft_order()
+        session = diner_capability.issue_table_session(self.table)
+        response = self._diner_put(self.RETIRE_URL, order, session)
+        self.assertEqual(response.status_code, 200, response.content)

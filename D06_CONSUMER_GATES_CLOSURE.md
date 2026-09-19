@@ -425,6 +425,107 @@ then answers below it is broken, not old`). The rule was not relaxed.
 
 ---
 
+## Second Codex round — two findings on the FIX commits, both valid
+
+The first round reviewed the heads at PR-open. The fix commits were unreviewed,
+so a pass was requested on `a3bc20c` / `6b9d994`. Both findings below are on
+code those commits touched, and **both are the same shape as everything else in
+this record: a rule implemented at one consumer and not the next.**
+
+### BE-1 (P2) — the post-lock refusal was not the door's refusal
+
+`DinerCapabilityDenied` defaults to `'Not found.'` and both order endpoints
+render a raised one as `exc.message`. Three sites answered `'Not found'`:
+`_session_refusal` (create), the accepted-submission replay, and
+`retire_quote_for_review`. One route, two spellings, decided by WHEN the
+revocation landed.
+
+**The consequence is larger than the oracle the finding names.** The deployed
+client matches the body EXACTLY — `DinerSessionService.CAPABILITY_DENIED_404`,
+compared with `===` after a `trim()` that does not strip a period — so the
+periodless form was **not recognised as a capability denial at all**: no
+`needsRescan`, no rescan panel, and a dead credential still treated as live.
+Six production call sites consult that predicate, the checkout handlers among
+them.
+
+Fixed with one shared `diner_capability.denial_envelope()`, DERIVED from the
+exception. The third site was not named by the finding and is fixed with the
+other two. The STAFF channel is deliberately left periodless — its own door is
+the orders endpoints' `'Not found'` — with a control pinning that the two
+channels stay different.
+
+**Why the suite did not see it, which is the part worth keeping.** Four tests
+were named *"the channel's own 404, not a new word"* and every one compared the
+KEY SET only. The word — the half that had drifted — was never asserted. They
+now go through `assertChannelEnvelope`, and the new regression drives BOTH
+refusals over real HTTP on one route and compares the two responses to each
+other, so it names no literal and cannot be satisfied by two copies that happen
+to agree.
+
+### FE-1 (P2) — a block is not a renamed mutation, and it PREDATES this work
+
+`checkoutBlocked` withholds Checkout; the footer answers a block by rendering
+**Retry** (`@if (orderError || checkoutBlocked)`). For a record with no issued
+command — the ordinary shape after a lost `retire-quote` reply — `retryOrder()`
+skips `replayIssuedCommand`, classifies the record as a replayable initiation
+and re-sends `orders/initiate/` under a key that may be bound to a RETIRED
+order. The reply carries the same unreadable closure, so the diner loops:
+exactly what `checkoutBlocked`'s own comment says it exists to prevent, reached
+through the other door.
+
+`placeOrder` carries that guard and its comment claims it covers *"every other
+entry — a direct `retryOrder`"*. It does not: the two replay exits return
+before reaching it, so only the fallthrough was guarded.
+
+**It is not new.** `unusableClosure()` and `inconsistent` already blocked at
+`477c6af`; `6b9d994` added a third state to the same group. All three are fixed
+together.
+
+Fixed in two independent places: `retryOrder` is guarded at the top (covering
+`replayIssuedCommand`, `replayInitiation` and `placeOrder` alike), and the
+footer renders a DISABLED control instead of Retry — the shape
+`tableHasOngoingOrder` already uses. **No mutating action at all rather than a
+non-mutating one**, because the notice beside it already names the remedy and it
+is a person: `UNRESOLVED_CLOSURE_MESSAGE` says to check with staff *before
+ordering the same items again*, which is precisely what a Retry invites.
+
+### Discriminating regressions, and what each reintroduced defect breaks
+
+| mutation | fails |
+|---|---|
+| the three diner sites answer `'Not found'` again | **6 of 72** in `tests_authority_during_lock_wait.py` — the 2 new plus the 4 that now check the word |
+| `retryOrder`'s guard removed | **1 of 25** in `basket-body.closure-recovery.spec.ts` (the re-initiate regression) |
+| the footer's disabled branch neutralised | **1 of 25** (the no-mutating-control regression) |
+
+Every control held on every mutation — in particular the STAFF refusal staying
+periodless and different, a live session still retiring over HTTP, and the
+`unknown` outcome keeping its real Retry (nothing was asserted about the quote
+there, so re-sending is the right offer).
+
+### Verification after the second round
+
+* Backend `./scripts/verify.sh` — all gates PASS; the authority suite is **72**
+  (67 + 5) and the pinned order-path query budgets are untouched.
+* Backend `./scripts/verify.sh` — **all checks passed**, **4541 tests OK**
+  (4536 + 5); the authority suite is **72** (67 + 5) and the pinned order-path
+  query budgets are untouched.
+* Frontend `type-check` clean, `lint` **0 errors / 9 warnings** (baseline),
+  `test:tenant-boundary` **306**, `test:ci` **2514** (2510 + 4), `build:prod`
+  PASS (pre-existing bundle-budget warning only);
+  `basket-body.closure-recovery.spec.ts` is **25** (21 + 4).
+* **Browser, on the FINAL delivered pair** (backend `314c823`, frontend
+  `4620075`): `journey.mjs` **42/42**, `recovery.mjs` **88/88**,
+  `kitchen.mjs` **55/55** on a fresh fixture. Re-run because BOTH fixes touch
+  paths these scripts exercise — the frontend change is on the footer CTA and
+  the Retry handler `recovery.mjs` drives directly, and the backend change is
+  on the refusal the diner channel returns. Against a **disposable local
+  PostgreSQL 16** created in this container, a local Django on `test_settings`
+  at `ENV=dev`, and a **development** `ng serve` (not optimized assets) on
+  Node 24.15.0 with Chromium 141. No UAT or production database, host or
+  credential was reached; `environment.ts` was restored before commit.
+
+---
+
 ## Remaining operational gates — unchanged by this work
 
 * `DELEGATED_QR_TRIAGE.md` — a delegated read-only view receives live table QR

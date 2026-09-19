@@ -1299,6 +1299,42 @@ menu-only, stock-change and valid-rescan controls are all kept separately,
 because an internal call with NO capability is not an oracle for a public request
 carrying a revoked one.
 
+### The refusal is the door's refusal, byte for byte
+
+Every boundary above is documented as answering "the capability channel's OWN
+opaque 404", and three of them answered something else. The door raises
+`DinerCapabilityDenied` and both order endpoints render it as `exc.message` —
+`'Not found.'` — while `_session_refusal` (create), the accepted-submission
+replay and `retire_quote_for_review` each wrote out `'Not found'` by hand. One
+route, two spellings, decided by WHEN the revocation landed.
+
+**THE CLIENT-VISIBLE CONSEQUENCE IS LARGER THAN THE ORACLE.** As an oracle it
+lets a caller separate a door refusal from a post-wait one, and liveness
+revocation from generation revocation, in a channel built to disclose nothing.
+But the deployed client matches the body EXACTLY
+(`DinerSessionService.CAPABILITY_DENIED_404`, compared with `===` after a
+`trim()` that does not strip a trailing period), so the periodless form was not
+recognised as a capability denial at all: a diner whose table went out of
+service mid-request was shown **no rescan panel**, and the client went on
+treating a dead credential as live.
+
+**`diner_capability.denial_envelope()` is now the one answer**, DERIVED from
+`DinerCapabilityDenied` rather than re-spelled, so changing the channel's word
+moves every site at once. All three sites use it — including
+`retire_quote_for_review`, which this finding did not name; fixing two of three
+would have left the same defect behind one door.
+
+**NO WIRE SHAPE CHANGES.** The status is 404 and the keys are `status` and
+`message` on every path, before and after. What changes is that three paths now
+emit the same `message` the door has always emitted, which is what the contract
+already said they emitted.
+
+**THE STAFF CHANNEL IS DELIBERATELY UNTOUCHED.** Its door is the orders
+endpoints' own periodless `'Not found'`, and `StaffAuthorityError` already
+matches it; routing staff through the diner envelope would introduce there
+exactly the mismatch this removes here. A control pins that the two channels
+stay different.
+
 
 ## Summary of frontend changes needed before merge
 

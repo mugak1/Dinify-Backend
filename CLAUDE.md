@@ -1117,10 +1117,38 @@ so keep it current when conventions change.
   keyless/internal, staff, paused-restaurant, menu-only, stock-change and
   valid-rescan controls are all kept separately, because an internal call with NO
   capability is not an oracle for a public request carrying a revoked one. Pinned
-  by `orders_app/tests_authority_during_lock_wait.py` (67 tests across seven
+  by `orders_app/tests_authority_during_lock_wait.py` (72 tests across eight
   classes; the 7 added for the post-wait branch reproduce it as 3 FAILED / 4
-  controls on the head that carried it). See `BREAKING_CHANGES.md` §16c and
-  `D06_CONSUMER_GATES_CLOSURE.md`
+  controls on the head that carried it).
+  **AND THE REFUSAL IS THE DOOR'S REFUSAL, BYTE FOR BYTE** (Codex P2 on PR #325,
+  valid). Every one of these boundaries is documented as answering "the
+  capability channel's OWN opaque 404", and three of them answered something
+  else: the door raises `DinerCapabilityDenied` and both order endpoints render
+  it as `exc.message` — `'Not found.'` — while `_session_refusal`, the
+  accepted-submission replay and `retire_quote_for_review` each wrote out
+  `'Not found'` by hand. ONE route, two spellings, decided by WHEN the
+  revocation landed. As an oracle that separates a door refusal from a
+  post-wait one, and liveness revocation from generation revocation, in a
+  channel whose whole design is non-disclosure — **but the consequence that
+  reaches a diner is larger than that**: the deployed client matches the body
+  EXACTLY (`DinerSessionService.CAPABILITY_DENIED_404`, compared with `===`
+  after a `trim()` that does not strip a period), so the periodless form was
+  not recognised as a capability denial at all and **the rescan panel never
+  appeared** — six production call sites consult that predicate, the checkout
+  handlers among them. `diner_capability.denial_envelope()` is now the ONE
+  answer, DERIVED from the exception rather than re-spelled, and the third site
+  (`retire_quote_for_review`, which Codex did not name) is fixed with the other
+  two. **THE STAFF CHANNEL IS DELIBERATELY NOT THIS**: its door is the orders
+  endpoints' own periodless `'Not found'` and `StaffAuthorityError` already
+  matches it, so routing staff through the diner envelope would introduce there
+  exactly the mismatch this removes here — pinned by its own control.
+  **WHY THE SUITE DID NOT SEE IT**: four tests named "the channel's own 404,
+  NOT A NEW WORD" compared only the KEY SET, never the word — the half that had
+  drifted. They now go through `assertChannelEnvelope`, and the new
+  byte-identity regression drives BOTH refusals over real HTTP on one route and
+  compares the responses to each other, so it names no literal and cannot be
+  satisfied by two copies that happen to agree. Reverting the three sites fails
+  6 of 72. See `BREAKING_CHANGES.md` §16c and `D06_CONSUMER_GATES_CLOSURE.md`
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one

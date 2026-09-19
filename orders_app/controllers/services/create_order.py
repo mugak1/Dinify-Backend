@@ -437,7 +437,13 @@ def _create_order(*, restaurant, table, items,
         row = table_row() if callable(table_row) else table_row
         if diner_capability.session_still_admissible(capability, row):
             return None
-        return {'status': 404, 'message': 'Not found'}
+        # THE CHANNEL'S OWN ENVELOPE, DERIVED — never a second literal. The
+        # door renders `DinerCapabilityDenied` as `exc.message`, and the
+        # deployed client matches that body exactly to decide whether a 404
+        # means "your QR is dead, rescan"; a periodless copy here was not
+        # recognised, so a revocation landing inside the lock wait showed the
+        # diner no rescan panel at all.
+        return diner_capability.denial_envelope()
 
     # The try/except sits AROUND the atomic block (the same idiom as the two
     # nested savepoints inside it): OrderItemRejected must unwind through

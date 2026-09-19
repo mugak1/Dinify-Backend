@@ -726,7 +726,9 @@ def _submit_order(order: Order, user: Union[User, None],
             if not diner_capability.session_still_admissible(
                 capability, locked_table
             ):
-                return {'status': 404, 'message': 'Not found'}
+                # The channel's own envelope, derived — see
+                # `diner_capability.denial_envelope`.
+                return diner_capability.denial_envelope()
             return replay
 
         # D06: HAS THIS DRAFT'S QUOTE ALREADY BEEN RETIRED? Asked second, and
@@ -1074,7 +1076,9 @@ def _retire_quote_answer(order: Order,
         if not diner_capability.session_still_admissible(
             capability, locked_table
         ):
-            return {'status': 404, 'message': 'Not found'}
+            # The channel's own envelope, derived — see
+            # `diner_capability.denial_envelope`.
+            return diner_capability.denial_envelope()
 
         # The staff channel's equivalent, for the same reason as at acceptance.
         try:
