@@ -168,10 +168,32 @@ def close(order, *, quote_ref, reason, now, evidence=None):
 
     MUST run inside the caller's transaction, holding the locks an acceptance
     takes, so that this decision and a competing acceptance are ordered by the
-    database rather than by arrival. Asserted rather than assumed: a closure
-    written in autocommit beside an acceptance still deciding would be exactly
-    the double-purchase this service exists to prevent, and that failure is
-    silent.
+    database rather than by arrival. A closure written in autocommit beside an
+    acceptance still deciding would be exactly the double-purchase this service
+    exists to prevent, and that failure is silent.
+
+    A1(C) — EXACTLY HOW MUCH OF THAT IS ASSERTED HERE, stated precisely because
+    this docstring used to say "asserted rather than assumed" about the whole
+    sentence and only half of it was:
+
+      * INSIDE A TRANSACTION — genuinely asserted below, and it raises.
+      * HOLDING THE ORDER ROW — NOT asserted, and not assertable. PostgreSQL
+        records a row lock on the tuple itself rather than in `pg_locks`, so
+        there is no cheap query that answers "do I hold FOR UPDATE on this
+        row"; a `FOR UPDATE NOWAIT` probe would succeed just as readily when
+        NOBODY holds it, which is the case that matters. Claiming an assertion
+        that cannot exist is worse than naming the guarantee that does.
+
+    WHAT ACTUALLY GUARANTEES IT: every production path that reaches here takes
+    `Order.objects.select_for_update()` on the target first, and
+    `tests_closure_preconditions.py` scans the source to keep that true rather
+    than leaving it a convention nobody checks. That is this repository's
+    established answer to a cross-function discipline — the same shape as the
+    membership-serialization and ambient-authority ratchets.
+
+    There is deliberately NO caller-supplied "already locked" flag. A trusted
+    switch would let the one caller that gets it wrong assert its way past the
+    only thing standing between a closure and an acceptance.
 
     ``evidence`` is the caller's already-loaded ``OrderAcceptance`` (or None) when
     it has one, so the ordinary acceptance path spends no extra query proving the

@@ -228,6 +228,11 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
 
             customer = None
             created_by = None
+            # A1 — one of these is set by the branch that authorized the request;
+            # the other stays `None`, which the boundary reads as "that channel
+            # was not used" and re-checks nothing for.
+            capability = None
+            authority = None
 
             if source == 'admin':
                 if user is None:
@@ -248,6 +253,25 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                 ):
                     return Response({'status': 404, 'message': 'Not found'}, status=404)
                 created_by = request.user
+                # A1 — THE MINIMAL RECORD OF WHAT WAS JUST AUTHORIZED, carried
+                # to the boundary that writes. The gate immediately above ran in
+                # AUTOCOMMIT; creation then waits for the admission advisory
+                # lock and the table row, and a membership deactivated, a role
+                # removed or the restaurant leaving the portal-access states
+                # inside that wait revokes exactly this authority. The same
+                # record the acceptance boundary has carried since G1b: three
+                # facts, no credential, and the principal as the OBJECT so a
+                # delegation's in-memory context is not silently lost.
+                #
+                # `_create_order` cross-checks `restaurant_id` against the
+                # `Restaurant` row it loads before re-asking the gate, which is
+                # what makes the target server-derived rather than merely
+                # authorized-at-the-door.
+                authority = StaffAuthority(
+                    user=request.user,
+                    restaurant_id=restaurant_id,
+                    module=MODULE_TABLES,
+                )
                 table_id = data.get('table')
                 if restaurant_id is None or table_id is None:
                     return Response(
@@ -285,6 +309,15 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                          'message': 'table does not match your table session'},
                         status=400,
                     )
+                # A1 — AND THE DINER'S HALF OF THE SAME THING. `require_table_session`
+                # has just verified the signature, the expiry, the generation and
+                # the table's scannability, in autocommit; a QR regeneration
+                # committing while creation waits on its locks revokes this
+                # session, and nothing downstream knew what generation was
+                # presented. Built ONLY from the table the session resolved to —
+                # building one from anything else would manufacture an
+                # authorization fact.
+                capability = diner_capability.capability_from_table(table)
 
             # FULL INPUT VALIDATION, after authority is resolved. Placed here
             # so no catalogue-shaped feedback ever precedes authorization; the
@@ -303,6 +336,8 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                 customer=customer,
                 created_by=created_by,
                 client_order_id=validated['client_order_id'],
+                capability=capability,
+                authority=authority,
             )
             return Response(response, status=response.get('status', 200))
 
