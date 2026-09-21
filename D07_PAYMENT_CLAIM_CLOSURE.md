@@ -314,11 +314,18 @@ default still fails a test that says what it is about.
 
 **NOT RUN, stated rather than implied:**
 
-- **The backend suite was executed on Python 3.11.15, not CI's pinned 3.12.3.** The
-  local interpreter is what this container provides; CI is the gate that runs the
+- **The backend suite was executed LOCALLY on Python 3.11.15, not CI's pinned 3.12.3.**
+  The local interpreter is what this container provides; CI is the gate that runs the
   pinned version. Nothing in this change is version-sensitive (no new syntax, no new
-  dependency, no interpreter-dependent behaviour), but the run is not a substitute for
-  the pinned leg.
+  dependency, no interpreter-dependent behaviour), but the local run is not a
+  substitute for the pinned leg — so this bullet recorded an OUTSTANDING gap rather
+  than a closed one.
+  **CI has since supplied it, and this line is kept rather than deleted so the
+  provenance of each run stays legible.** `Backend CI` run `35636249160` on `8289ed6`:
+  `suite (3.12.3)` green end to end — migrations consistency, the money-field guard,
+  the ambient-authority gate, the tenant-relation ratchet, the tenant-isolation closure
+  gate and the full suite — with the `test` aggregator green on it. The gap is closed
+  by CI, not by the local run.
 - **No browser journey was run for this change** — see §12.
 - No live-data query, no deployment, no workflow dispatch, no production or UAT access,
   no real OTP/SMS/email, no credential extraction or rotation, no backfill or repair.
