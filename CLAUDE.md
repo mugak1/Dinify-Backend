@@ -2049,6 +2049,39 @@ so keep it current when conventions change.
   E1-E7 to changed-consumer mapping, the Stage A evidence corrections, the
   judgement calls (the CREATE pickers dropping `order_pay`, the receipt-copy
   extension, the Sales Method blank cell) and what was deliberately NOT run
+- **AND `summarize_revenue` STATES NO TREND IT DID NOT COMPUTE (D07/G1).** It
+  returned `'month_growth': 'up'` as a LITERAL, with the comparison that would
+  have justified it commented out on the same line
+  (`# if this_month > last_month else 'down'`), so it reported growth for every
+  restaurant in every month — measured, for a restaurant with no orders at all:
+  `{'total': 0, 'this_month': 0, 'month_growth': 'up'}`. A direction asserted
+  from no comparison is the same class of claim as an empty card reading "no
+  settled payments in this period".
+  **THE CONSUMER SEARCH DECIDED THE REMEDY, and it is why the key is REMOVED
+  rather than given an honest value.** `summarize_revenue` has NO production
+  caller anywhere in this repository — it is on no urlconf, in no serializer and
+  in no response, reached only from `orders_app.tests_launch_boundary` (whose own
+  comment calls it "the dead-but-live all-time revenue helper") and
+  `reports_app.tests_timezone_clocks`, and neither reads that key. The
+  frontend's `month_growth` type declarations belong to `DinifyDashboardData`,
+  the retired admin-plane shape, and name different fields entirely. So there is
+  no wire contract to keep compatible. A trend that is genuinely wanted later
+  gets built against a baseline that can be ABSENT — precisely what a bare
+  direction string cannot express, and the lesson `PaymentMethodData.change_pct`
+  was deleted for on the other side.
+  **AND THE TWO FIGURES THAT REMAIN ARE DISCLOSED**: `total` and `this_month`
+  both aggregate `payment_status='paid'`, so the helper now publishes the SAME
+  `PAYMENT_TRACKING_ENABLED` constant v1 and v2 do, asserted BY IDENTITY rather
+  than as a second literal. **Nothing is rebased, repriced or recomputed** — the
+  paid filter stays, and a control pins that `SALE_STATUSES` does not appear in
+  the function. Pinned by `reports_app/tests_summarize_revenue_claims.py` (6);
+  **4 failed on the unmodified tree** and the 2 that passed are the controls.
+  The frontend half of G1 (the four dashboard consumers) and G2 (the billing
+  read states) are in the Frontend `CLAUDE.md`; `D07_PAYMENT_CLAIM_CLOSURE.md`
+  §13 is the completion record, and §10 item 6 now records that the deep-link
+  evidence originally cited was a QR-rotation METHOD test — which answers a
+  different question — replaced by a real browser navigation in
+  `e2e/billing-journey/`
 - Reports module — rebuilt on the clean contract: ✅ Complete. All four
   restaurant reports (`api/v1/reports/restaurant/<name>/` →
   `RestaurantReportsEndpoint`, `{status, message, data}` envelope) are rebuilt on

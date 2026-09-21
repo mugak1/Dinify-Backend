@@ -234,14 +234,34 @@ def summarize_revenue(restaurant_id: str):
         time_created__month=local_now.month,
         time_created__year=local_now.year
     ).aggregate(total_revenue=Sum('actual_cost'))['total_revenue']
-    # last_month_revenue = orders.filter(
-    #     time_created__month=datetime.now().month - 1
-    # ).aggregate(total_revenue=Sum('actual_cost'))['total_revenue']
+    # `month_growth` USED TO SIT HERE AS THE LITERAL STRING 'up', with the
+    # comparison that would have justified it commented out beside it:
+    #
+    #     'month_growth': 'up'  # if this_month > last_month else 'down'
+    #
+    # So this helper reported growth for every restaurant in every month,
+    # including one that had never taken an order (measured: a restaurant with
+    # zero orders returned {'total': 0, 'this_month': 0, 'month_growth': 'up'}).
+    # That is a direction asserted from no comparison at all — the same class
+    # of claim D07 removed from the cards that read these figures.
+    #
+    # IT IS REMOVED RATHER THAN GIVEN AN HONEST VALUE, and the consumer search
+    # is what decides that: `summarize_revenue` has NO production caller in
+    # this repository — it is on no urlconf, in no serializer and in no
+    # response, and is reached only from two test modules, neither of which
+    # reads this key. There is no wire contract to keep compatible. A trend
+    # that is genuinely wanted later gets built against a baseline that can be
+    # ABSENT, which is exactly what a bare direction string cannot express.
     return {
         'total': total_revenue if total_revenue is not None else 0,
         'this_month': this_month_revenue if this_month_revenue is not None else 0,
-        # 'last_month': last_month_revenue,
-        'month_growth': 'up'  # if this_month_revenue > last_month_revenue else 'down'
+        # THE SAME CONSTANT THE TWO DASHBOARDS PUBLISH, not a second literal.
+        # Both figures above aggregate `payment_status='paid'`, so both are
+        # permanently zero on live data for exactly the reason v1's
+        # `paid_orders` and v2's `revenue` are — and a caller has to be able to
+        # tell a zero that was measured from one that was not. Nothing here is
+        # repriced, rebased or recomputed: the paid filter stays.
+        'payment_tracking_enabled': PAYMENT_TRACKING_ENABLED,
     }
 
 
