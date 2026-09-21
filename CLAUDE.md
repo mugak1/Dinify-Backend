@@ -1969,9 +1969,13 @@ so keep it current when conventions change.
 - Payments posture (current): the codebase holds NO PSP credentials and NO
   payment-execution code of any kind — the empty `payment_integrations_app`
   aggregator shell was deleted and its dead test-only env-var stubs removed from
-  `test_settings.py`. The subscription flow is record-only —
-  `tx_subscription.initiate()` writes a Pending `DinifyTransaction` and stops (no
-  provider call). The PSP adapter will be designed FRESH per the non-custodial
+  `test_settings.py`. **The subscription flow is now REFUSED, not record-only (D07)** —
+  `tx_subscription.initiate()` answers **501 `subscription_collection_unavailable`**
+  and writes nothing at all. It used to write a Pending `DinifyTransaction` and stop,
+  under a message reading "The subscription payment has been initiated", which is a
+  payment claim about a collector that does not exist; the insertion branch is REMOVED
+  rather than parked behind a flag, because a flag is a working fake collection one
+  boolean away from returning. See the D07 bullet below. The PSP adapter will be designed FRESH per the non-custodial
   Pattern A when the counsel and PSP integration gates clear.
   REPO-CLEAN IS NOT HOST-CLEAN: the 2026-07-29 host reconnaissance
   (`REGULATORY_AUDIT.md` APPENDIX, finding H2) found the DPO / Flutterwave / Yo
@@ -1981,6 +1985,70 @@ so keep it current when conventions change.
   by any local account including `www-data`, the account the app itself runs as.
   Deleting a file does not revoke a credential — provider-side revocation is
   recorded there as OUTSTANDING
+- A PAYMENT INTERFACE NEVER CLAIMS WORK NO PROVIDER PERFORMED (D07): ✅ the
+  platform collects no money — the order-payment writer was deleted in the
+  custodial teardown, no PSP integration replaced it, and
+  `notifications_app.controllers.sms` holds the ONLY outbound HTTP call site in
+  the tree — yet four surfaces still spoke as though it did. Each is corrected at
+  the place that makes the claim, and NOTHING here builds, enables or simulates a
+  collector.
+  **THE SUBSCRIPTION COLLECTOR IS REFUSED AT THE SERVICE, NOT AT THE VIEW**
+  (`finance_app/controllers/tx_subscription.py`). `initiate` answered "The
+  subscription payment has been initiated. Please confirm payment when promted",
+  booked a Pending `DinifyTransaction` and contacted nobody — the provider call
+  was a COMMENT. It now answers **501 `subscription_collection_unavailable`** with
+  ZERO effects: no transaction, no payment intent, no OTP or challenge, no SMS or
+  email, no stored MSISDN, no amount or status write. **The refusal lives in the
+  SERVICE because the endpoint is one caller** — `initiate` is reachable in-process
+  by any caller (including one passing `user=None`, which used to persist
+  `created_by=None`), so disabling a view or hiding a button would leave the fake
+  collection fully available. **501, NOT 503** — RFC 9110 §15.6.2 is "does not
+  support the functionality required" while §15.6.4 is a temporary overload, and a
+  `Retry-After`, a retry timer or a poll would all suggest that waiting implements
+  a collector. The ORDER of the gates is preserved: the endpoint's
+  `can_manage_restaurant` 404 runs FIRST, and an unknown or malformed restaurant id
+  still answers that same opaque 404 rather than 500ing or disclosing, so only a
+  request that cleared both gates reaches the 501. **The insertion branch is
+  REMOVED rather than parked behind an enable switch**, and
+  `finance_app/subscription_capability.py` is the one leaf module both planes read
+  so the portal cannot advertise a collector the server refuses — it is a
+  DISCLOSURE, never a switch, and `initiate` deliberately does not branch on it
+  (a test pins that while the constant reads False, `initiate` refuses).
+  **THE RESTAURANT'S OWN BILLING READ STATES WHAT THE SERVER KNOWS** — an additive
+  projection on `restaurant-setup/subscription-details/` carrying the collection
+  capability and either the CANONICAL recorded terms or an explicit "none
+  recorded". It reuses `commercial_app`'s own open-terms rule rather than
+  reconstructing current terms from `flat_fee`, `preferred_subscription_method`,
+  `subscription_validity` (which DEFAULTS TRUE and has no writer), a transaction
+  count or a UI catalogue; it adds no second source of truth, no terms writer, no
+  invoice, no entitlement inference and no read-time `get_or_create`; and it does
+  NOT import or bypass the admin endpoint to expose its privileged fields. The
+  EXISTING settings-module read gate, the foreign/unknown denials and the
+  delegated exclusion are all preserved — read permission is not the collector's
+  management permission, so it resolves through the existing resolvers rather than
+  a new hardcoded owner/manager check.
+  **A NEW TABLE NO LONGER ADVERTISES A PAY STEP** — `Table.qr_mode`'s default moved
+  `order_pay` → `order_only` (migration `restaurants_app/0058`, an `AlterField`
+  with NO `RunPython`). `order_pay` is RETAINED as a choice, stays inside
+  `ORDERING_QR_MODES` and remains fully orderable, so **no existing row is rewritten
+  and no venue's diners lose the ability to order**; operationally the two modes are
+  IDENTICAL and `menu_only` is the one that blocks, so this changes what a new table
+  CLAIMS and nothing about what it DOES. Pinned by
+  `restaurants_app/tests_qr_mode_default.py`; reverting the default fails exactly
+  its two REGRESSION cases while all four CONTROLs hold.
+  **AND THE DASHBOARD DISCLOSES THAT PAYMENT IS NOT MEASURED** — `dashboard-v2`
+  publishes `payment_tracking_enabled` beside its cards, governing the
+  `revenue` card, the `payment_methods` card and `orders.breakdown.paid` — an
+  empty list, a zero, and a whole headline figure, each indistinguishable from a
+  real trading fact. It is the SAME v1
+  constant, asserted equal by identity so the two responses cannot drift. See
+  `BREAKING_CHANGES.md` §17 for the 501's cutover note — **FRONTEND FIRST**, the
+  reverse of the usual rule, because backend first makes an older client send a
+  REAL OTP (the billing dialog dispatched one BEFORE its POST) for a payment that
+  then fails — and `D07_PAYMENT_CLAIM_CLOSURE.md` for the delivery record: the
+  E1-E7 to changed-consumer mapping, the Stage A evidence corrections, the
+  judgement calls (the CREATE pickers dropping `order_pay`, the receipt-copy
+  extension, the Sales Method blank cell) and what was deliberately NOT run
 - Reports module — rebuilt on the clean contract: ✅ Complete. All four
   restaurant reports (`api/v1/reports/restaurant/<name>/` →
   `RestaurantReportsEndpoint`, `{status, message, data}` envelope) are rebuilt on
@@ -2043,7 +2111,17 @@ so keep it current when conventions change.
   nothing writes and which therefore made it permanently `null`. Two ADDITIVE keys:
   `orders_placed`, and `payment_tracking_enabled` — a module constant, `False`
   until the PSP write path lands, flagging that `paid_orders` is a placeholder and
-  not a measurement (flip it in the same PR that lands PSP). dashboard-v2's
+  not a measurement (flip it in the same PR that lands PSP). **D07 published the SAME
+  constant on `dashboard-v2` too**, where it governs three more figures — the
+  `revenue` card, the `payment_methods` card and `orders.breakdown.paid` — which were
+  silently zero rather than disclosed as unmeasured. **`revenue` is the one most
+  easily missed**: `_build_revenue` aggregates `gross` and `discounts` over that same
+  unwritten `payment_status='paid'` column, `net = gross - discounts - refunds` is
+  derived from them, and `refunds` is NOT paid-gated — so a window holding one
+  reports a NEGATIVE net against a zero gross, and `pricing_conventions` counts over
+  the same empty set, which is why the D02/C mixed-pricing notice has never been able
+  to render on a live payload. One constant, four consumers: the v1 and
+  v2 responses are asserted EQUAL by identity, so they cannot drift. dashboard-v2's
   `_build_orders` base shared the draft-counting defect and was fixed identically,
   so `orders.total` now equals v1's `orders_placed` and `breakdown` sums to
   `total`. The diner / item / peak-hour figures DELIBERATELY still read the
@@ -2113,6 +2191,9 @@ so keep it current when conventions change.
   `dinify_backend/tenancy/TENANT_ISOLATION_CLOSURE.md` (tenant boundary — BOTH
   live under `dinify_backend/tenancy/`, not the repo root),
   `REGULATORY_AUDIT.md` (non-custodial posture — and see its APPENDIX below),
+  `D07_PAYMENT_CLAIM_CLOSURE.md` (payment interfaces that claimed work no provider
+  performed — the delivery record for the 501, the terms projection, the QR-mode
+  default, the reporting disclosures and the copy corrections),
   `REPORTS_CONTRACT_AUDIT.md` (cross-repo Reports
   contract), `PHASE_0_5_CLOSURE.md` (the four-PR Phase 0.5 pre-launch remediation
   ladder — what it closed, what it deliberately left open, and the seams Phase 1
@@ -2430,8 +2511,11 @@ the catch-all `<str:config_detail>/` route.
 - TWO commercial keys are registered in `EDIT_INFORMATION['restaurants']` but are
   PLATFORM-owned: `flat_fee` (the subscription PRICE billed by
   `finance_app.tx_subscription`) and `preferred_subscription_method` (the BILLING
-  METHOD, and the ONLY gate in `tx_subscription.initiate` — `== 'per_order'` →
-  refuse). The restaurant-setup write path STRIPS BOTH keys from EVERY
+  METHOD; it used to be the ONLY gate in `tx_subscription.initiate` — `== 'per_order'`
+  → refuse — but **D07 removed that branch**: every authorized request now gets the
+  same 501 whatever the column says, because branching on it would have offered
+  changing a plan as a way to enable machinery that does not exist. The strip below
+  is UNCHANGED and still load-bearing for the Phase-1 admin writer). The restaurant-setup write path STRIPS BOTH keys from EVERY
   `restaurants` PUT payload AFTER `check_permission` and BEFORE the Secretary
   dispatch (`platform_only_fields` in `restaurant_setup.py`), so no principal on
   this plane can zero a subscription price or change the billing terms. `flat_fee`
@@ -5433,8 +5517,13 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
     `f8acc50` to `010fd8dd` succeeded *because no migration sat between them*.
     That property is what this rule preserves — see the ROLLBACK / MANUAL
     REDEPLOY bullet under "Deployment Rules — CRITICAL"
-- Latest migration: `restaurants_app/migrations/0057_restaurant_is_test.py`
-  (0054 adds `Table.qr_version`; 0055 data-repairs MenuItem extras — see the
+- Latest migration: `restaurants_app/migrations/0058_table_qr_mode_order_only_default.py`
+  (0058 is MODEL-STATE ONLY — one `AlterField` moving `Table.qr_mode`'s default
+  `order_pay` → `order_only`, with NO `RunPython`, no row rewrite and no backfill:
+  every existing table keeps its stored value, `order_pay` stays a legal choice and
+  stays orderable, so a rollback is a TRUE INVERSE that restores the old default for
+  FUTURE rows and changes no existing one — see the D07 bullet;
+  0054 adds `Table.qr_version`; 0055 data-repairs MenuItem extras — see the
   "Write-time menu relationship integrity" bullet; 0056 constrains
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
   "Restaurant Lifecycle"; 0057 adds the platform-owned `Restaurant.is_test` flag,

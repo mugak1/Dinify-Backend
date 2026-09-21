@@ -793,12 +793,32 @@ class Table(BaseModel):
     )
     tags = models.JSONField(default=list, blank=True)
     has_qr = models.BooleanField(default=False)
+    # ORDERING POLICY FOR THE QR PUBLIC. `order_eligibility.ORDERING_QR_MODES`
+    # is the whitelist that decides whether a diner may order; `menu_only` is a
+    # menu a diner reads and cannot order from.
+    #
+    # THE DEFAULT IS `order_only`, AND IT MOVED (D07). It was `order_pay`, which
+    # names a capability this platform does not have: there is no aggregator
+    # integration anywhere in the tree, and `tx_subscription` is the only
+    # payment writer left — a record-only one that now refuses outright. So a
+    # table created with no explicit mode claimed the app would collect the
+    # diner's payment, and nothing behind it ever could. `order_only` is the
+    # truthful default: the diner orders in the app and settles with the
+    # restaurant by whatever means the restaurant actually uses.
+    #
+    # `order_pay` IS RETAINED AND STAYS ORDERABLE — it is not deprecated out of
+    # the whitelist and no row is rewritten. Every existing table keeps its
+    # stored value and behaves exactly as before; only the label is neutral now,
+    # because "Order & Pay" was the claim rather than the behaviour. The two
+    # modes are operationally identical today, which is precisely why relabelling
+    # costs nothing and why a data migration would be an unforced rewrite of
+    # tenant configuration nobody asked us to change.
     qr_mode = models.CharField(
         max_length=20,
-        default='order_pay',
+        default='order_only',
         choices=[
             ('menu_only', 'Menu Only'),
-            ('order_pay', 'Order & Pay'),
+            ('order_pay', 'Order (legacy)'),
             ('order_only', 'Order Only'),
         ]
     )

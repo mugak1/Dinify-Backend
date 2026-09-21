@@ -9,7 +9,8 @@ from users_app.tests import seed_user
 from finance_app.models import DinifyTransaction
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
-    ProcessingStatus_Pending,
+    # ProcessingStatus_Pending is no longer imported: it existed only for the
+    # fake-success assertions D07 replaced. The model default is untouched.
     PaymentMode_MobileMoney,
     RestaurantStatus_Live,
     RESTAURANT_OWNER,
@@ -20,7 +21,11 @@ from restaurants_app.tests import (
     seed_restaurant, seed_menu_section, seed_menu_items, seed_tables,
     TEST_RESTAURANT_NAME,
 )
-from finance_app.controllers.tx_subscription import SubscriptionPaymentTransaction
+from finance_app.controllers.tx_subscription import (
+    SubscriptionPaymentTransaction,
+    REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+    MESSAGE_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+)
 
 TEST_MSISDN = '256700000000'
 
@@ -63,47 +68,59 @@ class FinanceAppTestFunctions(TestCase):
         seed_tables()
         seed_order()
 
-    def test_subscription_payment(self, *mocks):
-        """Subscription initiate now stubs to a pending transaction (no aggregator call)."""
+    def test_subscription_collection_is_refused_whatever_the_legacy_plan_says(self, *mocks):
+        """D07 REGRESSION (was a fake-success characterization).
+
+        This test used to assert the two shapes D07 removed: a ``per_order``
+        BUSINESS refusal, and a 200 booking a Pending row for a monthly plan.
+        Both are gone. The plan column no longer decides anything, because there
+        is no 200 to gate — offering "switch to monthly" as the way past a
+        refusal would point at machinery that does not exist.
+        """
         restaurant = Restaurant.objects.get(name=TEST_RESTAURANT_NAME)
         restaurant.subscription_validity = False
         restaurant.save()
 
-        # Per-order subscription — should reject direct payment
-        result = SubscriptionPaymentTransaction().initiate(
-            restaurant_id=restaurant.id,
-            transaction_platform='web',
-            payment_mode=PaymentMode_MobileMoney,
-            user=None,
-            msisdn=TEST_MSISDN
-        )
-        self.assertEqual(result['status'], 400)
+        def refuse(expected_plan):
+            result = SubscriptionPaymentTransaction().initiate(
+                restaurant_id=restaurant.id,
+                transaction_platform='web',
+                payment_mode=PaymentMode_MobileMoney,
+                user=None,
+                msisdn=TEST_MSISDN,
+            )
+            self.assertEqual(
+                result['status'], 501,
+                f'plan={expected_plan}: expected the unimplemented-collection '
+                f'refusal, got {result}',
+            )
+            self.assertEqual(
+                result['reason'], REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE)
+            self.assertEqual(
+                result['message'], MESSAGE_SUBSCRIPTION_COLLECTION_UNAVAILABLE)
+            # It answers about the request, not about a transaction.
+            self.assertNotIn('data', result)
+            return result
 
-        # Switch to monthly subscription with flat fee
+        # The DEFAULT plan every supported creation path produces.
+        self.assertEqual(restaurant.preferred_subscription_method, 'per_order')
+        refuse('per_order')
+
+        # And the plan that used to unlock the fake success. Written directly
+        # because no supported path on this plane can set it (restaurant_setup
+        # strips it from every PUT) — which is exactly why it is worth pinning.
         restaurant.preferred_subscription_method = 'monthly'
         restaurant.flat_fee = Decimal('50000')
         restaurant.save()
+        refuse('monthly')
 
-        # Monthly MoMo subscription payment — pending stub
-        result = SubscriptionPaymentTransaction().initiate(
-            restaurant_id=restaurant.id,
-            transaction_platform='web',
-            payment_mode=PaymentMode_MobileMoney,
-            user=None,
-            msisdn=TEST_MSISDN
-        )
-        self.assertEqual(result['status'], 200)
-        self.assertIn('transaction_id', result['data'])
+        restaurant.preferred_subscription_method = 'yearly'
+        restaurant.save()
+        refuse('yearly')
 
-        txs = DinifyTransaction.objects.get(id=result['data']['transaction_id'])
-        self.assertEqual(txs.processing_status, ProcessingStatus_Pending)
-
-        # The transaction is recorded against the restaurant (record-only
-        # DinifyTransaction; the dinify_revenue account was removed in 8a).
-        revenue_txs = DinifyTransaction.objects.filter(
-            restaurant=restaurant
-        )
-        self.assertTrue(revenue_txs.exists())
+        # Nothing was recorded by any of the three.
+        self.assertFalse(
+            DinifyTransaction.objects.filter(restaurant=restaurant).exists())
 
 
 class RetiredOrderPaymentRouteTests(TestCase):
@@ -228,15 +245,119 @@ class SubscriptionTransactionTenancyTests(TestCase):
         self.assertEqual(resp.status_code, 404, resp.content)
         self.assertEqual(self.a_count(), before)
 
-    # --- 3. owner allowed -> exactly one row, created_by == owner -------
-    def test_owner_allowed(self, *mocks):
+    # --- 3. owner reaches the capability answer, and books nothing -------
+    def test_owner_is_authorized_and_still_gets_the_unavailable_answer(self, *mocks):
+        """D07 REGRESSION (was ``test_owner_allowed``, a fake-success characterization).
+
+        The AUTHORIZATION half is unchanged and still pinned: an owner of THIS
+        restaurant clears the gate, where the four denials below do not. What
+        changed is what lies past the gate — the collector is unimplemented, so
+        the authorized caller gets 501 and no row is written.
+        """
         resp = self.post_subscription(self.owner_a, self.restaurant_a.id)
-        self.assertEqual(resp.status_code, 200, resp.content)
-        rows = DinifyTransaction.objects.filter(restaurant=self.restaurant_a)
-        self.assertEqual(rows.count(), 1)
-        row = rows.get()
-        self.assertEqual(row.created_by, self.owner_a)
-        self.assertEqual(row.processing_status, ProcessingStatus_Pending)
+        self.assertEqual(resp.status_code, 501, resp.content)
+        body = resp.json()
+        self.assertEqual(body['status'], 501)
+        self.assertEqual(
+            body['reason'], REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE)
+        self.assertEqual(
+            body['message'], MESSAGE_SUBSCRIPTION_COLLECTION_UNAVAILABLE)
+        # The owner got PAST the gate — that is what separates this from the
+        # denial tests, and asserting only "no row" would not show it.
+        self.assertNotEqual(resp.status_code, 404)
+        self.assertEqual(
+            DinifyTransaction.objects.filter(restaurant=self.restaurant_a).count(), 0)
+
+    def test_the_refusal_is_not_cacheable(self, *mocks):
+        resp = self.post_subscription(self.owner_a, self.restaurant_a.id)
+        self.assertEqual(resp['Cache-Control'], 'no-store, private')
+        self.assertEqual(resp['Pragma'], 'no-cache')
+        self.assertIn('Authorization', resp['Vary'])
+
+    def test_no_retry_affordance_is_offered(self, *mocks):
+        """A Retry-After would say waiting implements a collector. Nothing waits."""
+        resp = self.post_subscription(self.owner_a, self.restaurant_a.id)
+        self.assertNotIn('Retry-After', resp)
+        body = resp.json()
+        for word in ('retry', 'try again', 'later', 'temporarily'):
+            self.assertNotIn(word, body['message'].lower(), body['message'])
+
+    def test_repetition_stays_side_effect_free(self, *mocks):
+        """No refusal ledger, no dedup machinery needed — just nothing, five times."""
+        for _ in range(5):
+            resp = self.post_subscription(self.owner_a, self.restaurant_a.id)
+            self.assertEqual(resp.status_code, 501, resp.content)
+        self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+    def test_no_tender_string_reaches_a_successful_response(self, *mocks):
+        """The old path validated no tender at all and persisted whatever it got."""
+        for mode in ('momo', 'card', 'cash', 'bitcoin', '', None):
+            body = {
+                'transaction_type': 'subscription',
+                'transaction_platform': 'web',
+                'payment_mode': mode,
+                'restaurant_id': str(self.restaurant_a.id),
+                'msisdn': '256700000399',
+            }
+            resp = self.client.post(
+                self.URL, data=json.dumps(body),
+                content_type='application/json', **self.auth(self.owner_a),
+            )
+            self.assertEqual(resp.status_code, 501, f'{mode!r}: {resp.content}')
+        self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+    def test_an_msisdn_is_never_stored(self, *mocks):
+        self.post_subscription(
+            self.owner_a, self.restaurant_a.id, msisdn='256700000777')
+        self.assertFalse(
+            DinifyTransaction.objects.filter(msisdn='256700000777').exists())
+        self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+    def test_the_direct_in_process_call_is_refused_too(self, *mocks):
+        """A UI-only or endpoint-only disable would leave this open.
+
+        ``user=None`` is the exact shape that used to persist a row with no
+        attribution at all.
+        """
+        result = SubscriptionPaymentTransaction().initiate(
+            restaurant_id=self.restaurant_a.id,
+            transaction_platform='web',
+            payment_mode=PaymentMode_MobileMoney,
+            user=None,
+            msisdn='256700000399',
+            otp='1234',
+        )
+        self.assertEqual(result['status'], 501)
+        self.assertEqual(
+            result['reason'], REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE)
+        self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+    def test_a_malformed_or_unknown_id_still_404s_from_the_service_itself(self, *mocks):
+        """The service self-guards; it does not rely on its caller's gate.
+
+        Both answers must stay the endpoint gate's opaque 404 — not a 501, which
+        would tell an unauthorized caller that the restaurant exists.
+        """
+        for bad in ('not-a-uuid', str(uuid.uuid4())):
+            result = SubscriptionPaymentTransaction().initiate(
+                restaurant_id=bad, transaction_platform='web',
+                payment_mode=PaymentMode_MobileMoney, user=None,
+            )
+            self.assertEqual(result['status'], 404, f'{bad!r}: {result}')
+            self.assertNotIn('reason', result)
+        self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+    def test_the_refusal_sends_no_sms_email_or_otp(self, *mocks):
+        """The class mocks are asserted on, not merely installed.
+
+        Decorator order is bottom-up, so *mocks arrives as
+        (yo_sms, messenger_email, messenger_sms, otp_make, otp_resend, otp_verify).
+        """
+        self.post_subscription(self.owner_a, self.restaurant_a.id)
+        for m in mocks:
+            self.assertEqual(
+                m.call_count, 0,
+                f'{getattr(m, "_mock_name", m)} was called by a refused request')
 
     # --- 4. the legacy platform role grants nothing ---------------------
     def test_legacy_platform_role_denied(self, *mocks):
@@ -285,3 +406,139 @@ class SubscriptionTransactionTenancyTests(TestCase):
         resp = self.post_subscription(self.owner_a, 'not-a-uuid')
         self.assertEqual(resp.status_code, 404, resp.content)
         self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+
+class TheDisclosureAndTheBoundaryAgreeTests(TestCase):
+    """
+    ONE capability fact, published in two places, pinned so they cannot drift.
+
+    ``finance_app.subscription_capability.IN_APP_COLLECTION_SUPPORTED`` is what the
+    restaurant's own billing read publishes; ``tx_subscription.initiate`` is what
+    actually happens when somebody tries to pay. If those two ever disagree the
+    portal offers a Pay button the server refuses — which is a smaller version of
+    exactly the defect D07 closed, reached from the other side.
+
+    THE PAIRING IS PINNED RATHER THAN ENFORCED, and that is deliberate. ``initiate``
+    does NOT branch on the flag: it removed its insertion branch outright, because a
+    switch is a working fake collection one boolean away from returning. So the
+    invariant cannot be "the code consults the constant" — it has to be "while the
+    constant says unsupported, the boundary refuses", which is what the first test
+    below asserts and what makes flipping the constant alone insufficient.
+    """
+
+    #: Module-level names that may ASSIGN the capability. One, by construction.
+    CAPABILITY_HOME = 'finance_app/subscription_capability.py'
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            first_name='Cap', last_name='Owner', email='cap-owner@test.com',
+            phone_number='256775000401', username='256775000401',
+            country='Uganda', password='password', roles=[],
+        )
+        self.restaurant = Restaurant.objects.create(
+            name='Capability Ltd', location='loc-cap',
+            status=RestaurantStatus_Live, owner=self.owner,
+        )
+
+    def _initiate(self):
+        return SubscriptionPaymentTransaction().initiate(
+            restaurant_id=str(self.restaurant.pk),
+            transaction_platform='web',
+            payment_mode=PaymentMode_MobileMoney,
+            user=self.owner,
+            msisdn=TEST_MSISDN,
+            otp='1234',
+        )
+
+    # -- the pairing ----------------------------------------------------------
+
+    def test_while_the_disclosure_says_unsupported_the_boundary_refuses(self):
+        # REVERTING EITHER HALF FAILS HERE: make `initiate` succeed and the status
+        # assertion breaks; flip the constant and the premise assertion does.
+        from finance_app import subscription_capability
+
+        self.assertIs(
+            subscription_capability.IN_APP_COLLECTION_SUPPORTED, False,
+            'the capability constant no longer states what this build does',
+        )
+        result = self._initiate()
+        self.assertEqual(result['status'], 501)
+        self.assertEqual(
+            result['reason'],
+            subscription_capability.REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+        )
+        self.assertEqual(DinifyTransaction.objects.count(), 0)
+
+    def test_the_boundary_re_exports_the_shared_code_and_sentence(self):
+        # Re-exported, not re-spelled: an importer of either module gets the same
+        # two strings.
+        from finance_app import subscription_capability
+
+        self.assertEqual(
+            REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+            subscription_capability.REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+        )
+        self.assertEqual(
+            MESSAGE_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+            subscription_capability.MESSAGE_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+        )
+
+    # -- structural: one writer, and never a switch ---------------------------
+
+    def _assignments_of(self, relative_path, name):
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        tree = ast.parse((root / relative_path).read_text())
+        found = []
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets = [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    found.append(node.lineno)
+        return found
+
+    def test_only_one_module_assigns_the_capability(self):
+        # A second assignment is a second source of truth, and the two would
+        # disagree the first time one of them was edited.
+        name = 'IN_APP_COLLECTION_SUPPORTED'
+        self.assertTrue(self._assignments_of(self.CAPABILITY_HOME, name))
+        for consumer in (
+            'finance_app/controllers/tx_subscription.py',
+            'restaurants_app/controllers/subscriptions.py',
+        ):
+            self.assertEqual(
+                self._assignments_of(consumer, name), [],
+                f'{consumer} restates the capability instead of importing it',
+            )
+
+    def test_the_collection_boundary_never_reads_the_flag_at_runtime(self):
+        # It imports it to be PINNED by the test above, never to branch on it.
+        # A `if IN_APP_COLLECTION_SUPPORTED:` inside `initiate` would turn a
+        # removed capability back into a switch — a working fake collection one
+        # boolean away from returning.
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        tree = ast.parse(
+            (root / 'finance_app/controllers/tx_subscription.py').read_text()
+        )
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for inner in ast.walk(node):
+                if (isinstance(inner, ast.Name)
+                        and inner.id == 'IN_APP_COLLECTION_SUPPORTED'):
+                    offenders.append((node.name, inner.lineno))
+        self.assertEqual(
+            offenders, [],
+            'tx_subscription consults the capability flag at runtime; it must '
+            'refuse unconditionally instead',
+        )

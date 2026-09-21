@@ -1336,6 +1336,82 @@ exactly the mismatch this removes here. A control pins that the two channels
 stay different.
 
 
+## 17. In-app subscription collection is refused — `POST finances/transactions/` now answers 501 (D07)
+
+**What changed.** `POST /api/v1/finances/transactions/` with
+`{"transaction_type": "subscription", ...}` used to answer **200** with
+`{"status": 200, "message": "The subscription payment has been initiated. Please
+confirm payment when promted"}` and persist a Pending `DinifyTransaction`. It now
+answers:
+
+```
+HTTP 501
+{"status": 501,
+ "reason": "subscription_collection_unavailable",
+ "message": "In-app subscription payment collection is not available. This request
+             did not create or send a payment request."}
+```
+
+**Why.** There has never been a collector behind that sentence. The provider call
+was a comment; `notifications_app.controllers.sms` holds the only outbound HTTP
+call site in the tree, and the repository carries no PSP credentials and no
+payment-execution code. A 200 saying a payment "has been initiated" is a claim
+about work no provider performed, and the Pending row it left behind was evidence
+of a payment attempt that never happened.
+
+**501, not 503, and no `Retry-After`.** RFC 9110 §15.6.2 is "the server does not
+support the functionality required"; §15.6.4 is a temporary overload or
+maintenance. A `Retry-After`, a retry timer or a client-side poll would each
+suggest that waiting implements a collector. Nothing here suggests that.
+
+**What is unchanged.** The endpoint's authorization runs FIRST and is untouched:
+`can_manage_restaurant` resolved against the body's `restaurant_id`, answering
+**404** (never 403) so a non-member cannot learn whether a restaurant exists, and
+failing closed on a missing or empty id. The transaction-type dispatch keeps its
+existing 400 for an unknown type. An unknown or malformed `restaurant_id` still
+reaches the same opaque 404 rather than a 500. Historical `DinifyTransaction`
+rows, the model, its serializers and both Transactions reports are untouched —
+this changes what the server will DO, never what it has recorded.
+
+**The legacy plan column no longer decides anything.**
+`preferred_subscription_method == 'per_order'` used to be the one branch above the
+200 path. There is no 200 path now, so branching on it would offer changing a plan
+as a way to enable machinery that does not exist; every authorized request gets
+the same answer whatever the column says. (It was never writable from the customer
+plane anyway — `restaurant_setup.py` strips it, with `flat_fee`, from every
+`restaurants` PUT, and that strip is unchanged.)
+
+**The refusal is in the SERVICE, not the view.**
+`finance_app.controllers.tx_subscription.initiate` is reachable in-process by any
+caller — including one passing `user=None`, which used to persist
+`created_by=None` — so disabling a view or hiding a button would have left the
+fake collection fully available. Every caller reaches the refusal, and the
+insertion branch is REMOVED rather than parked behind an enable switch: a switch
+is a working fake collection one boolean away from returning.
+
+### CUTOVER — FRONTEND FIRST, and the window is a real (small) regression
+
+Ship the restaurant portal's read-only billing screen BEFORE this. The paired
+frontend removes the Pay/Renew/Subscribe control entirely, so against either
+backend it sends no `finances/transactions/` request at all — inert.
+
+Backend first is NOT inert. An older deployed client still runs its pre-submit
+chain before it ever reaches this refusal: a `users/msisdn-lookup/` probe and a
+**REAL OTP** through `users/auth/resend-otp/`, for a payment that then fails. The
+operator gets a verification code by SMS and a failure — worse than the honest
+refusal, and completely avoidable by ordering. Nothing is lost either way: no
+payment was ever collected on either side of this change.
+
+### ROLLBACK
+
+Reverting restores the 200 and the Pending row — that is, it restores the payment
+claim. Prefer a forward fix. A rollback across this is a deliberate decision to
+re-enable a message the platform cannot honour, not a neutral revert, and it is
+schema-free: no migration accompanies it, so the databases match either way.
+
+---
+
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

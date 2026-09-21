@@ -4194,7 +4194,14 @@ class DinerTableScanTests(TestCase):
             'shape': 'square',
             'status': 'available',
             'tags': [],
-            'qr_mode': 'order_pay',
+            # D07/PR-4. This fixture creates its table WITHOUT naming a mode,
+            # so this literal tracks the MODEL DEFAULT, which moved
+            # `order_pay` -> `order_only`. The snapshot is about the
+            # serializer's shape rather than about the default, and the
+            # default has its own pin in `tests_qr_mode_default.py` — so this
+            # is corrected rather than loosened, and reverting the default
+            # still fails a test that says what it is about.
+            'qr_mode': 'order_only',
         })
 
     def test_scan_read_query_count_flat_with_multiple_orders(self):

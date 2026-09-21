@@ -51,7 +51,8 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Refunded, PaymentStatus_Pending,
 )
 from reports_app.controllers.restaurant.dashboard import (
-    MIXED_PRICING_NOTICE, _build_revenue, generate_restaurant_dashboard_v2,
+    MIXED_PRICING_NOTICE, PAYMENT_TRACKING_ENABLED, _build_revenue,
+    generate_restaurant_dashboard_v2,
 )
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED, PRICING_VERSION_LEGACY,
@@ -878,3 +879,80 @@ class DashboardV2PricingConventionTests(DashboardV2Base):
                 datetime(2024, 12, 31, 23, 59, tzinfo=dt_timezone.utc),
                 PERIOD_TRUNC['month'], 'month',
             )
+
+
+
+class DashboardV2PaymentTrackingTests(DashboardV2Base):
+    """
+    D07/PR-5 — THE PAYLOAD THE PORTAL READS SAYS WHAT IT CANNOT MEASURE.
+
+    ``payment_tracking_enabled`` has been on the v1 ``dashboard`` payload since the
+    custodial teardown, and the restaurant portal reads ``dashboard-v2`` — so the
+    disclosure existed and reached nobody.
+
+    It is a DISCLOSURE, NOT A SWITCH: nothing branches on it server-side, no figure
+    is suppressed, no row is filtered, and every number beside it is unchanged. The
+    controls below pin that.
+    """
+
+    def _data(self):
+        return self.dashboard(bucket='day')['data']
+
+    def test_the_flag_is_published_and_false(self):
+        self.assertIs(self._data()['payment_tracking_enabled'], False)
+
+    def test_it_is_THE_constant_and_not_a_second_opinion(self):
+        # Bound by identity to the module constant v1 also emits, so flipping it
+        # at PSP moves both payloads and neither can be flipped alone.
+        self.assertIs(
+            self._data()['payment_tracking_enabled'],
+            PAYMENT_TRACKING_ENABLED,
+        )
+
+    def test_v1_and_v2_state_the_same_thing(self):
+        token = str(RefreshToken.for_user(self.owner).access_token)
+        v1 = self.client.get(
+            f'/api/v1/reports/restaurant/dashboard/'
+            f'?restaurant={self.restaurant.id}'
+            f'&from={RANGE_FROM}&to={RANGE_TO}',
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+        self.assertEqual(v1.status_code, 200, v1.content)
+        self.assertIs(
+            v1.json()['data']['payment_tracking_enabled'],
+            self._data()['payment_tracking_enabled'],
+        )
+
+    def test_WHY_the_flag_exists_paid_orders_yet_no_payment_methods(self):
+        """The defect the disclosure describes, reproduced from the fixture.
+
+        This window holds five orders the fixture marked PAID, and the payment
+        methods card is EMPTY — because that card sums ``DinifyTransaction`` rows
+        of type order_payment with status success, and the writer for those was
+        deleted in the non-custodial teardown. Read without the flag, the card
+        says "no payments were settled in this period" about a restaurant with
+        five paid orders in it.
+        """
+        data = self._data()
+        self.assertEqual(
+            {row['status']: row['count'] for row in data['orders']['breakdown']}['paid'],
+            5,
+        )
+        self.assertEqual(data['payment_methods'], [])
+        # And the flag is what tells those two facts apart.
+        self.assertIs(data['payment_tracking_enabled'], False)
+
+    def test_CONTROL_the_disclosure_is_additive(self):
+        # It suppresses nothing and reshapes nothing: the cards beside it keep
+        # their exact shapes and the totals are the pre-D07 values.
+        data = self._data()
+        self.assertEqual(set(data['revenue']),
+                         {'series', 'totals', 'pricing_conventions'})
+        self.assertEqual(set(data['orders']), {'series', 'breakdown', 'total'})
+        self.assertEqual(data['revenue']['totals'], {
+            'gross': '5000.00',
+            'discounts': '1000.00',
+            'refunds': '0.00',
+            'net': '4000.00',
+        })
+        self.assertEqual(data['orders']['total'], 5)
