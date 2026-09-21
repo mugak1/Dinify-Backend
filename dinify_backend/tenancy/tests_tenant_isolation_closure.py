@@ -48,6 +48,9 @@ from restaurants_app.models import (
 )
 from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
 from finance_app.models import DinifyTransaction
+from finance_app.subscription_capability import (
+    REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+)
 from reviews_app.models import Review
 from orders_app.controllers.services.create_order import _create_order
 from orders_app.controllers.con_orders import ConOrder
@@ -1602,26 +1605,77 @@ class SubscriptionTransactionClosureTests(ClosureFixtureBase):
             content_type='application/json', **self._jwt(user),
         )
 
-    def test_endpoint_gates_on_manage_and_amount_is_server_derived(self):
+    def test_endpoint_gates_on_manage_and_no_client_amount_is_stored(self):
+        """
+        ORACLE CORRECTED, NOT RELAXED (D07).
+
+        It asserted `200`, read back the `DinifyTransaction` the call had written,
+        and checked its `transaction_amount` came from `restaurant.flat_fee` rather
+        than the client body's `'1'`. That premise — that an authorized manager's
+        request WRITES a subscription payment row — is exactly what D07 removed:
+        no aggregator integration exists, so the row recorded a collection nobody
+        performed. `tx_subscription.initiate` now refuses every caller (501).
+
+        THE TWO TENANT PROPERTIES THIS NAMES BOTH SURVIVE, and the second is now
+        stronger rather than weaker:
+
+          * the `can_manage_restaurant` gate ADMITS the right principal — this is
+            the discriminating half, because the sibling tests below assert 404
+            for a non-manager and for a cross-tenant id. A 501 here and a 404
+            there is what proves the gate still separates them;
+          * NO client-supplied monetary value is honoured. It used to be
+            "overwritten by the server's figure"; it is now "stored nowhere at
+            all", which no client body can reach past.
+        """
         resp = self._subscribe(self.owner_a, self.restaurant_a.id, transaction_amount='1')
-        self.assertEqual(resp.status_code, 200, resp.content)
-        txn = DinifyTransaction.objects.get(id=resp.json()['data']['transaction_id'])
-        # Amount comes from restaurant.flat_fee, never the client body's '1'.
-        self.assertEqual(txn.transaction_amount, Decimal('50000.00'))
-        self.assertEqual(txn.restaurant_id, self.restaurant_a.id)
+
+        # Past the authorization gate (NOT the 404 a non-manager gets) and then
+        # refused by the collector that does not exist.
+        self.assertEqual(resp.status_code, 501, resp.content)
+        self.assertEqual(
+            resp.json().get('reason'), REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+        )
+
+        # Nothing was written, so the client's '1' reached no stored value.
+        self.assertFalse(
+            DinifyTransaction.objects.filter(restaurant=self.restaurant_a).exists(),
+        )
 
     def test_owner_cannot_unlock_billing_by_editing_the_subscription_method(self):
         """
         THE CHAIN THIS CLOSES, end to end.
 
-        `tx_subscription.initiate`'s only gate is
+        `tx_subscription.initiate`'s only gate WAS
         `preferred_subscription_method == 'per_order'` -> refuse. While that field
         was tenant-writable, an owner could PUT `monthly` through the generic
         restaurant edit route and then bill their own restaurant — recording a
         subscription charge against terms Dinify never chose.
 
-        Restaurant B is left at the model default (`per_order`). The edit is now
-        stripped, so the controller — which is UNCHANGED by this PR — still refuses.
+        Restaurant B is left at the model default (`per_order`). The edit is
+        stripped, so the platform-owned column stays platform-owned.
+
+        ORACLE CORRECTED, NOT RELAXED (D07), AND THE TWO HALVES ARE NOW
+        INDEPENDENT. The refusal used to be a `400` DERIVED FROM the column this
+        test protects, so the strip and the refusal were one chain and the status
+        code was evidence about the column. D07 removed the 200 path entirely:
+        `initiate` refuses every authorized caller with `501` whatever the column
+        says, because there is no collector behind it. So the refusal is no longer
+        evidence about `preferred_subscription_method`, and this test no longer
+        asserts it as such.
+
+        WHAT IT STILL PROVES, and why it is still worth running:
+
+          * THE STRIP — the load-bearing tenant property, asserted byte-identically
+            below. An owner PUTs `monthly`, the rename applies, and the commercial
+            column does not move. That is unchanged by D07 and must stay so: the
+            column is platform-owned regardless of whether anything reads it today,
+            and the Phase-1 admin-plane writer still goes through Secretary;
+          * NO ROW IS WRITTEN. Under the old chain that followed from the column;
+            it now holds unconditionally, which is strictly stronger.
+
+        The strip is therefore DEFENCE IN DEPTH rather than the only thing refusing
+        — and it is not redundant: restoring the collector without restoring the
+        strip would re-open this exact chain.
         """
         self.assertEqual(
             self.restaurant_b.preferred_subscription_method, 'per_order',
@@ -1642,7 +1696,12 @@ class SubscriptionTransactionClosureTests(ClosureFixtureBase):
 
         before = DinifyTransaction.objects.filter(restaurant=self.restaurant_b).count()
         resp = self._subscribe(self.owner_b, self.restaurant_b.id)
-        self.assertEqual(resp.status_code, 400, resp.content)
+        # 501 (the collector does not exist), no longer 400 (the column said
+        # per_order) — see the docstring. Nothing is billed either way.
+        self.assertEqual(resp.status_code, 501, resp.content)
+        self.assertEqual(
+            resp.json().get('reason'), REASON_SUBSCRIPTION_COLLECTION_UNAVAILABLE,
+        )
         self.assertEqual(
             DinifyTransaction.objects.filter(restaurant=self.restaurant_b).count(),
             before,

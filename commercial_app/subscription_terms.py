@@ -64,6 +64,12 @@ from commercial_app.mutation_context import (
     parse_uuid,
     resolve_actor,
 )
+# THE SELECTION RULE IS SHARED, NOT COPIED. `commercial_app.reads.open_terms` is the
+# one answer to "which terms row is in force", read by the restaurant's own billing
+# surface as well as by the three writers below. Bound by IDENTITY rather than
+# re-implemented, so a writer that refuses a second open row and a reader that
+# reports the current one cannot come to disagree about which row that is.
+from commercial_app.reads import open_terms as _open_terms
 
 # The model stores DecimalField(max_digits=12, decimal_places=2).
 _AMOUNT_EXPONENT = Decimal('0.01')
@@ -300,19 +306,6 @@ def _requested_tuple(fields):
         fields['currency'],
         fields['billing_interval_unit'],
         fields['billing_interval_count'],
-    )
-
-
-def _open_terms(restaurant):
-    """
-    The restaurant's open terms row, or ``None``. At most one can exist —
-    ``one_open_subscription_terms_per_restaurant`` guarantees it at the database, and
-    that constraint remains the final backstop behind every check in this module.
-    """
-    return (
-        RestaurantSubscriptionTerms.objects
-        .filter(restaurant=restaurant, ended_at__isnull=True)
-        .first()
     )
 
 

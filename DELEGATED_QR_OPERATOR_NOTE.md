@@ -124,18 +124,53 @@ Four further limits, each real:
 environment is shallow — 142 commits, grafted at `1bec1ed` (2026-07-28) — and both
 the delegated read path and the flat serializer's `qr_credential` predate the graft,
 so `git log -S` attributes both to the graft commit rather than to their real
-changes. The window is the intersection of *when `tables` joined
-`SETUP_READABLE_RECORDS`* and *when `qr_credential` joined the flat table
-serializer*, closing when containment deploys. Establish it against full history or
-against the deploy record; do not quote a date from this checkout.
+changes. The window opens when `tables` joined `SETUP_READABLE_RECORDS` **and the FIRST
+disclosing builder existed**, and closes when containment deploys. Establish it
+against full history or against the deploy record; do not quote a date from this
+checkout.
+
+> **CORRECTED (D07 §14).** This previously dated the window from *the flat table
+> serializer's* `qr_credential`. **That is the LATEST of the disclosing builders,
+> not the earliest**, so using it as the opening bound UNDERSTATES the exposure.
+> Containment had to be applied at **six** sites, and the flat list was added
+> LAST — the repository's own record says PR 7A "only covered the other two" and
+> the flat field arrived later, because the portal lost every credential on
+> reload. The **grouped** (`?grouping`) read and the `regenerate-qr` response
+> disclosed before it. Date the window from the earliest disclosing builder that
+> a delegated read could reach, and enumerate all of them rather than the one
+> whose field name is easiest to grep.
+
+**And "no rows" is not proof.** Any upper bound drawn from retained
+`delegation_grant` / `delegated_session` rows is bounded by the completeness and
+integrity of that retention, and by the environment and time interval those rows
+actually cover. An empty result means *nothing was found in what survived and was
+searched* — which, given that a successful delegated read writes no audit row at
+all (above), is a much weaker statement than "no historical disclosure occurred"
+and must never be recorded as that.
 
 ---
 
 ## 5. The remedy that exists, and exactly what it buys
 
-`PUT /api/v1/restaurant-setup/table-actions/regenerate-qr/` with `{"table_id": ...}`
-— owner/manager-gated through the `tables` module, **one table per call, no bulk
-mode**.
+`POST /api/v1/restaurant-setup/table-actions/regenerate-qr/` with
+`{"table_id": ...}` — gated through the **`tables` module**, **one table per call,
+no bulk mode**.
+
+> **CORRECTED (D07 §14).** This read `PUT` until D07's documentation pass.
+> `TableActionsEndpoint` defines **only** `post` — there is no `put` handler and no
+> `PUT` in any test — so an operator following the previous wording would have been
+> answered **405** in the middle of a containment response, and would reasonably
+> have concluded the remedy was unavailable.
+
+> **CORRECTED (D07 §14).** This also read *"owner/manager-gated"*. That narrows the
+> real policy in prose: `tables` is an ordinary grid module, and
+> `role_defaults.DEFAULT_ROLE_MODULES` grants it to **`restaurant_staff`** by
+> default as well as to owner and manager — while an owner may widen or withdraw it
+> for any non-owner role through the Roles & Access grid. So who may rotate is
+> **whatever that restaurant's grid currently says**, which is the thing to read
+> before planning a rotation; it is not a fixed two-role list, and it is not
+> narrowed by the QR-disclosure containment (which withholds the CREDENTIAL from a
+> delegated caller and changes no module policy).
 
 It bumps `qr_version` atomically (an `F()` expression, race-safe under concurrent
 taps) and stamps `qr_regenerated_at`.

@@ -26,6 +26,25 @@ def no_store(response):
     return response
 
 
+def private_no_store(response):
+    """
+    Mark an AUTHENTICATED, principal-scoped response as non-cacheable.
+
+    The sibling ``no_store`` above is for the DINER capability channel and varies
+    on the diner headers. A JWT-authenticated operator response has no diner
+    credential to vary on — the thing that distinguishes one principal's response
+    from another's there is ``Authorization`` — so it gets its own two-line
+    helper rather than borrowing a Vary that does not apply to it.
+
+    Same cache headers, different Vary. Returns the same response for chaining.
+    """
+    response['Cache-Control'] = 'no-store, private'
+    response['Pragma'] = 'no-cache'
+    response['Expires'] = '0'
+    patch_vary_headers(response, ('Authorization',))
+    return response
+
+
 class NoStoreResponseMixin:
     """
     APIView mixin that stamps every response from the view as non-cacheable via

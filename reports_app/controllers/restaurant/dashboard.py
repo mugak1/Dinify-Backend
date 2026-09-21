@@ -774,6 +774,48 @@ def generate_restaurant_dashboard_v2(
     return {
         'status': 200,
         'data': {
+            # THE SAME DISCLOSURE v1 CARRIES, ON THE PAYLOAD THE PORTAL ACTUALLY
+            # READS (D07). v1 has published `payment_tracking_enabled` since the
+            # custodial teardown, but the restaurant dashboard reads v2, so the
+            # statement reached nobody.
+            #
+            # IT GOVERNS THREE FIGURES BELOW, which is why it sits at the top
+            # level rather than inside any one card:
+            #   * `payment_methods`, which sums `DinifyTransaction` rows of type
+            #     order_payment with status success. The order-payment WRITER was
+            #     deleted with the custodial teardown, so no such row has been
+            #     written since and none can be; the card is `[]` for every
+            #     restaurant and every window, permanently.
+            #   * `orders.breakdown.paid`, which counts `payment_status='paid'`.
+            #     Order creation seeds 'pending' and nothing writes 'paid'.
+            #   * `revenue` — THE HEADLINE, and the one most easily missed.
+            #     `_build_revenue` aggregates `gross` and `discounts` over
+            #     `paid = base.filter(payment_status=PaymentStatus_Paid)`, the
+            #     SAME unwritten column, so both are permanently `0.00` in every
+            #     bucket and in `totals`. `refunds` is NOT paid-gated
+            #     (`order_status='refunded'` is reachable), and
+            #     `net = gross - discounts - refunds`, so a window containing a
+            #     single refund reports a NEGATIVE net against a zero gross.
+            #     `pricing_conventions` counts `pricing_version` over that same
+            #     empty set, which is why the D02/C mixed-pricing notice has
+            #     never been able to render on a live payload.
+            #
+            # An empty card, a zero count and a zero-or-negative headline are not
+            # measurements — read as ones they say "no payments were settled in
+            # this period" and "this restaurant lost money", which are claims
+            # about the restaurant's trade rather than about this platform's
+            # instrumentation. The flag is what lets a client tell the two apart,
+            # and the portal renders the distinction rather than the bare figure.
+            #
+            # NOTHING IS REPRICED, RECOMPUTED OR SUPPRESSED. The figures stay
+            # exactly as they were — this states what they are worth, and does
+            # not invent a revenue basis (that is the PSP write path's job, and
+            # rebasing `_build_revenue` onto sale orders would be a reporting
+            # contract change, not a disclosure).
+            #
+            # ONE CONSTANT, BOTH PAYLOADS: flip `PAYMENT_TRACKING_ENABLED` in the
+            # same PR that lands the PSP write path and v1 and v2 move together.
+            'payment_tracking_enabled': PAYMENT_TRACKING_ENABLED,
             'revenue': _build_revenue(
                 restaurant_id, date_from, date_to, trunc_fn, bucket_key,
             ),
