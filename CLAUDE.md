@@ -1392,7 +1392,11 @@ so keep it current when conventions change.
   (`SerializerPublicGetTable.qr_credential` — the portal Setup View's page-load
   read, added later because PR 7A only covered the other two and the portal lost
   every credential on reload), the grouped `?grouping` read, and the
-  regenerate-qr response. Both tokens
+  regenerate-qr response — all SIX of those sites now gated on
+  `qr_disclosure_policy`, which withholds from a delegated caller and from anything
+  that cannot positively establish ordinary `tables` authority (see the QR
+  disclosure bullet below; that gate is the reason "hands the owner" is literally
+  true rather than approximately). Both tokens
   travel HEADER-ONLY (`credential_from_request` → `X-Diner-Credential`,
   `session_token_from_request` → `X-Diner-Session`); the `?credential=` /
   `?session=` / body-`session` fallbacks were removed. `DINER_CAP_KEY` is
@@ -1407,6 +1411,60 @@ so keep it current when conventions change.
   may only MATCH, never widen), and an invalid diner session never falls back to
   staff JWT. `DINER_CAP_KEY` MUST be configured in every deployed env before the
   auto-deploy runs (migrate / check --deploy fail closed without it)
+- QR CREDENTIALS ARE WITHHELD FROM A DELEGATED READ, DENIED BY DEFAULT: ✅ one
+  decision, `restaurants_app/controllers/qr_disclosure.py`, and one invariant —
+  **QR material is emitted only after ORDINARY, NON-DELEGATED authority for the
+  relevant table scope has been positively established; otherwise it is withheld
+  BEFORE SIGNING.** `SETUP_READABLE_RECORDS` admits `tables` to the delegated
+  restaurant-setup GET, and that read MINTED a credential per row — so a delegated
+  administrator holding even the READ-ONLY `view` scope received working ordering
+  authority for every table in the restaurant as an ordinary consequence of opening
+  a list. The credential is verified WITHOUT expiry and revoked only by a
+  `qr_version` bump (a reprint), so it OUTLIVED the delegated session and the grant.
+  Measured against unmodified `main` before anything changed: the credential
+  minted a real diner session, and `support` scope disclosed identically.
+  **THE CONTAINMENT IS FIELD-LEVEL, NOT THE REMOVAL OF THE TABLE VIEW** — number,
+  area, capacity, status, geometry, `has_qr` and `qr_mode` are untouched, and both
+  scopes keep them.
+  **"NON-DELEGATED" IS A VETO OVER THE MODULE CHECK, NOT A REFINEMENT OF IT.**
+  `can_user_access_module` / `get_module_restaurant_ids` INTENTIONALLY resolve a
+  delegated principal from the grant, so the resolver correctly says a delegate may
+  read tables. Reading a table is not the authority to mint the credential that
+  orders from it, and the resolver cannot tell those apart because it was never
+  asked to. `request_is_delegated` reads BOTH server-derived signals the platform
+  already establishes (`delegation_context` on the request, and the
+  `PRINCIPAL_DELEGATION_ATTR` marker the delegated authenticator sets on the user),
+  and ANY failure to read either one answers DELEGATED — the only safe answer to
+  "I could not tell" is the one that withholds.
+  **THE POLARITY IS THE OPPOSITE OF THE `menu_policy` PRECEDENT, AND THAT IS THE
+  WHOLE THING.** There, an ABSENT context correctly means the ordinary operator
+  path. Copying it here produces a containment that reads as applied and discloses
+  anyway — measured: `Secretary.read()` passed NO serializer context, so a
+  `if delegation_context(request): return None` guard in the serializer evaluated
+  against `{}` and the credential still minted a session. So **`Secretary` now
+  threads the request into both its paginated and unpaginated serializer
+  constructions** (`_read_context`, which carries the request and decides no
+  policy), and a missing request, an anonymous principal, a builder handed no
+  policy and a serializer with no context ALL resolve to `WITHHOLD_ALL`.
+  **THE WIRE CONTRACT IS OMISSION**, never `null`, `''`, the table UUID, a
+  placeholder or a credential-bearing URL under another key: the serializer POPS
+  the field per instance when the policy withholds everything (the signer is then
+  invoked ZERO times, measured), and a per-row refusal returns a sentinel the
+  builder removes rather than calling the signer. Scope is a SET resolved ONCE per
+  response, so a row is checked against its own restaurant and there is no
+  permission query per row. Six sites pass it explicitly — the flat list, the
+  grouped builder, and the five ordinary table-action responses (`seat`, `clear`,
+  `transfer` source+destination, `update-status`, `regenerate-qr`). `regenerate-qr`
+  ADDS the key only when permitted rather than computing and dropping it.
+  Pinned by `restaurants_app/tests_qr_disclosure_boundary.py` (35) and the CONVERTED
+  `platform_admin_app/tests_delegated_qr_disclosure.py` (11) — the three assertions
+  that asserted the disclosure are INVERTED and the two fixtures that depended on it
+  are REBUILT against an ordinary authorized read, recorded in that file's docstring
+  rather than done by deleting tests. **IT REVOKES NOTHING ALREADY DISCLOSED** —
+  see `DELEGATED_QR_TRIAGE.md` §7 and `DELEGATED_QR_OPERATOR_NOTE.md`, which records
+  the grant/session evidence, its limits (above all that a delegated GET that
+  SUCCEEDS writes no audit row, so absence of one proves nothing) and the per-table
+  rotation option. No production record was inspected and no table was rotated
 - Role-permission MANAGEMENT surface: ✅ Owner-only GET/PUT
   `api/v1/restaurant-setup/role-permissions/` (`RolePermissionsEndpoint`,
   `restaurants_app/endpoints/role_permissions.py`) reads all four role grids and

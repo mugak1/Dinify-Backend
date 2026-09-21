@@ -19,6 +19,9 @@ from restaurants_app.models import (
 )
 from misc_app.serializers.fields import JSONStringCompatField, JSONStringCompatListField
 from restaurants_app.controllers.diner_capability import issue_qr_credential
+from restaurants_app.controllers.qr_disclosure import (
+    QR_CREDENTIAL_WITHHELD, policy_from_context,
+)
 from restaurants_app.controllers.tables import get_table_availability
 from restaurants_app.controllers.tenant_scope import assert_fks_belong_to_restaurant
 from restaurants_app.controllers.menu_relationships import (
@@ -792,6 +795,30 @@ class SerializerPutTable(ModelSerializer):
 class SerializerPublicGetTable(ModelSerializer):
     """
     serializer for getting tables
+
+    ``qr_credential`` IS NOT AN ORDINARY FIELD. It is the table's bearer
+    authority: it exchanges at the anonymous scan route for a diner table
+    session, it is verified without expiry, and it is revoked only by reprinting
+    the physical sticker. It is therefore emitted ONLY to a caller whose ordinary,
+    non-delegated ``tables`` authority over that table's restaurant has been
+    positively established — see ``restaurants_app.controllers.qr_disclosure``,
+    which owns that decision for every table builder.
+
+    WITHHOLDING OMITS THE KEY AND NEVER CALLS THE SIGNER, in two layers:
+
+    * ``__init__`` drops the field outright when the policy can permit nothing —
+      the delegated, anonymous and no-context cases, i.e. the whole security case.
+      A per-INSTANCE ``self.fields.pop``, never a change to ``_declared_fields`` or
+      any other class-level state, so one request's omission cannot contaminate
+      the next request's fields.
+    * ``get_qr_credential`` guards each ROW against the policy's resolved scope and
+      returns a sentinel that ``to_representation`` removes. Defensive: the
+      endpoint's scoped queryset should make a foreign row unreachable here, and
+      if it ever were, this withholds rather than minting.
+
+    Neither layer produces ``null`` or an empty string. A key that is present and
+    empty and a key that is absent are different facts to a client; the contract
+    is ABSENT.
     """
     dining_area = SerializerMethodField()
     qr_credential = SerializerMethodField()
@@ -800,15 +827,35 @@ class SerializerPublicGetTable(ModelSerializer):
         model = Table
         fields = '__all__'
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Resolved once per serializer instance (so once per response), never per
+        # row: `qr_disclosure_policy` runs the module-scope query at most once.
+        self._qr_policy = policy_from_context(self.context)
+        if self._qr_policy.withholds_everything:
+            # Before evaluation: the field is gone, so the signer is unreachable
+            # for every row rather than called and stripped afterwards.
+            self.fields.pop('qr_credential', None)
+
     def get_qr_credential(self, table):
         # The current opaque QR credential (bound to restaurant+table+
         # generation) so the owner UI can render/print the QR directly —
         # mirrors get_tables_by_area and the regenerate-qr response (PR 7A;
         # this flat list is the read the portal Setup View actually loads).
         # Derived per read, never stored; a qr_version bump revokes it.
+        if not self._qr_policy.allows(table.restaurant_id):
+            return QR_CREDENTIAL_WITHHELD
         return issue_qr_credential(
             table.restaurant_id, table.id, table.qr_version,
         )
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get('qr_credential') is QR_CREDENTIAL_WITHHELD:
+            # Omit, never null. The sentinel is returned WITHOUT signing, so this
+            # removes a placeholder rather than a live credential.
+            data.pop('qr_credential', None)
+        return data
 
     def get_dining_area(self, table):
         if table.dining_area is None:
