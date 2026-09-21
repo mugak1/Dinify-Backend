@@ -157,12 +157,26 @@ delivery.** The flag is a single statement about instrumentation, so disclosing 
 Payment Methods card alone would have been the same defect with a smaller blast radius:
 
 - **Revenue** is E5's principal claim and the loudest of the three. `_build_revenue`
-  aggregates `gross` and `discounts` over `payment_status='paid'`, a column with no
-  writer, so both are zero in every bucket and in `totals`; `net = gross − discounts −
-  refunds` is derived from them while `refunds` is NOT paid-gated, so a window holding
-  one refund reports a NEGATIVE net against a zero gross — as the Dashboard's headline
-  figure, in success green. `pricing_conventions` counts over that same empty set, which
-  is why the D02/C mixed-pricing notice has never been able to render on a live payload.
+  aggregates `gross` and `discounts` over `payment_status='paid'`, and **no supported
+  writer in the current source sets that column**, so on any deployment whose history
+  was produced by this source they are zero in every bucket and in `totals`;
+  `net = gross − discounts − refunds` is derived from them while `refunds` is NOT
+  paid-gated, so a window holding one refund reports a NEGATIVE net against a zero
+  gross — as the Dashboard's headline figure, in success green. `pricing_conventions`
+  counts over the same set.
+
+  **THE SCOPE OF THAT CLAIM IS NARROWER THAN THE ORIGINAL WORDING, deliberately.** This
+  paragraph said the figures were zero full stop and that the D02/C notice "has never
+  been able to render on a live payload". Neither follows from a source search:
+  "no supported current writer" is a statement about the CURRENT tree, not about how a
+  deployed row got its value, and an older writer, an import, a fixture or a manual
+  correction would produce paid rows this reasoning cannot see. §10 item 3 already made
+  exactly that correction for `paid`/`success`; the paragraph was not brought into line
+  with it. **What is asserted now is what the source supports: the current tree writes
+  none, so a database it alone produced holds none.** Whether a given deployed database
+  holds historical paid or refunded rows is a live-data question that was not asked and
+  is not answered here — and it is precisely why the client's remedy is to WITHHOLD the
+  figures when the server declines to vouch for them, rather than to assume a value.
 - **Payment Methods** showed an empty list reading as "no one paid today".
 - **Total Orders** counts `paid` on the same unwritten column and `open` as everything
   else not cancelled or refunded, so the split reads "nobody has paid" about a
@@ -231,12 +245,34 @@ carrying one repo's rule across to the other is the mistake to avoid:
   for a payment that then fails — the OTP is dispatched before the POST. Frontend-first
   is inert: the new billing panel issues no collection request at all, so it behaves
   identically against a pre-D07 backend.
-- **PR-2's projection is additive**, so an old client ignoring it is unaffected in
-  either order.
-- **PR-4** is safe in either order: both modes are orderable, so a new frontend against
-  an old backend creates `order_pay` tables and an old frontend against a new backend
-  creates `order_only` ones — and neither changes what a diner can do.
-- **PR-5 / PR-6 / PR-7** are additive or client-only.
+- **PR-2's projection is additive.** An old client ignores the key. **EXECUTED**: the
+  `unconfigured` and `legacy` sections of `e2e/billing-journey/billing.mjs` drive a
+  NEW client against a backend carrying the projection, and the `terms-unstated`
+  branch — the shape an OLDER backend produces — is exercised by
+  `billing-read-states.spec.ts` against the real `HttpClient` and interceptor rather
+  than in a browser. **LIMIT**: no run of a deployed pre-D07 bundle was performed, in
+  either direction.
+- **PR-4** both modes are orderable, so a new frontend against an old backend creates
+  `order_pay` tables and an old frontend against a new backend creates `order_only`
+  ones. **NOT EXECUTED as a pairing** — the claim rests on
+  `tests_qr_mode_default.py` and `tables-qr-mode.spec.ts`, which pin each side
+  separately. "Safe in either order" is therefore an inference from two one-sided
+  pins, not an observed pairing, and is recorded as such.
+- **PR-5 / PR-6 / PR-7** are additive or client-only. **EXECUTED** for PR-5: the
+  dashboard section of the billing journey signs in against a live `dashboard-v2` and
+  asserts the withheld figures on the real cards. PR-6 and PR-7 are client-only and
+  were not paired.
+- **The 501 pairing WAS executed.** `billing.mjs` §3 issues the retired collector's
+  request through the running app's own `ApiService` — so it passes the real
+  `AuthInterceptor` and `ErrorInterceptor` — against a live Django. The server answered
+  `501 / subscription_collection_unavailable`, the refusal reached the operator, and
+  the subscription-transaction row count was **1 before and 1 after** (the fixture's own
+  seeded history row), including on a call supplying both `msisdn` and `otp`. §4 then
+  replays the retired OTP-then-POST ORDERING with the challenge **intercepted by the
+  harness**, so the limitation is demonstrated with no verification code dispatched.
+  **LIMIT**: this replays the old request from the CURRENT build. It shows the server
+  refuses it and the current interceptor chain surfaces the refusal; it does not show
+  how the deployed older bundle renders that refusal, and no such claim is made.
 
 **Rollback** restores the payment claim. It is schema-free for everything except 0058,
 whose reverse is a true inverse (future rows only).
@@ -259,8 +295,20 @@ Stage A's §10 evidence, corrected per the approval:
    paths", not a claim about host state.** `REGULATORY_AUDIT.md`'s appendix already
    records that repo-clean is not host-clean (H2 in particular remains OUTSTANDING).
 5. **`ENV=dev` is documentation, not a fresh check** — it was not re-verified.
-6. **The orphaned route needed its own deep-link reachability check**, which was done:
-   `PUT regenerate-qr` → 405, `POST` → 200.
+6. **The orphaned route needed its own deep-link reachability check, and the evidence
+   cited for it was the wrong evidence.** This entry read "which was done:
+   `PUT regenerate-qr` → 405, `POST` → 200". That is a METHOD test on the QR-rotation
+   endpoint; it establishes which verbs that endpoint accepts and says nothing whatever
+   about whether a retired payment URL still resolves to a payment surface. **A
+   QR-rotation method test is not a payment-route reachability test**, and citing it as
+   one made an unverified claim look verified.
+
+   **It has since been done properly, in a browser.** `e2e/billing-journey/billing.mjs`
+   §5 enters three retired payment paths directly in the address bar — `/diner/
+   payment-details`, `/diner/basket/payment-details` and
+   `/rest-app-ordering/payment-details` — and asserts that none renders a payment
+   surface and that none resolves to a `payment-details` route. Entering the URL is the
+   only thing that answers the question a bookmark asks.
 7. **The NULL-purpose / latest-OTP interaction is source-led** and stays so; no
    discriminating test was executed for it, and none is claimed.
 
@@ -326,7 +374,16 @@ default still fails a test that says what it is about.
   the ambient-authority gate, the tenant-relation ratchet, the tenant-isolation closure
   gate and the full suite — with the `test` aggregator green on it. The gap is closed
   by CI, not by the local run.
-- **No browser journey was run for this change** — see §12.
+- **No browser journey was run at the time of the original delivery** — see §12. **That
+  gap is now CLOSED, and this line is kept rather than deleted so the provenance of each
+  run stays legible.** `e2e/billing-journey/billing.mjs` was built and executed for the
+  G1/G2 completion: **42/42**, and **28/42 with the eleven production files reverted**,
+  so it discriminates. Eight of those fourteen failures are behavioural and six are
+  `data-testid` hooks this change introduced; the README records which is which rather
+  than counting all fourteen as regressions. Node 24.15.0, Playwright 1.63.0 (installed
+  `--no-save`, product manifests unchanged), Chromium 141.0.7390.37 (pre-installed,
+  `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`, nothing fetched), PostgreSQL 16, a disposable
+  local database, development assets.
 - No live-data query, no deployment, no workflow dispatch, no production or UAT access,
   no real OTP/SMS/email, no credential extraction or rotation, no backfill or repair.
 
@@ -369,3 +426,128 @@ default still fails a test that says what it is about.
   manual settlement acknowledgement, a subscription entitlement/invoice system,
   payment-before-preparation enforcement, a readiness-engine implementation, or a change
   to any venue's commercial decision.
+
+---
+
+## 13. The completion delta (G1 / G2 / G3)
+
+Not a new payment architecture and not a re-opening of Stage A's decisions — the
+remaining approved requirements, delivered against the same policy. **The
+service-level 501 and its tests, `commercial_app/reads.py`'s canonical
+`open_terms` alias, `RestaurantSubscription.get_details()`, migration 0058 as a
+narrow `AlterField`, `order_pay` recognition for existing rows, exact-money
+handling, the D01–D06 safeguards and the delegated-QR containment are all
+UNTOUCHED.**
+
+### G1 — an unknown measurement is rendered as unavailable
+
+PR-5 made the server SAY it does not record settlement and made three cards
+print a note under the figures. **A note under a plotted series still shows the
+series, and an operator reads the series.** So the figures are now WITHHELD.
+
+**FOUR ANSWERS, NOT TWO.** The old reading was `=== false`, which merged three
+situations — the server said false, the server never said, the server said
+something unreadable — into one "not false, therefore measured".
+`_shared/reporting/payment-measurement.ts` is the one decision;
+`dashboard-adapter` classifies it once because **key presence is the only thing
+that separates silence from an unreadable answer**, and once the payload is
+gone that distinction cannot be recovered. `false` and `missing` get different
+sentences: saying "Dinify doesn't record settled payments" on behalf of a server
+that never said so is the same manufactured claim pointed the other way.
+
+**FOUR CONSUMERS, and the fourth was never wired at all** — the Dashboard
+template bound the declaration on Revenue, Payment Methods and Total Orders and
+not on Tables, whose `median_visit_minutes`, `turns_today`, `turns_yesterday`,
+`avg_ticket_today` and `avg_ticket_yesterday` are every one of them paid-gated
+in `_build_tables`.
+
+**WHAT IS *NOT* WITHHELD is as deliberate as what is.** Revenue's `refunds`
+aggregates `order_status`, which is written; Total Orders' `total`, `cancelled`
+and `refunded` are independent measurements, so the card is not hidden and its
+trend badge — an order count on both sides — still renders; Tables' occupancy is
+live floor state. **No metric is rebased, no settlement synthesised, no refund
+removed and no negative clamped.**
+
+The comparison is gated on BOTH windows, because the baseline is a SECOND
+`dashboard-v2` response carrying its own declaration, and a delta between a
+measured window and an unmeasured one describes our deployment rather than the
+restaurant's trade. `measurement` joins the `ngOnChanges` trigger list so a
+capability change CLEARS the chart rather than leaving the last series painted.
+
+**Backend:** `summarize_revenue` returned the literal string `'up'` as
+`month_growth`, with the comparison that would have justified it commented out
+beside it — so it reported growth for every restaurant in every month, measured
+including one with no orders at all (`{'total': 0, 'this_month': 0,
+'month_growth': 'up'}`). The consumer search decided the remedy: it has **no
+production caller** — no urlconf, no serializer, no response, only two test
+modules, neither of which reads that key — so the key is REMOVED rather than
+given an honest value, and the two figures that remain (both paid-gated) now
+publish the same `PAYMENT_TRACKING_ENABLED` constant the two dashboards do,
+asserted by identity.
+
+### G2 — the billing screen says which answer it got
+
+**This does not reopen a payment UI.** `PayNow`, `Save`, `sendOtp` and
+`InitPayment` stay removed. What changed is the READING: the screen had two
+states where the wire has five.
+
+`current` / `none` / `unstated` / `unreadable`, plus a failure that is owned by
+the load state and never becomes "Not configured". The shapes that used to fall
+through: an older response with no projection rendered **nothing at all** (a
+heading above blank space); `{recorded: false, current: <valid terms>}` rendered
+as ABSENCE, which would hide a price the restaurant is being charged; a
+non-object body became `{}` and read as an older server; a 2xx transport
+carrying a refusal envelope was parsed anyway; a malformed capability was
+silently dropped, so a broken contract removed the explanatory note and the page
+looked like a build that had grown a collector.
+
+**"NO CURRENT SUBSCRIPTION TERMS ARE RECORDED."** The selector behind `recorded`
+is `open_terms` — `ended_at IS NULL` — so a restaurant whose terms have been
+ENDED answers the same way. The old copy said none had been recorded "yet",
+which claims none ever existed and that the venue has never paid. No historical
+terms API was added to make a sentence accurate.
+
+**BOUNDED READ OWNERSHIP.** Principal + restaurant + generation, captured BEFORE
+each request and compared on arrival — never re-derived, since comparing a
+response against whatever the service says now is what makes a stale answer look
+authoritative. Measured on the unmodified code: a stale answer repainted a
+different restaurant's UGX 150,000 onto a screen scoped elsewhere. Previous-scope
+content is cleared IMMEDIATELY rather than when the replacement lands. Billing
+history gained its own three states — it used to sit in a skeleton for ever,
+because `load_list` only moved on a 200 — and a malformed successful payload is
+not an empty list: it threw `newCollection[Symbol.iterator] is not a function`
+out of the template and took the section down.
+
+### G3 — what was executed
+
+| | |
+|---|---|
+| G1 baseline | **7/7 FAILED** on unmodified `cabb672`, through the real card components |
+| G2 baseline | **8/8 FAILED** on unmodified `cabb672`, through the real component, `ApiService`, `HttpClient` and interceptor |
+| `payment-tracking-disclosure.spec.ts` | 23 → **60**, green |
+| `billing-read-states.spec.ts` | **30**, new, green |
+| `billing.component.spec.ts` | 16, green after three oracle corrections |
+| `reports_app/tests_summarize_revenue_claims.py` | **6**, new; **4 failed** on the unmodified tree, 2 controls held |
+| frontend `verify.sh` | exit 0 — type-check, lint, tenant-boundary **306**, `test:ci` **2803**, `build:prod` |
+| `e2e/billing-journey/billing.mjs` | **42/42**, and **28/42** with the production change reverted |
+
+**THREE SHIPPED ORACLES WERE CORRECTED OPENLY, not loosened**, each at the spec
+that replaced it: PR-5's "an older server keeps the original wording" asserted
+the behaviour G1 removes; "it recomputes, suppresses and reprices nothing"
+asserted that all four Revenue pills RENDER, and its intent (nothing recomputed
+or repriced, payload unmutated) is preserved and still pinned; and the billing
+spec's "stays silent when the server did not answer" asserted the blank section.
+The four `netIsNegative` specs were DELETED with the getter, because the clause
+explained a headline that is no longer rendered — and a control now pins that a
+measuring server's below-zero net is still shown plainly, which is the fact they
+existed to protect.
+
+**LIMITS, stated rather than implied.** The billing journey replays the retired
+collector's request from the CURRENT build: it shows the live server refuses it
+and the current interceptor chain surfaces the refusal, not how a deployed
+pre-D07 bundle renders that refusal. Six of its fourteen discriminating failures
+are `data-testid` hooks this change introduced rather than behavioural
+regressions, and the README says which. PR-4's "safe in either order" remains an
+inference from two one-sided pins. Nothing was deployed, merged, dispatched or
+run against production or UAT; no OTP, SMS, email or provider traffic was
+generated; no historical row was repaired and no QR was rotated.
