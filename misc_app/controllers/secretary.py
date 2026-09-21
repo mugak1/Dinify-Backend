@@ -289,6 +289,27 @@ class Secretary:
                     'message': error_message
                 }
 
+    def _read_context(self):
+        """
+        The DRF context the READ path hands its serializer.
+
+        Secretary already holds the request (it passes it to ``DinifyPaginator``)
+        and simply never gave it to the serializer, so a serializer asking "who is
+        this response for?" got ``{}`` and — for anything that must FAIL CLOSED on
+        that question — silently took the permissive branch. That is the whole
+        reason ``restaurants_app.serializers.SerializerPublicGetTable`` could not
+        withhold a QR bearer credential from a delegated reader.
+
+        Deliberately narrow: it adds ``request`` and preserves any context a caller
+        supplied, rather than inventing policy of its own. Secretary is generic and
+        stays generic — WHAT a request entitles a reader to is the serializer's
+        question, not this class's. Read-only; ``create``/``update``/``delete`` are
+        untouched.
+        """
+        context = dict(self.args.get('serializer_context') or {})
+        context.setdefault('request', self.args.get('request'))
+        return context
+
     def read(self):
         """
         reads records from the database
@@ -315,7 +336,8 @@ class Secretary:
             data = {
                 'records': self.serializer(
                     records,
-                    many=True
+                    many=True,
+                    context=self._read_context(),
                 ).data,
                 'pagination': {
                     'paginated': False,
@@ -337,7 +359,8 @@ class Secretary:
 
         serialized_records = self.serializer(
             pagination_response.get('records'),
-            many=True
+            many=True,
+            context=self._read_context(),
         ).data
 
         # return response

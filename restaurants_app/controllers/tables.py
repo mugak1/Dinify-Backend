@@ -109,7 +109,61 @@ def create_tables_in_section(
     }
 
 
-def get_tables_by_area(restaurant_id: str):
+def _grouped_table_row(table, qr_policy):
+    """
+    ONE row of the grouped tables read — the shape both branches emit.
+
+    The assigned and unassigned branches built this dict independently and
+    identically, which is exactly how a change lands on one of them and not the
+    other: the delegated-credential triage had to pin the second branch
+    separately because a fix to the first would have looked complete. They share
+    one builder now, so a field cannot be added, removed or gated on one side
+    only.
+
+    ``qr_credential`` IS ADDED, NEVER COMPUTED-THEN-DROPPED. When the policy does
+    not permit it the key is simply absent and ``issue_qr_credential`` is not
+    called, so no bearer credential is minted for a caller who may not have one.
+    Every other key, and their order, is unchanged.
+    """
+    row = {
+        'id': table.id,
+        'number': table.number,
+        'enabled': table.enabled,
+        'reserved': table.reserved,
+        'available': get_table_availability(table_id=str(table.id)),
+        'display_name': table.display_name,
+        'min_capacity': table.min_capacity,
+        'max_capacity': table.max_capacity,
+        'shape': table.shape,
+        'status': table.status,
+        'tags': table.tags,
+        'has_qr': table.has_qr,
+        'qr_mode': table.qr_mode,
+    }
+    if qr_policy is not None and qr_policy.allows(table.restaurant_id):
+        row['qr_credential'] = issue_qr_credential(
+            table.restaurant_id, table.id, table.qr_version,
+        )
+    row.update({
+        'floor_x': table.floor_x,
+        'floor_y': table.floor_y,
+        'is_active': table.is_active,
+    })
+    return row
+
+
+def get_tables_by_area(restaurant_id: str, qr_policy=None):
+    """
+    The grouped (``?grouping=``) tables read.
+
+    ``qr_policy`` is the response-entitlement decision resolved by the CALLER,
+    from the request, after its own authorization has run — see
+    ``restaurants_app.controllers.qr_disclosure``. It is keyword-only in practice
+    and DEFAULTS TO NONE, which WITHHOLDS: a caller that forgets to pass one (a
+    direct call, a management command, a test) gets a perfectly good tables
+    listing with no QR credentials in it, rather than a listing that hands out
+    bearer authority because nobody said not to.
+    """
     tables_listing = []
 
     # get the dining areas to consider
@@ -130,29 +184,9 @@ def get_tables_by_area(restaurant_id: str):
             dining_area=area['id']
         )
 
-        area_table_listing = [{
-            'id': table.id,
-            'number': table.number,
-            'enabled': table.enabled,
-            'reserved': table.reserved,
-            'available': get_table_availability(table_id=str(table.id)),
-            'display_name': table.display_name,
-            'min_capacity': table.min_capacity,
-            'max_capacity': table.max_capacity,
-            'shape': table.shape,
-            'status': table.status,
-            'tags': table.tags,
-            'has_qr': table.has_qr,
-            'qr_mode': table.qr_mode,
-            # The current opaque QR credential (bound to restaurant+table+
-            # generation) so the owner UI can render/print the QR directly.
-            'qr_credential': issue_qr_credential(
-                table.restaurant_id, table.id, table.qr_version,
-            ),
-            'floor_x': table.floor_x,
-            'floor_y': table.floor_y,
-            'is_active': table.is_active,
-        } for table in area_tables]
+        area_table_listing = [
+            _grouped_table_row(table, qr_policy) for table in area_tables
+        ]
 
         tables_listing.append({
             'dining_area': area,
@@ -186,27 +220,10 @@ def get_tables_by_area(restaurant_id: str):
                 'id': None,
                 'name': 'Not Assigned'
             },
-            'tables': [{
-                'id': table.id,
-                'number': table.number,
-                'enabled': table.enabled,
-                'reserved': table.reserved,
-                'available': get_table_availability(table_id=str(table.id)),
-                'display_name': table.display_name,
-                'min_capacity': table.min_capacity,
-                'max_capacity': table.max_capacity,
-                'shape': table.shape,
-                'status': table.status,
-                'tags': table.tags,
-                'has_qr': table.has_qr,
-                'qr_mode': table.qr_mode,
-                'qr_credential': issue_qr_credential(
-                    table.restaurant_id, table.id, table.qr_version,
-                ),
-                'floor_x': table.floor_x,
-                'floor_y': table.floor_y,
-                'is_active': table.is_active,
-            } for table in unassigned_tables]
+            'tables': [
+                _grouped_table_row(table, qr_policy)
+                for table in unassigned_tables
+            ]
         })
     return {
         'status': 200,

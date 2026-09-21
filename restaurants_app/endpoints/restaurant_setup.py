@@ -32,6 +32,7 @@ from restaurants_app.models import Restaurant, MenuSection, SectionGroup, MenuIt
 from restaurants_app.controllers.tables import (
     get_tables_by_area
 )
+from restaurants_app.controllers.qr_disclosure import qr_disclosure_policy
 from restaurants_app.controllers.dining_areas import create_dining_area
 from restaurants_app.controllers.menu_sections import ConMenuSection
 from restaurants_app.controllers.menu_items import ConMenuItem
@@ -786,8 +787,14 @@ class RestaurantSetupEndpoint(APIView):
                     return Response(
                         {'status': 404, 'message': 'Not found'}, status=404
                     )
+                # The QR credential is bearer authority, not an ordinary field:
+                # it is emitted only where ordinary, non-delegated `tables`
+                # authority has been positively established. Resolved ONCE here,
+                # from the request, AFTER the module gate above — never inside the
+                # builder, and never from anything the caller supplied.
                 response = get_tables_by_area(
-                    restaurant_id=request.GET.get('restaurant')
+                    restaurant_id=request.GET.get('restaurant'),
+                    qr_policy=qr_disclosure_policy(request),
                 )
                 return Response(response, status=200)
 

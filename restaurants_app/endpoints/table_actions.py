@@ -10,11 +10,31 @@ from dinify_backend.configss.string_definitions import MODULE_TABLES
 from restaurants_app.models import Table, Reservation
 from restaurants_app.serializers import SerializerPublicGetTable
 from restaurants_app.controllers.diner_capability import issue_qr_credential
+from restaurants_app.controllers.qr_disclosure import qr_disclosure_policy
 
 
 TABLE_STATUS_CHOICES = {
     'available', 'seated', 'bill_requested', 'dirty', 'out_of_service'
 }
+
+
+def _qr_context(request):
+    """
+    The response-entitlement context every table response built here carries.
+
+    These are ORDINARY, ALREADY-AUTHORIZED action responses — every one of them
+    is behind this endpoint's own `can_user_access_module(..., MODULE_TABLES)`
+    gate, and a delegated session is refused the whole route before dispatch
+    (`table-actions` is absent from `ALLOWED_ROUTES`). They are given the context
+    EXPLICITLY all the same: `SerializerPublicGetTable` now WITHHOLDS BY DEFAULT,
+    so a response constructed without one would silently stop carrying a field
+    these contracts already carry. Fail-closed defaults must not regress a
+    surface that was never the exposure.
+
+    Resolved once per response and shared by every serializer in it, so a
+    multi-table answer (transfer) costs the scope query once rather than per row.
+    """
+    return {'qr_policy': qr_disclosure_policy(request)}
 
 
 class TableActionsEndpoint(APIView):
@@ -101,7 +121,7 @@ class TableActionsEndpoint(APIView):
         return Response({
             'status': 200,
             'message': 'Table seated successfully',
-            'data': SerializerPublicGetTable(table).data
+            'data': SerializerPublicGetTable(table, context=_qr_context(request)).data
         }, status=200)
 
     # ------------------------------------------------------------------
@@ -137,7 +157,7 @@ class TableActionsEndpoint(APIView):
         return Response({
             'status': 200,
             'message': 'Table cleared successfully',
-            'data': SerializerPublicGetTable(table).data
+            'data': SerializerPublicGetTable(table, context=_qr_context(request)).data
         }, status=200)
 
     # ------------------------------------------------------------------
@@ -183,12 +203,13 @@ class TableActionsEndpoint(APIView):
                 table=source, status='seated', deleted=False
             ).update(table=dest)
 
+        qr_context = _qr_context(request)
         return Response({
             'status': 200,
             'message': 'Party transferred successfully',
             'data': {
-                'source': SerializerPublicGetTable(source).data,
-                'destination': SerializerPublicGetTable(dest).data,
+                'source': SerializerPublicGetTable(source, context=qr_context).data,
+                'destination': SerializerPublicGetTable(dest, context=qr_context).data,
             }
         }, status=200)
 
@@ -268,7 +289,7 @@ class TableActionsEndpoint(APIView):
         return Response({
             'status': 200,
             'message': 'Table status updated successfully',
-            'data': SerializerPublicGetTable(table).data
+            'data': SerializerPublicGetTable(table, context=_qr_context(request)).data
         }, status=200)
 
     # ------------------------------------------------------------------
@@ -358,19 +379,36 @@ class TableActionsEndpoint(APIView):
             fields=['qr_version', 'qr_regenerated_at', 'has_qr']
         )
 
+        payload = {
+            'id': str(table.id),
+            'number': table.number,
+            'qr_version': table.qr_version,
+            'qr_regenerated_at': table.qr_regenerated_at,
+        }
+        # The fresh opaque credential to encode into the reprinted QR sticker —
+        # bound to restaurant+table+new generation.
+        #
+        # Gated on the SAME response-entitlement decision as every other table
+        # builder, rather than on this route being off the delegated allowlist.
+        # A route allowlist is a statement about which requests arrive; it is not
+        # a statement about the principal, and `can_user_access_module` above
+        # deliberately answers True for a delegated caller too. Asking the one
+        # question everywhere is what keeps that from being an exception nobody
+        # revisits when the allowlist next changes.
+        #
+        # It cannot strand a legitimate operator: this endpoint has already
+        # required ordinary `tables` access at this exact restaurant, and
+        # `can_user_access_module` and `get_module_restaurant_ids` resolve that
+        # from the same employment, lifecycle and override rows — so for a
+        # non-delegated caller who reached here the scope necessarily contains it.
+        if qr_disclosure_policy(request).allows(table.restaurant_id):
+            payload['qr_credential'] = issue_qr_credential(
+                table.restaurant_id, table.id, table.qr_version,
+            )
+
         return Response({
             'status': 200,
             'message': 'QR code regenerated successfully. Previously issued QR '
                        'codes and diner sessions for this table are now invalid.',
-            'data': {
-                'id': str(table.id),
-                'number': table.number,
-                'qr_version': table.qr_version,
-                'qr_regenerated_at': table.qr_regenerated_at,
-                # The fresh opaque credential to encode into the reprinted QR
-                # sticker — bound to restaurant+table+new generation.
-                'qr_credential': issue_qr_credential(
-                    table.restaurant_id, table.id, table.qr_version,
-                ),
-            }
+            'data': payload,
         }, status=200)
