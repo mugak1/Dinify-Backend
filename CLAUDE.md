@@ -214,7 +214,25 @@ so keep it current when conventions change.
   and the per-line quantity ceiling bounds what may be SUBMITTED — never the merged
   row, which may legitimately exceed it. This is POST-PARSE APPLICATION validation:
   it does not replace an HTTP body-size limit, edge rate limiting or any other DoS
-  control, and claims nothing about them
+  control, and claims nothing about them.
+  **THE CEILINGS ARE NOW A SOURCE-AUTHORITATIVE CONTRACT A PEER CAN AGREE WITH
+  (D08/B1).** `orders_app/contracts/checkout_limits.py` derives the published set from
+  these constants — no number typed twice — and `checkout_limits.contract.json` beside
+  it is the committed export, asserted against the live constants **UNCONDITIONALLY**
+  by `CrossRepositoryCeilingContractTests`. That matters because the cross-repository
+  assertion that gave the class its name `skipTest`s whenever Dinify-Frontend is not
+  checked out beside this repository, which in CI is always — so it had never once
+  run there, and two independently checked copies are not parity: they are two things
+  that each agree with themselves. The tie to the other repository is a DIGEST over
+  the ceiling VALUES in a canonical form both languages produce byte for byte
+  (`json.dumps(sort_keys=True, separators=(',', ':'))`); keys beginning `_` are
+  provenance notes and are excluded, so the two copies may annotate themselves
+  differently and still agree. Dinify-Frontend records its own copy's digest in the
+  release manifest and refuses to publish a build whose digest disagrees with the
+  backend peer pinned in its compatible set — **so changing a ceiling is a
+  two-repository change**, and a one-sided change cannot be released whichever side
+  moved. `manage.py export_checkout_limits_contract` writes or checks the export; the
+  gate is the test, not the command
 - Stored modifier definitions (D01): ✅ `restaurants_app/controllers/modifier_definition.py`
   is the ONE structural reading of a `MenuItem.options` row, shared by
   `ConOrder.normalize_selected_modifiers` and the read-only preflight so the two
@@ -5534,6 +5552,18 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   captured for the whole scan — a discount window is time-dependent, and reading the
   clock per item would describe no single moment. Still read-only, still bounded,
   still no repair mode, and the report still carries no catalogue JSON
+- `export_checkout_limits_contract` in `orders_app/management/commands/` — writes or
+  checks `orders_app/contracts/checkout_limits.contract.json`, the source-authoritative
+  export of the D01 request ceilings, derived from `order_input`'s own constants.
+  `--check` exits non-zero when the committed file is stale; `--write` regenerates it;
+  with neither it reports the path, the digest and the state and changes nothing. It
+  is a CONVENIENCE, not the gate — the gate is
+  `orders_app/tests_order_input.py::CrossRepositoryCeilingContractTests`, which asserts
+  the file against the live constants unconditionally, so a ceiling changed without
+  regenerating fails CI whether or not anyone runs this. It reads and writes exactly
+  one file in this repository, contacts nothing, touches no database and makes no
+  claim about any other repository's copy — but remember the client repository PINS
+  this digest in its release policy, so changing a ceiling is a two-repository change
 - `unlock_platform_admin` in `platform_admin_app/management/commands/` — clears
   `failed_attempts`/`locked_until` for a platform-staff account under a row lock and
   audits `ADMIN_AUTH_LOCKOUT_CLEARED`. Does NOT touch the password, TOTP secret or
