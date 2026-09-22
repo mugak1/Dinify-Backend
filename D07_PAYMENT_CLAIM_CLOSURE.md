@@ -258,21 +258,41 @@ carrying one repo's rule across to the other is the mistake to avoid:
   `tests_qr_mode_default.py` and `tables-qr-mode.spec.ts`, which pin each side
   separately. "Safe in either order" is therefore an inference from two one-sided
   pins, not an observed pairing, and is recorded as such.
-- **PR-5 / PR-6 / PR-7** are additive or client-only. **EXECUTED** for PR-5: the
-  dashboard section of the billing journey signs in against a live `dashboard-v2` and
-  asserts the withheld figures on the real cards. PR-6 and PR-7 are client-only and
-  were not paired.
-- **The 501 pairing WAS executed.** `billing.mjs` §3 issues the retired collector's
-  request through the running app's own `ApiService` — so it passes the real
-  `AuthInterceptor` and `ErrorInterceptor` — against a live Django. The server answered
-  `501 / subscription_collection_unavailable`, the refusal reached the operator, and
-  the subscription-transaction row count was **1 before and 1 after** (the fixture's own
-  seeded history row), including on a call supplying both `msisdn` and `otp`. §4 then
-  replays the retired OTP-then-POST ORDERING with the challenge **intercepted by the
-  harness**, so the limitation is demonstrated with no verification code dispatched.
-  **LIMIT**: this replays the old request from the CURRENT build. It shows the server
-  refuses it and the current interceptor chain surfaces the refusal; it does not show
-  how the deployed older bundle renders that refusal, and no such claim is made.
+- **PR-5 / PR-6 / PR-7** are additive or client-only. **EXECUTED** for PR-5, and the
+  first version of that evidence did not support the claim either: `DashboardService.
+  USE_MOCK_DATA` is still `true` in the committed build, so the dashboard section was
+  asserting withheld hooks rendered from MOCK data with **no request reaching the
+  server at all**. It now runs in two phases — a mock-branch CONTROL that asserts zero
+  `dashboard-v2` requests are issued, then the REAL branch selected by a test-only
+  runtime flip of the static through Angular's dev-mode `window.ng`, where an
+  AUTHORIZED request is observed on the wire and its `payment_tracking_enabled: false`
+  declaration is asserted in the response body before the withheld-figure checks run.
+  No production flag is changed, no test endpoint is added, and the flip is undone
+  before the section ends. PR-6 and PR-7 are client-only and were not paired.
+- **The 501 pairing WAS executed — and the first version of that evidence did not
+  support the claim.** See §14/V1: the committed probe sent `restaurant` to an
+  endpoint that reads `restaurant_id`, so `can_manage_restaurant` refused it **404** at
+  the authorization gate before `SubscriptionPaymentTransaction.initiate()` ran, and
+  the only assertion made — `outcome === 'refused'` — was satisfied by that 404. The
+  row count was a **manual observation**, not an assertion. Both are now fixed in the
+  committed script and the claim below is the corrected one.
+  `billing.mjs` §3 issues the retired collector's request — **recovered verbatim from
+  `1d3d091^`, with `restaurant_id`** — through the running app's own `ApiService`, so
+  it passes the real `AuthInterceptor` and `ErrorInterceptor`, and `page.on('response')`
+  reads the SAME real response **before the interceptor flattens it**. Asserted: exactly
+  **501**, exactly `subscription_collection_unavailable`, exactly the request-specific
+  sentence — so a 400, 401, 403, 404, an arbitrary non-2xx or a request that never
+  answers each FAIL. A **404 control** (missing and foreign id) keeps the 501 from
+  being "the endpoint always says no", and the subscription-row count is read from the
+  restaurant's own authorized listing **before and after all three attempts** and
+  asserted unchanged. §4 then replays the retired OTP-then-POST ORDERING with the
+  challenge **intercepted by the harness**, so the limitation is demonstrated with no
+  verification code dispatched.
+  **LIMIT**: §§3-4 replay the two retired REQUESTS from the CURRENT build. They show
+  the server refuses the collection and the current interceptor chain surfaces the
+  refusal. **They are not an execution of the retired bundle** — its dialog, MSISDN
+  lookup and form state are deleted and nothing here runs them — and no claim is made
+  about how a deployed pre-D07 bundle renders that refusal.
 
 **Rollback** restores the payment claim. It is schema-free for everything except 0058,
 whose reverse is a true inverse (future rows only).
@@ -380,8 +400,12 @@ default still fails a test that says what it is about.
   G1/G2 completion: **42/42**, and **28/42 with the eleven production files reverted**,
   so it discriminates. Eight of those fourteen failures are behavioural and six are
   `data-testid` hooks this change introduced; the README records which is which rather
-  than counting all fourteen as regressions. Node 24.15.0, Playwright 1.63.0 (installed
-  `--no-save`, product manifests unchanged), Chromium 141.0.7390.37 (pre-installed,
+  than counting all fourteen as regressions. **THAT RUN WAS THE 42-CHECK HARNESS AT
+  THAT REVISION AND IS LABELLED AS SUCH** — see §14/V1 for the 56-check harness, its
+  two corrected sections and its own measured discriminations; the 28/42 figure is NOT
+  restated for it. Node 24.15.0, Playwright 1.63.0 (installed
+  `--no-save`, product manifests unchanged — **unpinned, which §14/V1 corrects**),
+  Chromium 141.0.7390.37 (pre-installed,
   `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`, nothing fetched), PostgreSQL 16, a disposable
   local database, development assets.
 - No live-data query, no deployment, no workflow dispatch, no production or UAT access,
@@ -529,7 +553,7 @@ out of the template and took the section down.
 | `billing.component.spec.ts` | 16, green after three oracle corrections |
 | `reports_app/tests_summarize_revenue_claims.py` | **6**, new; **4 failed** on the unmodified tree, 2 controls held |
 | frontend `verify.sh` | exit 0 — type-check, lint, tenant-boundary **306**, `test:ci` **2803**, `build:prod` |
-| `e2e/billing-journey/billing.mjs` | **42/42**, and **28/42** with the production change reverted |
+| `e2e/billing-journey/billing.mjs` | **42/42** at 42 checks, and **28/42** with the production change reverted — superseded by §14/V1, which rebuilt two of its five sections |
 
 **THREE SHIPPED ORACLES WERE CORRECTED OPENLY, not loosened**, each at the spec
 that replaced it: PR-5's "an older server keeps the original wording" asserted
@@ -551,3 +575,186 @@ regressions, and the README says which. PR-4's "safe in either order" remains an
 inference from two one-sided pins. Nothing was deployed, merged, dispatched or
 run against production or UAT; no OTP, SMS, email or provider traffic was
 generated; no historical row was repaired and no QR was rotated.
+
+---
+
+## 14. The B1 / B2 / V1 completion delta
+
+A bounded completion under the same Stage B approval. **No backend source
+changed** — this section, and the two corrections it records above, are the
+whole of the backend delta. `IN_APP_COLLECTION_SUPPORTED` stays `False`, the 501
+is untouched, `PAYMENT_TRACKING_ENABLED` is untouched, the terms projection is
+untouched, and no endpoint was relaxed.
+
+The frontend half is `claude/serene-shannon-7iz7bj` on `mugak1/Dinify-Frontend`.
+
+### B1 — a billing read is owned by the LIVE context, not by the last snapshot
+
+G2 gave every in-flight billing read an immutable owner (principal, restaurant,
+generation) captured before the request. That much was right and is kept. What
+the owner was compared AGAINST was wrong: `this.scope`, a field only `reload()`
+ever writes — so the guard could only ever see a transition the component had
+already been told about.
+
+Measured on the unmodified component, through the real chain: an auth
+**restaurant** change, an auth **principal** change, and **destruction with both
+reads in flight** each left `owns()` true. All three repainted; the third wrote
+to a destroyed instance and left two requests running, because Angular does not
+cancel an HTTP request on destroy — only unsubscribing does.
+
+The owner stays FROZEN and what it is measured against is read LIVE, which is
+the shape D04 settled for the diner checkout and the kitchen board settled for
+its own scope. **Replacing the captured owner with the current principal would
+be the opposite error** — attributing an old answer to a new user — and is not
+done. The principal is OBSERVED through `AuthenticationService.user`, the
+mechanism `kitchen-order.service.ts` already uses; a departed scope re-reads
+through `reload()`, which clears the previous scope's content at once and sends
+nothing when there is nothing to read. **A stable principal identifier is not a
+bearer credential**: no token enters ownership metadata or any log.
+
+**Labelled honestly, because it decides what the pins are worth.** The PRINCIPAL
+transition is really published and really in-session. The RESTAURANT half is
+DEFENSIVE — `rest_role` publishes nothing and every writer ends in a full
+document load — so the interleaving is constructed rather than reached, exactly
+as the kitchen board records for itself. Destruction is ordinary.
+
+`billing-live-ownership.spec.ts` — **15 specs**, **8 FAILED / 7 SUCCESS on the
+unmodified component** (7 real regressions; the 8th was a harness fault in the
+new file, corrected). It registers the DEPLOYED chain (`withXhr()`,
+`withInterceptorsFromDi()`, `AuthInterceptor`, `ErrorInterceptor`) and proves it
+ran with two discriminating controls: the `Authorization` header one interceptor
+adds, and the STRING an ordinary failure is flattened to by the other.
+Four mutations fail 1 / 1 / 1 / 1 distinct named specs, every control holding.
+
+### B2 — the screen validates the data it actually displays
+
+G2 validated the SHAPE of the projection and never the values inside it.
+`currency: ''` rendered a price with no currency; `effective_from: 'not-a-date'`
+**threw out of Angular's DatePipe and took the whole section down**; a naive
+timestamp was resolved against the device clock, which for an EAT platform
+administered from another zone is a three-hour lie about when a price took
+effect; `recurring_amount: '-150000.00'` rendered as a negative fee.
+
+The history was worse, because it answered with a SENTENCE: `[null, 'junk']`
+became `[]`, so the screen said **"No subscription transactions recorded"** — a
+claim about the restaurant manufactured out of rows nobody could read — and
+`[valid, null]` presented an incomplete history as the whole one with nothing
+saying a row had gone.
+
+The smallest truthful behaviour, which is the one taken: a row this client
+cannot read makes the HISTORY unreadable — the state that already existed, with
+the read-only retry it already had — and the two sections still fail
+independently, so an unreadable history leaves a readable price on screen.
+
+**NOTHING IS REPAIRED.** No row is deleted, rewritten, backfilled or
+reclassified; a readable page is returned VERBATIM (the same array), so there is
+no place for a repair to hide. **A legitimately null tender or status is an
+UNKNOWN and keeps its row** — `cash`, `paid`, `success` and `pending` are never
+invented, which is the D07 reports rule applied here; the template now spells a
+null status `—` rather than leaving the cell blank. Documented legacy nullables
+(`order_number`, `transaction_platform`, an absent `amount`) do not fail a read.
+No fallback to legacy terms, a default currency, the current clock, a free-trial
+inference or rounded money was added, and `formatAmount` and an explicit `0.00`
+are unchanged.
+
+`billing-wire-validation.spec.ts` — **32 specs**, **19 FAILED / 13 SUCCESS on
+the unmodified reader**, the 13 being exactly the specs labelled CONTROL.
+Malformed values are driven through the REAL template, not asserted on `kind`.
+Seven mutations fail 7 / 2 / 11 / 2 / 1 / 2 / 1 named subsets.
+
+**A SHIPPED ORACLE WAS CORRECTED OPENLY**, at the spec that carried it:
+`billing-read-states.spec.ts::'one unreadable row does not withhold the rest'`
+asserted the silent drop. It now asserts the rule above, with its own control
+for a genuinely empty list, and the correction is written at the site.
+
+### V1 — the browser evidence now discriminates
+
+**THE 501 CLAIM WAS NOT SUPPORTED BY THE COMMITTED SCRIPT, and §9 above is
+corrected accordingly.** Both collector probes sent `restaurant` to an endpoint
+that reads `restaurant_id`, so `can_manage_restaurant` refused them **404** at
+the authorization gate and `SubscriptionPaymentTransaction.initiate()` never
+ran. The only assertion made was `outcome === 'refused'`, which a 404 satisfies
+— and it had to be, because `ErrorInterceptor` flattens an ordinary failure to a
+STRING with no status, so the client cannot tell 501 from 404 at all.
+
+What the harness does now:
+
+- issues the retired request **recovered verbatim** from `1d3d091^`
+  (`{transaction_type, transaction_platform, payment_mode, restaurant_id,
+  msisdn, otp}`), through the running app's own `ApiService`;
+- **observes the same real response on the wire** via `page.on('response')`,
+  before any interceptor, and asserts exactly `501`, exactly
+  `subscription_collection_unavailable` and exactly the request-specific
+  sentence — so 400, 401, 403, 404, an arbitrary non-2xx and a request that
+  never answers each FAIL;
+- asserts SEPARATELY that the client reports a refusal and that the interceptor
+  surfaces the SERVER's own sentence;
+- keeps a **404 control** (missing id, foreign id) so the 501 cannot be "the
+  endpoint always says no";
+- reads the restaurant's own authorized `transactions-listing` **before and
+  after all three attempts** and asserts the row count is unchanged — the figure
+  this document previously recorded from a manual look;
+- asserts no verification code was dispatched, with `users/auth/resend-otp/`
+  still fulfilled by the harness and never reaching the server.
+
+**THE ENDPOINT WAS NOT RELAXED to accept `restaurant` as an alias.** Rescuing a
+harness by weakening a contract is the opposite of what this programme is for.
+
+**THE DASHBOARD SECTION WAS PASSING ON MOCK DATA.** `DashboardService.
+USE_MOCK_DATA` is still `true` in the committed build, so every withheld hook
+rendered with **no request reaching the server**. It now runs in two phases: a
+mock-branch CONTROL asserting zero `dashboard-v2` requests are issued, then the
+REAL branch selected by a **test-only runtime flip** of the static through
+Angular's dev-mode `window.ng`, where an AUTHORIZED request is observed on the
+wire and `payment_tracking_enabled: false` is asserted in the response body
+before the withheld-figure checks run. The flip is undone before the section
+ends. **No production flag is changed, no test endpoint is added and no build
+configuration is introduced.**
+
+**Sections 3 and 4 are a replay of two recovered REQUESTS from the current
+build, not an execution of the retired bundle** — its dialog, MSISDN lookup and
+form state are deleted and nothing here runs them. Both the script and the
+README now say so where it matters.
+
+### What was run, on the final pair, with clean seeds
+
+A single disposable PostgreSQL 16 cluster, a fresh database per script, Node
+24.15.0, **Playwright 1.56.1 pinned** (`npm i --no-save playwright@1.56.1`;
+`package.json` and `package-lock.json` verified unchanged with `git status`),
+Chromium pre-installed at `/opt/pw-browsers/chromium-1194` with
+`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` so nothing was fetched, `ENV=dev`,
+development assets, and `environment.ts` pointed at `127.0.0.1:8099` for the run
+and **not committed**.
+
+| | |
+|---|---|
+| `e2e/billing-journey/billing.mjs` | **56/56** |
+| ...wrong-request-key mutation | **51/56** — five failures, every one printing `404`, while `the client reports it as a refusal` still PASSES (the old assertion, proved non-discriminating) |
+| ...mock-dashboard mutation | **54/56** — exactly the two real-data checks |
+| `e2e/checkout-journey/journey.mjs` | **42/42**, fresh database |
+| `e2e/checkout-journey/recovery.mjs` | **137/137**, fresh database |
+| `e2e/kitchen-board/kitchen.mjs` | **55/55**, fresh database |
+| frontend `verify.sh` | exit 0 — type-check, lint, tenant-boundary **306**, `test:ci` **2862**, `build:prod` |
+
+**The 28/42 G1/G2 production-revert figure is NOT restated for the 56-check
+harness.** It was measured against the 42-check harness at that revision and is
+labelled as such above; re-measuring it would mean reverting across an
+intervening merge, and inventing a number for it would be the defect this
+section exists to correct.
+
+### Limits, stated rather than implied
+
+- **No pre-D07 bundle was executed**, in either direction. §§3-4 replay two
+  recovered requests from the current build.
+- **The restaurant half of the B1 guard is defensive**: no shipped in-app
+  restaurant switch keeps a billing component mounted across it, so the spec
+  constructs the interleaving. What is promised is that nothing ACTS on a stale
+  context.
+- **The `!this.destroyed` clause inside `owns()` is belt and braces** once the
+  reads are cancelled, and is labelled as such where it is written rather than
+  presented as load-bearing.
+- **PR-4's "safe in either order" remains an inference from two one-sided
+  pins**, unchanged.
+- Nothing was deployed, merged, dispatched or run against production or UAT; no
+  OTP, SMS, email or provider traffic was generated; no historical row was
+  repaired, no configuration changed and no QR rotated.
