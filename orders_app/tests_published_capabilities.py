@@ -101,19 +101,50 @@ class ExportCommandTests(SimpleTestCase):
     def run_command(self, *args):
         call_command('export_published_capabilities', *args, stdout=io.StringIO())
 
+    def make_stale(self):
+        """Move one published level away from what its constant produces.
+
+        Derived from the CURRENT value, never from a literal (Codex P2 on #331). A
+        hardcoded ``"kitchen_protocol": 1`` matches nothing once that level is raised
+        and the export regenerated: the "stale" file would then be in step, so the
+        check test would fail on a legitimate change and the write test would pass
+        having regenerated nothing. The premise is asserted rather than assumed.
+        """
+        body = json.loads(self.copy.read_text())
+        body['kitchen_protocol'] = published_capabilities.published_values()['kitchen_protocol'] + 1
+        stale = json.dumps(body, indent=2) + '\n'
+        self.assertNotEqual(stale, published_capabilities.export_text(), 'the fixture is not stale')
+        self.copy.write_text(stale)
+
     def test_check_passes_when_in_step(self):
         self.run_command('--check')
 
     def test_check_fails_loudly_when_the_file_is_stale(self):
-        self.copy.write_text(self.copy.read_text().replace('"kitchen_protocol": 1', '"kitchen_protocol": 9'))
+        self.make_stale()
         with self.assertRaises(CommandError):
             self.run_command('--check')
 
     def test_write_regenerates_a_stale_file_to_exactly_the_export(self):
-        self.copy.write_text(self.copy.read_text().replace('"kitchen_protocol": 1', '"kitchen_protocol": 9'))
+        self.make_stale()
         self.run_command('--write')
         self.assertEqual(self.copy.read_text(), published_capabilities.export_text())
         self.run_command('--check')
+
+    def test_REGRESSION_the_stale_fixture_follows_a_raised_level(self):
+        """Codex P2 on #331: raise a level the way a real change would — the constant
+        moves and the export is regenerated — and the fixture must still produce a
+        file ``--check`` refuses. With the old literal replace, nothing matched after
+        the raise, the "stale" copy was in step, and ``--check`` passed."""
+        raised = tuple(
+            (name, source, value + 1 if name == 'kitchen_protocol' else value)
+            for name, source, value in published_capabilities.PUBLISHED
+        )
+        with mock.patch.object(published_capabilities, 'PUBLISHED', raised):
+            self.run_command('--write')
+            self.run_command('--check')
+            self.make_stale()
+            with self.assertRaises(CommandError):
+                self.run_command('--check')
 
     def test_check_and_write_together_are_refused(self):
         with self.assertRaises(CommandError):
