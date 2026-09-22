@@ -2048,7 +2048,27 @@ so keep it current when conventions change.
   then fails — and `D07_PAYMENT_CLAIM_CLOSURE.md` for the delivery record: the
   E1-E7 to changed-consumer mapping, the Stage A evidence corrections, the
   judgement calls (the CREATE pickers dropping `order_pay`, the receipt-copy
-  extension, the Sales Method blank cell) and what was deliberately NOT run
+  extension, the Sales Method blank cell) and what was deliberately NOT run.
+  **TWO OF ITS BROWSER CLAIMS WERE NOT SUPPORTED BY THE SCRIPT THAT MADE THEM,
+  and §14 records the correction** (a frontend-only delta; no backend source
+  moved, and NO ENDPOINT WAS RELAXED to rescue a harness). The collector probe in
+  `e2e/billing-journey/billing.mjs` sent `restaurant` where
+  `finance_app/endpoints/transactions.py` reads `restaurant_id`, so
+  `can_manage_restaurant` refused it **404 at the authorization gate** and
+  `SubscriptionPaymentTransaction.initiate()` never ran — while the only
+  assertion made, "the live server REFUSES it", is satisfied by that 404,
+  because `ErrorInterceptor` flattens an ordinary failure to a STRING with no
+  status. The harness now sends the shape the retired dialog really sent and
+  reads the SAME response off the wire before any interceptor, asserting an
+  exact 501, an exact `subscription_collection_unavailable` and the exact
+  request-specific sentence, with a 404 control for a missing and a foreign id
+  and an ASSERTED (no longer manually observed) before/after subscription-row
+  count. Separately, the PR-5 dashboard pairing was passing on MOCK data —
+  `DashboardService.USE_MOCK_DATA` is still `true`, so no request reached this
+  server at all — and now selects the real branch through a test-only runtime
+  flip, observes the authorized `dashboard-v2` request and asserts
+  `payment_tracking_enabled: false` in the response body. Measured: 56/56, with
+  51/56 under the wrong-key mutation and 54/56 under the mock-branch one
 - **AND `summarize_revenue` STATES NO TREND IT DID NOT COMPUTE (D07/G1).** It
   returned `'month_growth': 'up'` as a LITERAL, with the comparison that would
   have justified it commented out on the same line
