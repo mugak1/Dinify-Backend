@@ -1633,6 +1633,39 @@ class CrossRepositoryCeilingContractTests(TestCase):
             'a changed ceiling must change the digest, or the release gate is blind',
         )
 
+    def test_hashing_the_EXPORTED_DOCUMENT_gives_the_same_digest(self):
+        """The natural thing for a caller to hash is the file, notes and all.
+
+        The control above passes an ALREADY-FILTERED mapping, so it could not see
+        this: filtering only inside ``published_values()`` made the module's stated
+        rule true of the default path and false of every other, and a release tool
+        hashing the exported document would have reported a contract mismatch that
+        was not one. The JavaScript side has always filtered; this is the assertion
+        that keeps the two answering identically.
+        """
+        raw = json.loads(checkout_limits.CONTRACT_FILE.read_text())
+        self.assertTrue(
+            any(k.startswith('_') for k in raw),
+            'the export must actually carry provenance notes for this to test anything',
+        )
+        self.assertEqual(
+            checkout_limits.contract_digest(raw),
+            checkout_limits.contract_digest(),
+        )
+        self.assertEqual(checkout_limits.canonical_json(raw), checkout_limits.canonical_json())
+
+    def test_stripping_notes_did_not_move_the_published_digest(self):
+        """The digest itself is unchanged, and it has to be.
+
+        Dinify-Frontend PINS this value in `release/policy.json`. A fix to how the
+        digest is COMPUTED that moved the digest would break the compatible set it
+        exists to hold together — so this asserts the literal, not a re-derivation.
+        """
+        self.assertEqual(
+            checkout_limits.contract_digest(),
+            'sha256:1441d038214a7ff71b61f43f7c73516304545256d8e4a4822f71b424f6f18676',
+        )
+
     def test_the_frontend_contract_file_matches(self):
         """The values the diner app compiles against are these values.
 

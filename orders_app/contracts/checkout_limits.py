@@ -90,10 +90,29 @@ def published_values():
     return {name: getattr(order_input, name) for name in PUBLISHED_NAMES}
 
 
+def _ceilings_only(values):
+    """Drop provenance notes, whatever mapping a caller supplies.
+
+    The module contract is that keys beginning ``_`` are notes for a human reader
+    and never enter the digest — and the natural thing for a caller to hash is the
+    EXPORTED DOCUMENT, which carries ``_source`` and ``_note``. Filtering only
+    inside ``published_values()`` left that true of the default path and false of
+    every other, so hashing the file directly produced a digest disagreeing with
+    this module's own, and with the JavaScript side, which has always filtered.
+    A false contract mismatch in a release gate is worse than none at all.
+    """
+    return {k: v for k, v in values.items() if not str(k).startswith('_')}
+
+
 def canonical_json(values=None):
-    """The exact text both repositories digest. See the module docstring."""
+    """The exact text both repositories digest. See the module docstring.
+
+    Accepts the published mapping, the parsed export, or anything shaped like
+    either: provenance keys are stripped here so the answer does not depend on
+    which one the caller happened to have.
+    """
     return json.dumps(
-        published_values() if values is None else values,
+        published_values() if values is None else _ceilings_only(values),
         sort_keys=True,
         separators=(',', ':'),
     )
@@ -111,8 +130,7 @@ def contract_digest(values=None):
 
 def committed_export():
     """The committed JSON, with provenance notes stripped."""
-    published = json.loads(CONTRACT_FILE.read_text())
-    return {k: v for k, v in published.items() if not k.startswith('_')}
+    return _ceilings_only(json.loads(CONTRACT_FILE.read_text()))
 
 
 def export_text():
