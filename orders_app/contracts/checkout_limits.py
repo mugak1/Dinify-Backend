@@ -11,11 +11,18 @@ two things that each agree with themselves.
 
 WHAT CLOSES IT. One authority — this module, derived from ``order_input`` — plus a
 committed export (``checkout_limits.contract.json``) that a test asserts against it
-UNCONDITIONALLY, plus a DIGEST both languages can compute byte for byte. The release
-gate in Dinify-Frontend records its own copy's digest in the release manifest and
-refuses to publish a build whose digest disagrees with the backend peer pinned in
-its compatible set. A ceiling changed on one side and not the other then cannot be
-released, whichever side moved.
+UNCONDITIONALLY, plus a DIGEST both languages can compute byte for byte. Dinify-
+Frontend's release gate reads this export AT A SELECTED COMMIT of this repository,
+through a peer receipt its own producer builds from git, and refuses to publish a
+FRONTEND candidate whose compiled copy disagrees with it.
+
+WHAT THAT DOES NOT CLOSE. The refusal lives on the frontend's publication path only.
+This repository's own deploy (``deploy-uat.yml``) makes no such decision, so a
+ceiling changed here deploys unimpeded and the disagreement surfaces at the next
+frontend publication decision — or in this repository's own tests, if the export was
+not regenerated. Changing a ceiling therefore still needs ORDERED, MANUAL
+coordination across the two repositories: the gate makes an uncertified pairing
+machine-refusable on the frontend's side, and nothing here makes it so on this one.
 
 THE CANONICAL FORM IS THE CROSS-LANGUAGE CONTRACT: keys sorted, no insignificant
 whitespace, integers only —

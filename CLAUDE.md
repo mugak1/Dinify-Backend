@@ -227,12 +227,22 @@ so keep it current when conventions change.
   the ceiling VALUES in a canonical form both languages produce byte for byte
   (`json.dumps(sort_keys=True, separators=(',', ':'))`); keys beginning `_` are
   provenance notes and are excluded, so the two copies may annotate themselves
-  differently and still agree. Dinify-Frontend records its own copy's digest in the
-  release manifest and refuses to publish a build whose digest disagrees with the
-  backend peer pinned in its compatible set — **so changing a ceiling is a
-  two-repository change**, and a one-sided change cannot be released whichever side
-  moved. `manage.py export_checkout_limits_contract` writes or checks the export; the
-  gate is the test, not the command
+  differently and still agree. Dinify-Frontend's release gate reads this export AT A
+  SELECTED COMMIT of this repository, through a peer receipt its own producer builds
+  from git, and refuses to publish a FRONTEND candidate whose compiled copy disagrees
+  (D08 B1 completion — it used to compare against a digest literal typed into its own
+  policy, which checked the literal, not this repository). `manage.py
+  export_checkout_limits_contract` writes or checks the export; the gate is the test,
+  not the command.
+  **WHAT THAT DOES NOT ENFORCE — corrected, because this file used to claim "a
+  one-sided change cannot be released whichever side moved".** The refusal lives on
+  the frontend's publication path only, and that path is itself not yet active.
+  THIS repository's deploy (`deploy-uat.yml`) makes no compatibility decision at all,
+  so a ceiling changed here deploys to UAT unimpeded and the disagreement surfaces at
+  the next frontend publication decision, or in this repository's own tests if the
+  export was not regenerated. Changing a ceiling is therefore an ORDERED, MANUAL
+  two-repository sequence — frontend copy and receipt approval coordinated with the
+  backend deploy — and nothing on this side enforces the order
 - Stored modifier definitions (D01): ✅ `restaurants_app/controllers/modifier_definition.py`
   is the ONE structural reading of a `MenuItem.options` row, shared by
   `ConOrder.normalize_selected_modifiers` and the read-only preflight so the two
@@ -5562,8 +5572,21 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   the file against the live constants unconditionally, so a ceiling changed without
   regenerating fails CI whether or not anyone runs this. It reads and writes exactly
   one file in this repository, contacts nothing, touches no database and makes no
-  claim about any other repository's copy — but remember the client repository PINS
-  this digest in its release policy, so changing a ceiling is a two-repository change
+  claim about any other repository's copy. The client repository selects this backend
+  by commit through a peer receipt read from the committed file, so changing a ceiling
+  also needs the client's copy and a new receipt approved there — an ordered, manual
+  sequence nothing on this side enforces
+- `export_published_capabilities` in `orders_app/management/commands/` — the same
+  shape for the four capability levels this server publishes (`checkout_protocol`,
+  `quote_protocol`, `kitchen_protocol`, `quote_policy_version`): writes or checks
+  `orders_app/contracts/published_capabilities.contract.json`, derived from the very
+  constants the wire emits. A convenience, not the gate — the gate is
+  `orders_app/tests_published_capabilities.py`, which asserts the file against the
+  live constants unconditionally. It exists because Dinify-Frontend's release gate
+  compared a client's required levels against integers TYPED INTO ITS OWN POLICY;
+  its peer-receipt producer now reads this file at an exact selected commit instead.
+  It is a statement about SOURCE at a revision, never about what is deployed: there
+  is still no runtime identity (B3), and the frontend gate refuses on that by name
 - `unlock_platform_admin` in `platform_admin_app/management/commands/` — clears
   `failed_attempts`/`locked_until` for a platform-staff account under a row lock and
   audits `ADMIN_AUTH_LOCKOUT_CLEARED`. Does NOT touch the password, TOTP secret or

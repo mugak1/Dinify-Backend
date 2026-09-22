@@ -1542,9 +1542,10 @@ class CrossRepositoryCeilingContractTests(TestCase):
       3. the frontend's copy matches, when it happens to be checked out beside us
 
     The digest is what ties (2) to the other repository without sharing any code:
-    Dinify-Frontend computes the same canonical form in JavaScript, records it in its
-    release manifest, and refuses to publish a build whose digest disagrees with the
-    backend peer pinned in its compatible set.
+    Dinify-Frontend computes the same canonical form in JavaScript, reads this export
+    at a selected commit of THIS repository through a peer receipt, and refuses to
+    publish a FRONTEND build whose digest disagrees. That refusal is on the frontend's
+    publication path only; this repository's deploy makes no such decision.
 
     The export is deliberately a static file and not a runtime endpoint: eight
     integers do not need a network round trip, and a fetched limit would be
@@ -1584,9 +1585,10 @@ class CrossRepositoryCeilingContractTests(TestCase):
     def test_the_committed_export_matches_the_live_constants(self):
         """THE UNCONDITIONAL ONE. No sibling checkout, no skip.
 
-        ``manage.py export_checkout_limits_contract --write`` regenerates the file;
-        remember that the client repository pins this digest in its release policy,
-        so changing a ceiling is a two-repository change.
+        ``manage.py export_checkout_limits_contract --write`` regenerates the file.
+        A client repository reads it at a selected commit through a peer receipt, so
+        a changed ceiling also needs the client's copy updated and a new receipt
+        approved there — an ordered, manual sequence nothing on this side enforces.
         """
         self.assertTrue(
             checkout_limits.CONTRACT_FILE.is_file(),

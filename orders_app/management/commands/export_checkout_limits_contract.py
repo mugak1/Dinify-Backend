@@ -60,6 +60,8 @@ class Command(BaseCommand):
         if options['check'] and not in_step:
             raise CommandError(
                 'The committed contract is not what the constants produce. Run with '
-                '--write, and remember the client repository pins this digest in its '
-                'release policy — changing a ceiling is a two-repository change.'
+                '--write. A client repository selects this backend by commit through a '
+                'peer receipt read from this file, so a changed ceiling also needs its '
+                'own copy updated and a new receipt approved there, in that order — '
+                'nothing on this side enforces the sequence.'
             )
