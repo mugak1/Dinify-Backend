@@ -11,7 +11,11 @@ These tests assert that UNCONDITIONALLY: no sibling checkout, no environment swi
 nothing that makes them ``skipTest`` in CI (the lesson of the D01 sibling test,
 which skipped on every CI run it ever had).
 """
+import io
 import json
+import pathlib
+import tempfile
+from unittest import mock
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -20,6 +24,9 @@ from django.test import SimpleTestCase
 from orders_app.contracts import published_capabilities
 from orders_app.controllers.orders import serializers as order_serializers
 from orders_app.controllers.services import checkout_protocol, kitchen_transition, quote_policy, quote_protocol
+
+
+_COMMITTED = published_capabilities.CONTRACT_FILE
 
 
 class PublishedCapabilitiesExportTests(SimpleTestCase):
@@ -73,18 +80,45 @@ class PublishedCapabilitiesExportTests(SimpleTestCase):
 
 
 class ExportCommandTests(SimpleTestCase):
+    """The command against a TEMPORARY copy, never the committed file.
+
+    A test that rewrites a tracked file and restores it in ``finally`` leaves that
+    file corrupted in the working tree whenever the process dies between the two
+    writes, and races any other reader of it. ``CONTRACT_FILE`` is read through the
+    module at call time, so pointing it at a temporary copy exercises exactly the
+    code path the committed file goes through.
+    """
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.copy = pathlib.Path(directory.name) / 'published_capabilities.contract.json'
+        self.copy.write_text(published_capabilities.CONTRACT_FILE.read_text())
+        patcher = mock.patch.object(published_capabilities, 'CONTRACT_FILE', self.copy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_command(self, *args):
+        call_command('export_published_capabilities', *args, stdout=io.StringIO())
+
     def test_check_passes_when_in_step(self):
-        call_command('export_published_capabilities', '--check', stdout=open('/dev/null', 'w'))
+        self.run_command('--check')
 
     def test_check_fails_loudly_when_the_file_is_stale(self):
-        original = published_capabilities.CONTRACT_FILE.read_text()
-        try:
-            published_capabilities.CONTRACT_FILE.write_text(original.replace('"kitchen_protocol": 1', '"kitchen_protocol": 9'))
-            with self.assertRaises(CommandError):
-                call_command('export_published_capabilities', '--check', stdout=open('/dev/null', 'w'))
-        finally:
-            published_capabilities.CONTRACT_FILE.write_text(original)
+        self.copy.write_text(self.copy.read_text().replace('"kitchen_protocol": 1', '"kitchen_protocol": 9'))
+        with self.assertRaises(CommandError):
+            self.run_command('--check')
+
+    def test_write_regenerates_a_stale_file_to_exactly_the_export(self):
+        self.copy.write_text(self.copy.read_text().replace('"kitchen_protocol": 1', '"kitchen_protocol": 9'))
+        self.run_command('--write')
+        self.assertEqual(self.copy.read_text(), published_capabilities.export_text())
+        self.run_command('--check')
 
     def test_check_and_write_together_are_refused(self):
         with self.assertRaises(CommandError):
-            call_command('export_published_capabilities', '--check', '--write', stdout=open('/dev/null', 'w'))
+            self.run_command('--check', '--write')
+
+    def test_CONTROL_the_committed_file_is_never_the_one_written(self):
+        """The patch is what every test above ran against."""
+        self.assertNotEqual(published_capabilities.CONTRACT_FILE, _COMMITTED)
