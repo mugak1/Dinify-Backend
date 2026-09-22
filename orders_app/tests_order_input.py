@@ -38,6 +38,7 @@ from dinify_backend.configss.string_definitions import (
 from finance_app.models import DinifyTransaction
 from orders_app.controllers import con_orders as con_orders_module
 from orders_app.controllers.con_orders import ConOrder
+from orders_app.contracts import checkout_limits
 from orders_app.controllers.services import order_input
 from orders_app.controllers.services.create_order import _create_order
 from orders_app.models import Order, OrderItem, RestaurantDailyOrderCounter
@@ -1520,36 +1521,45 @@ class D01ServiceClientOrderIdTests(_D01Base):
 class CrossRepositoryCeilingContractTests(TestCase):
     """The diner app must refuse what this module refuses (D01/D02, FE half).
 
-    The ceilings are enforced here, but the browser has to stop a basket
-    REACHING a state this module would refuse — a diner who cannot submit and is
-    not told why simply taps Checkout again. The frontend therefore carries its
-    own copies, and two copies of a number drift.
+    The ceilings are enforced here, but the browser has to stop a basket REACHING a
+    state this module would refuse — a diner who cannot submit and is not told why
+    simply taps Checkout again. The frontend therefore carries its own copy, and two
+    copies of a number drift.
 
-    The fixture below is the contract between them. Both repositories assert
-    their own constants against THIS FILE's contents, so either side moving
-    fails its own suite rather than surfacing as a rejected order in front of a
-    diner. It is deliberately a static file and not a runtime endpoint: eight
+    WHAT CHANGED, AND WHY IT MATTERED. This class used to assert only against the
+    frontend's copy, reached through a sibling checkout — and skipped when that
+    checkout was absent, which in CI is always. So the cross-repository assertion
+    that gave the contract its name had never once run there. Two independently
+    checked copies are not parity: they are two things that each agree with
+    themselves.
+
+    There are now THREE assertions and only the last is conditional:
+
+      1. the published set is complete and classified  (unchanged in substance)
+      2. the COMMITTED EXPORT beside this repository's own contract module matches
+         the live constants — UNCONDITIONAL, so a ceiling changed without
+         regenerating fails here, alone, in CI
+      3. the frontend's copy matches, when it happens to be checked out beside us
+
+    The digest is what ties (2) to the other repository without sharing any code:
+    Dinify-Frontend computes the same canonical form in JavaScript, records it in its
+    release manifest, and refuses to publish a build whose digest disagrees with the
+    backend peer pinned in its compatible set.
+
+    The export is deliberately a static file and not a runtime endpoint: eight
     integers do not need a network round trip, and a fetched limit would be
     unavailable exactly when the diner is offline and the basket most needs to
     behave.
-
-    Its path is the one the frontend imports, named here so a rename on either
-    side fails loudly instead of silently orphaning one copy.
     """
 
-    #: Repository-relative path in Dinify-Frontend.
-    CONTRACT_PATH = 'src/app/_shared/order/checkout-limits.contract.json'
+    #: Repository-relative path in Dinify-Frontend, named here so a rename on either
+    #: side fails loudly instead of silently orphaning one copy.
+    CONTRACT_PATH = checkout_limits.CLIENT_CONTRACT_PATH
 
-    PUBLISHED = {
-        'MAX_QUANTITY_PER_LINE': order_input.MAX_QUANTITY_PER_LINE,
-        'MAX_LINES_PER_ORDER': order_input.MAX_LINES_PER_ORDER,
-        'MAX_TOTAL_UNITS': order_input.MAX_TOTAL_UNITS,
-        'MAX_MODIFIER_GROUPS_PER_LINE': order_input.MAX_MODIFIER_GROUPS_PER_LINE,
-        'MAX_CHOICES_PER_GROUP': order_input.MAX_CHOICES_PER_GROUP,
-        'MAX_EXTRAS_PER_LINE': order_input.MAX_EXTRAS_PER_LINE,
-        'MAX_SELECTION_ENTRIES_PER_REQUEST':
-            order_input.MAX_SELECTION_ENTRIES_PER_REQUEST,
-    }
+    #: Read from the contract module rather than restated. A second list here would
+    #: be exactly the drift this class exists to prevent, one layer in.
+    PUBLISHED = checkout_limits.published_values()
+    NOT_CLIENT_ACTIONABLE = set(checkout_limits.NOT_CLIENT_ACTIONABLE)
 
     def test_the_published_ceilings_are_this_module_s_own(self):
         """No number in the contract is typed twice on this side."""
@@ -1557,46 +1567,81 @@ class CrossRepositoryCeilingContractTests(TestCase):
             with self.subTest(name=name):
                 self.assertEqual(getattr(order_input, name), value)
 
-    #: Bounds this module holds that a BASKET cannot act on, with the reason.
-    #: Publishing these would tell the diner app to enforce something it can
-    #: neither cause nor cure, which is worse than not publishing them.
-    NOT_CLIENT_ACTIONABLE = {
-        # The catalogue mints modifier ids; a basket only ever echoes them back.
-        # An over-long stored id makes the ITEM unorderable however small the
-        # basket is, so there is nothing for a diner to reduce. That condition
-        # is reported by `manage.py check_order_input_compatibility`, against
-        # the catalogue, where it can actually be fixed.
-        'MAX_MODIFIER_ID_LENGTH',
-        # How many problems ONE refusal enumerates. A reporting bound on the
-        # response, not a limit on what may be submitted.
-        'MAX_REPORTED_ERRORS',
-    }
-
     def test_every_enforced_ceiling_is_classified(self):
         """A new ceiling cannot ship unclassified.
 
         Discovered from the module rather than listed, so adding a ``MAX_*``
-        constant forces a decision — publish it to the diner app, or record here
-        why a basket cannot act on it — instead of it reaching a diner as an
-        unexplained refusal.
+        constant forces a decision — publish it to the diner app, or record why a
+        basket cannot act on it — instead of it reaching a diner as an unexplained
+        refusal.
         """
-        enforced = {
-            name for name in vars(order_input)
-            if name.startswith('MAX_') and isinstance(
-                getattr(order_input, name), int,
-            )
-        }
+        enforced = checkout_limits.enforced_ceiling_names()
         self.assertEqual(enforced - self.NOT_CLIENT_ACTIONABLE, set(self.PUBLISHED))
         # And the exclusions must still name something real, so a renamed or
         # deleted constant cannot sit here forever pretending to be handled.
         self.assertTrue(self.NOT_CLIENT_ACTIONABLE <= enforced)
 
+    def test_the_committed_export_matches_the_live_constants(self):
+        """THE UNCONDITIONAL ONE. No sibling checkout, no skip.
+
+        ``manage.py export_checkout_limits_contract --write`` regenerates the file;
+        remember that the client repository pins this digest in its release policy,
+        so changing a ceiling is a two-repository change.
+        """
+        self.assertTrue(
+            checkout_limits.CONTRACT_FILE.is_file(),
+            f'the committed export is missing: {checkout_limits.CONTRACT_FILE}',
+        )
+        self.assertEqual(checkout_limits.committed_export(), self.PUBLISHED)
+        self.assertEqual(
+            checkout_limits.CONTRACT_FILE.read_text(),
+            checkout_limits.export_text(),
+            'the committed export is stale; run '
+            '`manage.py export_checkout_limits_contract --write`',
+        )
+
+    def test_the_canonical_form_is_the_cross_language_one(self):
+        """The exact text the other repository digests, asserted as a literal.
+
+        A literal rather than a re-derivation: this string IS the contract, and a
+        test that recomputed it with the same function could not notice the function
+        changing.
+        """
+        self.assertEqual(
+            checkout_limits.canonical_json(),
+            '{"MAX_CHOICES_PER_GROUP":64,"MAX_EXTRAS_PER_LINE":64,'
+            '"MAX_LINES_PER_ORDER":100,"MAX_MODIFIER_GROUPS_PER_LINE":32,'
+            '"MAX_QUANTITY_PER_LINE":99,"MAX_SELECTION_ENTRIES_PER_REQUEST":2048,'
+            '"MAX_TOTAL_UNITS":500}',
+        )
+        self.assertEqual(
+            checkout_limits.contract_digest(),
+            'sha256:1441d038214a7ff71b61f43f7c73516304545256d8e4a4822f71b424f6f18676',
+        )
+
+    def test_the_digest_follows_the_values_and_ignores_the_notes(self):
+        """A negative control for the digest, so agreement is not agreement by luck."""
+        published = dict(self.PUBLISHED)
+        self.assertEqual(
+            checkout_limits.contract_digest(published),
+            checkout_limits.contract_digest(),
+        )
+        moved = dict(published, MAX_LINES_PER_ORDER=published['MAX_LINES_PER_ORDER'] + 1)
+        self.assertNotEqual(
+            checkout_limits.contract_digest(moved),
+            checkout_limits.contract_digest(),
+            'a changed ceiling must change the digest, or the release gate is blind',
+        )
+
     def test_the_frontend_contract_file_matches(self):
         """The values the diner app compiles against are these values.
 
-        SKIPPED rather than failed when the sibling checkout is absent: CI runs
-        each repository alone, and a test that fails for being run in isolation
-        teaches people to ignore it.
+        SKIPPED rather than failed when the sibling checkout is absent: CI runs each
+        repository alone, and a test that fails for being run in isolation teaches
+        people to ignore it. This is now the WEAKEST of the three assertions rather
+        than the only one — the committed export above runs unconditionally, and the
+        digest it publishes is what the other repository's release gate compares
+        against.
         """
         candidates = [
             pathlib.Path(settings.BASE_DIR).parent / 'Dinify-Frontend'
@@ -1605,8 +1650,8 @@ class CrossRepositoryCeilingContractTests(TestCase):
         contract = next((p for p in candidates if p.is_file()), None)
         if contract is None:
             self.skipTest(
-                'Dinify-Frontend is not checked out beside this repository; '
-                'the frontend asserts the same file from its own suite.'
+                'Dinify-Frontend is not checked out beside this repository; the '
+                'committed export above is asserted unconditionally either way.'
             )
 
         published = json.loads(contract.read_text())
