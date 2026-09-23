@@ -15,6 +15,7 @@ from dinify_backend.configss.string_definitions import (
     PaymentStatus_Paid, OrderStatus_Cancelled, OrderStatus_Refunded,
 )
 from rest_framework.serializers import ModelSerializer
+from misc_app.serializers.fields import MediaPathFieldsMixin
 from misc_app.controllers.utils.archive_record import archive_record
 
 
@@ -1011,7 +1012,7 @@ class UpsellItem(BaseModel):
 
 # serializers for archival
 # serializers used in the same file to avoid circular dependencies
-class SerArcRestaurant(ModelSerializer):
+class SerArcRestaurant(MediaPathFieldsMixin, ModelSerializer):
     class Meta:
         model = Restaurant
         fields = '__all__'
@@ -1034,7 +1035,7 @@ def seed_restaurant_tag_catalog(sender, instance, created, **kwargs):
         logger.error("Failed to seed restaurant tag catalog for %s: %s", instance.pk, error)
 
 
-class SerArcMenuSection(ModelSerializer):
+class SerArcMenuSection(MediaPathFieldsMixin, ModelSerializer):
     class Meta:
         model = MenuSection
         fields = '__all__'
@@ -1057,7 +1058,7 @@ def archive_section_group(sender, instance, **kwargs):
     archive_record(record_data, 'archive_section_groups')
 
 
-class SerArcMenuItem(ModelSerializer):
+class SerArcMenuItem(MediaPathFieldsMixin, ModelSerializer):
     class Meta:
         model = MenuItem
         fields = '__all__'
