@@ -1474,6 +1474,11 @@ so keep it current when conventions change.
   constructions** (`_read_context`, which carries the request and decides no
   policy), and a missing request, an anonymous principal, a builder handed no
   policy and a serializer with no context ALL resolve to `WITHHOLD_ALL`.
+  **THAT CONTEXT CHANGE ALSO BROKE EVERY PORTAL IMAGE, AND THE REQUEST MUST
+  STAY IN IT.** DRF renders a file field as an absolute URL once a request is
+  in the context, so the portal's menu, section and restaurant images all
+  broke. The fix is on the FIELD, not on the context. See MEDIA-PATH-00 under
+  Key Serializer Notes.
   **THE WIRE CONTRACT IS OMISSION**, never `null`, `''`, the table UUID, a
   placeholder or a credential-bearing URL under another key: the serializer POPS
   the field per instance when the policy withholds everything (the signer is then
@@ -5426,6 +5431,31 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   tolerates legacy duplicates). Do NOT persist or compare raw client `selected_modifiers`
 
 ## Key Serializer Notes
+- **MEDIA LEAVES THE API AS A PATH, NEVER AN ABSOLUTE URL** (MEDIA-PATH-00). Every
+  client renders `environment.apiUrl + image`, and the deployed `apiUrl` carries the
+  Apache mount (`…/uat`), which is where the media alias lives (`/uat/media/`).
+  Stock DRF file fields return `request.build_absolute_uri(url)` as soon as a
+  `request` is in the serializer context. When `Secretary._read_context` started
+  passing one (the QR-disclosure fix, backend #326, 2026-09-21), every image on the
+  portal's `restaurant-setup` list reads became absolute: menu item `image`, section
+  `section_banner_image`, restaurant `logo`/`cover_photo`. The client then built
+  `…/uathttps://…/media/…`. The absolute URL is wrong even on its own:
+  `MEDIA_URL = '/media/'` has a leading slash, which Django never prefixes with
+  `SCRIPT_NAME`, so it names `/media/…` at the host root, where no alias exists
+  (measured on the live host: `/media/` answers 404, `/uat/media/` 403). The diner
+  menu, upsells and the single-record detail read were unaffected, because they
+  pass no request. **THE RULE LIVES ON THE FIELD**:
+  `misc_app/serializers/fields.py` has `MediaPathImageField` /
+  `MediaPathFileField` and `MediaPathFieldsMixin`, which goes BEFORE
+  `ModelSerializer` in the bases and maps model file/image columns onto them. Every
+  image-bearing serializer carries it, the archival `SerArc*` ones included. A
+  field declared explicitly (e.g. `UpsellItemSerializer.item_image`) must use the
+  media-path class itself. **Do NOT "fix" a future breakage by taking the request
+  out of the context**: the QR credential policy fails closed without it.
+  `restaurants_app/tests_media_paths.py` drives the real reads under
+  `SCRIPT_NAME='/uat'` over HTTPS, and GUARDS every project serializer through the
+  tenancy discovery, so a new serializer that renders an absolute media URL fails
+  the build
 - `SerializerPublicGetMenuItem` includes `section` and `in_stock` —
   added deliberately for the diner menu. Do not remove them. It also emits
   read-only `is_discount_active` (bool) and `current_price` (effective base

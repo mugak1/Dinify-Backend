@@ -17,7 +17,10 @@ from restaurants_app.models import (
     SectionGroup, DiningArea, UpsellConfig, UpsellItem,
     Reservation, WaitlistEntry, RestaurantTag
 )
-from misc_app.serializers.fields import JSONStringCompatField, JSONStringCompatListField
+from misc_app.serializers.fields import (
+    JSONStringCompatField, JSONStringCompatListField,
+    MediaPathFieldsMixin, MediaPathImageField,
+)
 from restaurants_app.controllers.diner_capability import issue_qr_credential
 from restaurants_app.controllers.qr_disclosure import (
     QR_CREDENTIAL_WITHHELD, policy_from_context,
@@ -42,7 +45,7 @@ _WAITLIST_EVIDENCE = 'restaurants_app.tests_write_surface_tenancy.WaitlistFkTena
 _SECTION_GROUP_EVIDENCE = 'restaurants_app.tests_write_surface_tenancy.SectionGroupSectionTenantTests'
 
 
-class SerializerGetRestaurantDetail(ModelSerializer):
+class SerializerGetRestaurantDetail(MediaPathFieldsMixin, ModelSerializer):
     class Meta:
         """
         the meta class for the serializers
@@ -51,7 +54,7 @@ class SerializerGetRestaurantDetail(ModelSerializer):
         fields = '__all__'
 
 
-class SerializerPutRestaurant(ModelSerializer):
+class SerializerPutRestaurant(MediaPathFieldsMixin, ModelSerializer):
     """
     serializer for adding and editing restaurant details
 
@@ -100,7 +103,7 @@ class SerializerPutRestaurant(ModelSerializer):
         )
 
 
-class SerializerPublicGetRestaurant(ModelSerializer):
+class SerializerPublicGetRestaurant(MediaPathFieldsMixin, ModelSerializer):
     """
     serializer for getting public restaurant details
     """
@@ -232,7 +235,7 @@ class SerializerGetRestaurantEmployee(ModelSerializer):
         }
 
 
-class SerializerPutMenuSection(ModelSerializer):
+class SerializerPutMenuSection(MediaPathFieldsMixin, ModelSerializer):
     """
     serializer for adding menu section
 
@@ -258,7 +261,7 @@ class SerializerPutMenuSection(ModelSerializer):
         )
 
 
-class SerializerPublicGetMenuSection(ModelSerializer):
+class SerializerPublicGetMenuSection(MediaPathFieldsMixin, ModelSerializer):
     """
     serializer for getting the menu section
     """
@@ -364,7 +367,7 @@ class SerializerPublicGetSectionGroup(ModelSerializer):
         ).count()
 
 
-class SerializerPutMenuItem(ModelSerializer):
+class SerializerPutMenuItem(MediaPathFieldsMixin, ModelSerializer):
     """
     serializer for adding menu Item
     """
@@ -524,7 +527,7 @@ class SerializerRestaurantTag(ModelSerializer):
         read_only_fields = ('id', 'restaurant', 'is_system_preset',)
 
 
-class SerializerPublicGetMenuItem(ModelSerializer):
+class SerializerPublicGetMenuItem(MediaPathFieldsMixin, ModelSerializer):
     """
     serializer for getting the menu Item
     """
@@ -964,7 +967,7 @@ class SerializerPublicGetTableDetails(ModelSerializer):
         return get_table_availability(table=table)
 
 
-class SerializerGetFullMenu(ModelSerializer):
+class SerializerGetFullMenu(MediaPathFieldsMixin, ModelSerializer):
     item_count = SerializerMethodField()
     groups = SerializerMethodField()
     items = SerializerMethodField()
@@ -1182,7 +1185,7 @@ class UpsellItemSerializer(ModelSerializer):
         source='menu_item.running_discount', read_only=True
     )
     item_discount_percentage = SerializerMethodField()
-    item_image = serializers.ImageField(source='menu_item.image', read_only=True)
+    item_image = MediaPathImageField(source='menu_item.image', read_only=True)
     item_available = serializers.BooleanField(source='menu_item.available', read_only=True)
     item_in_stock = serializers.BooleanField(source='menu_item.in_stock', read_only=True)
 
