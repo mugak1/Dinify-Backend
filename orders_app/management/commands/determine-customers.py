@@ -11,6 +11,22 @@ from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from dinify_backend.configss.string_definitions import TransactionType_OrderPayment
 
 
+def _non_blank(value: Optional[str]) -> Optional[str]:
+    """
+    One of an order's own contact details, or ``None`` when it holds nothing.
+
+    A blank value is no contact at all, never one to look up. ``create_user`` stores a
+    missing email as ``''``, so every account registered without an email holds
+    exactly that value: a blank order email passed through verbatim would reach
+    ``User.objects.get(email='')`` and link the order to whichever account happens to
+    be the only one holding ``''`` — or, with no usable phone beside it, mint an
+    account keyed on ``''``.
+    """
+    if value is None or not value.strip():
+        return None
+    return value
+
+
 class Command(BaseCommand):
     help = """
     - Determines the customers who have made purchases.
@@ -88,8 +104,11 @@ class Command(BaseCommand):
                 customer_match_attempted=False,
             )
             for order in orders:
-                customer_phone = None
-                customer_email = None
+                # The order's OWN phone and email are what it is matched on. The
+                # payment's msisdn below is only the fallback, for an order whose phone
+                # and email are both null.
+                customer_phone = _non_blank(order.customer_phone)
+                customer_email = _non_blank(order.customer_email)
                 # if the customer phone and customer email are both null,
                 # check if the order payments has any records to map to
                 if order.customer_phone is None and order.customer_email is None:
