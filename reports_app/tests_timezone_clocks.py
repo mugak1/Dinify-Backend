@@ -130,3 +130,72 @@ class DinifyDashboardRetiredTests(TestCase):
     def test_the_dinify_reports_controllers_are_gone(self):
         with self.assertRaises(ImportError):
             import reports_app.controllers.dinify  # noqa: F401
+
+
+class DashboardV2TodayIsEatTodayTests(TestCase):
+    """
+    The dashboard-v2 Tables and KDS cards count "today" in EAT, like every other
+    clock read in this file.
+
+    Both builders took ``today`` from ``timezone.now().date()`` — the UTC calendar
+    day — and compared it against ``time_created__date`` / ``served_at__date``, which
+    Django resolves in EAT. From 00:00 to 03:00 EAT (21:00-24:00 UTC) the two differ
+    by a day, so the cards reported YESTERDAY's turns, average ticket and median visit
+    as today's, the day before as yesterday's, and no fulfilment time at all. That is
+    also why ``tests_test_restaurant_parity``'s Tables-card test failed every night
+    between 21:00 and 24:00 UTC and passed the rest of the day.
+
+    The fixture separates the two days by COUNT (one order today, two yesterday, one
+    table), so the defect cannot pass by coincidence: under the UTC read, "today"
+    picks up yesterday's two orders.
+    """
+
+    def setUp(self):
+        self.owner = make_user('256700000902')
+        self.restaurant = Restaurant.objects.create(
+            name='TZ Restaurant', location='loc',
+            status=RestaurantStatus_Live, owner=self.owner,
+        )
+        self.table = Table.objects.create(number=1, restaurant=self.restaurant)
+
+        # 2026-08-01 00:30 EAT: today, in EAT. Served fifteen minutes later.
+        today = make_paid_order(self.restaurant, self.table)
+        Order.objects.filter(id=today.id).update(
+            time_created=BOUNDARY_ORDER_UTC,
+            time_last_updated=datetime(2026, 7, 31, 21, 50, tzinfo=dt_timezone.utc),
+            fulfilment_status='served',
+            served_at=datetime(2026, 7, 31, 21, 45, tzinfo=dt_timezone.utc),
+        )
+        # 2026-07-31 00:30 and 12:00 EAT: yesterday, in EAT (and "today" in UTC at
+        # the frozen instant, which is the whole trap).
+        for created in (datetime(2026, 7, 30, 21, 30, tzinfo=dt_timezone.utc),
+                        datetime(2026, 7, 31, 9, 0, tzinfo=dt_timezone.utc)):
+            order = make_paid_order(self.restaurant, self.table)
+            Order.objects.filter(id=order.id).update(
+                time_created=created, time_last_updated=created,
+            )
+
+    @mock.patch('django.utils.timezone.now', return_value=FROZEN_UTC)
+    def test_the_tables_card_counts_today_in_eat(self, _now):
+        from reports_app.controllers.restaurant.dashboard import _build_tables
+        tables = _build_tables(self.restaurant.id)
+        self.assertEqual(tables['turns_today'], '1.0')
+        self.assertEqual(tables['turns_yesterday'], '2.0')
+        self.assertEqual(tables['avg_ticket_today'], '750.00')
+        self.assertEqual(tables['median_visit_minutes'], '20.0')
+
+    @mock.patch('django.utils.timezone.now', return_value=FROZEN_UTC)
+    def test_the_kds_card_counts_orders_served_today_in_eat(self, _now):
+        from reports_app.controllers.restaurant.dashboard import _build_kds
+        self.assertEqual(_build_kds(self.restaurant.id)['avg_fulfillment_minutes'], '15.0')
+
+    def test_CONTROL_the_same_instant_outside_the_window_already_agreed(self):
+        # 2026-08-01 12:00 UTC == 15:00 EAT: both calendars say 1 August, so the old
+        # UTC read and the EAT read give the same answer. The fixture is right; only
+        # the 21:00-24:00 UTC window ever exposed the defect.
+        noon = datetime(2026, 8, 1, 12, 0, tzinfo=dt_timezone.utc)
+        from reports_app.controllers.restaurant.dashboard import _build_tables
+        with mock.patch('django.utils.timezone.now', return_value=noon):
+            tables = _build_tables(self.restaurant.id)
+        self.assertEqual(tables['turns_today'], '1.0')
+        self.assertEqual(tables['turns_yesterday'], '2.0')
