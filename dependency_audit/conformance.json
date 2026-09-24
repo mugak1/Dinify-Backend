@@ -1,0 +1,1736 @@
+{
+  "schema": "dinify.dependency-audit.conformance/v1",
+  "about": "Cross-ecosystem policy vectors. Byte-identical in Dinify-Frontend, Dinify-Admin and Dinify-Backend; the JavaScript and Python evaluators are both tested against every case. Change it in all three or in none.",
+  "cases": [
+    {
+      "name": "CONTROL: a complete scan with no findings is within policy",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [],
+      "records": [],
+      "expect": {
+        "outcome": "within_policy",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 0,
+          "blocking": 0,
+          "triageRequired": 0
+        }
+      }
+    },
+    {
+      "name": "a collection failure with no findings is incomplete, never clean",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [
+        {
+          "code": "scanner_timeout",
+          "detail": "timed out"
+        }
+      ],
+      "findings": [],
+      "records": [],
+      "expect": {
+        "outcome": "incomplete",
+        "exitCode": 2,
+        "refused": [],
+        "counts": {
+          "findings": 0
+        }
+      }
+    },
+    {
+      "name": "runtime high blocks",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "runtime low blocks: any advisory on a shipped package",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-dddd",
+          "aliases": [],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "low"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "runtime advisory of unknown severity blocks",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "PYSEC-2026-0007",
+          "aliases": [],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "unknown"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "blocking": 1,
+          "unresolved": 0
+        }
+      }
+    },
+    {
+      "name": "tooling high blocks: a devDependency is not excused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-tttt-0001-hhhh",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "high"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "tooling critical blocks",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-tttt-0002-cccc",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "critical"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "scanner-graph moderate is visible triage, not zero",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-ssss-0008-mmmm",
+          "aliases": [],
+          "package": "scan-dep",
+          "version": "0.9.0",
+          "path": "scanner:node_modules/npm/node_modules/scan-dep",
+          "scope": "tooling",
+          "severity": "moderate"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "within_policy",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "triageRequired": 1,
+          "blocking": 0
+        }
+      }
+    },
+    {
+      "name": "tooling moderate requires triage and is counted",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-tttt-0003-mmmm",
+          "aliases": [
+            "CVE-2026-0003"
+          ],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "moderate"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "within_policy",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "triageRequired": 1,
+          "blocking": 0
+        }
+      }
+    },
+    {
+      "name": "tooling low and info require triage",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-tttt-0004-llll",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "low"
+        },
+        {
+          "advisory": "GHSA-tttt-0005-iiii",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "info"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "within_policy",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 2,
+          "triageRequired": 2
+        }
+      }
+    },
+    {
+      "name": "tooling advisory of unknown severity cannot be evaluated",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "PYSEC-2026-0006",
+          "aliases": [
+            "GHSA-tttt-0006-uuuu"
+          ],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "unknown"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "incomplete",
+        "exitCode": 2,
+        "refused": [],
+        "counts": {
+          "unresolved": 1
+        }
+      }
+    },
+    {
+      "name": "unknown scope below high cannot be evaluated",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-uuuu-0009-mmmm",
+          "aliases": [],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "unknown",
+          "severity": "moderate"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "incomplete",
+        "exitCode": 2,
+        "refused": [],
+        "counts": {
+          "unresolved": 1
+        }
+      }
+    },
+    {
+      "name": "unknown scope at high still blocks",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-uuuu-0010-hhhh",
+          "aliases": [],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "unknown",
+          "severity": "high"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "a finding missing its version is incomplete",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-mmmm-0011-xxxx",
+          "aliases": [],
+          "package": "lib-a",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "incomplete",
+        "exitCode": 2,
+        "refused": [],
+        "counts": {
+          "unresolved": 1
+        }
+      }
+    },
+    {
+      "name": "a valid narrow exception passes, visibly",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "exceptions_only",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "excepted": 1,
+          "blocking": 0,
+          "refusedRecords": 0
+        }
+      }
+    },
+    {
+      "name": "an exception may name the finding by alias",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "CVE-2026-0001",
+          "aliases": [
+            "GHSA-aaaa-bbbb-cccc"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "exceptions_only",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "excepted": 1
+        }
+      }
+    },
+    {
+      "name": "an exception is valid through the day before it expires",
+      "now": "2026-10-19T23:59:59Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "exceptions_only",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "excepted": 1
+        }
+      }
+    },
+    {
+      "name": "an expired exception is refused and the finding blocks",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-09-24"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {
+          "blocking": 1,
+          "refusedRecords": 1
+        }
+      }
+    },
+    {
+      "name": "an exception longer than 90 days is refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-12-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "an exception approved in the future is refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "x",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/1",
+            "date": "2026-09-25"
+          },
+          "expires": "2026-10-25"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {}
+      }
+    },
+    {
+      "name": "an exception without an owner is refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "an approval that is only a flag is refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20",
+          "approved": true
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {}
+      }
+    },
+    {
+      "name": "an approval not linked to a mugak1 review is refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "x",
+            "reference": "https://example.com/ok",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {}
+      }
+    },
+    {
+      "name": "a calendar-impossible date is refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-02-30"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {}
+      }
+    },
+    {
+      "name": "a wildcard version is refused as broadened",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "*",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "a version range is refused as broadened",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": ">=1.0.0",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {}
+      }
+    },
+    {
+      "name": "a wildcard path is refused as broadened",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/*"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {}
+      }
+    },
+    {
+      "name": "an extra path matching nothing is refused as broadened",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a",
+            "application:node_modules/other/node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "a mismatched version is refused and the finding blocks",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.4",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "a mismatched scope is refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "tooling",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "a stale exception with nothing to cover is refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {
+          "findings": 0
+        }
+      }
+    },
+    {
+      "name": "a narrow exception covers only its own path",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        },
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/parent/node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "excepted": 1,
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "a triage record cannot cover a blocking finding",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "triage",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001"
+        ],
+        "counts": {
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "a triage record records a lower-severity tooling finding",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-tttt-0003-mmmm",
+          "aliases": [
+            "CVE-2026-0003"
+          ],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "moderate"
+        }
+      ],
+      "records": [
+        {
+          "id": "TRI-0001",
+          "kind": "triage",
+          "advisory": "GHSA-tttt-0003-mmmm",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "paths": [
+            "application:node_modules/tool-b"
+          ],
+          "scope": "tooling",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "within_policy",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "triaged": 1,
+          "triageRequired": 0
+        }
+      }
+    },
+    {
+      "name": "an exception cannot stand in for triage",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-tttt-0003-mmmm",
+          "aliases": [
+            "CVE-2026-0003"
+          ],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "moderate"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0002",
+          "kind": "exception",
+          "advisory": "GHSA-tttt-0003-mmmm",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "paths": [
+            "application:node_modules/tool-b"
+          ],
+          "scope": "tooling",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0002"
+        ],
+        "counts": {
+          "triageRequired": 1
+        }
+      }
+    },
+    {
+      "name": "two records for one finding: the second is refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        },
+        {
+          "id": "EXC-0002",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0002"
+        ],
+        "counts": {
+          "excepted": 1
+        }
+      }
+    },
+    {
+      "name": "records sharing an id are all refused",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        },
+        {
+          "advisory": "GHSA-tttt-0003-mmmm",
+          "aliases": [
+            "CVE-2026-0003"
+          ],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "moderate"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        },
+        {
+          "id": "EXC-0001",
+          "kind": "triage",
+          "advisory": "GHSA-tttt-0003-mmmm",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "paths": [
+            "application:node_modules/tool-b"
+          ],
+          "scope": "tooling",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [
+          "EXC-0001",
+          "EXC-0001"
+        ],
+        "counts": {
+          "blocking": 1,
+          "triageRequired": 1,
+          "excepted": 0
+        }
+      }
+    },
+    {
+      "name": "an unresolved finding cannot be excepted",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "PYSEC-2026-0006",
+          "aliases": [
+            "GHSA-tttt-0006-uuuu"
+          ],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "unknown"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0003",
+          "kind": "exception",
+          "advisory": "PYSEC-2026-0006",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "paths": [
+            "application:node_modules/tool-b"
+          ],
+          "scope": "tooling",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "incomplete",
+        "exitCode": 2,
+        "refused": [
+          "EXC-0003"
+        ],
+        "counts": {
+          "unresolved": 1
+        }
+      }
+    },
+    {
+      "name": "incomplete takes precedence over blocking and exceptions",
+      "now": "2026-09-24T12:00:00Z",
+      "incomplete": [
+        {
+          "code": "coverage_mismatch",
+          "detail": "count differs"
+        }
+      ],
+      "findings": [
+        {
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high"
+        },
+        {
+          "advisory": "GHSA-tttt-0001-hhhh",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "4.5.6",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "high"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-0001",
+          "kind": "exception",
+          "advisory": "GHSA-aaaa-bbbb-cccc",
+          "aliases": [
+            "CVE-2026-0001"
+          ],
+          "package": "lib-a",
+          "version": "1.2.3",
+          "paths": [
+            "application:node_modules/lib-a"
+          ],
+          "scope": "runtime",
+          "applicability": "The vulnerable parser is never reached: input is a constant compiled into the bundle.",
+          "reason": "No compatible fixed release exists yet; upstream fix tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-20"
+          },
+          "expires": "2026-10-20"
+        }
+      ],
+      "expect": {
+        "outcome": "incomplete",
+        "exitCode": 2,
+        "refused": [],
+        "counts": {
+          "excepted": 1,
+          "blocking": 1
+        }
+      }
+    }
+  ]
+}

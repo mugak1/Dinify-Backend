@@ -1,0 +1,16 @@
+{
+  "schema": "dinify.dependency-audit.policy/v1",
+  "repository": "mugak1/Dinify-Backend",
+  "ecosystem": "pypi",
+  "target": {
+    "python": "3.12.3"
+  },
+  "scanner": {
+    "package": "pip-audit",
+    "version": "2.10.1",
+    "requirements": "dependency_audit/scanner-requirements.txt",
+    "index": "https://pypi.org/simple/",
+    "timeoutSeconds": 300
+  },
+  "records": []
+}
