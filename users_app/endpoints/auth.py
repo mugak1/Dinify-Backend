@@ -26,6 +26,23 @@ _ACTION_THROTTLES = {
 }
 
 
+def _reset_identifier(data):
+    """
+    The email or phone number a password-reset request names, or ``None``.
+
+    The web client sends ``identifier`` (the typed email, or ``256`` + the national
+    number) beside an advisory ``identification``; an older client sends
+    ``phone_number``. ``identifier`` wins when both are present. Nothing else is
+    interpreted here: ``_resolve_user`` tells an email from a phone by the ``@``, and
+    applies every refusal. A blank or non-string value names no one.
+    """
+    for key in ('identifier', 'phone_number'):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 class UsersAuthenticationEndpoint(APIView):
     """
     endpoint for authenticating users
@@ -53,13 +70,19 @@ class UsersAuthenticationEndpoint(APIView):
                 password=request.data.get('password'),
                 source=request.data.get('source', 'restaurant')
             )
+        elif action in ("initiate-reset-password", "reset-password") and (
+            _reset_identifier(request.data) is None
+        ):
+            # Not the controllers' generic NO_PHONE_NUMBER: nothing was looked up,
+            # so this refusal says only that the request named no one.
+            response = {'status': 400, 'message': MESSAGES.get('NO_RESET_IDENTIFIER')}
         elif action == "initiate-reset-password":
             response = initiate_password_reset(
-                username=request.data.get('phone_number')
+                username=_reset_identifier(request.data)
             )
         elif action == "reset-password":
             response = reset_password(
-                username=request.data.get('phone_number'),
+                username=_reset_identifier(request.data),
                 otp=request.data.get('otp')
             )
         elif action == "change-password":
