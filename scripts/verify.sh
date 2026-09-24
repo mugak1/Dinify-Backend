@@ -17,6 +17,20 @@
 #                                         includes the delegated-session auth path)
 #   7. test                              (full Django test suite)
 #
+# Plus the dependency audit (D08 B2.1, dependency_audit/README.md), exactly as CI
+# runs it inside the `suite` leg:
+#
+#   0. dependency-audit snapshot          (OFFLINE — this interpreter's installed
+#                                         inventory, before anything else runs)
+#   5a. dependency-audit evaluator tests  (OFFLINE — fixtures only; scans nothing)
+#   8. dependency audit                   (NETWORK — scans the snapshotted inventory
+#                                         against PyPI's advisory data; a scan that
+#                                         cannot complete FAILS, it is never skipped)
+#
+# The audit describes the environment of the interpreter running this script. It
+# refuses (incomplete) on anything but the Python 3.12.3 validation target, because
+# a 3.11 environment's inventory is not the one CI validates.
+#
 # test_settings falls back to SQLite in-memory for the fast checks, but the
 # tenant-isolation closure gate and the full suite include relationship-integrity
 # tests that use JSONField `__contains` (Table/MenuItem deletion_blockers), which
@@ -65,11 +79,15 @@ run_step() {
   fi
 }
 
+# Taken first, exactly as in CI, so the scan in the last step is bound to the
+# environment everything in between validated.
+run_step "dependency-audit inventory snapshot (offline)" "${PYTHON}" -m dependency_audit snapshot
 run_step "django check"         "${PYTHON}" -m django check --settings="${SETTINGS}"
 run_step "makemigrations check" "${PYTHON}" -m django makemigrations --check --dry-run --settings="${SETTINGS}"
 run_step "money-field guard"    "${PYTHON}" scripts/check_money_fields.py
 run_step "ambient-authority gate" "${PYTHON}" scripts/check_ambient_authority.py
 run_step "tenant-relation ratchet" "${PYTHON}" scripts/check_tenant_relation_ratchet.py
+run_step "dependency-audit evaluator tests (offline)" "${PYTHON}" -m unittest discover -t . -s dependency_audit -p "tests_*.py"
 # Fail-fast adversarial tenant-isolation closure gate (TENANT-ISO-PR6A): the
 # focused boundary matrix + the deep capability / relationship / concurrency /
 # write-surface suites it builds on. Runs BEFORE the full suite so a broken
@@ -84,6 +102,8 @@ run_step "tenant-isolation closure gate" "${PYTHON}" -m django test \
   platform_admin_app.tests_delegated_session \
   --settings="${SETTINGS}" --verbosity=2 --timing
 run_step "tests"                "${PYTHON}" -m django test --settings="${SETTINGS}" --verbosity=2 --timing
+# NETWORK. Required: an unreachable advisory service fails this run; it does not pass.
+run_step "dependency audit (network: PyPI advisory data)" bash -c '"$0" -m dependency_audit self-test && "$0" -m dependency_audit audit' "${PYTHON}"
 
 echo
 echo "=================================================================="

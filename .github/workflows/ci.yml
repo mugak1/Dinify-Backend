@@ -58,6 +58,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # DEPENDENCY AUDIT, part 1 of 2 (D08 B2.1 — dependency_audit/README.md). Taken
+      # IMMEDIATELY after installation with THIS interpreter's own `pip inspect`: the
+      # exact package inventory the suite below runs against — pinned requirements, their
+      # unpinned transitives and the pip upgraded above. Offline. Refuses if a declared
+      # requirement is missing or the interpreter is not the 3.12.3 target.
+      - name: Dependency audit — snapshot the installed inventory
+        run: python -m dependency_audit snapshot
+
       - name: Check migrations consistency
         env:
           DATABASE_ENGINE: django.db.backends.postgresql
@@ -96,6 +104,12 @@ jobs:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: python scripts/check_tenant_relation_ratchet.py
 
+      - name: Dependency-audit evaluator tests
+        # The evaluator's own regression matrix — offline and deterministic, fixtures
+        # only, no database. Proves the policy can pass AND refuse; it scans nothing and
+        # is not a substitute for the scan at the end of this job.
+        run: python -m unittest discover -t . -s dependency_audit -p "tests_*.py"
+
       - name: Tenant-isolation closure gate
         # Fail-fast adversarial boundary suite (TENANT-ISO-PR6A): the focused
         # closure matrix + the deep capability / relationship / concurrency /
@@ -132,6 +146,30 @@ jobs:
         run: |
           python -m django test --settings=dinify_backend.test_settings --verbosity=2 --timing
 
+      # DEPENDENCY AUDIT, part 2 of 2 — inside this leg, so the `test` aggregator below
+      # cannot report success when it fails. Scans the snapshotted inventory (and the
+      # hash-pinned scanner's own venv) against PyPI's advisory data and enforces the
+      # policy: any advisory on a runtime package fails; an advisory on pip, whose
+      # severity pip-audit does not report, cannot be evaluated and fails as incomplete;
+      # a scan that could not complete — a timeout, a network failure, an unparseable or
+      # empty report, a skipped package, an inventory that moved — is never read as
+      # clean. Placed LAST so the suites above still report when only the audit fails.
+      # No `if:`, no `continue-on-error`, no pipe: its exit status is the step's.
+      - name: Dependency audit — scan the validated inventory and enforce the policy
+        run: python -m dependency_audit self-test && python -m dependency_audit audit
+
+      # The complete raw scanner output, the inventory and the decision, kept whether
+      # the leg passed or not. `always()` only retains evidence; it cannot turn a failed
+      # step green.
+      - name: Retain the dependency-audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-audit-${{ matrix.python-version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dependency_audit/evidence/
+          if-no-files-found: warn
+          retention-days: 30
+
   # Branch protection on `main` requires a status check literally named `test`.
   # A matrix job can never produce one: it always suffixes the leg value, so the
   # single leg above reports as `suite (3.12.3)` and the bare name would sit
@@ -141,7 +179,9 @@ jobs:
   # stays and this job is still needed.
   #
   # This aggregator owns that name and is the ONE required check. It goes green
-  # only when EVERY leg succeeded, which is what decouples the required-check
+  # only when EVERY leg succeeded — and since D08 B2.1 a leg includes the dependency
+  # audit, so an audit that blocked or could not complete makes this red too, with no
+  # change here. It is what decouples the required-check
   # list from the matrix: legs can be added, removed or re-pinned — as deleting
   # 3.10.12 at cutover was — with no repo-settings change.
   #

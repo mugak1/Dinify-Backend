@@ -5798,11 +5798,13 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
     rebuilding the venv alone means prod runs an interpreter nothing tested.
     Note the deploy pipeline CANNOT rebuild the venv or `mod_wsgi` — that is
     hands-on host work, which is why the two can drift if nobody couples them
-  - `.github/workflows/audit.yml` pins the SAME value independently. Both files
-    must be changed together; they are the only two places the interpreter
-    version is asserted (no `setup.py` / `pyproject.toml` / `tox.ini` exists, and
-    `requirements.txt` declares no `requires-python`). Dependency bumps must
-    satisfy `requires-python <= 3.12`
+  - `.github/workflows/audit.yml` pins the SAME value independently, and so does
+    `dependency_audit/policy.json → target.python` (D08 B2.1: the audit refuses any
+    other interpreter as not the validation target). All three must be changed
+    together — `dependency_audit/tests_workflow.py` fails if they differ — and they
+    are the only places the interpreter version is asserted (no `setup.py` /
+    `pyproject.toml` / `tox.ini` exists, and `requirements.txt` declares no
+    `requires-python`). Dependency bumps must satisfy `requires-python <= 3.12`
   - The matrix job is keyed `suite`, so its leg reports as `suite (3.12.3)`.
     Branch protection on `main` requires a check literally named `test`, which a
     matrix job can NEVER produce (it always suffixes the leg value — collapsing
@@ -5837,6 +5839,24 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `non_fk_tenant_inventory.py` for tenant refs outside DRF relations
 - Then runs the full Django test suite — a missing migration or a model
   change without a generated migration will fail CI
+- **AND THEN THE DEPENDENCY AUDIT, inside the same `suite` leg (D08 B2.1 —
+  `dependency_audit/README.md`), so the `test` aggregator cannot go green without it.**
+  `python -m dependency_audit snapshot` runs directly after `pip install -r
+  requirements.txt` and records THIS interpreter's installed inventory (`pip inspect`,
+  per-package RECORD digests — 27 packages on main, including the unpinned `cffi` /
+  `pycparser` transitives and the upgraded `pip`); the offline evaluator matrix runs with
+  the other gates; and `self-test && audit` runs LAST, scanning exactly that inventory as
+  exact pins (`pip-audit --no-deps --disable-pip --strict`) plus the scanner's own venv
+  (29 hash-pinned packages, `--require-hashes --only-binary=:all: --isolated`). The
+  policy is shared with Frontend and Admin (`conformance.json` byte-identical, digest
+  pinned in each suite): four outcomes, `within_policy` 0 / `exceptions_only` 0 /
+  `blocking` 1 / `incomplete` 2. **pip-audit reports no severity**, so a Python finding
+  on a runtime package blocks and one on `pip` is incomplete — never read as low. A
+  failed scan is never clean: measured, PyPI unreachable makes pip-audit exit 1 with EMPTY
+  stdout (the same status as "vulnerabilities found"), so the status is only accepted when
+  the body agrees. `policy.json → records` is empty — nothing is pre-approved. Evidence is
+  uploaded as `dependency-audit-<python>-<run>-<attempt>`, pass or fail. It audits the CI
+  environment, NOT the live UAT venv, which the deploy re-installs independently
 - **`test_settings.py` sets `PASSWORD_HASHERS` to `MD5PasswordHasher`, and that is
   DELIBERATE — do not "fix" it.** Django 5.2's default `pbkdf2_sha256` runs 1,000,000
   iterations (~258ms per hash) and the suite builds fixtures per test method (159 `setUp`
@@ -5859,10 +5879,14 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   manually). Two coupling notes: renaming the `Backend CI` workflow silently
   breaks the deploy trigger, which matches on that literal name, and the
   `workflow_dispatch` rollback pre-flight queries `ci.yml`'s runs by path
-- A scheduled `.github/workflows/audit.yml` runs a weekly `pip-audit` sweep
-  (Mondays 06:30 UTC) + manual `workflow_dispatch` — NOT triggered on
-  PRs/pushes, so it never becomes a blocking PR check; a failure (advisories
-  found) fires GitHub's scheduled-workflow notification
+- A scheduled `.github/workflows/audit.yml` is a weekly (Mondays 06:30 UTC) + manual
+  `workflow_dispatch` RE-SCAN of main with the SAME evaluator and policy — the enforcing
+  audit is inside `suite`; this exists because advisories are published between merges.
+  It is not a required check, and it authorizes nothing: deploy-uat.yml triggers on the
+  workflow named "Backend CI" and its manual path re-verifies `ci.yml` runs by path. A
+  failure (blocking, or a scan that could not complete) fires GitHub's
+  scheduled-workflow notification. It used to run `pip-audit -r requirements.txt` with an
+  unpinned scanner — an independent resolution, not the validated inventory
 
 ## Verification
 Before raising any PR, run `./scripts/verify.sh` (mirrors CI) and confirm:
@@ -5875,3 +5899,5 @@ Before raising any PR, run `./scripts/verify.sh` (mirrors CI) and confirm:
 6. Confirm monetary fields use DecimalField
 7. If adding a new endpoint, confirm it's registered in urls.py above the catch-all
 8. Confirm no reintroduction of `clear_<field>` sentinels in PUT payloads
+9. Confirm the dependency audit passes (`verify.sh` runs it last; it needs network and
+   the Python 3.12.3 target, and refuses — fails — otherwise)
