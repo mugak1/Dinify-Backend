@@ -214,9 +214,9 @@ class TestRestaurantParityTests(_ParityFixture):
 
     # 8 — customer matching
     def test_customer_matching_treats_it_like_a_live_restaurant(self):
-        # Keyed on the PAYMENT's phone number, which is the path the command matches
-        # on (it does not read the order's own `customer_phone`; that is a separate,
-        # pre-existing gap that affects real and test restaurants alike).
+        # Keyed on the PAYMENT's phone number: with the order's own phone and email
+        # both null, that is the fallback the command matches on. Matching on the
+        # order's own contact details is pinned by `tests_determine_customers`.
         for venue, order, phone in ((self.real, self.real_order, '256770009991'),
                                     (self.test, self.test_order, '256770009992')):
             Order.objects.filter(pk=order.pk).update(
