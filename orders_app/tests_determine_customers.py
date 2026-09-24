@@ -9,10 +9,16 @@ email therefore reached ``match_customer`` with nothing, was never matched, and 
 still marked ``customer_match_attempted`` — so it was never retried either.
 
 The order's own phone and email are now what it is matched on. The payment's msisdn is
-still the fallback for an order carrying neither, exactly as before, and everything
-downstream is unchanged: the phone goes through ``normalise_msisdn`` (an unnormalisable
-one is skipped, never fatal), and an unmatched contact still goes down the existing
-create-a-user path.
+still the fallback for an order carrying neither, exactly as before. The phone goes
+through ``normalise_msisdn`` (an unnormalisable one is skipped, never fatal), and the
+email is resolved the way login and password reset resolve one
+(``users_app.controllers.email_lookup.get_user_by_email``).
+
+AN ACCOUNT IS CREATED FROM A PHONE, NEVER FROM AN EMAIL ALONE. An unmatched usable phone
+still goes down the create-a-user path, keyed on the canonical number. An unmatched
+email with no usable phone leaves the order unmatched, because a restaurant user's phone
+is required at every write site (``users_app/models.py``) and "Phone is the identity;
+email is contact detail" (``platform_admin_app/onboarding_creation.py``).
 
 Every fixture is an ordinary order at a live, real restaurant, so none of it depends on
 which orders the command leaves out. That rule (``counted_orders_q``: a practice order
@@ -34,6 +40,7 @@ from dinify_backend.configss.string_definitions import (
 from finance_app.models import DinifyTransaction
 from orders_app.models import Order
 from restaurants_app.models import Restaurant, Table
+from users_app.controllers.update_user_profile import self_update_user_profile
 from users_app.models import User
 
 
@@ -200,9 +207,55 @@ class OrderContactMatchingTests(DetermineCustomersFixture):
             self.assertTrue(order.customer_match_attempted)
         self.assertEqual(User.objects.count(), before)
 
+    def test_an_email_in_other_capitals_matches_the_account_holding_it_lower_cased(self):
+        """Registration stores an email lower-cased; the order may carry any capitals."""
+        known = self._person('256772123456', email='known@example.com')
+        order = self._order(customer_email='Known@Example.com')
+        before = User.objects.count()
+
+        self._run()
+
+        order.refresh_from_db()
+        self.assertEqual(order.customer_id, known.id)
+        self.assertEqual(User.objects.count(), before)
+
+    def test_an_email_typed_exactly_matches_its_own_account_beside_a_lower_cased_twin(self):
+        """
+        CONTROL: the address as typed is asked first.
+
+        A profile edit stores an email as typed and its duplicate check is exact, so
+        ``Known@Example.com`` and ``known@example.com`` can belong to two accounts.
+        Lower-casing the lookup would match the order to the wrong one, and
+        ``email__iexact`` would find both and match neither.
+        """
+        self._person('256772123456', email='known@example.com')
+        exact = self._person('256772123457', email='other@example.com')
+        edited = self_update_user_profile(user_id=str(exact.id), email='Known@Example.com')
+        self.assertEqual(edited['status'], 200, edited)
+        order = self._order(customer_email='Known@Example.com')
+
+        self._run()
+
+        order.refresh_from_db()
+        self.assertEqual(order.customer_id, exact.id)
+
+    def test_an_email_several_accounts_share_matches_none_of_them(self):
+        """CONTROL: ``User.email`` is not unique, and an ambiguous address picks no one."""
+        self._person('256772123456', email='shared@example.com')
+        self._person('256772123457', email='shared@example.com')
+        order = self._order(customer_email='shared@example.com')
+        before = User.objects.count()
+
+        self._run()
+
+        order.refresh_from_db()
+        self.assertIsNone(order.customer_id)
+        self.assertTrue(order.customer_match_attempted)
+        self.assertEqual(User.objects.count(), before)
+
 
 class UnmatchedContactCreationTests(DetermineCustomersFixture):
-    """The existing create-a-user path, now reachable from the order's own contact."""
+    """An account is created from a usable phone, and never from an email alone."""
 
     def test_an_unmatched_phone_creates_a_user_keyed_on_the_canonical_number(self):
         order = self._order(customer_phone='+256 772 555 444')
@@ -218,18 +271,11 @@ class UnmatchedContactCreationTests(DetermineCustomersFixture):
         self.assertIsNone(created.email)
         self.assertEqual(created.country, self.restaurant.country)
 
-    def test_an_unmatched_email_creates_a_user_with_no_phone(self):
-        """
-        RECORDED, NOT ENDORSED: what the create path does with an email and no phone.
-
-        This branch of ``match_customer`` could not be reached until the order's own
-        email was read, and the account it creates has no ``phone_number``, which
-        registration requires of every restaurant user (``REQUIRED_INFORMATION
-        ['new_user']``). It is pinned so the behaviour is visible here, and so it
-        cannot silently start crashing: an ``IntegrityError`` inside the command's one
-        ``transaction.atomic()`` would roll back every order in the batch.
-        """
-        order = self._order(customer_email='new.diner@example.com')
+    def test_an_unmatched_phone_with_an_unmatched_email_creates_one_account_with_both(self):
+        """CONTROL: the phone-keyed create path is unchanged, the email riding along."""
+        order = self._order(
+            customer_phone='+256 772 555 444', customer_email='new.diner@example.com',
+        )
         before = User.objects.count()
 
         self._run()
@@ -237,6 +283,39 @@ class UnmatchedContactCreationTests(DetermineCustomersFixture):
         order.refresh_from_db()
         self.assertEqual(User.objects.count(), before + 1)
         created = order.customer
+        self.assertEqual(created.phone_number, '256772555444')
+        self.assertEqual(created.username, '256772555444')
         self.assertEqual(created.email, 'new.diner@example.com')
-        self.assertEqual(created.username, 'new.diner@example.com')
-        self.assertIsNone(created.phone_number)
+
+    def test_an_unmatched_email_alone_creates_no_account(self):
+        """
+        An email with no usable phone never becomes an account.
+
+        This used to be pinned the other way round, as "recorded, not endorsed": the
+        account it created had no ``phone_number``, which every restaurant user must
+        have. The order stays unmatched and is still marked attempted, like any other
+        order nothing matched.
+        """
+        order = self._order(customer_email='new.diner@example.com')
+        before = User.objects.count()
+
+        self._run()
+
+        order.refresh_from_db()
+        self.assertIsNone(order.customer_id)
+        self.assertTrue(order.customer_match_attempted)
+        self.assertEqual(User.objects.count(), before)
+        self.assertFalse(User.objects.filter(email='new.diner@example.com').exists())
+
+    def test_an_unnormalisable_phone_beside_an_unmatched_email_creates_no_account(self):
+        """A phone that cannot be normalised is no usable phone either."""
+        order = self._order(customer_phone='12345', customer_email='new.diner@example.com')
+        before = User.objects.count()
+
+        output = self._run()
+
+        self.assertIn(SKIPPED, output)
+        order.refresh_from_db()
+        self.assertIsNone(order.customer_id)
+        self.assertTrue(order.customer_match_attempted)
+        self.assertEqual(User.objects.count(), before)
