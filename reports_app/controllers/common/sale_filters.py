@@ -17,6 +17,7 @@ different status semantics and is intentionally out of scope here — though
 from django.db.models import Sum
 
 from orders_app.models import Order
+from orders_app.controllers.test_orders import counted_orders_q
 from dinify_backend.configss.string_definitions import (
     OrderStatus_Served,
     OrderStatus_Paid,
@@ -62,15 +63,20 @@ def sale_orders(restaurant_id, date_from, date_to):
     The queryset is lazy (no query runs until it is evaluated) and filters on:
       * ``restaurant`` == ``restaurant_id``
       * ``order_status__in`` == :data:`SALE_STATUSES`
-      * ``is_test`` is False — a pre-go-live rehearsal order is not a sale
+      * not a PRACTICE order (``orders_app.controllers.test_orders.counted_orders_q``)
+        — a test order at a real restaurant, such as a rehearsal before it went
+        live, is not a sale. At a TEST restaurant nothing is excluded: its orders
+        are flagged test and still count, exactly like a live restaurant's
       * ``time_created`` within the inclusive local-day range
         ``[date_from, date_to]``
 
-    THIS IS THE CHOKEPOINT for test-order exclusion. Sales listing/trends/hourly,
+    THIS IS THE CHOKEPOINT for practice-order exclusion. Sales listing/trends/hourly,
     diners summary/listing and menu summary all derive their base queryset from here,
-    so they inherit the ``is_test`` filter and must not re-add it. The dashboards and
-    the transactions report build their own querysets and carry their own exclusion —
-    see ``restaurant/dashboard.py`` and ``restaurant/transactions.py``.
+    so they inherit the rule and must not re-add it — least of all as a bare
+    ``is_test=False``, which would switch a test restaurant's reports off. The
+    dashboards and the transactions report build their own querysets and apply the
+    same ``counted_orders_q`` — see ``restaurant/dashboard.py`` and
+    ``restaurant/transactions.py``.
 
     Date filtering aligns to the *local* day (EAT). Under ``USE_TZ = True`` the
     ``__date`` lookup extracts the date in the active timezone, so a ``__date``
@@ -81,9 +87,9 @@ def sale_orders(restaurant_id, date_from, date_to):
     ``'YYYY-MM-DD'`` strings.
     """
     return Order.objects.filter(
+        counted_orders_q(),
         restaurant=restaurant_id,
         order_status__in=SALE_STATUSES,
-        is_test=False,
         time_created__date__gte=date_from,
         time_created__date__lte=date_to,
     )

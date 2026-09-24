@@ -174,13 +174,18 @@ def _insert_order(*, restaurant, table, customer, created_by, order_source,
         # true, and neither of them is anything the caller sent:
         #
         #   TENANT   — the restaurant itself exists for testing
-        #              (`Restaurant.is_test`). Such a tenant never
-        #              produces commerce, whatever its lifecycle
-        #              state, so a test restaurant that has gone
-        #              `live` still writes test orders.
+        #              (`Restaurant.is_test`), so a test restaurant
+        #              that has gone `live` still writes test orders.
         #   LIFECYCLE — the order predates go-live, so it is a
-        #              rehearsal: operationally real, commercially
-        #              invisible.
+        #              rehearsal.
+        #
+        # FLAGGED IS ALL IT MEANS AT A TEST RESTAURANT. The flag keeps
+        # these orders identifiable; it does not switch anything off
+        # there — a test restaurant's orders count in its reports and
+        # dashboards, can be reviewed and are matched to customers
+        # exactly like a live restaurant's. Only a PRACTICE order (a
+        # test order at a REAL restaurant) is left out, and that rule
+        # lives in ONE place: `orders_app.controllers.test_orders`.
         #
         # BOTH values come from `verdict` — the single query the
         # ADMISSION ran under the advisory lock at step 1a — and not

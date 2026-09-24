@@ -7,10 +7,13 @@ ready — which is what the go-live transition and its readiness gate exist to p
 Now `onboarding` refuses the public but still lets the owner place ONE end-to-end
 rehearsal order, because proving that path is a hard blocker on the Phase-1 checklist.
 
-THE GOVERNING RULE, asserted throughout: **a test order is operationally real and
-commercially invisible.** It occupies its table, reaches the kitchen board and is
-served or cancelled like any other — that is the rehearsal. It never reaches revenue,
-history or diner analytics, and it cannot be reviewed.
+THE GOVERNING RULE, asserted throughout: **a rehearsal at a REAL restaurant is
+operationally real and commercially invisible.** It occupies its table, reaches the
+kitchen board and is served or cancelled like any other — that is the rehearsal. It
+never reaches revenue, history or diner analytics, and it cannot be reviewed. (It is
+a PRACTICE order — a test order at a restaurant that is not a test restaurant. At a
+TEST restaurant the flag limits nothing; ``tests_test_restaurant_parity`` pins that
+half, consumer by consumer, the way this file pins this one.)
 
 The exclusion tests are deliberately one-per-consumer rather than one representative
 case. Each consumer builds its own queryset, and a filter that is missing from exactly

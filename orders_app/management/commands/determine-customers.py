@@ -4,6 +4,7 @@ import random
 from django.db import transaction
 from django.core.management.base import BaseCommand
 from orders_app.models import Order
+from orders_app.controllers.test_orders import counted_orders_q
 from finance_app.models import DinifyTransaction
 from users_app.models import User
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
@@ -74,14 +75,17 @@ class Command(BaseCommand):
         with transaction.atomic():
             # get the paid orders where the customer is null
             # TODO only consider paid orders
-            # Test orders are excluded, and this is the exclusion that matters most:
-            # unmatched contact details here CREATE a real platform User with a random
-            # password. A rehearsal order carrying the owner's own phone number would
-            # otherwise mint an account for them every time this runs.
+            # PRACTICE orders are excluded — test orders at a real restaurant, such as
+            # a rehearsal before it went live — and this is the exclusion that matters
+            # most: unmatched contact details here CREATE a real platform User with a
+            # random password, and a rehearsal carrying the owner's own phone number
+            # would otherwise mint an account for them every time this runs. A TEST
+            # restaurant's orders are matched exactly like a live restaurant's
+            # (`counted_orders_q`): it exists so matching can be seen to work.
             orders = Order.objects.filter(
+                counted_orders_q(),
                 customer=None,
                 customer_match_attempted=False,
-                is_test=False,
             )
             for order in orders:
                 customer_phone = None

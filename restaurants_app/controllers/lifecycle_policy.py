@@ -256,9 +256,12 @@ def orders_are_commercial(status) -> bool:
     """
     Whether orders created in this state count as real business.
 
-    The single source for ``Order.is_test``: an order created while the answer is no
-    is a rehearsal — operationally real (it occupies its table and reaches the
-    kitchen) but invisible to revenue, history and diner analytics.
+    The lifecycle source for ``Order.is_test`` (the restaurant's own test label is the
+    other): an order created while the answer is no is a rehearsal — operationally
+    real (it occupies its table and reaches the kitchen) and, at a real restaurant, a
+    PRACTICE order left out of its revenue, history and diner analytics
+    (``orders_app.controllers.test_orders``). At a test restaurant nothing is left
+    out.
     """
     return bool(_row(status)[CAP_LIVE_TRADING])
 

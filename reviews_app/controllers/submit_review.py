@@ -16,6 +16,7 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Served, OrderStatus_Paid,
 )
 from orders_app.models import Order
+from orders_app.controllers.test_orders import is_practice_order
 from reviews_app.serializers import (
     ReviewWriteSerializer,
     ReviewRestaurantReadSerializer,
@@ -84,7 +85,9 @@ def submit_review(order_id, rating_fields, comment=None, tags=None,
     if order_id is None:
         return {'status': 404, 'message': 'We could not find that order.'}
     try:
-        order = Order.objects.get(
+        # `restaurant` is selected with the order because the practice-order rule
+        # below reads it — one statement, not two.
+        order = Order.objects.select_related('restaurant').get(
             id=order_id,
             restaurant_id=session_restaurant_id,
             table_id=session_table_id,
@@ -106,13 +109,19 @@ def submit_review(order_id, rating_fields, comment=None, tags=None,
             'message': 'This order is not eligible for review.',
         }
 
-    #    A pre-go-live rehearsal order is not reviewable either, and shares the same
-    #    restrained message. Blocked at the door rather than filtered downstream
-    #    because Review denormalises `restaurant` and the analytics aggregate on THAT
-    #    — they never join Order, so an `is_test` filter would not reach them and a
-    #    rehearsal review would move the restaurant's real rating average and land in
-    #    the service-recovery queue.
-    if order.is_test:
+    #    A PRACTICE order is not reviewable either, and shares the same restrained
+    #    message: a test order at a REAL restaurant, such as a rehearsal before it
+    #    went live. Blocked at the door rather than filtered downstream because
+    #    Review denormalises `restaurant` and the analytics aggregate on THAT — they
+    #    never join Order, so an `is_test` filter would not reach them and a
+    #    rehearsal review would move the restaurant's real rating average and land
+    #    in the service-recovery queue.
+    #
+    #    A TEST RESTAURANT'S orders are flagged `is_test` too and ARE reviewable,
+    #    exactly like a live restaurant's. This gate used to refuse every one of
+    #    them, which made reviews impossible to try out on the one kind of
+    #    restaurant that exists for trying things out.
+    if is_practice_order(order):
         return {
             'status': 400,
             'message': 'This order is not eligible for review.',

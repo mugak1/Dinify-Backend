@@ -296,8 +296,11 @@ def _validate_is_test(raw) -> bool:
     The test classification, which must be an actual boolean.
 
     NOT coerced, and not defaulted. ``is_test`` decides whether a tenant's orders are
-    commerce at all: a real restaurant misclassified TEST silently vanishes from
-    every revenue figure, and a test tenant misclassified real contaminates them.
+    FLAGGED as test orders. That limits nothing while it stays a test restaurant — a
+    test restaurant can do everything a live one can — but the flags are what decide
+    whether those orders count once it is real: a real restaurant misclassified TEST
+    has its real orders flagged and they leave its figures when the mistake is
+    corrected, and a test tenant misclassified real mixes demo orders into real ones.
     Accepting ``1``, ``"true"`` or an omission would let that decision be made by a
     coercion rule instead of by an operator. It is never inferred from the name, the
     environment, the actor or the location.
