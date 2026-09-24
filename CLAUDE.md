@@ -3113,6 +3113,9 @@ and locked, so there is nothing about it to undo.
   would send a `Diner@Example.com` owner to the account holding `diner@example.com`.
   And a fallback that `get()`s or `.first()`s an address several accounts share would
   crash or pick one of them silently (pinned in `users_app/tests_email_lookup_case.py`).
+  `determine-customers` matches an order's email through the same helper, and it
+  creates an account only from a usable phone, never from an email alone
+  (`orders_app/tests_determine_customers.py`).
 
 ### A NEW OWNER HAS NO PASSWORD AND NO CUSTOMER ACCESS
 `account_type=restaurant_user`, `username` = `phone_number` = the canonical
