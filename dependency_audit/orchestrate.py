@@ -46,6 +46,54 @@ def _read_json(path):
         return json.load(fh)
 
 
+def _read_evidence(path, schema):
+    """One retained evidence document, or the reason it is not one: ``(doc, None)`` or
+    ``(None, problem)``.
+
+    JSON that parses is not yet evidence. ``{}``, ``[]``, ``null``, ``0``, ``""`` and
+    ``false`` all parse, and a caller that read a falsy document as "nothing to check"
+    skipped every binding and graph check — so an evidence directory holding ``{}``
+    re-decided to within policy, exit 0 (Codex review on mugak1/Dinify-Backend#339).
+    Only a JSON object carrying the expected schema is returned; everything else comes
+    back as a problem, so an absent document always has a named reason."""
+    name = os.path.basename(path)
+    try:
+        doc = _read_json(path)
+    except (OSError, ValueError) as error:
+        return None, "%s: %s" % (name, error)
+    if not isinstance(doc, dict):
+        return None, "%s is not a JSON object" % name
+    if doc.get("schema") != schema:
+        return None, "%s: schema is not recognised" % name
+    return doc, None
+
+
+def _snapshot_problems_readable(snap):
+    """A snapshot records its own problems as a list of objects; anything else is malformed."""
+    problems = snap.get("problems")
+    return isinstance(problems, list) and all(isinstance(p, dict) for p in problems)
+
+
+def _recorded_run(g):
+    """A recorded scan names its raw output file and that file's digest, or it is malformed."""
+    run = g.get("run") if isinstance(g, dict) else None
+    if isinstance(run, dict) and isinstance(run.get("stdoutFile"), str) and isinstance(run.get("stdoutSha256"), str):
+        return run
+    return None
+
+
+def _recorded_packages(g):
+    """The scanner inventory a collection recorded, or None when it is not one."""
+    packages = g.get("packages")
+    if isinstance(packages, list) and all(
+            isinstance(p, dict) and isinstance(p.get("name"), str) and isinstance(p.get("version"), str)
+            # None is legitimate: pip_adapter records it for a package with no metadata files.
+            and (p.get("recordSha256") is None or isinstance(p.get("recordSha256"), str))
+            for p in packages):
+        return packages
+    return None
+
+
 def _write_json(path, value):
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(value, fh, indent=2, sort_keys=False, default=sorted)
@@ -274,14 +322,15 @@ def audit(root, evidence_dir, now, runner=spawn_runner, install_scanner=default_
     if not os.path.exists(snap_path):
         incomplete.append({"code": "no_snapshot", "detail": "no inventory snapshot was taken after installation — run `snapshot` first"})
     else:
-        try:
-            snap = _read_json(snap_path)
-        except (OSError, ValueError) as error:
-            incomplete.append({"code": "snapshot_unreadable", "detail": str(error)})
-        if snap is not None and snap.get("schema") != SNAPSHOT_SCHEMA:
-            incomplete.append({"code": "snapshot_unreadable", "detail": "snapshot schema is not recognised"})
-        for pr in (snap or {}).get("problems") or []:
-            incomplete.append({"code": "snapshot_%s" % pr.get("code"), "detail": pr.get("detail")})
+        doc, problem = _read_evidence(snap_path, SNAPSHOT_SCHEMA)
+        if problem:
+            incomplete.append({"code": "snapshot_unreadable", "detail": problem})
+        elif not _snapshot_problems_readable(doc):
+            incomplete.append({"code": "snapshot_unreadable", "detail": "snapshot.json: problems is not a list of problems"})
+        else:
+            snap = doc
+            for pr in snap["problems"]:
+                incomplete.append({"code": "snapshot_%s" % pr.get("code"), "detail": pr.get("detail")})
 
     workdir = tempfile.mkdtemp(prefix="dependency-audit-")
     try:
@@ -351,33 +400,38 @@ def reevaluate(root, evidence_dir, now, runner=spawn_runner, python=None, env_fa
     incomplete, findings = [], []
     policy, problems = load_policy(root)
     incomplete += problems
-    collection = snap = None
-    try:
-        collection = _read_json(os.path.join(evidence_dir, "collection.json"))
-        snap = _read_json(os.path.join(evidence_dir, "snapshot.json"))
-    except (OSError, ValueError) as error:
-        incomplete.append({"code": "evidence_unreadable", "detail": str(error)})
-    if collection and snap and policy:
-        if collection.get("schema") != COLLECTION_SCHEMA:
-            incomplete.append({"code": "evidence_unreadable", "detail": "collection schema is not recognised"})
+    documents = {}
+    for name, schema in (("collection.json", COLLECTION_SCHEMA), ("snapshot.json", SNAPSHOT_SCHEMA)):
+        documents[name], problem = _read_evidence(os.path.join(evidence_dir, name), schema)
+        if problem:
+            incomplete.append({"code": "evidence_unreadable", "detail": problem})
+    collection, snap = documents["collection.json"], documents["snapshot.json"]
+    # Every way this branch is skipped has already recorded its reason: a None document
+    # (_read_evidence), or a None policy (load_policy returns one only beside its problems).
+    if collection is not None and snap is not None and policy:
         packages, cap_problems, current = capture(root, policy, python=python, runner=runner, env_facts=env_facts, revision=git_revision(root))
         incomplete += cap_problems
         for d in _binding_differences(collection.get("binding"), current):
             incomplete.append({"code": "evidence_foreign", "detail": "the evidence is not for this checkout: %s" % d})
         for d in _binding_differences(snap.get("binding"), collection.get("binding")):
             incomplete.append({"code": "evidence_foreign", "detail": "the evidence's scan is not bound to its snapshot: %s" % d})
+        graphs = collection.get("graphs") if isinstance(collection.get("graphs"), dict) else {}
         for graph in ("application", "scanner"):
-            g = (collection.get("graphs") or {}).get(graph)
+            g = graphs.get(graph)
             if not g:
                 incomplete.append({"code": "evidence_missing_graph", "detail": "%s: no scan was recorded" % graph})
                 continue
+            recorded = _recorded_run(g)
+            if recorded is None:
+                incomplete.append({"code": "evidence_unreadable", "detail": "%s: the recorded scan is malformed" % graph})
+                continue
             try:
-                with open(os.path.join(evidence_dir, g["run"]["stdoutFile"]), "r", encoding="utf-8") as fh:
+                with open(os.path.join(evidence_dir, recorded["stdoutFile"]), "r", encoding="utf-8") as fh:
                     stdout = fh.read()
             except OSError:
                 incomplete.append({"code": "evidence_unreadable", "detail": "%s: raw output missing" % graph})
                 continue
-            if pa.sha256(stdout) != g["run"]["stdoutSha256"]:
+            if pa.sha256(stdout) != recorded["stdoutSha256"]:
                 incomplete.append({"code": "evidence_tampered", "detail": "%s: the raw output is not the bytes that were recorded" % graph})
                 continue
             if graph == "application":
@@ -385,10 +439,14 @@ def reevaluate(root, evidence_dir, now, runner=spawn_runner, python=None, env_fa
                 if pa.inventory_digest(pkgs) != g.get("inventorySha256"):
                     incomplete.append({"code": "evidence_foreign", "detail": "application: the recorded scan was of a different inventory"})
             else:
-                pkgs = [dict(p, path="scanner:site-packages/%s" % p["name"]) for p in g.get("packages") or []]
+                recorded_packages = _recorded_packages(g)
+                if recorded_packages is None:
+                    incomplete.append({"code": "evidence_unreadable", "detail": "scanner: the recorded inventory is malformed"})
+                    continue
+                pkgs = [dict(p, path="scanner:site-packages/%s" % p["name"]) for p in recorded_packages]
                 if pa.inventory_digest(pkgs) != g.get("inventorySha256"):
                     incomplete.append({"code": "evidence_tampered", "detail": "scanner: the recorded inventory does not match its digest"})
-            run = dict(g["run"], stdout=stdout)
+            run = dict(recorded, stdout=stdout)
             problems, found = pa.read_report(graph, run, pkgs)
             incomplete += problems
             findings += found

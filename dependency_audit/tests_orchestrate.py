@@ -313,3 +313,73 @@ class InvalidPolicyTests(unittest.TestCase):
                 result = p.reevaluate(runner)
                 self.assertEqual((result["outcome"], result["exitCode"]), ("incomplete", 2), label)
                 self._only_policy_invalid(result["reasons"], label)
+
+
+class MalformedEvidenceTests(unittest.TestCase):
+    """Retained evidence that is not a document is incomplete, never clean.
+
+    Codex review on mugak1/Dinify-Backend#339: evidence that PARSES is not yet evidence.
+    ``reevaluate`` guarded on truthy documents, so a collection.json or snapshot.json holding
+    ``{}``, ``[]``, ``null``, ``0``, ``""`` or ``false`` skipped every binding and graph
+    check and re-decided to within policy, exit 0 — a clean verdict about evidence that does
+    not exist — and a non-empty list raised AttributeError."""
+
+    SHAPES = {
+        "an empty object": {}, "an empty list": [], "null": None, "zero": 0, "an empty string": "",
+        "false": False, "a list": [1, 2], "an object with another schema": {"schema": "dinify.dependency-audit.something-else/v1"},
+    }
+
+    def _prepared(self):
+        p = Project()
+        self.addCleanup(p.cleanup)
+        runner = Runner()
+        p.snapshot(runner)
+        self.assertEqual(p.audit(runner)["outcome"], "within_policy")
+        return p, runner
+
+    def _write(self, p, name, value):
+        with open(os.path.join(p.evidence, name), "w", encoding="utf-8") as fh:
+            json.dump(value, fh)
+
+    def test_REGRESSION_re_deciding_a_collection_or_snapshot_that_is_not_a_document_is_incomplete(self):
+        for label, value in self.SHAPES.items():
+            for name in ("collection.json", "snapshot.json"):
+                with self.subTest(label=label, file=name):
+                    p, runner = self._prepared()
+                    self._write(p, name, value)
+                    r = p.reevaluate(runner)
+                    self.assertEqual((r["outcome"], r["exitCode"]), ("incomplete", 2), r["reasons"])
+                    self.assertTrue(any(x["code"] == "evidence_unreadable" and x["detail"].startswith(name) for x in r["reasons"]), r["reasons"])
+
+    def test_REGRESSION_a_malformed_graph_record_is_incomplete_not_a_crash(self):
+        def graphs_list(c): c["graphs"] = []
+        def graph_string(c): c["graphs"]["application"] = "recorded"
+        def run_empty(c): c["graphs"]["application"]["run"] = {}
+        def run_string(c): c["graphs"]["scanner"]["run"] = "recorded"
+        def packages_junk(c): c["graphs"]["scanner"]["packages"] = [1]
+        def packages_missing(c): c["graphs"]["scanner"].pop("packages")
+        for mutate in (graphs_list, graph_string, run_empty, run_string, packages_junk, packages_missing):
+            with self.subTest(mutate.__name__):
+                p, runner = self._prepared()
+                c = json.loads(p.read("collection.json"))
+                mutate(c)
+                self._write(p, "collection.json", c)
+                r = p.reevaluate(runner)
+                self.assertEqual((r["outcome"], r["exitCode"]), ("incomplete", 2), r["reasons"])
+
+    def test_REGRESSION_the_audit_refuses_a_snapshot_that_is_not_a_document_and_scans_nothing(self):
+        shapes = dict(self.SHAPES, **{"problems that are not a list": "problems-string", "a problem that is not an object": "problems-null"})
+        for label, value in shapes.items():
+            with self.subTest(label):
+                p = Project()
+                self.addCleanup(p.cleanup)
+                runner = Runner()
+                p.snapshot(runner)
+                good = json.loads(p.read("snapshot.json"))
+                doc = dict(good, problems="none") if value == "problems-string" else dict(good, problems=[None]) if value == "problems-null" else value
+                self._write(p, "snapshot.json", doc)
+                runner = Runner()
+                r = p.audit(runner)
+                self.assertEqual((r["outcome"], r["exitCode"]), ("incomplete", 2), r["reasons"])
+                self.assertIn("snapshot_unreadable", [x["code"] for x in r["reasons"]])
+                self.assertFalse([c for c in runner.calls if c[0].endswith("pip-audit")], "nothing is scanned")
