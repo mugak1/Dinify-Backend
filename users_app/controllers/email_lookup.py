@@ -4,7 +4,8 @@ The account an email address names, when the address may be typed in any capital
 Registration (``self_register``) and admin onboarding (``onboarding_creation``) store an
 email lower-cased, while a profile edit (``self_update_user_profile``) stores it exactly
 as typed. So an address can reach a lookup in different capitals from the ones it was
-stored in, and ``login`` and ``reset_password._resolve_user`` both resolve through here.
+stored in, and ``login``, ``reset_password._resolve_user`` and the
+``determine-customers`` command all resolve through here.
 """
 from users_app.models import User
 

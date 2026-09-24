@@ -7,6 +7,7 @@ from orders_app.models import Order
 from orders_app.controllers.test_orders import counted_orders_q
 from finance_app.models import DinifyTransaction
 from users_app.models import User
+from users_app.controllers.email_lookup import get_user_by_email
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from dinify_backend.configss.string_definitions import TransactionType_OrderPayment
 
@@ -64,23 +65,26 @@ class Command(BaseCommand):
 
         if customer_email is not None:
             try:
-                user = User.objects.get(email=customer_email.strip())
+                # The same resolution login and password reset use: the address as
+                # typed first, then lower-cased if exactly one account holds it, since
+                # registration stores emails lower-cased and the order may not.
+                user = get_user_by_email(customer_email.strip())
                 return user
             except User.DoesNotExist:
                 user_email = customer_email.strip()
             except Exception as error:
                 print(f"Error matching customer based on email: {error}")
 
-        # create the user
-        username = user_phone if user_phone is not None else user_email
-        if username is None:
-            # No usable phone or email to key the new user on — do not create a
-            # row with a null phone_number/username (the column is NOT NULL).
+        # create the user — from a usable phone only, never from an email alone. A
+        # restaurant user's phone is required at every write site (users_app/models.py)
+        # and is its identity; an email is contact detail, carried on the new account
+        # when there is one, never the thing an account is created from.
+        if user_phone is None:
             return None
         user = User.objects.create(
             phone_number=user_phone,
             email=user_email,
-            username=username,
+            username=user_phone,
             country=restaurant_country
         )
         user.set_password(str(random.randint(100000, 999999)))
