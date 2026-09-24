@@ -2,10 +2,17 @@
 Set or clear a restaurant's platform-owned TEST CLASSIFICATION, with an audit trail.
 
 ``Restaurant.is_test`` marks a tenant that exists for Dinify's own testing or
-demonstration rather than to trade. It decides whether that tenant's orders count as
-commerce at all — ``Order.is_test`` is derived from it under the order-admission
-advisory lock — so flipping it moves a restaurant into or out of every revenue
-figure. Migration 0057 added the column with NO backfill and, in particular, no
+demonstration rather than to trade. Orders placed while it is set are FLAGGED as test
+orders — ``Order.is_test`` is derived from it under the order-admission advisory lock —
+and flagged is all: a test restaurant can do everything a live restaurant can, and its
+flagged orders count in its own figures, can be reviewed and are matched to customers.
+What the flag decides is what happens once the restaurant is REAL — its flagged orders
+are then PRACTICE orders and leave its figures (``orders_app.controllers.test_orders``),
+so flipping it back to real takes the orders it took as a test restaurant out of its
+numbers — and whether Dinify's OWN portfolio and financial figures count the
+restaurant at all: the Admin spec (§11, §16) leaves test restaurants out of them. Those
+figures are not built yet, and they are Dinify's numbers, never the restaurant's.
+Migration 0057 added the column with NO backfill and, in particular, no
 name-based heuristic: a restaurant is not a test tenant because its name looks like
 one. Deciding that a given tenant IS one is a commercial judgement a human makes.
 
@@ -19,7 +26,8 @@ THREE PROPERTIES IT EXISTS TO GUARANTEE:
 
   UUID-ONLY TARGETING. The target is an immutable primary key, never a name. Name
   matching is exactly how the wrong tenant gets flagged, and the failure is silent:
-  the orders keep working, they just stop being revenue. There is deliberately no
+  the orders keep working, they are just flagged test — and they leave the real
+  restaurant's figures as soon as the mistake is corrected. There is deliberately no
   ``--restaurant-name``, no fuzzy match, no ``.first()``, and no bulk mode — one
   invocation, one row.
 
@@ -50,10 +58,12 @@ soft-delete flag. A test asserts that column set exactly, rather than trusting a
 list of fields somebody remembered to worry about.
 
 Above all it does NOT rewrite history: existing ``Order.is_test`` rows are left
-exactly as they are. Classification governs how FUTURE orders are derived, at
+exactly as they are. Classification governs how FUTURE orders are flagged, at
 admission time; retro-labelling orders that were placed under a different
 classification would silently restate past revenue, which is a separate decision
-needing its own reasoning and its own migration.
+needing its own reasoning and its own migration. (Whether an already-flagged order
+COUNTS follows the restaurant's current classification — see
+``orders_app.controllers.test_orders`` — which is a reading rule, not a rewrite.)
 
 REFUSALS ARE NOT AUDITED, deliberately, and this differs from the HTTP transition
 endpoint on purpose. There, a refusal is an authenticated administrator being told no
@@ -256,8 +266,9 @@ class Command(BaseCommand):
             # a plain SELECT does not block on a row somebody else holds FOR UPDATE.
             # So without this line an admission could read the old flag, this
             # transaction could commit the new one, and the order could then be
-            # INSERTed with the obsolete classification: a rehearsal counted as
-            # revenue, or a real sale erased from it, with no error anywhere.
+            # INSERTed with the obsolete classification: a real sale flagged test,
+            # which leaves the restaurant's figures once it is real, with no error
+            # anywhere.
             # `_create_order` states that "the lock is what makes both values still
             # true at the INSERT" — that guarantee was vacuous only while nothing
             # wrote the flag, and this command is the first writer.

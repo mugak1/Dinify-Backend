@@ -5376,14 +5376,20 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   name. That operator decision is made through the audited
   `manage.py mark_restaurant_test` command — the ONLY writer of the flag (see
   Existing Management Commands); there is still no admin-plane write endpoint and no
-  Admin UI. Two consequences: it surfaces on the admin directory/detail reads, and it
-  feeds `Order.is_test` below
-- `Order.is_test` (migration `orders_app/0035`, indexed) marks an order that is
-  operationally real but commercially invisible. It is **SERVER-DERIVED, NEVER
+  Admin UI. Three consequences: it surfaces on the admin directory/detail reads; it
+  feeds `Order.is_test` below — which FLAGS a test restaurant's orders and limits
+  nothing there: **a test restaurant can do everything a live restaurant can**; and
+  Dinify's OWN portfolio and financial figures (Admin spec §11/§16 — the Home
+  portfolio summary, metrics and receivables, none built yet) are meant to leave it
+  out. That last one is about Dinify's numbers, never the restaurant's, and it is why
+  a real customer must never be classified TEST by mistake
+- `Order.is_test` (migration `orders_app/0035`, indexed) FLAGS an order as a test
+  order. The order is always operationally real, and it is commercially invisible
+  only when it is a PRACTICE order (the rule below). It is **SERVER-DERIVED, NEVER
   CLIENT-SUPPLIED**, in `_create_order`, and it is now TRUE under either of two
   independent conditions:
   1. **TENANT** — `verdict.restaurant_is_test`: the restaurant is flagged a test
-     tenant, so it never produces commerce in any lifecycle state
+     tenant, so every order it takes is flagged, in any lifecycle state
   2. **LIFECYCLE** — `not orders_are_commercial(verdict.status)`: the classic
      PRE-GO-LIVE REHEARSAL case, an order placed while still `onboarding`
   BOTH values come from the `AdmissionVerdict`, which reads `status` and `is_test` in
@@ -5393,19 +5399,45 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   flag off an earlier instance would reintroduce exactly the drift the lock was taken
   to prevent. **No extra `Restaurant` row lock was added** — the flag rides the
   existing `values_list`, so the order path's pinned query counts are unchanged.
-  There is no request field for either input and there must never be one. The governing rule: **a test order is
-  operationally real and commercially invisible** — it occupies its table, reaches
-  the kitchen board and is served/cancelled normally, but is excluded from
-  `sale_filters.sale_orders()` (the chokepoint that sales/diners/menu inherit), both
-  dashboards, `summarize_revenue`, the transactions report (via
-  `Q(order__isnull=True) | Q(order__is_test=False)`, so order-less subscription rows
-  survive), and `determine-customers` (which MINTS REAL USERS); and it cannot be
-  reviewed (`submit_review` refuses it, because review analytics aggregate on the
-  denormalised `Review.restaurant` and would never see an `is_test` filter). The
+  There is no request field for either input and there must never be one.
+  **THE FLAG IS A LABEL, AND AT A TEST RESTAURANT IT LIMITS NOTHING
+  (TEST-RESTAURANT-PARITY-00).** A test restaurant exists so somebody can check that
+  everything a live restaurant does actually works, so its orders — every one flagged
+  `is_test` by the TENANT half above — count in its own reports and dashboards, can be
+  reviewed and are matched to customers exactly like a live restaurant's. Until this
+  change every consumer filtered `is_test=False`, so none of that was true: a test
+  restaurant's orders could not be reviewed ("This order is not eligible for review.")
+  and were missing from its sales/diners/menu reports, both dashboards, the
+  transactions report and customer matching. **What IS left out is a PRACTICE ORDER**
+  — a test order at a restaurant that is NOT a test restaurant: a pre-go-live
+  rehearsal (the LIFECYCLE half), or an order from a restaurant's time as a test
+  restaurant before it was switched to real. A practice order is operationally real —
+  it occupies its table, reaches the kitchen board and is served/cancelled normally —
+  but is excluded from `sale_filters.sale_orders()` (the chokepoint that
+  sales/diners/menu inherit), both dashboards, `summarize_revenue`, the transactions
+  report (via `Q(order__isnull=True) | counted_orders_q('order__')`, so order-less
+  subscription rows survive), and `determine-customers` (which MINTS REAL USERS); and
+  it cannot be reviewed (`submit_review` refuses it, because review analytics
+  aggregate on the denormalised `Review.restaurant` and would never see an order
+  filter). **THE RULE LIVES IN ONE PLACE**, `orders_app/controllers/test_orders.py`:
+  `counted_orders_q(prefix)` for querysets — built in the POSITIVE form, joining the
+  order's restaurant inside the same statement so it adds NO query to any pinned
+  count — and `is_practice_order(order)` for one order in hand (select the restaurant
+  with it). Every consumer asks through it, and **a bare `is_test=False` filter
+  anywhere else is a defect**: it switches a test restaurant off.
+  `orders_app/tests_test_restaurant_parity.py` fails the build on one (an AST scan of
+  filter/exclude/`Q` calls, with a self-test proving it fires) and compares a test
+  and a real live restaurant consumer by consumer; against the pre-change consumers
+  12 of its 19 fail. It reads the restaurant's CURRENT classification, so switching a
+  test restaurant to real takes the orders it took as a test restaurant out of its
+  figures (they become practice orders) and switching back returns them — pinned.
+  **KNOWN EDGE**, stated rather than hidden: review READS aggregate on
+  `Review.restaurant` and never consult the order's flag, so reviews left on a test
+  restaurant's orders stay visible if it is later switched to real. The
   DELIBERATE inclusions are dashboard-v2's `_build_kds` and the OCCUPANCY queryset
-  inside `_build_tables` — live floor state, which must agree with the kitchen board;
-  note `_build_tables` is split, so its median-visit / turns / avg-ticket metrics DO
-  filter `is_test=False` (history and money). `has_completed_test_order`
+  inside `_build_tables` — live floor state, which must agree with the kitchen board,
+  and which counts practice orders too; note `_build_tables` is split, so its
+  median-visit / turns / avg-ticket metrics DO apply the rule (history and money). `has_completed_test_order`
   (`orders_app/controllers/test_orders.py`) is the queryable fact Phase-1's readiness
   checklist consumes. Accepted and documented: a rehearsal order consumes a real
   `RestaurantDailyOrderCounter` ticket number
@@ -5507,7 +5539,14 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   does not exclude an in-flight order admission, which reads `is_test` unlocked. Bidirectional and idempotent — a same-value
   rerun writes nothing and audits nothing. It does NOT rewrite history: existing
   `Order.is_test` rows are untouched, since classification governs what FUTURE orders
-  derive at admission. There is still NO admin-plane write endpoint and no Admin UI
+  derive at admission. **Classifying a restaurant TEST limits nothing** — a test
+  restaurant can do everything a live one can, and its orders are merely flagged;
+  what the classification changes is the FLAG on future orders, whether
+  already-flagged orders count follows the restaurant's CURRENT classification
+  (switching one back to real takes its test orders out of its figures — see the
+  practice-order rule under `Order.is_test`), and Dinify's own portfolio and
+  financial figures (Admin spec §11/§16, not built) are meant to leave a test
+  restaurant out. There is still NO admin-plane write endpoint and no Admin UI
   for the flag, and no restaurant has been classified with the command yet
 - `adopt_restaurant_onboarding` in `platform_admin_app/management/commands/` — the
   only writer of `legacy_adopted` onboarding provenance (the `admin_created` one is

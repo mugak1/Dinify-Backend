@@ -387,6 +387,11 @@ that is how the owner places the end-to-end rehearsal order the go-live checklis
 requires. Such an order is flagged `is_test` server-side and is excluded from all
 revenue, dashboard and diner-analytics figures; it cannot be reviewed.
 
+*Narrowed since (TEST-RESTAURANT-PARITY-00):* that exclusion now applies only at a
+restaurant that is not itself classified test. A test restaurant's orders are all
+flagged `is_test` and still count in its own figures and can be reviewed. The rule
+is in `orders_app/controllers/test_orders.py`.
+
 **Frontend action required:**
 - Diner app: surface the message as-is. No new state to handle — it is an ordinary
   400 on the existing initiate call.

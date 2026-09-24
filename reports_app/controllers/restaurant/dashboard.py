@@ -10,6 +10,7 @@ from django.db.models.functions import (
 from django.utils import timezone
 
 from orders_app.models import Order, OrderItem
+from orders_app.controllers.test_orders import counted_orders_q
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED, PRICING_VERSION_LEGACY,
 )
@@ -121,18 +122,21 @@ def generate_restaurant_dashboard_details(
     date_from = dates.get('date_from')
     date_to = dates.get('date_to')
 
-    # Pre-go-live rehearsal orders are excluded from every figure below: this whole
-    # report is commercial history. The live floor and KDS cards in dashboard-v2 are
-    # the deliberate exception — see _build_tables / _build_kds.
+    # PRACTICE orders — test orders at a real restaurant, such as a rehearsal before it
+    # went live — are excluded from every figure below: this whole report is
+    # commercial history (`counted_orders_q`). At a TEST restaurant nothing is
+    # excluded; its orders are flagged test and count exactly like a live
+    # restaurant's. The live floor and KDS cards in dashboard-v2 include every order
+    # anywhere, deliberately — see _build_tables / _build_kds.
     orders = Order.objects.filter(
+        counted_orders_q(),
         restaurant=restaurant_id,
-        is_test=False,
         time_created__gte=date_from,
         time_created__lte=date_to
     )
     order_items = OrderItem.objects.filter(
+        counted_orders_q('order__'),
         order__restaurant=restaurant_id,
-        order__is_test=False,
         order__time_created__gte=date_from,
         order__time_created__lte=date_to
     )
@@ -222,8 +226,8 @@ def generate_restaurant_dashboard_details(
 
 def summarize_revenue(restaurant_id: str):
     orders = Order.objects.filter(
+        counted_orders_q(),
         restaurant=restaurant_id,
-        is_test=False,
         payment_status=PaymentStatus_Paid
     )
     total_revenue = orders.aggregate(total_revenue=Sum('actual_cost'))['total_revenue']
@@ -421,8 +425,8 @@ def _pricing_conventions(legacy, corrected):
 
 def _build_revenue(restaurant_id, date_from, date_to, trunc_fn, bucket):
     base = Order.objects.filter(
+        counted_orders_q(),
         restaurant=restaurant_id,
-        is_test=False,
         time_created__gte=date_from,
         time_created__lte=date_to,
     )
@@ -469,7 +473,7 @@ def _build_revenue(restaurant_id, date_from, date_to, trunc_fn, bucket):
     # sums were already two queries; folding the convention counts in beside
     # them makes the disclosure below cost NOTHING — the card now runs one
     # FEWER query than before, over the same already tenant-, date- and
-    # test-filtered queryset. No second scan, no unfiltered read.
+    # practice-filtered queryset. No second scan, no unfiltered read.
     totals = paid.aggregate(
         gross=Sum('total_cost'),
         discounts=Sum('savings'),
@@ -497,10 +501,10 @@ def _build_revenue(restaurant_id, date_from, date_to, trunc_fn, bucket):
 def _build_payment_methods(restaurant_id, date_from, date_to):
     rows = (
         DinifyTransaction.objects.filter(
+            counted_orders_q('order__'),
             transaction_type=TransactionType_OrderPayment,
             transaction_status=TransactionStatus_Success,
             order__restaurant=restaurant_id,
-            order__is_test=False,
             order__time_created__gte=date_from,
             order__time_created__lte=date_to,
         )
@@ -527,8 +531,8 @@ def _build_orders(restaurant_id, date_from, date_to, trunc_fn, bucket):
     # 'pending') is excluded from 'open' below and fails 'paid', so it was counted
     # in the total while appearing in none of the four rows.
     base = _orders_placed(Order.objects.filter(
+        counted_orders_q(),
         restaurant=restaurant_id,
-        is_test=False,
         time_created__gte=date_from,
         time_created__lte=date_to,
     ))
@@ -572,8 +576,8 @@ def _build_orders(restaurant_id, date_from, date_to, trunc_fn, bucket):
 def _build_popular_items(restaurant_id, date_from, date_to):
     rows = (
         OrderItem.objects.filter(
+            counted_orders_q('order__'),
             order__restaurant=restaurant_id,
-            order__is_test=False,
             order__time_created__gte=date_from,
             order__time_created__lte=date_to,
         )
@@ -624,8 +628,8 @@ def _build_tables(restaurant_id):
 
     # Median visit duration for today's closed orders
     closed_today = Order.objects.filter(
+        counted_orders_q(),
         restaurant=restaurant_id,
-        is_test=False,
         payment_status=PaymentStatus_Paid,
         time_created__date=today,
     )
@@ -641,8 +645,8 @@ def _build_tables(restaurant_id):
     # Turns
     closed_today_count = closed_today.count()
     closed_yesterday_count = Order.objects.filter(
+        counted_orders_q(),
         restaurant=restaurant_id,
-        is_test=False,
         payment_status=PaymentStatus_Paid,
         time_created__date=yesterday,
     ).count()
@@ -658,8 +662,8 @@ def _build_tables(restaurant_id):
     # Avg ticket
     avg_today = closed_today.aggregate(v=Avg('actual_cost'))['v']
     avg_yesterday = Order.objects.filter(
+        counted_orders_q(),
         restaurant=restaurant_id,
-        is_test=False,
         payment_status=PaymentStatus_Paid,
         time_created__date=yesterday,
     ).aggregate(v=Avg('actual_cost'))['v']

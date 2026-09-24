@@ -1,13 +1,17 @@
 """
 ``manage.py mark_restaurant_test`` — the audited operator path for ``is_test``.
 
-The flag decides whether a tenant's orders count as commerce, so the tests below are
-organised around the three ways getting it wrong would hurt, rather than around the
-command's arguments:
+The flag decides whether a tenant's orders are FLAGGED as test orders. It limits
+nothing while the restaurant stays a test restaurant — a test restaurant can do
+everything a live one can (``orders_app.tests_test_restaurant_parity``) — but the
+flags decide what counts once a restaurant is real, so the tests below are organised
+around the three ways getting it wrong would hurt, rather than around the command's
+arguments:
 
   WRONG TENANT — targeting is UUID-only and exact. A name-matched or `.first()`-ed
-  target fails silently: the restaurant keeps working, it just stops being revenue.
-  Covered by the malformed / unknown / soft-deleted cases.
+  target fails silently: the restaurant keeps working, its orders are just flagged
+  test, and they leave its figures once the mistake is corrected. Covered by the
+  malformed / unknown / soft-deleted cases.
 
   UNATTRIBUTABLE — a classification nobody stands behind. The actor is validated on
   all three counts before anything is written, the reason has to be a real sentence,
@@ -420,7 +424,7 @@ class TestFlagVocabularyTests(_CommandFixture):
     def test_truthy_strings_are_not_coerced(self):
         """
         '1', 'yes', 'y' and 'on' each require a GUESS about what the operator meant,
-        and the guess decides whether a tenant's trading counts as revenue.
+        and the guess decides whether a tenant's orders are flagged test.
         """
         for value in ('1', '0', 'yes', 'no', 'y', 'n', 'on', 'off', 't', 'f'):
             with self.subTest(value=value):

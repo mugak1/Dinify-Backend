@@ -61,11 +61,16 @@ class StrictBooleanField(serializers.Field):
     DRF's ``BooleanField`` would NOT do, and the reason is specific rather than
     stylistic: it treats ``1``, ``"1"``, ``"true"``, ``"yes"`` and ``"on"`` as True
     and a matching set as False, so a client that sent a string or a number would
-    have the platform's TEST CLASSIFICATION decided by a coercion table. A real
-    restaurant misclassified as a test tenant disappears from every revenue figure —
-    ``sale_filters``, both dashboards, the transactions report — and a test tenant
-    misclassified as real contaminates all of them. That decision has to be made by
-    an operator saying so, which means the wire value has to be a boolean.
+    have the platform's TEST CLASSIFICATION decided by a coercion table. A test
+    restaurant works exactly like a live one, but its orders are FLAGGED test, and
+    those flags decide what counts once a restaurant is real: a real restaurant
+    misclassified as a test tenant has its real orders flagged, and they leave its
+    figures when the mistake is corrected; a test tenant misclassified as real mixes
+    demo orders into real ones. The classification also keeps a test restaurant out
+    of Dinify's own portfolio and financial figures (Admin spec §11/§16, not built
+    yet), so a real customer misclassified TEST would vanish from them. That
+    decision has to be made by an operator saying so, which means the wire value has
+    to be a boolean.
     """
 
     default_error_messages = {

@@ -86,11 +86,16 @@ class Restaurant(BaseModel):
     #
     #   1. Admin surfaces must make it UNMISTAKABLE (spec §16) — a test restaurant
     #      that reads as real is how an operator acts on the wrong tenant.
-    #   2. Its orders are never commerce. `Order.is_test` is derived from this flag
-    #      OR the pre-go-live rehearsal rule, so a test restaurant that happens to be
-    #      `live` still produces orders excluded from every revenue figure. That
-    #      derivation reads this column under the order-admission advisory lock —
-    #      see orders_app.controllers.services.order_admission.
+    #   2. Its orders are FLAGGED as test orders — `Order.is_test` is derived from
+    #      this flag OR the pre-go-live rehearsal rule, read under the order-admission
+    #      advisory lock (orders_app.controllers.services.order_admission) — and
+    #      flagged is all. A test restaurant can do everything a live restaurant can:
+    #      its orders count in its own reports and dashboards, can be reviewed and are
+    #      matched to customers exactly like a live restaurant's, because it exists so
+    #      somebody can check that all of that works. The flag keeps them
+    #      identifiable, and it is what takes them out of the restaurant's figures if
+    #      it is later switched to real (they become PRACTICE orders) — see
+    #      orders_app.controllers.test_orders, the one place that rule lives.
     #
     # SERVER-WRITTEN ONLY. Deliberately absent from EDIT_INFORMATION['restaurants']
     # and from SerializerPutRestaurant's field list, exactly like `status`: Secretary
@@ -103,8 +108,9 @@ class Restaurant(BaseModel):
     # (platform_admin_app.onboarding_creation, Step 2D) sets it from an explicit,
     # strictly-boolean request field — never inferred from the name, the environment or
     # the actor, and never re-stated afterwards through mark_restaurant_test, which
-    # exists to CHANGE an existing tenant's classification. Indexed because portfolio
-    # and financial figures will exclude it.
+    # exists to CHANGE an existing tenant's classification. Indexed because Dinify's
+    # own platform-wide portfolio figures (not built yet) are meant to leave test
+    # restaurants out — never the restaurant's own figures, which count everything.
     is_test = models.BooleanField(default=False, db_index=True)
 
     # dynamic configurations

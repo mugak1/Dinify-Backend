@@ -5,13 +5,16 @@ Test TENANTS and test ORDERS — the expanded ``Order.is_test`` invariant.
 either of two independent things, and the second is new:
 
     TENANT    — the restaurant itself exists for testing (``Restaurant.is_test``),
-                so nothing it produces is commerce, whatever its lifecycle state;
+                so everything it takes is flagged test, whatever its lifecycle state;
     LIFECYCLE — the order predates go-live, so it is a rehearsal.
 
-The governing rule is unchanged and still asserted by ``tests_launch_boundary``: a
-test order is operationally real and commercially invisible. What this suite adds is
-that a test restaurant which has gone ``live`` still writes test orders — the case
-the old rule got wrong, because it asked only about lifecycle state.
+What this suite pins is the CLASSIFICATION: a test restaurant which has gone
+``live`` still writes orders FLAGGED test — the case the old rule got wrong, because
+it asked only about lifecycle state. What the flag then DOES is pinned elsewhere, and
+it is deliberately little: at a test restaurant it limits nothing — its flagged orders
+count, can be reviewed and are matched to customers exactly like a live restaurant's
+(``tests_test_restaurant_parity``) — while a test order at a REAL restaurant is a
+practice order, left out of its figures (``tests_launch_boundary``).
 
 THE CONCURRENCY POINT, which is why this is not simply ``restaurant.is_test``: the
 tenant flag is read in the SAME locked query as the lifecycle status, inside
@@ -78,10 +81,11 @@ class TestTenantClassificationTests(LaunchBoundaryFixture):
         """
         The case the lifecycle-only rule got wrong.
 
-        A test restaurant that has gone live would otherwise start writing orders
-        that count as revenue — the exact outcome `Restaurant.is_test` exists to
-        prevent, and the one that would be discovered from a wrong figure rather
-        than from an error.
+        A test restaurant that has gone live would otherwise write orders nobody could
+        tell apart from real ones. The flag keeps them identifiable — for Dinify's own
+        platform-wide figures, and for the moment a test restaurant is switched to real
+        and its test orders must leave its numbers. It limits nothing while the
+        restaurant is a test restaurant (tests_test_restaurant_parity).
         """
         self._mark_test_tenant()
         self._at(RestaurantStatus_Live)

@@ -84,19 +84,29 @@ class Order(BaseModel):
         max_length=128, null=True, blank=True, db_index=True,
     )
 
-    # === the launch boundary (PR-D) ===
-    # A rehearsal order, placed by the owner while the restaurant was still
-    # `onboarding` so they could prove the flow end to end before going live.
+    # === test orders (PR-D, TEST-RESTAURANT-PARITY-00) ===
+    # A FLAG, written once when the order is created and never changed afterwards.
+    # It is true for either of two reasons:
+    #   - TENANT: the restaurant is a test restaurant (`Restaurant.is_test`), so
+    #     every order it takes is flagged, in any lifecycle state;
+    #   - LIFECYCLE: the restaurant was still `onboarding`, so the order is a
+    #     rehearsal the owner placed to prove the flow before going live.
     #
-    # OPERATIONALLY REAL, COMMERCIALLY INVISIBLE. It occupies its table, reaches the
-    # kitchen board and is served or cancelled like any other order — that is the
-    # entire point of the rehearsal — but it is excluded from every revenue,
-    # historical and diner-analytics consumer, and it cannot be reviewed.
+    # A test order is always OPERATIONALLY REAL: it occupies its table, reaches the
+    # kitchen board and is served or cancelled like any other order. What the flag
+    # changes depends on the restaurant. At a TEST restaurant it changes nothing:
+    # the orders count in its reports and dashboards, can be reviewed and are
+    # matched to customers. At a REAL restaurant a flagged order is a PRACTICE
+    # order, left out of that restaurant's figures, reviews and customer matching.
+    # That rule lives in ONE place, `orders_app.controllers.test_orders`; never
+    # filter on `is_test=False` directly.
     #
-    # SERVER-DERIVED, NEVER CLIENT-SUPPLIED: set in `_create_order` from
-    # `lifecycle_policy.orders_are_commercial(restaurant.status)`. There is no request
-    # field for it, so it cannot be spoofed in either direction — a diner cannot mark
-    # a real order as test, and an owner cannot mark a rehearsal as real.
+    # SERVER-DERIVED, NEVER CLIENT-SUPPLIED: set in `_create_order` from the
+    # admission verdict — `Restaurant.is_test` and
+    # `lifecycle_policy.orders_are_commercial(status)`, both read under the
+    # admission lock. There is no request field for it, so it cannot be spoofed in
+    # either direction — a diner cannot mark a real order as test, and an owner
+    # cannot mark a rehearsal as real.
     is_test = models.BooleanField(default=False, db_index=True)
 
     # === pricing provenance (D02) ===

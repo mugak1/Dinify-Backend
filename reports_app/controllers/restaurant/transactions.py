@@ -26,6 +26,7 @@ from django.db.models import Count, Q, Sum
 from finance_app.models import DinifyTransaction
 from finance_app.serializers import SerializerGetRestaurantTransactionListing
 from misc_app.controllers.clean_dates import clean_dates
+from orders_app.controllers.test_orders import counted_orders_q
 from dinify_backend.configss.string_definitions import (
     TransactionStatus_Success,
     TransactionStatus_Failed,
@@ -63,13 +64,15 @@ def generate_restaurant_transaction_summary(
     date_to = dates['date_to']
 
     # This report is scoped by `restaurant_id` directly rather than through the order
-    # FK, so it does NOT inherit sale_filters' test-order exclusion — it needs its own.
-    # The Q() form is load-bearing: `order` is nullable and subscription rows carry no
-    # order at all, so a bare `.exclude(order__is_test=True)` would be a join-shaped
-    # filter that silently drops them. Keep rows with no order, and order-backed rows
-    # only when the order is real.
+    # FK, so it does NOT inherit sale_filters' practice-order exclusion — it applies
+    # the same rule itself (`counted_orders_q`). The Q() form is load-bearing: `order`
+    # is nullable and subscription rows carry no order at all, so a bare
+    # `.exclude(order__is_test=True)` would be a join-shaped filter that silently
+    # drops them. Keep rows with no order, and order-backed rows unless the order is
+    # a PRACTICE order (a test order at a real restaurant) — at a TEST restaurant
+    # every row counts, exactly as it would at a live one.
     base = DinifyTransaction.objects.filter(
-        Q(order__isnull=True) | Q(order__is_test=False),
+        Q(order__isnull=True) | counted_orders_q('order__'),
         restaurant_id=restaurant_id,
         time_created__date__gte=date_from,
         time_created__date__lte=date_to,
