@@ -18,6 +18,7 @@ from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
 from misc_app.controllers.save_action_log import save_action
+from users_app.controllers.email_lookup import get_user_by_email
 from users_app.controllers.otp_manager import OtpManager
 from users_app import customer_access
 
@@ -171,7 +172,7 @@ def _resolve_user(username):
     """
     try:
         if '@' in username:
-            user = User.objects.get(email=username)
+            user = get_user_by_email(username)
         else:
             user = User.objects.get(phone_number=username)
     except User.DoesNotExist:

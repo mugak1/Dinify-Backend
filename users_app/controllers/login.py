@@ -11,6 +11,7 @@ from users_app.serializers import SerGetUserProfile
 from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.save_action_log import save_action
+from users_app.controllers.email_lookup import get_user_by_email
 from users_app.controllers.otp_manager import OtpManager
 from users_app.controllers.permissions_check import get_any_restaurant_roles
 from users_app import customer_access
@@ -41,7 +42,10 @@ def login(
     # to use for authentication
     consider_email = User.objects.filter(email=username.lower()).exists()
     if consider_email:
-        username = User.objects.get(email=username).username
+        # Not `User.objects.get(email=username)`: that asks for the address as typed
+        # while the check above asked for it lower-cased, so `Diner@Example.com`
+        # passed the check and then raised DoesNotExist, a 500 from the endpoint.
+        username = get_user_by_email(username).username
 
     t_lookup = time.monotonic()
     logger.info("login [%s]: email lookup %.3fs", username, t_lookup - t_start)
