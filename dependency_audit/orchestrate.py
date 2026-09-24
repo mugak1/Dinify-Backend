@@ -57,6 +57,14 @@ def _canonical(value):
 
 
 def load_policy(root):
+    """The committed policy, validated. Returns (policy, problems).
+
+    ``policy`` is None whenever ANY problem was recorded, not only when the file will not
+    parse. Every caller guards on a truthy policy and then indexes ``target``, ``scanner``
+    and ``records``, so handing back a dict that failed validation turns a named
+    ``policy_invalid`` into an uncaught KeyError or TypeError — an audit that crashes
+    instead of reporting itself incomplete. An invalid policy is no policy: the problems
+    carry the explanation, and the outcome is ``incomplete`` (exit 2) on every path."""
     path = os.path.join(root, "dependency_audit", "policy.json")
     try:
         policy = _read_json(path)
@@ -101,7 +109,7 @@ def load_policy(root):
             p("scanner.timeoutSeconds must be 30..900")
     if not isinstance(policy.get("records"), list):
         p("records must be a list (it may be empty)")
-    return policy, problems
+    return (None if problems else policy), problems
 
 
 def spawn_runner(command, args, cwd=None, env=None, timeout=None):

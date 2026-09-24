@@ -236,3 +236,80 @@ class ReevaluationTests(unittest.TestCase):
         r = self.p.reevaluate(self.runner)
         self.assertEqual(r["outcome"], "incomplete")
         self.assertIn("evidence_tampered", [x["code"] for x in r["reasons"]])
+
+
+class InvalidPolicyTests(unittest.TestCase):
+    """An invalid policy is incomplete on every path, never a crash.
+
+    Codex review on Dinify-Frontend#698, which found it in the npm evaluator: the loader
+    recorded ``policy_invalid`` and still returned the policy, every caller guarded on a
+    truthy policy, and ``capture`` then read ``policy["target"]["python"]`` — so a
+    parseable policy with no target, a null target or a non-object one raised out of
+    ``snapshot`` and ``reevaluate`` instead of reporting itself. An uncaught exception is
+    not one of the four outcomes."""
+
+    SHAPES = {
+        "no target": lambda p: p.pop("target"),
+        "a null target": lambda p: p.update(target=None),
+        "a target that is not an object": lambda p: p.update(target="3.12.3"),
+        "a target python that is not a string": lambda p: p.update(target={"python": 3.12}),
+        "no scanner": lambda p: p.pop("scanner"),
+        "a null scanner": lambda p: p.update(scanner=None),
+        "records that are not a list": lambda p: p.update(records={"a": 1}),
+    }
+
+    @staticmethod
+    def _break(project, mutate):
+        path = os.path.join(project.root, "dependency_audit", "policy.json")
+        with open(path, "r", encoding="utf-8") as fh:
+            policy = json.load(fh)
+        mutate(policy)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(policy, fh)
+
+    def _only_policy_invalid(self, problems, label):
+        # Exactly the named problem — not a spurious target_mismatch read off a malformed target.
+        self.assertTrue(problems, label)
+        self.assertEqual(sorted({x["code"] for x in problems}), ["policy_invalid"], "%s: %s" % (label, problems))
+
+    def _each(self):
+        for label, mutate in self.SHAPES.items():
+            p = Project()
+            self.addCleanup(p.cleanup)
+            yield label, mutate, p
+
+    def test_REGRESSION_the_snapshot_reports_it_is_still_written_and_the_audit_after_it_is_incomplete(self):
+        for label, mutate, p in self._each():
+            with self.subTest(label):
+                self._break(p, mutate)
+                ok, problems, _ = p.snapshot(Runner())
+                self.assertFalse(ok, label)
+                self._only_policy_invalid(problems, label)
+                self.assertEqual(json.loads(p.read("snapshot.json"))["problems"], problems, "%s: the evidence says why" % label)
+                runner = Runner()
+                result = p.audit(runner)
+                self.assertEqual((result["outcome"], result["exitCode"]), ("incomplete", 2), label)
+                self.assertFalse([c for c in runner.calls if c[0].endswith("pip-audit")], "%s: nothing is scanned" % label)
+
+    def test_REGRESSION_a_policy_broken_after_a_valid_snapshot_scans_nothing_and_is_incomplete(self):
+        for label, mutate, p in self._each():
+            with self.subTest(label):
+                ok, _, _ = p.snapshot(Runner())
+                self.assertTrue(ok, label)
+                self._break(p, mutate)
+                runner = Runner()
+                result = p.audit(runner)
+                self.assertEqual((result["outcome"], result["exitCode"]), ("incomplete", 2), label)
+                self._only_policy_invalid(result["reasons"], label)
+                self.assertFalse([c for c in runner.calls if c[0].endswith("pip-audit")], "%s: nothing is scanned" % label)
+
+    def test_REGRESSION_re_deciding_retained_evidence_under_an_invalid_policy_is_incomplete(self):
+        for label, mutate, p in self._each():
+            with self.subTest(label):
+                runner = Runner()
+                p.snapshot(runner)
+                self.assertEqual(p.audit(runner)["outcome"], "within_policy", label)
+                self._break(p, mutate)
+                result = p.reevaluate(runner)
+                self.assertEqual((result["outcome"], result["exitCode"]), ("incomplete", 2), label)
+                self._only_policy_invalid(result["reasons"], label)
