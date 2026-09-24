@@ -1944,7 +1944,11 @@ so keep it current when conventions change.
   `Order`, `OneToOneField` via `related_name='review_record'`,
   `db_table='reviews'`), Secretary-pattern endpoints at `api/v1/reviews/`
   (`reviews_app/urls.py`): `submit/` (diner submission, AllowAny),
-  `summary/` + `analytics/` (owner/manager analytics),
+  `summary/` + `analytics/` (owner/manager analytics — `summary/` takes the
+  dashboard's selected `from`/`to` and then counts AND lists the reviews in that
+  window over inclusive EAT days, the same bounding `analytics/` uses; with neither
+  it keeps its original contract, a rolling last 30 days plus the three newest
+  reviews of all time, and one without the other is a 400 — REVIEWS-WINDOW-00),
   `<int:review_id>/resolution/` (owner/manager mark-handled write, optional
   `resolution_note` that persists across reopen/re-resolve), and `` root
   (owner/manager retrieval). Diner `submit/` needs a table session and accepts

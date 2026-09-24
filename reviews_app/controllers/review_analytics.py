@@ -2,7 +2,8 @@
 Reviews analytics controllers (read-only, tenant-scoped).
 
 Two pure functions over the ``Review`` model:
-- ``review_summary``   -> the lean dashboard card, a fixed last-30-day window.
+- ``review_summary``   -> the lean dashboard card, over the dashboard's selected
+  date range (or, for a caller that sends none, a fixed last-30-day window).
 - ``review_analytics`` -> the windowed Overview report (dimensions, weakest
   dimension, critical queue, and a weekly/daily trend).
 
@@ -27,8 +28,9 @@ from reviews_app.controllers.submit_review import RATING_FIELDS
 from reviews_app.models import PUBLIC_RATING_THRESHOLD, Review
 from reviews_app.serializers import ReviewRestaurantReadSerializer
 
-# Fixed look-back for the dashboard card; default look-back for the Overview
-# report when the caller sends no date range.
+# Look-back for the dashboard card when the caller sends no date range (a client
+# that predates the range parameters); default look-back for the Overview report
+# when the caller sends no date range.
 SUMMARY_WINDOW_DAYS = 30
 DEFAULT_ANALYTICS_WINDOW_DAYS = 90
 # A dimension needs at least this many ratings before it can be named the
@@ -72,19 +74,54 @@ def _critical_counts(reviews):
     return critical.count(), critical.filter(resolution_status='open').count()
 
 
-def review_summary(restaurant_id):
-    """Dashboard card — fixed last-SUMMARY_WINDOW_DAYS window."""
-    cutoff = timezone.now() - timedelta(days=SUMMARY_WINDOW_DAYS)
-    windowed = Review.objects.filter(
-        restaurant=restaurant_id, created_at__gte=cutoff,
-    )
+def review_summary(restaurant_id, date_from=None, date_to=None):
+    """
+    Dashboard card: rating, count, star histogram and the newest reviews.
+
+    TWO FORMS, decided by whether the caller names a window:
+
+    * ``from`` AND ``to`` (the dashboard's selected range, ``YYYY-MM-DD``, inclusive
+      EAT days — the same bounding ``review_analytics`` uses, so the card and the
+      Reviews page count the same reviews for the same dates). EVERYTHING describes
+      that window, ``recent_reviews`` included: the card shows one set of reviews,
+      and a header reading "0 reviews" above quotes from outside the window is a
+      card contradicting itself.
+    * NEITHER (a client that predates the range parameters): the original contract,
+      unchanged — the aggregates cover a rolling last-``SUMMARY_WINDOW_DAYS`` window
+      and ``recent_reviews`` is the newest three of all time.
+
+    One without the other is a 400. The legacy default is a rolling window rather
+    than a date range, so there is no honest way to fill in the missing half.
+    """
+    if date_from is None and date_to is None:
+        cutoff = timezone.now() - timedelta(days=SUMMARY_WINDOW_DAYS)
+        windowed = Review.objects.filter(
+            restaurant=restaurant_id, created_at__gte=cutoff,
+        )
+        # Legacy form only: recent_reviews is ALL-TIME, not the rolling window.
+        recent_source = Review.objects.filter(restaurant=restaurant_id)
+    else:
+        if not date_from or not date_to:
+            return {
+                'status': 400,
+                'message': 'from and to must both be supplied, or neither',
+            }
+        cleaned = clean_dates(date_from, date_to)
+        if cleaned['status'] != 200:
+            return cleaned
+        # created_at__date__range is inclusive on both ends.
+        windowed = Review.objects.filter(
+            restaurant=restaurant_id,
+            created_at__date__range=(cleaned['date_from'], cleaned['date_to']),
+        )
+        recent_source = windowed
 
     critical_count, unresolved_critical_count = _critical_counts(windowed)
 
-    # recent_reviews is ALL-TIME (not the 30-day window): the newest three reviews,
-    # with order context joined so the card can show table/spend without an N+1.
+    # The newest three, with order context joined so the card can show table/spend
+    # without an N+1.
     recent_qs = (
-        Review.objects.filter(restaurant=restaurant_id)
+        recent_source
         .select_related('order', 'order__table')
         .order_by('-created_at')[:3]
     )

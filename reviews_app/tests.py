@@ -660,6 +660,160 @@ class ReviewSummaryEndpointTests(_ScopingTestsMixin, ReviewAnalyticsTestBase):
         self.assertEqual(data['recent_reviews'], [])
 
 
+class ReviewSummaryWindowTests(ReviewAnalyticsTestBase):
+    """
+    The dashboard card over the dashboard's SELECTED range (``from`` + ``to``).
+
+    The card used to ignore the dashboard's timeframe: the aggregates always
+    covered the last 30 days while ``recent_reviews`` was all-time, so a restaurant
+    whose reviews were two months old saw "0.0 / 0 reviews" above those same
+    reviews, whatever range was picked. The windowed form counts and lists the
+    SAME reviews, over inclusive EAT days, exactly as the Reviews page does.
+    The legacy form (no range) is pinned unchanged by ReviewSummaryEndpointTests.
+    """
+
+    def _query(self, frm, to):
+        return f'?restaurant={self.restaurant_a.id}&from={frm}&to={to}'
+
+    def _data(self, frm, to):
+        resp = self.get_summary(self.owner_a, self._query(frm, to))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return resp.json()['data']
+
+    def _local_day(self, review):
+        """The EAT calendar day a review landed on (what the window filters on)."""
+        review.refresh_from_db()
+        return timezone.localtime(review.created_at).date()
+
+    def test_THE_REGRESSION_older_reviews_count_in_a_range_that_covers_them(self):
+        # The reported case: reviews left about two months ago, dashboard set to
+        # "This year". The legacy form counts only the last 30 days.
+        self._review(days_ago=63, overall_rating=5)
+        self._review(days_ago=65, overall_rating=4)
+        today = timezone.localdate()
+
+        data = self._data((today - timedelta(days=365)).isoformat(), today.isoformat())
+        self.assertEqual(data['total_reviews'], 2)
+        self.assertEqual(data['average_rating'], '4.5')
+        self.assertEqual(data['distribution'], [
+            {'stars': 5, 'count': 1}, {'stars': 4, 'count': 1},
+            {'stars': 3, 'count': 0}, {'stars': 2, 'count': 0},
+            {'stars': 1, 'count': 0},
+        ])
+        self.assertEqual(
+            [r['overall_rating'] for r in data['recent_reviews']], [5, 4])
+
+        # CONTROL: the legacy form still reads the same rows as outside its window.
+        legacy = self.get_summary(
+            self.owner_a, f'?restaurant={self.restaurant_a.id}').json()['data']
+        self.assertEqual(legacy['total_reviews'], 0)
+        self.assertEqual(len(legacy['recent_reviews']), 2)
+
+    def test_recent_reviews_come_from_the_window_not_all_time(self):
+        # The card must not say "N reviews" about one set and quote another.
+        self._review(days_ago=2, overall_rating=1)   # newer, but after the window
+        for days_ago, rating in ((12, 5), (13, 4), (14, 3), (15, 2)):
+            self._review(days_ago=days_ago, overall_rating=rating)
+        today = timezone.localdate()
+
+        data = self._data(
+            (today - timedelta(days=20)).isoformat(),
+            (today - timedelta(days=8)).isoformat())
+        self.assertEqual(data['total_reviews'], 4)
+        # The newest three INSIDE the window, newest first; the day-2 review is not
+        # among them even though it is the newest of all.
+        self.assertEqual(
+            [r['overall_rating'] for r in data['recent_reviews']], [5, 4, 3])
+        self.assertEqual(data['critical_count'], 2)   # the 3 and the 2; not the 1
+
+    def test_both_end_days_are_inclusive(self):
+        first = self._review(days_ago=10, overall_rating=5)
+        last = self._review(days_ago=3, overall_rating=3)
+        d1, d2 = self._local_day(first), self._local_day(last)
+
+        self.assertEqual(self._data(d1.isoformat(), d2.isoformat())['total_reviews'], 2)
+        self.assertEqual(
+            self._data((d1 + timedelta(days=1)).isoformat(), d2.isoformat())['total_reviews'], 1)
+        self.assertEqual(
+            self._data(d1.isoformat(), (d2 - timedelta(days=1)).isoformat())['total_reviews'], 1)
+
+    def test_a_single_day_window_counts_that_day(self):
+        # The dashboard's default is "Today": from == to. A bound that compared the
+        # datetime column with midnight of `to` would count nothing here.
+        review = self._review(days_ago=0, overall_rating=4)
+        day = self._local_day(review).isoformat()
+
+        data = self._data(day, day)
+        self.assertEqual(data['total_reviews'], 1)
+        self.assertEqual(data['average_rating'], '4.0')
+
+    def test_a_window_with_no_reviews(self):
+        self._review(days_ago=40, overall_rating=5)
+        today = timezone.localdate()
+
+        data = self._data(today.isoformat(), today.isoformat())
+        self.assertEqual(data['total_reviews'], 0)
+        self.assertEqual(data['average_rating'], '0.0')
+        self.assertEqual(
+            data['distribution'],
+            [{'stars': s, 'count': 0} for s in range(5, 0, -1)])
+        self.assertEqual(data['recent_reviews'], [])
+
+    def test_another_restaurants_reviews_are_never_counted(self):
+        other = self.make_review(
+            self.make_order(self.restaurant_b, self.table_b), overall_rating=1)
+        mine = self._review(days_ago=0, overall_rating=5)
+        today = timezone.localdate()
+
+        data = self._data((today - timedelta(days=30)).isoformat(), today.isoformat())
+        self.assertEqual(data['total_reviews'], 1)
+        ids = [r['id'] for r in data['recent_reviews']]
+        self.assertEqual(ids, [mine.id])
+        self.assertNotIn(other.id, ids)
+
+    def test_agrees_with_the_reviews_page_for_the_same_window(self):
+        # The owner compares this card with the Reviews page, so the two must count
+        # the same reviews for the same dates.
+        for days_ago, rating in ((1, 5), (20, 4), (45, 2), (80, 5), (200, 1)):
+            self._review(days_ago=days_ago, overall_rating=rating)
+        today = timezone.localdate()
+        frm = (today - timedelta(days=90)).isoformat()
+        to = today.isoformat()
+
+        summary = self._data(frm, to)
+        analytics = self.get_analytics(
+            self.owner_a, self._query(frm, to)).json()['data']
+        for key in ('total_reviews', 'average_rating', 'distribution',
+                    'critical_count', 'unresolved_critical_count'):
+            self.assertEqual(summary[key], analytics[key], key)
+        self.assertEqual(summary['total_reviews'], 4)
+
+    def test_one_bound_without_the_other_is_400(self):
+        today = timezone.localdate().isoformat()
+        base = f'?restaurant={self.restaurant_a.id}'
+        for query in (f'&from={today}', f'&to={today}', '&from=&to='):
+            with self.subTest(query=query):
+                resp = self.get_summary(self.owner_a, base + query)
+                self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_invalid_or_inverted_dates_are_400(self):
+        today = timezone.localdate()
+        for frm, to in (('not-a-date', today.isoformat()),
+                        (today.isoformat(), '2026-02-30'),
+                        (today.isoformat(), (today - timedelta(days=1)).isoformat())):
+            with self.subTest(frm=frm, to=to):
+                resp = self.get_summary(self.owner_a, self._query(frm, to))
+                self.assertEqual(resp.status_code, 400, resp.content)
+
+    def test_the_window_does_not_widen_authority(self):
+        # A range is a filter, never a scope: the module gate still decides.
+        today = timezone.localdate().isoformat()
+        resp = self.get_summary(
+            self.outsider,
+            f'?restaurant={self.restaurant_a.id}&from={today}&to={today}')
+        self.assertEqual(resp.status_code, 403)
+
+
 class ReviewAnalyticsEndpointTests(_ScopingTestsMixin, ReviewAnalyticsTestBase):
     endpoint_url = ANALYTICS_URL
 

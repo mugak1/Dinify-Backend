@@ -49,7 +49,11 @@ class ReviewSummaryEndpoint(APIView):
         restaurant_id, error = _resolve_restaurant(request)
         if error is not None:
             return Response(error, status=error['status'])
-        response = review_summary(restaurant_id)
+        response = review_summary(
+            restaurant_id,
+            request.GET.get('from'),
+            request.GET.get('to'),
+        )
         return Response(response, status=response['status'])
 
 
