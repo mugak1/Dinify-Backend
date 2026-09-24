@@ -3100,10 +3100,19 @@ and locked, so there is nothing about it to undo.
 - **A duplicate non-blank EMAIL is refused too (409 `owner_email_already_in_use`), and
   the refusal names no account.** Email is NOT identity here and is never used to
   select an owner — but `users_app.controllers.login` and
-  `reset_password._resolve_user` both call `User.objects.get(email=...)`, so a
-  duplicate would break email login AND password reset with a **500 for both users**.
-  `update_user_profile` already refuses an email change for exactly this reason. Do
-  not let this policy mutate into "email identifies the owner".
+  `reset_password._resolve_user` both resolve an address through
+  `users_app.controllers.email_lookup.get_user_by_email`, which asks
+  `User.objects.get(email=...)` first, so a duplicate would break email login AND
+  password reset with a **500 for both users**. `update_user_profile` already refuses
+  an email change for exactly this reason. Do not let this policy mutate into "email
+  identifies the owner".
+  **THAT HELPER TAKES AN ADDRESS IN ANY CAPITALS AND CHANGES NOTHING ELSE**: it tries
+  the address as typed, and only when that names no account does it try the address
+  lower-cased, accepting it only if exactly one account holds it. Both halves are
+  load-bearing. A profile edit stores an email as typed, so lower-casing every lookup
+  would send a `Diner@Example.com` owner to the account holding `diner@example.com`.
+  And a fallback that `get()`s or `.first()`s an address several accounts share would
+  crash or pick one of them silently (pinned in `users_app/tests_email_lookup_case.py`).
 
 ### A NEW OWNER HAS NO PASSWORD AND NO CUSTOMER ACCESS
 `account_type=restaurant_user`, `username` = `phone_number` = the canonical
