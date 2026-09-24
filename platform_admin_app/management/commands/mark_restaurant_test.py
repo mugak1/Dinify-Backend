@@ -6,10 +6,13 @@ demonstration rather than to trade. Orders placed while it is set are FLAGGED as
 orders — ``Order.is_test`` is derived from it under the order-admission advisory lock —
 and flagged is all: a test restaurant can do everything a live restaurant can, and its
 flagged orders count in its own figures, can be reviewed and are matched to customers.
-What the flag decides is what happens once the restaurant is REAL: its flagged orders
+What the flag decides is what happens once the restaurant is REAL — its flagged orders
 are then PRACTICE orders and leave its figures (``orders_app.controllers.test_orders``),
 so flipping it back to real takes the orders it took as a test restaurant out of its
-numbers. Migration 0057 added the column with NO backfill and, in particular, no
+numbers — and whether Dinify's OWN portfolio and financial figures count the
+restaurant at all: the Admin spec (§11, §16) leaves test restaurants out of them. Those
+figures are not built yet, and they are Dinify's numbers, never the restaurant's.
+Migration 0057 added the column with NO backfill and, in particular, no
 name-based heuristic: a restaurant is not a test tenant because its name looks like
 one. Deciding that a given tenant IS one is a commercial judgement a human makes.
 

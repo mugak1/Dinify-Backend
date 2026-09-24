@@ -5376,15 +5376,20 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   name. That operator decision is made through the audited
   `manage.py mark_restaurant_test` command — the ONLY writer of the flag (see
   Existing Management Commands); there is still no admin-plane write endpoint and no
-  Admin UI. Two consequences: it surfaces on the admin directory/detail reads, and it
+  Admin UI. Three consequences: it surfaces on the admin directory/detail reads; it
   feeds `Order.is_test` below — which FLAGS a test restaurant's orders and limits
-  nothing there: **a test restaurant can do everything a live restaurant can**
-- `Order.is_test` (migration `orders_app/0035`, indexed) marks an order that is
-  operationally real but commercially invisible. It is **SERVER-DERIVED, NEVER
+  nothing there: **a test restaurant can do everything a live restaurant can**; and
+  Dinify's OWN portfolio and financial figures (Admin spec §11/§16 — the Home
+  portfolio summary, metrics and receivables, none built yet) are meant to leave it
+  out. That last one is about Dinify's numbers, never the restaurant's, and it is why
+  a real customer must never be classified TEST by mistake
+- `Order.is_test` (migration `orders_app/0035`, indexed) FLAGS an order as a test
+  order. The order is always operationally real, and it is commercially invisible
+  only when it is a PRACTICE order (the rule below). It is **SERVER-DERIVED, NEVER
   CLIENT-SUPPLIED**, in `_create_order`, and it is now TRUE under either of two
   independent conditions:
   1. **TENANT** — `verdict.restaurant_is_test`: the restaurant is flagged a test
-     tenant, so it never produces commerce in any lifecycle state
+     tenant, so every order it takes is flagged, in any lifecycle state
   2. **LIFECYCLE** — `not orders_are_commercial(verdict.status)`: the classic
      PRE-GO-LIVE REHEARSAL case, an order placed while still `onboarding`
   BOTH values come from the `AdmissionVerdict`, which reads `status` and `is_test` in
@@ -5536,10 +5541,12 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `Order.is_test` rows are untouched, since classification governs what FUTURE orders
   derive at admission. **Classifying a restaurant TEST limits nothing** — a test
   restaurant can do everything a live one can, and its orders are merely flagged;
-  what the classification changes is the FLAG on future orders, and whether
+  what the classification changes is the FLAG on future orders, whether
   already-flagged orders count follows the restaurant's CURRENT classification
   (switching one back to real takes its test orders out of its figures — see the
-  practice-order rule under `Order.is_test`). There is still NO admin-plane write endpoint and no Admin UI
+  practice-order rule under `Order.is_test`), and Dinify's own portfolio and
+  financial figures (Admin spec §11/§16, not built) are meant to leave a test
+  restaurant out. There is still NO admin-plane write endpoint and no Admin UI
   for the flag, and no restaurant has been classified with the command yet
 - `adopt_restaurant_onboarding` in `platform_admin_app/management/commands/` — the
   only writer of `legacy_adopted` onboarding provenance (the `admin_created` one is
