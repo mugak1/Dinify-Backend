@@ -187,12 +187,27 @@ def classify(finding):
     return "unresolved"
 
 
+def _identity(finding):
+    """Which advisory a finding IS: its own identifier plus the aliases the SCANNER reported.
+
+    A record's ``aliases`` are never part of this set. They are a claim the record makes,
+    and trusting them let a record widen what it covered: a record for advisory A that
+    listed B as an alias also covered a separate finding B at the same path, so one
+    approval excepted a second, unapproved advisory and the audit exited 0."""
+    aliases = finding.get("aliases") if isinstance(finding.get("aliases"), list) else []
+    return {finding.get("advisory"), *aliases}
+
+
 def _advisory_matches(record, finding):
-    f_aliases = finding.get("aliases") if isinstance(finding.get("aliases"), list) else []
-    r_aliases = record.get("aliases") if isinstance(record.get("aliases"), list) else []
-    return (record.get("advisory") == finding.get("advisory")
-            or record.get("advisory") in f_aliases
-            or finding.get("advisory") in r_aliases)
+    """A record names a finding only through the finding's own, scanner-reported identity."""
+    return record.get("advisory") in _identity(finding)
+
+
+def _uncorroborated_aliases(record, finding):
+    """The aliases a record claims that the scanner does not report for this finding."""
+    identity = _identity(finding)
+    aliases = record.get("aliases") if isinstance(record.get("aliases"), list) else []
+    return [a for a in aliases if a not in identity]
 
 
 def _finding_problems(finding, index):
@@ -252,6 +267,13 @@ def evaluate(incomplete=(), findings=(), records=(), now=None):
             continue
         for f in related:
             if f.get("path") not in r["paths"]:
+                continue
+            # A record describes ONE advisory as the scanner identifies it. An alias the
+            # scanner does not report is an equivalence nobody has corroborated, so the
+            # record is refused rather than read as a description of some other advisory.
+            unverified = _uncorroborated_aliases(r, f)
+            if unverified:
+                entry["problems"].append("aliases %s are not reported by the scanner for %s at %s" % (", ".join(unverified), f.get("advisory"), f.get("path")))
                 continue
             if f.get("version") != r["version"]:
                 entry["problems"].append("version %s does not match %s at %s" % (r["version"], f.get("version"), f.get("path")))

@@ -22,7 +22,7 @@ with open(os.path.join(HERE, "conformance.json"), "rb") as _fh:
 VECTORS = json.loads(BYTES.decode("utf-8"))
 
 # Pinned identically in the three repositories. Change it only with the vectors, everywhere.
-CONFORMANCE_SHA256 = "341102170ee013d39560a7a919a33bb20218526bc1c8bfedb79aa7a411d67070"
+CONFORMANCE_SHA256 = "7a9d09e3acbede18578d64ce86d5f93c361601648dcc979a68f8066b58e865bf"
 
 
 class ConformanceVectorTests(unittest.TestCase):

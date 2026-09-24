@@ -72,8 +72,10 @@ advisory answer is reused.
 
 `policy.json → records` is empty, and **nothing in this change approves anything.** The
 record schema, its refusals (expired, beyond 90 days, broadened, mismatched, stale,
-duplicated, unknown fields, no linked review) and its matching rules are those of the npm
-repositories, pinned by the shared vectors. A Python node path is
+duplicated, unknown fields, no linked review, an alias the scanner does not report) and its
+matching rules are those of the npm repositories, pinned by the shared vectors. Which
+advisories are the same is pip-audit's statement (its `id` and `aliases`), never the
+record's: a record's aliases must all be corroborated by the finding it covers. A Python node path is
 `application:site-packages/<name>` or `scanner:site-packages/<name>`.
 
 ## How it runs
