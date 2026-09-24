@@ -21,6 +21,7 @@ MESSAGES = {
 
     # reset password
     'NO_PHONE_NUMBER': 'No matching user profile found.',
+    'NO_RESET_IDENTIFIER': 'Please provide your email address or phone number.',
     'OK_PASSWORD_RESET': 'Password reset successfully. Please check your SMS or email for the new password',  # noqa
 
     # restaurant

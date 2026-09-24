@@ -6,15 +6,16 @@ THE CUSTOMER-PLANE ACCESS GATE (Step 2D.1) — one axis, one policy, one token s
 Step 2D creates a new owner with an unusable password and hands the operator an
 ``OwnerInvitation`` as the account-claim credential. The intended architecture is
 that customer access does not exist until that invitation is redeemed — but nothing
-enforced it. Generic password reset needed only a phone number:
+enforced it. Generic password reset needed only a phone number or an email address:
 
-    initiate-reset-password(phone)  ->  OTP
-    reset-password(phone, otp)      ->  set_password() + RefreshToken.for_user()
+    initiate-reset-password(identifier)  ->  OTP
+    reset-password(identifier, otp)      ->  set_password() + RefreshToken.for_user()
 
-so anybody who knew the number could establish a password and take a customer
-session, leaving the platform in a state that contradicts itself: ``owner_control:
-not_established`` and ``invitation: pending``, while the account was already
-exercising owner authority over the restaurant.
+(``identifier`` is the email or phone the request names; an older client sends it as
+``phone_number``), so anybody who knew either could establish a password and take a
+customer session, leaving the platform in a state that contradicts itself:
+``owner_control: not_established`` and ``invitation: pending``, while the account was
+already exercising owner authority over the restaurant.
 
 AN UNUSABLE PASSWORD WAS NEVER THE INVARIANT. It is the thing being protected, not
 the protection: password reset exists precisely to replace one. The invariant has to
