@@ -24,9 +24,15 @@ the mechanism becomes acceptable.
 
 Usage (no DB, no Django settings required)::
 
-    python scripts/check_ambient_authority.py
+    python scripts/check_ambient_authority.py              # self-test, then the scan
+    python scripts/check_ambient_authority.py --self-test  # the self-test alone
 
-Exit 0 if clean, 1 if any violation is found.
+The default invocation always runs the self-test first, so a detector that stopped
+detecting cannot report a clean customer plane.
+
+Exit 0 complete and clean · 1 violation · 2 INCOMPLETE — a module could not be
+read or parsed, a directory could not be listed, or nothing was found; never clean ·
+3 the self-test failed, so no scan was trusted.
 """
 from __future__ import annotations
 
@@ -37,21 +43,33 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from dinify_backend.tenancy.ambient_authority import (  # noqa: E402
-    find_violations, format_violations, iter_scanned_files,
+    format_violations, scan, self_test,
 )
 
 
-def main() -> int:
-    violations = find_violations(REPO_ROOT)
-    if violations:
-        for line in format_violations(violations):
-            print(line)
-        return 1
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    status = self_test()
+    if status != 0 or '--self-test' in argv:
+        return status
 
-    scanned = sum(1 for _ in iter_scanned_files(REPO_ROOT))
+    result = scan(REPO_ROOT)
+    if result.violations:
+        for line in format_violations(result.violations):
+            print(line)
+        for line in result.incomplete:
+            print(f'  (the scan was also incomplete: {line})')
+        return 1
+    if result.incomplete:
+        print('Ambient-authority gate: INCOMPLETE — the scan did not cover what it '
+              'claims to, so this is NOT a clean result:')
+        for line in result.incomplete:
+            print(f'  {line}')
+        return 2
+
     print(
-        f'Ambient-authority gate: OK — scanned {scanned} customer-plane module(s), '
-        'no role-based platform authority.'
+        f'Ambient-authority gate: OK — analysed {len(result.files)} customer-plane '
+        'module(s) completely, no role-based platform authority.'
     )
     return 0
 

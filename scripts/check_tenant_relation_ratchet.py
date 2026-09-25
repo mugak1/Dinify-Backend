@@ -31,10 +31,17 @@ hide. Do not let this become permanent CI furniture.
 
 Usage (no DB, no Django settings needed)::
 
-    python scripts/check_tenant_relation_ratchet.py
+    python scripts/check_tenant_relation_ratchet.py              # self-test, then the check
+    python scripts/check_tenant_relation_ratchet.py --self-test  # the self-test alone
 
-Exit 0 if no additions (or bootstrap / local-skip), 1 on additions or a
-can't-read-base failure in CI.
+The default invocation always runs the pure self-test first, so a comparator that
+stopped detecting additions cannot report a clean baseline.
+
+Exit 0 compared-and-clean, or a LABELLED bootstrap / local skip (the output says
+``NO COMPARISON PERFORMED``); 1 on additions; 2 INCOMPLETE — in CI, any state in which
+nothing was compared (an unreadable base, a base that is the commit under test, a push
+with no pre-push commit, a moved baseline), and anywhere, a missing baseline file; 3 the
+self-test failed, so no comparison was trusted.
 """
 import os
 import sys
@@ -44,14 +51,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from dinify_backend.tenancy.git_ratchet import (  # noqa: E402
-    check_ratchet, in_ci, resolve_base_ref,
+    check_ratchet, in_ci, resolve_base_ref, self_test,
 )
 from dinify_backend.tenancy.ratchet import BASELINE_PATH  # noqa: E402
 
 BASELINE_REL = BASELINE_PATH.relative_to(REPO_ROOT).as_posix()
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    status = self_test()
+    if status != 0 or "--self-test" in argv:
+        return status
     base_ref = resolve_base_ref(os.environ)
     code, lines = check_ratchet(REPO_ROOT, BASELINE_REL, base_ref, in_ci())
     for line in lines:

@@ -5282,6 +5282,14 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `models.py` declares a monetary `FloatField`. It scans `models.py` files
   only — migrations are never scanned (historical money FloatFields there are
   immutable) — and matches whole underscore-tokens against monetary terms
+  (`MONEY_TOKENS`, unchanged). **Since D08 B2.3 it reads declarations with `ast`,
+  not a line regex**, which on `d4aacbd` missed three of four real spellings: a
+  parenthesised multiline assignment, an annotated assignment (`fee: float =
+  models.FloatField()`) and a same-module `from … import FloatField as X` alias. Still
+  NOT followed, deliberately: assignment aliases (`F = models.FloatField`), subclasses,
+  helper-built fields and classes merely named like the field. An unparseable or
+  unreadable `models.py`, an unlistable directory and an empty scope are INCOMPLETE
+  (exit 2), never clean
 
 ## MongoDB — Rules
 - MongoDB Atlas is currently unreachable from EC2
@@ -5837,6 +5845,33 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   not tenant isolation; the baseline count is NOT a vulnerability count. See
   `dinify_backend/tenancy/ASSURANCE.md` for the exact assurance boundary and
   `non_fk_tenant_inventory.py` for tenant refs outside DRF relations
+- **THE THREE GUARDS ABOVE ARE QUALIFIED, AND AN INCOMPLETE SCAN IS NEVER CLEAN (D08
+  B2.3).** Each CLI runs its own `--self-test` INSIDE its default invocation, before
+  the scan, so editing the `ci.yml` line cannot bypass it; the commands and step names
+  are unchanged. Shared exit contract: **0 complete and clean · 1 violation · 2
+  INCOMPLETE · 3 self-test failed**. What was reproduced on `d4aacbd` and is now closed:
+  the money guard reported `OK — scanned 0` for an empty or unlistable scope and OK for
+  an unparseable `models.py`; the ambient gate returned no violations for an
+  unparseable module "for `django check` to report" — but `django check` never
+  imported 46 of the 244 modules it scanned (`wsgi_admin.py`, `settings_admin.py`,
+  `urls_admin.py`, `lifecycle.py`, management commands …), so a `wsgi_admin.py` that
+  reintroduced `is_dinify_admin` and failed to parse passed BOTH; and the ratchet
+  (a) compared a push with ITSELF when `GITHUB_EVENT_BEFORE` was not plumbed (it fell
+  back to `main`, which on a push is the pushed commit), (b) read a MOVED baseline
+  (file and `BASELINE_PATH` moved together, an entry added) as "bootstrap" and passed
+  in CI, and (c) crashed with a traceback when the baseline file was deleted. Now, in
+  CI, every state in which nothing was compared exits 2; a genuine bootstrap (the base
+  predates `scripts/check_tenant_relation_ratchet.py`) and a local run that cannot
+  compare still exit 0 but print `NO COMPARISON PERFORMED`; a missing baseline is
+  INCOMPLETE everywhere and ZERO debt is an empty file. The ratchet's CI refusal for an
+  unreadable base moved from exit 1 to 2 (still a failure; the oracle in
+  `tests_relation_classification.py` was corrected, not relaxed), and so did the
+  ambient test that pinned the silent syntax-error skip. `scripts/tests_guards.py`
+  (30 tests, offline, ~4 s, its own `Guard qualification tests` step before the long
+  suite) drives the REAL CLIs against disposable trees and real git repositories with a
+  LOCAL bare origin, executes the committed step text under the runner's shell, and runs
+  `verify.sh` itself with every non-guard step stubbed green. `scripts/` became a
+  package only so that suite is discoverable; every guard still runs as a plain script
 - Then runs the full Django test suite — a missing migration or a model
   change without a generated migration will fail CI
 - **AND THEN THE DEPENDENCY AUDIT, inside the same `suite` leg (D08 B2.1 —
