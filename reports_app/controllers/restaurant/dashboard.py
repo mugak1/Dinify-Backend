@@ -601,7 +601,9 @@ def _build_popular_items(restaurant_id, date_from, date_to):
 
 def _build_tables(restaurant_id):
     now = timezone.now()
-    today = now.date()
+    # EAT, not UTC: the `__date` lookups below resolve in EAT, so a UTC `now.date()`
+    # is the previous day from 00:00 to 03:00 EAT and the card reports yesterday.
+    today = timezone.localdate(now)
     yesterday = today - timedelta(days=1)
 
     total = Table.objects.filter(
@@ -688,7 +690,7 @@ KDS_OVERDUE_MINUTES = 15
 
 def _build_kds(restaurant_id):
     now = timezone.now()
-    today = now.date()
+    today = timezone.localdate(now)  # EAT, for the same reason as _build_tables
 
     # Open = orders still moving through the kitchen fulfilment axis.
     # DELIBERATELY includes test orders, for the same reason as _build_tables: the
