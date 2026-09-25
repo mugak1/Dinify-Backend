@@ -192,8 +192,10 @@ CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 4. `python scripts/check_money_fields.py` — fails if a monetary model field is a `FloatField`
 5. `python scripts/check_ambient_authority.py` — fails if any customer-plane module reintroduces the retired role-based admin predicates
 6. `python scripts/check_tenant_relation_ratchet.py` — fails if the baseline of unclassified writable serializer relations grows
-7. the tenant-isolation closure gate
-8. the **full** test suite: `python -m django test --settings=dinify_backend.test_settings`
+   (each of 4–6 self-tests first and exits 2 — never clean — when its scan or comparison was incomplete)
+7. the guard qualification tests: `python -m unittest discover -t . -s scripts -p "tests_*.py"`
+8. the tenant-isolation closure gate
+9. the **full** test suite: `python -m django test --settings=dinify_backend.test_settings`
 
 **Test database:** PostgreSQL 15 in CI; `test_settings.py` falls back to SQLite in-memory locally when no `DATABASE_*` env vars are set. MongoDB is mocked with `unittest.mock.MagicMock`. `scripts/verify.sh` runs the same checks locally in the same order — run it before opening a PR.
 

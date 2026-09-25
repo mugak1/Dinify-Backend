@@ -40,6 +40,15 @@ isolation is proven." It is not. Read this before trusting the ratchet.
    event-aware (`resolve_base_ref`): a PR compares against its target branch; a
    **push compares against `github.event.before`** (the pre-push commit), not the
    already-advanced branch tip. In CI, an unreadable base **fails closed**.
+   **Since D08 B2.3, so does every other state in which nothing was compared**
+   (exit 2): a push or PR event that names no base (it used to fall back to `main`,
+   which on a push IS the pushed commit), a base that resolves to the commit under
+   test, an unreadable baseline blob, and a baseline absent at a base that already
+   had the ratchet (a MOVED baseline — it used to read as "bootstrap" and pass). A
+   genuine bootstrap (the base predates the ratchet) and a local run that cannot
+   compare still exit 0, and both say `NO COMPARISON PERFORMED`. A missing
+   working-tree baseline is INCOMPLETE everywhere; zero debt is an EMPTY file. The
+   CLI self-tests its comparator before every run (`scripts/tests_guards.py`).
 5. **A classification is well-formed.** `SameTenant` paths must resolve against the
    related model (typo catch); `GlobalRelation` needs a non-empty reason; only the
    three constrained types are permitted in `tenant_relations`.
@@ -53,7 +62,12 @@ isolation is proven." It is not. Read this before trusting the ratchet.
    plane, which owns the denylist), `*/migrations/` (immutable history) and test
    modules (which must name the strings to assert they grant nothing). Unlike the
    relation ratchet this is **not** a shrinking baseline — the tree is clean and the
-   allowlist is empty, asserted by its own meta-test.
+   allowlist is empty, asserted by its own meta-test. **A module it cannot parse or
+   read is INCOMPLETE (exit 2), never clean** (D08 B2.3) — it used to be skipped as
+   "`django check`'s to report", but `django check` never imports dozens of the
+   modules in scope (`wsgi_admin.py`, `settings_admin.py`, management commands …), so a
+   module that reintroduced the predicate and failed to parse passed both. The CLI
+   self-tests its detector before every scan.
 
 ## What is only CLASSIFIED (a conscious label — NOT a proof)
 

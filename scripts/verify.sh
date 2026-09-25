@@ -13,6 +13,10 @@
 #   4. ambient-authority gate            (fails if the customer plane reads User.roles
 #                                         for platform authority)
 #   5. tenant-relation ratchet           (fails if the tenant-relation baseline grew)
+#      — each of 3-5 runs its own self-test first, and exits 2 (INCOMPLETE, never
+#        clean) when it could not analyse its whole scope or compare its base
+#   5b. guard qualification tests        (OFFLINE — proves 3-5 fire, incl. real git
+#                                         repositories with a local bare origin)
 #   6. tenant-isolation closure gate     (focused adversarial boundary suite, fail-fast;
 #                                         includes the delegated-session auth path)
 #   7. test                              (full Django test suite)
@@ -87,6 +91,7 @@ run_step "makemigrations check" "${PYTHON}" -m django makemigrations --check --d
 run_step "money-field guard"    "${PYTHON}" scripts/check_money_fields.py
 run_step "ambient-authority gate" "${PYTHON}" scripts/check_ambient_authority.py
 run_step "tenant-relation ratchet" "${PYTHON}" scripts/check_tenant_relation_ratchet.py
+run_step "guard qualification tests (offline)" "${PYTHON}" -m unittest discover -t . -s scripts -p "tests_*.py"
 run_step "dependency-audit evaluator tests (offline)" "${PYTHON}" -m unittest discover -t . -s dependency_audit -p "tests_*.py"
 # Fail-fast adversarial tenant-isolation closure gate (TENANT-ISO-PR6A): the
 # focused boundary matrix + the deep capability / relationship / concurrency /

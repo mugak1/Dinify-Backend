@@ -45,6 +45,7 @@ from dinify_backend.tenancy.ambient_authority import (
     ALLOWLIST,
     PLATFORM_ROLE_LITERALS,
     RETIRED_NAMES,
+    UnanalysableSource,
     find_violations,
     find_violations_in_source,
     is_test_module,
@@ -183,10 +184,15 @@ class AmbientAuthorityScannerTests(SimpleTestCase):
         source = 'def add(a, b):\n    return a + b\n'
         self.assertEqual(find_violations_in_source(source, 'misc_app/util.py'), [])
 
-    def test_unparseable_source_is_not_reported(self):
-        # A syntax error is `django check`'s to report; guessing at broken source
-        # would only produce noise.
-        self.assertEqual(find_violations_in_source('def (:\n', 'x/y.py'), [])
+    def test_unparseable_source_is_refused_not_reported_clean(self):
+        # ORACLE CORRECTED (D08 B2.3). This used to assert `[]`, on the theory that a
+        # syntax error is `django check`'s to report. It is not: `django check` never
+        # imports dozens of the modules this gate scans (wsgi_admin.py, settings_admin.py,
+        # urls_admin.py, management commands, lifecycle.py ...), so a module that
+        # reintroduced the predicate AND failed to parse passed both. An unparseable
+        # module is now refused, and the scan that meets one is INCOMPLETE.
+        with self.assertRaises(UnanalysableSource):
+            find_violations_in_source('def is_dinify_admin(:\n', 'x/y.py')
 
     def test_test_modules_are_excluded(self):
         for path in ('users_app/tests.py', 'app/tests_thing.py'):

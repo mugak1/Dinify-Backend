@@ -323,6 +323,13 @@ class GuardrailNegativeTests(SimpleTestCase):
         self.assertEqual(resolve_base_ref({"GITHUB_EVENT_BEFORE": sha}), sha)
         self.assertEqual(resolve_base_ref({"GITHUB_EVENT_BEFORE": "0" * 40}), "main")
         self.assertEqual(resolve_base_ref({}), "main")
+        # D08 B2.3: when the EVENT is named, an event that has a base but did not
+        # supply one is refused rather than silently falling back to `main` — on a
+        # push, `main` IS the pushed commit.
+        self.assertIsNone(resolve_base_ref({"GITHUB_EVENT_NAME": "push"}))
+        self.assertIsNone(resolve_base_ref({"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_BEFORE": "0" * 40}))
+        self.assertIsNone(resolve_base_ref({"GITHUB_EVENT_NAME": "pull_request"}))
+        self.assertEqual(resolve_base_ref({"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_BEFORE": sha}), sha)
         # A PR base ref wins over a push before-sha (belt and suspenders).
         self.assertEqual(
             resolve_base_ref({"GITHUB_BASE_REF": "main", "GITHUB_EVENT_BEFORE": sha}),
@@ -378,11 +385,13 @@ class RatchetGitIntegrationTests(SimpleTestCase):
 
     def test_fail_closed_in_ci_when_base_unresolvable(self):
         # No 'origin' remote + is_ci=True -> the fetch fails -> the guard must FAIL
-        # loudly, never pass-with-a-warning in CI.
+        # loudly, never pass-with-a-warning in CI. (D08 B2.3: the status is 2,
+        # INCOMPLETE — nothing was compared — where it used to share 1 with an
+        # addition; both are failures.)
         with tempfile.TemporaryDirectory() as tmp:
             repo = self._init_repo(tmp, ["A::x"])
             code, lines = check_ratchet(repo, "baseline.txt", "main", is_ci=True)
-            self.assertEqual(code, 1, "\n".join(lines))
+            self.assertEqual(code, 2, "\n".join(lines))
             self.assertTrue(any("FAIL" in line for line in lines), "\n".join(lines))
 
     def test_local_run_degrades_when_base_unresolvable(self):
@@ -408,10 +417,14 @@ class RatchetGitIntegrationTests(SimpleTestCase):
             self._write(repo, ["A::x", "A::y", "A::z"])
             self._git(repo, "commit", "-q", "-am", "sneak addition on main")
 
-            # Old behaviour — compare against the branch tip — FALSELY passes:
-            # main == HEAD, so the addition is already in the base.
-            code, _lines = check_ratchet(repo, "baseline.txt", "main", is_ci=False)
+            # Old behaviour — compare against the branch tip — FALSELY passed:
+            # main == HEAD, so the addition is already in the base. (D08 B2.3: that
+            # comparison is now recognised as a baseline compared with ITSELF — a
+            # labelled local skip here, and a refusal in CI (scripts/tests_guards.py
+            # drives that half against a real origin) — rather than an "OK".)
+            code, lines = check_ratchet(repo, "baseline.txt", "main", is_ci=False)
             self.assertEqual(code, 0)
+            self.assertIn("NO COMPARISON PERFORMED", "\n".join(lines))
 
             # Fix — compare against the pre-push parent SHA (what resolve_base_ref
             # returns for a push) — correctly FAILS and names the sneaked entry.

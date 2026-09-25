@@ -79,6 +79,10 @@ jobs:
           python -m django makemigrations --check --dry-run --settings=dinify_backend.test_settings
 
       - name: Money-field guard
+        # Each of the three guards below runs its own --self-test BEFORE its scan (inside
+        # the default invocation, so it cannot be bypassed by editing this line), and
+        # exits 1 on a violation, 2 when the scan was INCOMPLETE (never clean) and 3 when
+        # the self-test failed. See scripts/tests_guards.py.
         run: python scripts/check_money_fields.py
 
       - name: Ambient-authority gate
@@ -103,6 +107,15 @@ jobs:
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: python scripts/check_tenant_relation_ratchet.py
+
+      - name: Guard qualification tests
+        # D08 B2.3: the three guards above prove they can find what they claim to, and
+        # that an incomplete scan is never clean. Each guard's CLI already runs its own
+        # self-test before its scan; this suite drives those REAL CLIs against disposable
+        # trees and real git repositories with a LOCAL bare origin (no network), executes
+        # this file's own step text under the runner's shell, and runs verify.sh itself.
+        # Offline, no database. Before the full suite so a broken guard fails early.
+        run: python -m unittest discover -t . -s scripts -p "tests_*.py"
 
       - name: Dependency-audit evaluator tests
         # The evaluator's own regression matrix — offline and deterministic, fixtures

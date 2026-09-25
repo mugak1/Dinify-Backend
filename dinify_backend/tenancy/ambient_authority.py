@@ -43,11 +43,26 @@ SCOPE. Every ``.py`` file in the repository except:
 Unlike the tenant-relation ratchet there is no baseline to shrink: the tree is
 clean today, so the gate is a flat zero-tolerance check, and ``ALLOWLIST`` starts
 and should stay empty.
+
+AN INCOMPLETE SCAN IS NEVER CLEAN (D08 B2.3). A module that cannot be read or parsed
+is not analysed, so it cannot be called clean: it used to return no violations on the
+theory that a syntax error is ``django check``'s to report. It is not — ``django
+check`` never imported 46 of the 244 modules this gate scanned at d4aacbd (``wsgi.py``,
+``wsgi_admin.py``, ``settings_admin.py``, ``urls_admin.py``, management commands,
+``restaurants_app/controllers/lifecycle.py`` among them), so a module that reintroduced
+the retired predicate AND failed to parse passed both. Now: an unparseable or
+unreadable module, a directory that cannot be listed, and a scope with no module at
+all each make the scan INCOMPLETE, which the CLI reports and exits 2 on. Symlinked
+directories are not followed, which is not a gap: a link's target is either inside
+the tree, where the walk reaches it at its real path, or outside it, where it is not
+repository source.
 """
 from __future__ import annotations
 
 import ast
 import os
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -99,6 +114,21 @@ SELF_EXEMPT = frozenset({
 ALLOWLIST: dict[str, set[str]] = {}
 
 
+class UnanalysableSource(ValueError):
+    """A module that could not be parsed. Never read as clean."""
+
+
+class IncompleteScan(RuntimeError):
+    """The scan did not cover its whole scope; its violation list proves nothing."""
+
+
+@dataclass
+class ScanResult:
+    files: list = field(default_factory=list)       # repo-relative paths analysed
+    violations: list = field(default_factory=list)  # (relative_path, lineno, name, reason)
+    incomplete: list = field(default_factory=list)  # human-readable reasons
+
+
 def is_test_module(relative_path: str) -> bool:
     """
     Whether a repo-relative path is a test module (excluded from the scan).
@@ -112,9 +142,19 @@ def is_test_module(relative_path: str) -> bool:
     return name == 'tests.py' or name.startswith('tests_')
 
 
-def iter_scanned_files(root: Path):
-    """Yield every customer-plane ``.py`` file under *root*, as absolute paths."""
-    for dirpath, dirnames, filenames in os.walk(root):
+def iter_scanned_files(root: Path, incomplete: list | None = None, walk=os.walk):
+    """Yield every customer-plane ``.py`` file under *root*, as absolute paths.
+
+    A directory that cannot be listed is appended to ``incomplete`` rather than
+    silently skipped (``os.walk`` ignores listing errors unless told otherwise).
+    """
+    incomplete = [] if incomplete is None else incomplete
+
+    def on_error(exc):
+        where = getattr(exc, 'filename', None) or '?'
+        incomplete.append(f'could not list {where}: {exc.strerror or exc}')
+
+    for dirpath, dirnames, filenames in walk(root, onerror=on_error):
         dirnames[:] = [
             d for d in dirnames if d not in PRUNE_DIRS and not d.startswith('.')
         ]
@@ -135,14 +175,16 @@ def find_violations_in_source(source: str, relative_path: str) -> list:
     Split from the filesystem walk so the meta-test can feed it synthetic source
     and prove the gate actually fires.
 
-    A file that does not parse yields no violations: a syntax error is ``django
-    check``'s to report, and guessing at broken source would only produce noise.
+    ``source`` may be ``bytes`` (so a coding cookie and an undecodable file behave as
+    they would for the interpreter) or ``str``. A module that does not parse raises
+    ``UnanalysableSource``: it has not been analysed, so it cannot be reported clean,
+    and no other enforcing check is guaranteed to import it (see the module docstring).
     """
     allowed = ALLOWLIST.get(relative_path, set())
     try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
+        tree = ast.parse(source, filename=relative_path)
+    except (SyntaxError, ValueError) as exc:
+        raise UnanalysableSource(f'{relative_path} does not parse: {exc}') from None
 
     violations = []
 
@@ -208,15 +250,40 @@ def _matches_platform_value(node) -> bool:
     return False
 
 
-def find_violations(root: Path = REPO_ROOT) -> list:
-    """Return ``[(relative_path, lineno, name, reason)]`` across the customer plane."""
-    found = []
-    for path in sorted(iter_scanned_files(root)):
+def scan(root: Path = REPO_ROOT, walk=os.walk) -> ScanResult:
+    """Analyse the customer plane, recording anything that could not be analysed."""
+    result = ScanResult()
+    for path in sorted(iter_scanned_files(root, result.incomplete, walk=walk)):
         relative = path.relative_to(root).as_posix()
-        source = path.read_text(encoding='utf-8', errors='replace')
-        for lineno, name, reason in find_violations_in_source(source, relative):
-            found.append((relative, lineno, name, reason))
-    return found
+        result.files.append(relative)
+        try:
+            source = path.read_bytes()
+        except OSError as exc:
+            result.incomplete.append(f'{relative} could not be read: {exc.strerror or exc}')
+            continue
+        try:
+            found = find_violations_in_source(source, relative)
+        except UnanalysableSource as exc:
+            result.incomplete.append(f'{relative} could not be analysed: {exc}')
+            continue
+        for lineno, name, reason in found:
+            result.violations.append((relative, lineno, name, reason))
+    if not result.files and not result.incomplete:
+        result.incomplete.append(
+            'no customer-plane module was found — an empty scope is not a clean one')
+    return result
+
+
+def find_violations(root: Path = REPO_ROOT) -> list:
+    """Return ``[(relative_path, lineno, name, reason)]`` across the customer plane.
+
+    Raises ``IncompleteScan`` when any in-scope module could not be analysed, so a
+    caller asserting "no violations" can never be satisfied by a partial scan.
+    """
+    result = scan(root)
+    if result.incomplete:
+        raise IncompleteScan('; '.join(result.incomplete))
+    return result.violations
 
 
 def format_violations(violations) -> list:
@@ -237,3 +304,90 @@ def format_violations(violations) -> list:
         'the only way one reaches tenant data.',
     ])
     return lines
+
+
+# ---------------------------------------------------------------------------
+# Self-test: run by the CLI before every scan, so a detector that stopped
+# detecting cannot report a clean customer plane.
+# ---------------------------------------------------------------------------
+
+_LEGACY = 'dinify' + '_admin'  # assembled so this module's own source stays readable
+
+_FIRES = {
+    'an imported predicate': 'from users_app.controllers.permissions_check import is_dinify_admin\n',
+    'an aliased import': 'from x import is_dinify_admin as allowed\n',
+    'a called predicate': 'def gate(user):\n    return is_dinify_admin(user)\n',
+    'an attribute reference': 'def gate(user):\n    return permissions.is_dinify_superuser(user)\n',
+    'a retired constant': 'ROLE = DINIFY_ACCOUNT_MANAGER\n',
+    'a platform-role literal': f'ADMIN_ROLES = [{_LEGACY!r}]\n',
+    'a platform-role ORM lookup': f'q = User.objects.filter(roles__contains=[{_LEGACY!r}])\n',
+    'a substring roles lookup': "q = User.objects.filter(roles__icontains='dinify')\n",
+}
+_QUIET = {
+    'a restaurant-role ORM lookup': "q = RestaurantEmployee.objects.filter(roles__contains=['owner'])\n",
+    'unrelated source': 'def add(a, b):\n    return a + b\n',
+    'the name in prose only': '# is_dinify_admin was retired; see TENANT-AUTH-00\n',
+}
+
+
+def self_test(log=print) -> int:
+    """Return 0 when every case behaves, 3 otherwise (printing each failure)."""
+    failures = []
+    for label, source in _FIRES.items():
+        if not find_violations_in_source(source, 'some_app/module.py'):
+            failures.append(f'did not flag {label}')
+    for label, source in _QUIET.items():
+        if find_violations_in_source(source, 'some_app/module.py'):
+            failures.append(f'flagged {label}')
+    try:
+        find_violations_in_source('def is_dinify_admin(:\n', 'some_app/broken.py')
+        failures.append('an unparseable module was analysed instead of refused')
+    except UnanalysableSource:
+        pass
+    if ALLOWLIST:
+        failures.append('the allowlist is not empty')
+    for path, excluded in (('users_app/tests.py', True), ('app/tests_x.py', True),
+                           ('dinify_backend/test_settings.py', False),
+                           ('app/latest_thing.py', False)):
+        if is_test_module(path) is not excluded:
+            failures.append(f'test-module classification is wrong for {path}')
+
+    # Discovery on a real temporary tree: the documented exclusions hold, an
+    # unparseable module and an empty scope are incomplete, a listing error is reported.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for relative, text in (
+            ('some_app/views.py', _FIRES['an imported predicate']),
+            ('platform_admin_app/services.py', _FIRES['an imported predicate']),
+            ('some_app/migrations/0011_flip.py', _FIRES['a platform-role literal']),
+            ('some_app/tests_boundary.py', _FIRES['a platform-role literal']),
+            ('scripts/tool.py', _QUIET['unrelated source']),
+        ):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(text, encoding='utf-8')
+        found = scan(root)
+        if {v[0] for v in found.violations} != {'some_app/views.py'} or found.incomplete:
+            failures.append(f'discovery: expected exactly some_app/views.py, got {found}')
+        (root / 'scripts/tool.py').write_text('def (:\n', encoding='utf-8')
+        if not scan(root).incomplete:
+            failures.append('discovery: an unparseable module did not make the scan incomplete')
+        empty = root / 'nothing'
+        empty.mkdir()
+        if not scan(empty).incomplete:
+            failures.append('discovery: an empty scope was not incomplete')
+
+        def failing_walk(top, onerror=None):
+            onerror(PermissionError(13, 'Permission denied', str(Path(top) / 'locked')))
+            yield str(top), [], []
+        if not scan(root, walk=failing_walk).incomplete:
+            failures.append('discovery: a listing error was silently skipped')
+
+    if failures:
+        for line in failures:
+            log(f'  self-test FAIL: {line}')
+        log(f'Ambient-authority gate self-test: {len(failures)} case(s) failed — the '
+            'detector cannot be trusted, so no scan was run.')
+        return 3
+    log(f'Ambient-authority gate self-test: OK — {len(_FIRES)} forms flagged, '
+        f'{len(_QUIET)} controls quiet, exclusions, unparseable and empty scopes checked.')
+    return 0
