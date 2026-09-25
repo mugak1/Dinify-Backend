@@ -1,9 +1,16 @@
 name: Backend Dependency Audit
 
-# Weekly pip-audit sweep so the requirements.txt advisory-zero state can't
-# silently erode. Scheduled + manual only — NOT triggered on PRs/pushes, so it
-# never produces a PR check and can't become a required/blocking gate. A
-# failure (advisories found) fires GitHub's scheduled-workflow notification.
+# A SCHEDULED RE-SCAN of main, using the SAME evaluator and policy as the required
+# check. Since D08 B2.1 the audit is enforced inside every `suite` leg of ci.yml, and
+# therefore inside the required `test` aggregator, on every pull request and every push
+# to main. This workflow exists because advisories are published between merges.
+#
+# It is not a required check and it authorizes nothing: deploy-uat.yml triggers on the
+# workflow named "Backend CI" and its manual path re-verifies a successful ci.yml run by
+# path, so a green run of THIS workflow cannot stand in for complete validation. It
+# audits a disposable CI environment built the way ci.yml builds one — NOT the live UAT
+# venv, which this repository never observes. A failure fires GitHub's
+# scheduled-workflow notification.
 on:
   schedule:
     - cron: '30 6 * * 1'   # Mondays 06:30 UTC (09:30 EAT)
@@ -24,10 +31,22 @@ jobs:
           # changed in the same PR as the box's venv rebuild.
           python-version: '3.12.3'
 
-      - name: Install pip-audit
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pip-audit
+          pip install -r requirements.txt
 
-      - name: Audit dependencies
-        run: pip-audit -r requirements.txt
+      - name: Dependency audit — snapshot the installed inventory
+        run: python -m dependency_audit snapshot
+
+      - name: Dependency audit — scan and enforce the policy
+        run: python -m dependency_audit self-test && python -m dependency_audit audit
+
+      - name: Retain the dependency-audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dependency_audit/evidence/
+          if-no-files-found: warn
+          retention-days: 30
