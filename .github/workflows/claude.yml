@@ -1,0 +1,69 @@
+name: Claude Code
+
+# NO OIDC IN THIS WORKFLOW, DELIBERATELY — and here it matters most.
+# deploy-uat.yml reaches AWS by exchanging a GitHub OIDC token for
+# `dinify-github-deploy-role`. Comment and issue events run from the default
+# branch, so an OIDC token minted in this job would carry this repository's
+# `refs/heads/main` identity, and nothing recorded here says the role's trust
+# policy also pins the workflow file. The action installs third-party npm code
+# inside the job, so the job must not be able to mint one: only deploy-uat.yml's
+# `deploy` job holds `id-token: write`. The action is handed the job's own
+# GITHUB_TOKEN instead of exchanging OIDC for the Claude app's token.
+# Consequences: Claude posts as github-actions[bot], and commits it pushes with
+# this token do not start CI on their own (GitHub does not trigger workflows from
+# GITHUB_TOKEN pushes), so push again or re-run CI before merging its work. The
+# token can push to any branch that is not protected, so keep `main` protected;
+# deploy-uat.yml only deploys a commit that a Backend CI run on main passed.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    # `opened` only: `assigned` re-ran an existing @claude mention on every
+    # (re)assignment, and an issue created with an assignee fired twice.
+    types: [opened]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    # Human mentions only. A bot comment that merely quotes "@claude" would
+    # otherwise start a run that the action then refuses, because it rejects
+    # non-human actors by default.
+    if: |
+      (github.event_name == 'issue_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && github.event.review.user.type != 'Bot' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && github.event.issue.user.type != 'Bot' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # branches and commits Claude makes, via GITHUB_TOKEN
+      pull-requests: write
+      issues: write
+      actions: read # Required for Claude to read CI results on PRs
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790 # v1.0.235
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+
+          # This is an optional setting that allows Claude to read CI results on PRs
+          additional_permissions: |
+            actions: read
+
+          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
+          # prompt: 'Update the pull request description to include a summary of changes.'
+
+          # Optional: Add claude_args to customize behavior and configuration
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
+          # claude_args: '--allowed-tools Bash(gh pr *)'
