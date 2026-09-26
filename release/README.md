@@ -1,15 +1,17 @@
-# Backend release candidate — D08 B2.5
+# Backend release candidate — D08 B2.5, and its preflight — D08 B2.6
 
 **One retained candidate whose exact source and complete Python dependency files are the
 ones its identified CI run validated and audited, and an independent proof that those
 retained inputs alone rebuild the environment.** This directory is the producer, the
-consumer and the rules both apply.
+consumer, the preflight (B2.6 — see [The preflight](#the-preflight-d08-b26)) and the
+rules they apply.
 
 It does **not** deploy anything. `deploy-uat.yml` is untouched: it still checks out the
 commit on the box and runs `pip install -q -r requirements.txt` into the shared serving
 venv, so **the live host has not acquired the guarantee this candidate carries** (a test
-pins that statement, so it cannot quietly become false). Connecting promotion to the
-candidate is later B2 work.
+pins that statement, so it cannot quietly become false). The preflight does not change
+that either: it runs beside the live deploy, a red preflight does not stop it, and it
+cannot protect it. Connecting promotion to the candidate and a received preflight is B3.
 
 ## What is certified
 
@@ -142,10 +144,274 @@ The reconstruction report is retained as `backend-reconstruction-<run>-<attempt>
 original record and its timestamps are never rewritten. `test` now requires **both** the
 leg and the reconstruction; a skipped reconstruction is not success.
 
+## The preflight (D08 B2.6)
+
+**Given one exact retained candidate: establish from outside it that its CI run certified
+it, ask the advisory question again now over exactly the inventory it retains, and leave a
+small, time-limited result that a later installer can check for itself.** It deploys
+nothing, observes no host and changes nothing. Every result it writes says
+`deploymentAuthorized: false`. A passing preflight is a statement about evidence at a
+recorded time. It is **not** production readiness.
+
+`release/preflight.py`, three commands, run by `.github/workflows/preflight.yml`:
+
+| command | token | what it does |
+|---|---|---|
+| `preflight facts` | read | Resolves the request, reads the certification facts from the GitHub API and downloads the candidate and reconstruction zips **by artifact id**, as bytes, unopened. |
+| `preflight assess` | none | Selects again from those facts, admits each zip by the listing's digest, verifies the candidate, binds the reconstruction, then queries advisories now and decides under the trusted policy. Writes the result. |
+| `preflight verify` | none | The receiving side. Its own facts, the result from the evaluation run's own listing, the decision reproduced from the raw output. |
+
+### Certification is read from GitHub, never from the candidate
+
+A record's `promotable: true` is eligibility metadata, and the candidate is uploaded by the
+`suite` leg **before** `reconstruct` and `test` run. So the preflight requires all of the
+following from the API:
+
+- **The workflow.** It must be the one whose path is `.github/workflows/ci.yml`, by
+  workflow id and path, never display name.
+- **The run.** A completed, successful push to `main` for the exact commit. The run's
+  repository and head repository must be `mugak1/Dinify-Backend`.
+- **Ancestry.** The commit is on `main` (compare: `ahead` or `identical`, with merge base
+  equal to the commit), and its tree is the git tree the API states.
+- **The jobs.** The selected attempt's own job listing is complete. It holds
+  `suite (3.12.3)`, `reconstruct` and `test` exactly once each, all completed
+  successfully, all carrying that attempt, run and commit. `REQUIRED_JOBS` is held equal
+  to the job names in the committed `ci.yml` by a test.
+- **The artifacts.** The run's artifact listing is complete. It holds exactly one
+  unexpired `backend-candidate-<run>-<attempt>` and exactly one
+  `backend-reconstruction-<run>-<attempt>` of that attempt, each with an id, a
+  `sha256:` digest, a size and the run's head commit. A non-promotable candidate name for
+  that attempt is a contradiction and is refused.
+
+**Partial re-runs cannot mix attempts.** "Re-run failed jobs" produces an attempt whose
+listing carries jobs from the earlier attempt. Any job not run by the selected attempt is
+`certification_mixed_attempt`. The fix is to re-run **all** jobs, so one attempt carries
+the candidate and every check that judged it.
+
+**Selection.** Automatic runs use the triggering run and attempt and nothing else. Manual
+runs take an exact commit, and optionally a run and attempt:
+
+- no run given: the only successful push-to-main `ci.yml` run for that commit is used;
+  more than one is `certification_ambiguous`;
+- a run without an attempt: that run's latest attempt is used.
+
+The request comes from the event through the environment and is validated. Nothing
+event-derived is interpolated into a script.
+
+### The bytes are the certified bytes
+
+Each zip is admitted only if its sha256 is the listing's digest, **before** anything is
+extracted. The member rules are then applied: no absolute or escaping paths, links,
+devices, encryption or duplicates, and bounded sizes. Extraction uses `O_EXCL|O_NOFOLLOW`
+into an empty directory.
+
+The candidate then goes through the B2.5 consumer's `verify`, with the expected commit,
+tree, run, attempt, event, ref, artifact name and workflow path taken **from the
+selection**. Nothing in it executes: no candidate module is imported and no installer,
+script or hook runs.
+
+The reconstruction report must be the one file `reconstruction.json` and must say
+verified, with no problems and a started application. It must be bound to exactly this
+record's sha256, artifact, commit, tree, run and attempt, and to this record's
+environment digest.
+
+### The fresh query
+
+**The application inventory is the RETAINED one.** It is the exact `name==version` set in
+the candidate's certification snapshot. It is refused unless its B2.1 inventory digest
+equals the record's `environment.auditInventorySha256`. It is classified by the
+**trusted** scope rule and queried with the pinned pip-audit as exact pins:
+`--no-deps --disable-pip --strict`. Nothing is installed, resolved or built. The
+environment certification installed is not re-observed (those bytes are gone), and the
+result says `observation: retained-inventory` rather than implying otherwise.
+
+**The scanner comes from the trusted checkout.** It is installed now from
+`dependency_audit/scanner-requirements.txt`, hash-pinned, from the verifier's own
+checkout. Its inventory is checked against the pins, queried like the application's
+(`observation: installed-now`), and inspected again after its scan.
+
+**Isolation.** Every process on the scanner path gets the B2.1 scrubbed environment plus
+`PIP_CONFIG_FILE=/dev/null`, because `--isolated` alone still reads the global and site
+`pip.conf` (measured below). It also runs without the runner's step-output files,
+`*_TOKEN` or `ACTIONS_*`. A test plants a `pip.conf` with a `find-links` and a dead proxy:
+the B2.1 CI install is still steered by it, and this bootstrap is not.
+
+**No earlier answer.** Each graph gets a fresh, empty `--cache-dir` that is removed
+afterwards.
+
+**Real timestamps.** Each graph records the actual start and finish of its query. The CLI
+has no clock override and no scanner override.
+
+**THE TRUSTED POLICY DECIDES.** The decision is `dependency_audit/policy.json` from the
+verifier's own checkout, identified by the sha256 of its bytes. It is never the policy
+inside the candidate. The candidate's original audit is still verified by the consumer, as
+**history**: it stays in the result under `candidate.originalAudit`, labelled, never
+rewritten or re-dated. A certification-time exception that has lapsed, or that the trusted
+policy no longer carries, does not survive into the fresh decision. An unreadable,
+partial or failed answer is `incomplete`, never clean.
+
+**Freshness.** The deadline is 24 hours from the **start of the evaluation**, which is
+earlier than the first query, so the window is never generous. Any record the decision
+applied cuts it short at that record's lapse, and a record whose lapse cannot be read gives
+no deadline at all.
+
+The trusted `release/` and `dependency_audit/` trees must equal both the evaluator
+revision's and **current main's**. A result from an evaluator that main has since moved
+past is `evaluator_not_current`, and the remedy is a new evaluation, never a refresh.
+
+### The result — `dinify.backend.preflight/1`
+
+`preflight.json` beside the raw evidence (`<graph>.inventory-requirements.txt`,
+`<graph>.scanner-stdout.txt`, `<graph>.scanner-stderr.txt` for both graphs). It binds:
+
+- the `scope` block (`kind: non-deploying preflight`, `deploymentAuthorized: false`,
+  `hostObserved: false`, `hostMutated: false`);
+- the request; repository, commit and tree;
+- the certification: workflow id and path, run, attempt, event, head branch and start, and
+  each required job's id;
+- the candidate and reconstruction artifacts by id, name, digest, size and creation time;
+- the candidate's record, archive, tree, content, wheelhouse, lock, requirements,
+  environment and audited-inventory digests, and its original audit (history);
+- the reconstruction report's sha256 and environment digest;
+- the evaluator: run, attempt, revision, trusted trees, policy sha256, scanner-requirements
+  sha256, scanner version and install, scanner inventory digest;
+- per graph: the observation kind, query start and finish, inventory and requirements
+  digests, the recorded run (argv, exit, raw output digests) and the package list;
+- the outcome, counts, headline, reasons, applied records, window and **deadline**.
+
+`decision` is `accepted` (within policy or exceptions only), `blocking`, `incomplete`, or
+`refused` (a selection, candidate or binding problem stopped it before the query). The
+result is retained as `backend-preflight-<run>-<attempt>` whatever it decided.
+
+### The receiving check — the contract for B3
+
+`preflight verify` trusts nothing it cannot reproduce. It reads its **own** facts and
+selects again. It then finds the result by name in the evaluation run's own artifact
+listing, bound to that run's head commit. The assessing job's reported id and digest are
+hints that must agree. `upload-artifact` reports its digest as bare hex while the
+listing says `sha256:<hex>`, and `listing_digest()` reads both spellings as one digest.
+Comparing them verbatim refused every valid result; Codex caught it on PR #343. A hint
+given at all must be whole: a numeric id and a digest. An empty output means the upload
+report is missing, which is `request_invalid`, never "no hint". The result zip is admitted
+by the listing's digest, and the receiving side then refuses unless all of the following
+hold:
+
+- the scope is exactly the non-deploying scope, the decision is `accepted`, and the file
+  set is exact;
+- repository, commit, tree, certifying run, attempt, jobs, workflow and both artifacts are
+  the selection's;
+- the candidate facts equal what this side derives from the candidate's bytes through the
+  consumer again, and the reconstruction report's sha256 matches;
+- the evaluator run, attempt, workflow path and revision are the evaluation run's;
+- the trusted trees are this verifier's and main's (`preflight_evaluator_changed`);
+- the policy sha256 is this side's trusted policy's (`preflight_policy_changed`);
+- the scanner requirements and version are this side's trusted pins
+  (`preflight_wrong_scanner`);
+- the raw files hash to what the result recorded (`preflight_raw_mismatch`);
+- the application query was over exactly the retained inventory, and the scanner query
+  over exactly the trusted pinned set (`preflight_wrong_inventory` / `preflight_wrong_scanner`);
+- **the decision reproduces from the raw output under this side's trusted policy**
+  (`preflight_unreproducible`);
+- **time**:
+  - every recorded time is present and ordered;
+  - the evaluation began no earlier than the evaluation run started;
+  - the decision is no later than GitHub's own record of the result's upload, and not in
+    the future;
+  - a 2-minute tolerance applies, only between the runner's clock and GitHub's;
+  - the deadline is recomputed and must equal the result's;
+  - it must be **more than 30 minutes away** (`preflight_expired`). `--margin-minutes`
+    can raise that margin, never lower it; a lower value is a usage error.
+
+It writes only bounded, validated values as outputs: commit, candidate artifact id and
+digest, environment digest and the deadline epoch. **Nothing in this repository consumes
+them yet.** The installer that must repeat this check at its own boundary is B3.
+
+### The workflow
+
+`preflight.yml` has two jobs, `assess` and `verify`. Each makes its own trusted sparse
+checkout (`release/`, `dependency_audit/`) at the workflow's own revision, persists no git
+credential, and asserts that it holds none. Top-level `permissions: {}`, and each job has
+`contents: read` and `actions: read` only.
+
+- **Deploys nothing.** There is no id-token, stored secret, AWS, SSM, S3 or deploy step,
+  and a test keeps it that way.
+- **The token reaches one step per job.** `GH_TOKEN` is in the "Read the facts" step only,
+  which runs no scanner. The assess and verify steps have no token, and assess removes
+  runner authority before anything runs.
+- **Triggers.** It runs after a successful `Backend CI` push to main (`workflow_run`),
+  or on `workflow_dispatch` with `sha`, and optional `ci_run_id` and `ci_run_attempt`.
+  A CI run that did not succeed produces a **skipped** preflight. Once an evaluation
+  begins, every refusal, blocking finding or incomplete scan is red, and the result is
+  still retained for 30 days.
+- **Bounded.** Timeouts are 30 and 20 minutes, with 900 s on the facts read.
+- **Pinned.** Every action is pinned by commit, and a test keeps it that way.
+  `checkout` v4.4.0 and `setup-python` v5.6.0 are the commits `ci.yml`'s floating `@v4`
+  and `@v5` resolve to today. `upload-artifact` is `ci.yml`'s reviewed pin.
+- **Not a gate on the live deploy.** `deploy-uat.yml` is unchanged and consumes none of
+  this. A red preflight does not stop it, and the first-merge effect of this change is
+  only that a preflight runs after the next successful main CI. Backend CI itself becomes
+  stricter only through the added tests. The release-tests step picks up
+  `tests_preflight.py` and `qualify_preflight.py`, and the qualification adds about
+  90 seconds.
+
+Exit status for `preflight assess`: **0** accepted · **1** refused or blocking · **2**
+incomplete · **64** usage. `facts` and `verify` are 0 or 1 (and 64).
+
+### Measured at delivery (2026-09-26) — what was real and what was not
+
+**Real facts.** The real public-API facts for main's certifying run `36261585225` attempt
+1 (commit `9a6a7e8`, tree `f8b9ba78`) select cleanly, with:
+- jobs `suite (3.12.3)` `108458322038`, `reconstruct` `108460588526`, `test`
+  `108460716245`;
+- candidate artifact `10912927026` (`sha256:3acbbf64…50c7`);
+- reconstruction `10912347747` (`sha256:742b1ae0…5258`).
+
+Three controls change one fact each and are refused:
+
+| change | refusal |
+|---|---|
+| reconstruct marked failed | `certification_job_not_successful` |
+| suite job carried from another attempt | `certification_mixed_attempt` |
+| truncated listing | `certification_listing_incomplete` |
+
+**That artifact's bytes could not be fetched.** GitHub redirects artifact zips to its blob
+storage, and this environment's egress policy refuses that host (403). This was not routed
+around.
+
+**A genuine local candidate of the same commit stood in for it:**
+- every suite-leg step was run for real, on setup-python's own CPython 3.12.3 build. The
+  deviations: PostgreSQL 16 instead of CI's 15, and a synthetic run id. 4,883 Django tests
+  passed;
+- it was packaged by the real producer and reconstructed by the real consumer;
+- its portable environment digest, `191df5a2…80213`, is **identical** to the one the real
+  run's reconstruction reported.
+
+**A real `preflight assess` over it (this change as the evaluator):**
+- pip-audit 2.10.1 was installed from PyPI by hash, with the isolation above;
+- real queries went to PyPI's vulnerability service: 27 retained application packages and
+  29 scanner packages, no advisories, `within_policy`;
+- about 17 seconds end to end.
+
+**A real `preflight verify` received it** and reproduced the decision. Controls on that
+same result:
+
+| change | refusal |
+|---|---|
+| received 20 minutes before its deadline | `preflight_expired` |
+| re-dated three hours and re-listed under a matching digest | `preflight_time_invalid` |
+
+**A positive control:** the same isolated scanner path asked about `django==4.2.0` gets 50
+advisories back from PyPI and blocks.
+
+**Synthetic in that run: the provenance only.** The run id `9100000001`, the artifact ids,
+the evaluation run `7100000001`, and "main" (the evaluator revision, since this branch is
+unmerged). They are written in exactly the shape `preflight facts` leaves them.
+
 ## Exit codes
 
 `python -B -m release …`: **0** accepted · **1** refused (every problem is printed with a
-stable code) · **64** usage. There is no "incomplete but OK".
+stable code) · **64** usage. There is no "incomplete but OK": `preflight assess` reports
+an incomplete scan as **2**, and it is red.
 
 ## Regenerating the lock (a reviewed change, never CI)
 
@@ -204,9 +470,12 @@ but **still reads `PIP_CONFIG_FILE`, the global `/etc/pip.conf` and a site `pip.
 Measured here: a `find-links` offered through a configuration file satisfied an install
 that `--no-index` alone should have refused. The certified install sets
 `PIP_CONFIG_FILE=/dev/null` — pip's documented switch for loading no file — and a test
-fails if it is removed. The B2.1 scanner install has the same exposure to the global file
-(`--require-hashes` still bounds it to the same hashed files); that is recorded in
-`dependency_audit/README.md`, not changed here.
+fails if it is removed. The preflight's scanner bootstrap sets it too (B2.6), and
+`qualify_preflight.py` proves the difference with real pip. It plants a site `pip.conf`
+carrying a `find-links` and a dead proxy: the unchanged B2.1 CI scanner install is steered
+by it, and the preflight's is not. The B2.1 CI scanner install keeps that exposure
+(`--require-hashes` still bounds it to the same hashed files); it is recorded in
+`dependency_audit/README.md` and left unchanged, because it is a CI scanner-policy change.
 
 ## Tests
 
@@ -217,10 +486,41 @@ environments from synthetic wheels and the standard library's bundled pip, real
 candidates, and the consumer's refusals. They are named apart so the Django runner's
 `test*.py` discovery does not run them a second time inside the full suite.
 
-## What remains (later B2)
+The preflight has one of each. `tests_preflight.py` (fast) covers:
 
-- Promotion: a deploy that installs **this** candidate's environment rather than
-  resolving `requirements.txt` on the box, with a fresh audit bound to what it promotes.
-- A served release identity for the backend (B3); until then the frontend's gate
-  refuses `peers.backend_serving_unverified`, correctly.
-- The scanner-install configuration exposure above.
+- request resolution;
+- the certification matrix: each required job failing or missing, a partial re-run
+  mixing attempts, another workflow, event, repository, commit or run, a commit not on
+  main, an incomplete listing, a missing or expired or contradictory artifact;
+- zip admission;
+- the deadline arithmetic;
+- the runner-authority and `pip.conf` isolation of the scanner's environment;
+- the workflow contract: triggers, permissions, the token boundary, commit pins, and the
+  committed step text executed for each exit status.
+
+`qualify_preflight.py` (~90 seconds) builds real candidates through the real producer and
+consumer and drives `assess` and `verify` end to end. It includes:
+
+- digest and identity substitution;
+- a tampered wheel and an unbound inventory;
+- a foreign or failed reconstruction;
+- a new advisory against an unchanged candidate;
+- scanner failures reported as incomplete;
+- every receiving refusal (time, raw output, inventory, scanner, policy, evaluator,
+  expiry, scope);
+- a candidate whose own policy and `release/preflight.py` try to decide for it;
+- the real-pip `pip.conf` proof;
+- the real CLI over a stub `gh`.
+
+Advisory answers are synthetic there. The approvals it uses are marked fixtures, never
+policy.
+
+## What remains
+
+- **B3 — promotion.** A deploy that installs **this** candidate's environment rather than
+  resolving `requirements.txt` on the box, and that repeats the preflight's receiving
+  check at its own boundary before it does. Until then `deploy-uat.yml` is the live path,
+  and nothing here protects it.
+- A served release identity for the backend (B3). Until then the frontend's gate refuses
+  `peers.backend_serving_unverified`, correctly.
+- The B2.1 CI scanner install's configuration exposure above (the preflight's is closed).

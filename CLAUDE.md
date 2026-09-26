@@ -2384,7 +2384,10 @@ so keep it current when conventions change.
   certified candidate or `release/python-lock.json`** — CI now validates an environment
   built from the lock, so the served venv and the validated one can differ in a
   transitive until promotion is connected. A direct-input change must also change the lock
-  in the same PR, or CI refuses it (`stale_lock`)
+  in the same PR, or CI refuses it (`stale_lock`). **Nor does it consume the D08 B2.6
+  preflight** (`preflight.yml`). That workflow runs beside it, off the same "Backend CI"
+  completion. A red preflight does not stop the deploy and cannot protect it. Connecting
+  the two is B3
 - The deploy is HEALTH-GATED (post-incident 2026-07-17, when a `.env` of mode
   600 `ubuntu:ubuntu` let CLI checks pass while mod_wsgi — running as
   `www-data` — died at settings import with `PermissionError`): BEFORE the
@@ -5978,6 +5981,67 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   failure (blocking, or a scan that could not complete) fires GitHub's
   scheduled-workflow notification. It used to run `pip-audit -r requirements.txt` with an
   unpinned scanner — an independent resolution, not the validated inventory
+- **A NON-DEPLOYING PREFLIGHT RE-ASKS THE ADVISORY QUESTION OVER ONE RETAINED CANDIDATE
+  (D08 B2.6 — `release/README.md` → "The preflight").** `.github/workflows/preflight.yml`
+  runs after a successful "Backend CI" push to main (`workflow_run`), or on
+  `workflow_dispatch` with an exact `sha` and an optional run and attempt. It runs three
+  commands of `release/preflight.py`:
+  - `facts` (READ TOKEN, no scanner): the run, that attempt's jobs, the artifact listing,
+    the commit, main and the trusted trees from the API; the zips BY ID, unopened.
+  - `assess` (NO TOKEN): select, admit each zip by the listing's digest, B2.5
+    consumer-verify, bind the reconstruction, query advisories now, decide.
+  - `verify` (NO TOKEN), a separate job: the receiving side.
+
+  **CERTIFICATION IS READ FROM GITHUB, NEVER FROM THE CANDIDATE.** The candidate uploads
+  before `reconstruct` and `test` run, so `promotable: true` proves nothing. The preflight
+  requires:
+  - the workflow by id AND path `ci.yml`, a completed successful push to main for the
+    exact commit, and ancestry;
+  - `suite (3.12.3)`, `reconstruct` and `test` all successful IN THE SAME ATTEMPT. A
+    partial re-run carries earlier attempts' jobs and is `certification_mixed_attempt`
+    (re-run ALL jobs). `REQUIRED_JOBS` is held equal to `ci.yml`'s names by a test;
+  - a complete artifact listing with exactly one candidate and one reconstruction of that
+    attempt, unexpired;
+  - the reconstruction report bound to that exact record. Manual runs with more than one
+    green run for the commit are `certification_ambiguous`.
+
+  **THE QUERY IS OVER THE RETAINED INVENTORY.** It uses the certification snapshot's
+  `name==version` set, bound to `record.environment.auditInventorySha256`, with
+  `--no-deps --disable-pip --strict`. Nothing is installed, resolved or built, and no
+  candidate code runs. Its other rules:
+  - the scanner is installed now from the TRUSTED hash-pinned requirements, with
+    `PIP_CONFIG_FILE=/dev/null`, a fresh cache per graph, and no runner tokens or
+    step-output files;
+  - **THE TRUSTED POLICY DECIDES**, never the candidate's. A certification-time exception
+    does not survive, and the original audit is kept as labelled history;
+  - the window is 24 hours from the evaluation's START, cut short by any applied record;
+  - a verifier or policy that main has moved past is refused, and needs a NEW evaluation;
+  - there is no clock or scanner override in the CLI.
+
+  The result is `dinify.backend.preflight/1`, and every one says
+  **`deploymentAuthorized: false`**. `verify` re-derives every fact, reproduces the
+  decision from the raw output under its own trusted policy, bounds the times by GitHub's
+  own run start and upload time (2-minute skew), and refuses anything within 30 minutes of
+  the deadline. It is the contract for B3. **Nothing consumes it yet, and `deploy-uat.yml`
+  is unchanged — the preflight cannot protect the live deploy.** Backend CI becomes
+  stricter only through the added tests (`release/tests_preflight.py`, and
+  `release/qualify_preflight.py` at ~90 s, both picked up by the existing release-tests
+  patterns). `release/testing.py::bundled_pip` also gained a fallback to
+  `/usr/share/python-wheels`, the Debian/Ubuntu ensurepip location, so the qualification
+  suites run on a system Python. CI's setup-python build already bundles pip.
+
+  **MEASURED, with the synthetic parts named.** The real public-API facts for main's run
+  `36261585225`/1 select cleanly, but the artifact's BYTES were unreachable here (egress
+  refuses GitHub's artifact blob host). So a genuine local candidate of the same commit
+  was built:
+  - every suite-leg step was run for real on setup-python's CPython 3.12.3, and 4,883
+    Django tests passed;
+  - its environment digest `191df5a2…80213` is identical to the real run's.
+
+  Then real `assess` ran (real hash-pinned scanner, real PyPI queries, 27 + 29 packages,
+  within policy, ~17 s), and real `verify` received the result. Only the GitHub
+  provenance around it was synthetic. `release/README.md` → "Measured at delivery" has
+  the identities and controls.
 
 ## Verification
 Before raising any PR, run `./scripts/verify.sh` (mirrors CI) and confirm:
