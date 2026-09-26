@@ -105,6 +105,16 @@ class TheCheckoutIsTheCommit(Repo):
             self.assertEqual(codes(self.observe(st.AFTER_VALIDATION)), ["unapproved_file"], path)
             os.remove(os.path.join(self.root, *path.split("/")))
 
+    def test_REGRESSION_a_linked_directory_is_refused_and_does_not_hide_what_is_behind_it(self):
+        outside = os.path.join(self._tmp.name, "outside")
+        tt.write(outside, "evil/__init__.py", "raise SystemExit\n")
+        os.symlink(os.path.join(outside, "evil"), os.path.join(self.root, "app", "evil"))
+        os.symlink(outside, os.path.join(self.root, "uploads"))
+        for phase in (st.BEFORE_VALIDATION, st.AFTER_VALIDATION):
+            obs = self.observe(phase)
+            self.assertEqual(codes(obs), ["unapproved_file"], phase)
+            self.assertEqual(sorted(p["detail"].split(" ")[0] for p in obs["problems"]), ["app/evil", "uploads"], phase)
+
     def test_CONTROL_the_archive_is_the_commit_not_the_working_tree(self):
         tt.write(self.root, "app/views.py", "VALUE = 'dirty'\n")
         out = os.path.join(self._tmp.name, "source.tar")

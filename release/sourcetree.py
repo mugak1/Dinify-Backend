@@ -180,6 +180,12 @@ def observe(root, phase, expected_commit=None, now=None):
         if rel_dir == ".":
             dirnames[:] = [d for d in dirnames if d != ".git"]
         dirnames.sort()
+        # os.walk does not descend into a linked directory, so it would otherwise hide
+        # everything behind the link — a package the interpreter can still import. A link
+        # is never in the commit (only regular files are supported), so it is unapproved.
+        for d in [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]:
+            dirnames.remove(d)
+            untracked.append(d if rel_dir == "." else "%s/%s" % (rel_dir.replace(os.sep, "/"), d))
         for filename in sorted(filenames):
             rel = filename if rel_dir == "." else "%s/%s" % (rel_dir.replace(os.sep, "/"), filename)
             if rel in tracked:
