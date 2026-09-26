@@ -2345,8 +2345,18 @@ so keep it current when conventions change.
   into that tree break the NEXT deploy); and SSM keeps only the FIRST 24,000
   characters of output, so the `DEPLOY-SKIP:` / `DEPLOYED-HEAD:` markers must stay
    ABOVE the pip/migrate output and pip runs `-q`. The legacy `UAT_SSH_*` secrets
-  were DELETED 2026-08-18 with the old-host teardown; no workflow references
-  `secrets.` at all — OIDC needs no stored credential
+  were DELETED 2026-08-18 with the old-host teardown; no deploy, CI or audit
+  workflow references `secrets.` — OIDC needs no stored credential. The one stored
+  secret is `CLAUDE_CODE_OAUTH_TOKEN`, read only by the two Claude workflows
+  (`claude.yml`, `@claude` mentions; `claude-code-review.yml`, an automatic review
+  when a PR is opened or marked ready). It is an Anthropic credential and grants
+  nothing in AWS. **Neither Claude workflow may hold `id-token: write`**: the action
+  installs its own npm dependencies inside the job, `claude.yml`'s comment and
+  issue events run from `refs/heads/main`, and the deploy role accepts this
+  repository's OIDC tokens. The action is handed the job's `github.token` instead,
+  so Claude posts as `github-actions[bot]` and a commit it pushes does not start
+  CI on its own. The review plugin is vendored under `.claude/review-marketplace/`
+  (README there), identical to Dinify-Frontend's and Dinify-Admin's copies
 - THE DEPLOY IS PINNED TO ONE EXACT COMMIT (PR #283, post-incident 2026-08-08,
   when a deploy run reported success while the box stayed 39 hours behind on an
   older commit — a green deploy that did not deploy). The workflow injects the
