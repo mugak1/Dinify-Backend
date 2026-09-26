@@ -1,0 +1,60 @@
+name: Claude Code Review
+
+# NO OIDC IN THIS WORKFLOW, DELIBERATELY. The stock Claude workflow grants
+# `id-token: write` so the action can exchange a GitHub OIDC token for the Claude
+# app's token. Here that would put third-party npm code (the action installs its
+# own dependencies inside the job) in a job able to mint an OIDC token, while
+# deploy-uat.yml's AWS role trusts OIDC tokens from this repository. Only
+# deploy-uat.yml's `deploy` job holds that permission. The action is handed the
+# job's own GITHUB_TOKEN instead, which needs no OIDC. Consequence: review
+# comments are posted as github-actions[bot], not claude[bot].
+
+on:
+  pull_request:
+    # Review once per PR, when it becomes reviewable — the same moments Codex
+    # reviews on. Not on every push (`synchronize`): each run is billed to the
+    # Claude plan behind CLAUDE_CODE_OAUTH_TOKEN. Ask for a fresh review with an
+    # `@claude` comment.
+    types: [opened, ready_for_review]
+
+jobs:
+  claude-review:
+    # Same-repository, human-authored, non-draft PRs only. Fork and Dependabot
+    # `pull_request` runs are not given Actions secrets (the OAuth token would
+    # be empty) and the action refuses bot actors by default, so both would
+    # only ever produce a failing check. A draft is reviewed when it is marked
+    # ready.
+    if: |
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.type != 'Bot' &&
+      !github.event.pull_request.draft
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # inline review comments, posted with GITHUB_TOKEN
+      issues: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790 # v1.0.235
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          # Vendored at a pinned upstream commit, not fetched from the moving
+          # default branch. It lives under `.claude/`, which the action replaces
+          # with the base branch's copy before installing plugins, so a PR's edits
+          # to the plugin take effect only once merged. That does not cover a PR
+          # editing this workflow itself; see .claude/review-marketplace/README.md.
+          plugin_marketplaces: './.claude/review-marketplace'
+          plugins: 'code-review@dinify-claude-plugins'
+          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          claude_args: '--allowedTools "mcp__github_inline_comment__create_inline_comment"'
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options

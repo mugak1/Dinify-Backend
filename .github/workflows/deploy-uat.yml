@@ -28,9 +28,10 @@ jobs:
     timeout-minutes: 30
     # OIDC (no inbound SSH, no stored credentials): the job mints a short-lived
     # identity token GitHub signs per-run; AWS trusts it for one narrowly-scoped
-    # role. No workflow in this repo references `secrets.` at all: OIDC needs no
+    # role. No deploy, CI or audit workflow references `secrets.`: OIDC needs no
     # stored credential. The legacy UAT_SSH_* secrets were deleted 2026-08-18
-    # with the old-host teardown.
+    # with the old-host teardown. The one stored secret, CLAUDE_CODE_OAUTH_TOKEN,
+    # is read only by the two Claude workflows, which hold no `id-token`.
     permissions:
       id-token: write
       contents: read

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "dinify-claude-plugins",
+  "version": "1.0.0",
+  "description": "Vendored subset of anthropics/claude-code@7779afb12e3635f46f56ec823979d68350ae000b: the code-review plugin only. See ../README.md.",
+  "owner": {
+    "name": "Dinify"
+  },
+  "plugins": [
+    {
+      "name": "code-review",
+      "description": "Automated code review for pull requests using multiple specialized agents with confidence-based scoring to filter false positives",
+      "version": "1.0.0",
+      "author": {
+        "name": "Boris Cherny",
+        "email": "boris@anthropic.com"
+      },
+      "source": "./plugins/code-review",
+      "category": "productivity"
+    }
+  ]
+}
