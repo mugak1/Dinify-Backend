@@ -2369,7 +2369,12 @@ so keep it current when conventions change.
 - The deploy DOES reinstall dependencies, so a `requirements.txt` change takes
   effect on the next deploy. The install runs after the checkout, before
   `migrate`; with `set -e` a failed install aborts before the Apache restart,
-  leaving the live API up on the old workers
+  leaving the live API up on the old workers. **It resolves `requirements.txt` on the box
+  (unpinned transitives, whatever pip is there) and does NOT consume the D08 B2.5
+  certified candidate or `release/python-lock.json`** — CI now validates an environment
+  built from the lock, so the served venv and the validated one can differ in a
+  transitive until promotion is connected. A direct-input change must also change the lock
+  in the same PR, or CI refuses it (`stale_lock`)
 - The deploy is HEALTH-GATED (post-incident 2026-07-17, when a `.env` of mode
   600 `ubuntu:ubuntu` let CLI checks pass while mod_wsgi — running as
   `www-data` — died at settings import with `PermissionError`): BEFORE the
@@ -5876,10 +5881,11 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   change without a generated migration will fail CI
 - **AND THEN THE DEPENDENCY AUDIT, inside the same `suite` leg (D08 B2.1 —
   `dependency_audit/README.md`), so the `test` aggregator cannot go green without it.**
-  `python -m dependency_audit snapshot` runs directly after `pip install -r
-  requirements.txt` and records THIS interpreter's installed inventory (`pip inspect`,
-  per-package RECORD digests — 27 packages on main, including the unpinned `cffi` /
-  `pycparser` transitives and the upgraded `pip`); the offline evaluator matrix runs with
+  `python -m dependency_audit snapshot` runs directly after the environment is installed
+  and records THIS interpreter's installed inventory (`pip inspect`, per-package RECORD
+  digests — 27 packages on main, including the `cffi` / `pycparser` transitives and
+  `pip`; since D08 B2.5 that environment is the certified one built from the lock, see the
+  next bullet); the offline evaluator matrix runs with
   the other gates; and `self-test && audit` runs LAST, scanning exactly that inventory as
   exact pins (`pip-audit --no-deps --disable-pip --strict`) plus the scanner's own venv
   (29 hash-pinned packages, `--require-hashes --only-binary=:all: --isolated`). The
@@ -5892,6 +5898,46 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   the body agrees. `policy.json → records` is empty — nothing is pre-approved. Evidence is
   uploaded as `dependency-audit-<python>-<run>-<attempt>`, pass or fail. It audits the CI
   environment, NOT the live UAT venv, which the deploy re-installs independently
+- **THE `suite` LEG NOW CERTIFIES A RETAINED RELEASE CANDIDATE, AND `test` REQUIRES AN
+  INDEPENDENT OFFLINE RECONSTRUCTION OF IT (D08 B2.5 — `release/README.md`).** Nothing is
+  installed from an index any more: `release/python-lock.json` is the reviewed,
+  target-specific (CPython 3.12.3 / x86_64 / glibc 2.39, `runs-on: ubuntu-24.04`),
+  hash-locked closure of `requirements.txt` — 26 application wheels plus pip 26.2.1 as a
+  SEPARATELY labelled bootstrap installer — and `requirements.txt` stays byte-unchanged as
+  the direct-input contract. The leg runs `lock check` (a changed `requirements.txt` with
+  the old lock is `stale_lock`, even a comment edit; certification never regenerates a
+  lock — `python -B -m release lock generate` is a reviewed local change), `observe` (every
+  tracked file's bytes and exec bit equal HEAD's blobs — catching `skip-worktree` edits
+  `git status` hides — and nothing untracked), `acquire` (NETWORK, the lock's exact
+  `files.pythonhosted.org` addresses, admitted on size + sha256 only), `install`
+  (OFFLINE: `venv --without-pip`, the pinned pip installs itself from its own wheel, then
+  `--isolated --no-index --require-hashes --no-deps --only-binary=:all:` under a scrubbed
+  env, `PIP_CONFIG_FILE=/dev/null` and a dead proxy, then RECONCILED: installed set ==
+  lock, `Requires-Dist` closure == the application packages, every wheel's RECORD against
+  its own bytes and every installed file against the wheel, no unowned files, `pip
+  check`), and puts that venv first on `PATH`, so the snapshot, every guard, the suites
+  and the audit run IN it. **`pip install --upgrade pip` and `pip install -r
+  requirements.txt` are gone from `ci.yml`, and the setup-python pip cache with them.**
+  After everything passes, `package` (no `if:`; re-checks `toJSON(steps)` against
+  `release/candidate.py::REQUIRED_STEPS`, which a test holds equal to the leg's step ids)
+  re-observes, re-reconciles, re-decides the audit from its raw output, exports `git
+  archive` of the commit and requires it to hash to the tree, and writes `record.json`
+  (`dinify.backend.candidate/1`, no self-digest) beside `source.tar`, `wheelhouse/` and
+  the nine audit files. Only a push to main is PROMOTABLE (`backend-candidate-<run>-<attempt>`);
+  a PR yields `backend-candidate-nonpromotable-…`; promotable means eligible to be
+  CONSIDERED later and authorizes nothing. The new `reconstruct` job (`contents: read`, no
+  credential) checks out its OWN consumer, receives the candidate as data and refuses it
+  unless identity, the tree RECOMPUTED FROM THE ARCHIVE against its own git, the lock,
+  every wheel and the re-decided audit all hold — before anything runs — then rebuilds
+  offline, requires the same portable environment digest, and starts both planes with
+  disposable settings. `test` needs `[suite, reconstruct]`; a skipped reconstruction is
+  not success. **The Django runner discovers `test*.py`, so the two heavy release suites
+  are `release/qualify_*.py`** and run in the "Release-candidate tests" step, not twice.
+  **`deploy-uat.yml` IS UNTOUCHED AND CONSUMES NONE OF THIS** — it still runs `pip install
+  -q -r requirements.txt` on the box, so the live venv has NOT acquired the candidate's
+  exact-package guarantee (a test pins that statement). Measured on the way: pip's
+  `--isolated` still reads `PIP_CONFIG_FILE` and the global/site `pip.conf`; the B2.1
+  scanner install has that exposure to the global file and is recorded, not changed
 - **`test_settings.py` sets `PASSWORD_HASHERS` to `MD5PasswordHasher`, and that is
   DELIBERATE — do not "fix" it.** Django 5.2's default `pbkdf2_sha256` runs 1,000,000
   iterations (~258ms per hash) and the suite builds fixtures per test method (159 `setUp`
@@ -5936,3 +5982,6 @@ Before raising any PR, run `./scripts/verify.sh` (mirrors CI) and confirm:
 8. Confirm no reintroduction of `clear_<field>` sentinels in PUT payloads
 9. Confirm the dependency audit passes (`verify.sh` runs it last; it needs network and
    the Python 3.12.3 target, and refuses — fails — otherwise)
+10. If `requirements.txt` changed, regenerate and REVIEW `release/python-lock.json` in
+   the same PR (`python -B -m release lock generate`, on the 3.12.3 target) —
+   `verify.sh`'s first step and CI's first release step refuse a stale lock

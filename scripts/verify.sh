@@ -31,6 +31,22 @@
 #                                         against PyPI's advisory data; a scan that
 #                                         cannot complete FAILS, it is never skipped)
 #
+# Plus the release-candidate checks (D08 B2.5, release/README.md):
+#
+#   L. release lock check                 (OFFLINE — release/python-lock.json is the
+#                                         reviewed resolution of requirements.txt; a
+#                                         changed requirements.txt with the old lock FAILS)
+#   5c. release-candidate tests           (OFFLINE — lock, source, producer and consumer
+#                                         rules; `tests_*` fast, then `qualify_*`, which
+#                                         build real virtual environments and candidates
+#                                         from synthetic wheels and the bundled pip wheel)
+#
+# CI goes further: it builds the certified environment from exactly the locked files
+# (`python -B -m release acquire` then `install`) and runs every step below IN it, then
+# packages and independently reconstructs the candidate. This script checks the
+# environment of the interpreter running it; to reproduce CI's environment locally, see
+# "Run it locally" in release/README.md.
+#
 # The audit describes the environment of the interpreter running this script. It
 # refuses (incomplete) on anything but the Python 3.12.3 validation target, because
 # a 3.11 environment's inventory is not the one CI validates.
@@ -85,6 +101,7 @@ run_step() {
 
 # Taken first, exactly as in CI, so the scan in the last step is bound to the
 # environment everything in between validated.
+run_step "release lock check (offline)" "${PYTHON}" -B -m release lock check
 run_step "dependency-audit inventory snapshot (offline)" "${PYTHON}" -m dependency_audit snapshot
 run_step "django check"         "${PYTHON}" -m django check --settings="${SETTINGS}"
 run_step "makemigrations check" "${PYTHON}" -m django makemigrations --check --dry-run --settings="${SETTINGS}"
@@ -93,6 +110,8 @@ run_step "ambient-authority gate" "${PYTHON}" scripts/check_ambient_authority.py
 run_step "tenant-relation ratchet" "${PYTHON}" scripts/check_tenant_relation_ratchet.py
 run_step "guard qualification tests (offline)" "${PYTHON}" -m unittest discover -t . -s scripts -p "tests_*.py"
 run_step "dependency-audit evaluator tests (offline)" "${PYTHON}" -m unittest discover -t . -s dependency_audit -p "tests_*.py"
+run_step "release-candidate tests (offline)" "${PYTHON}" -m unittest discover -t . -s release -p "tests_*.py"
+run_step "release-candidate qualification (offline, real environments)" "${PYTHON}" -m unittest discover -t . -s release -p "qualify_*.py"
 # Fail-fast adversarial tenant-isolation closure gate (TENANT-ISO-PR6A): the
 # focused boundary matrix + the deep capability / relationship / concurrency /
 # write-surface suites it builds on. Runs BEFORE the full suite so a broken
