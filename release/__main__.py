@@ -122,12 +122,22 @@ def cmd_interpreter(args):
 
 
 def cmd_package(args):
+    # The steps' recorded outcomes are the evidence that validation passed, so an
+    # unreadable or malformed record of them is a named refusal, never a crash (a crash
+    # also exits non-zero, but says nothing about why nothing was certified).
     outcomes = None
-    if args.step_outcomes:
-        with open(args.step_outcomes, "r", encoding="utf-8") as fh:
-            outcomes = json.load(fh)
-    elif os.environ.get("STEP_OUTCOMES"):
-        outcomes = json.loads(os.environ["STEP_OUTCOMES"])
+    try:
+        if args.step_outcomes:
+            with open(args.step_outcomes, "r", encoding="utf-8") as fh:
+                outcomes = json.load(fh)
+        elif os.environ.get("STEP_OUTCOMES"):
+            outcomes = json.loads(os.environ["STEP_OUTCOMES"])
+    except (OSError, ValueError) as error:
+        return report("PACKAGING", [{"code": "step_outcomes_unreadable", "detail": "the validation steps' recorded outcomes could not "
+                                     "be read (%s); nothing is certified without them" % type(error).__name__}], "")
+    if outcomes is not None and not isinstance(outcomes, dict):
+        return report("PACKAGING", [{"code": "step_outcomes_unreadable", "detail": "the validation steps' recorded outcomes are a %s, "
+                                     "not an object keyed by step id" % type(outcomes).__name__}], "")
     record, problems = pr.package(ROOT, args.wheelhouse, args.venv, args.evidence, args.before, args.out, now(), outcomes, local=args.local)
     if record:
         output("artifact", record["artifact"]["name"])

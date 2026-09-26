@@ -83,7 +83,9 @@ def github_context(env=None):
 def _outcomes(step_outcomes):
     """``toJSON(steps)`` (``{id: {outcome, conclusion, ...}}``) or ``{id: outcome}``."""
     out = {}
-    for key, value in (step_outcomes or {}).items():
+    if not isinstance(step_outcomes, dict):
+        return out
+    for key, value in step_outcomes.items():
         out[key] = value.get("outcome") if isinstance(value, dict) else value
     return out
 

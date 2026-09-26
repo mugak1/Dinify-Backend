@@ -326,6 +326,21 @@ class TheProducerRefusesToCertify(unittest.TestCase):
             proc, out = self.package(outcomes={"suite": outcome})
             self.assertRefused(proc, out, "required_step_not_passed")
 
+    def test_REGRESSION_unreadable_step_outcomes_are_a_named_refusal_not_a_crash(self):
+        for bad in ("{not json", "[]", '"success"'):
+            env = tt.ci_env(self.state["commit"])
+            env["STEP_OUTCOMES"] = bad
+            out = os.path.join(tempfile.mkdtemp(dir=self._tmp.name), "candidate")
+            proc = tt.package(self.state, out, env=env)
+            self.assertRefused(proc, out, "step_outcomes_unreadable")
+            self.assertNotIn("Traceback", proc.stderr, bad)
+        out = os.path.join(tempfile.mkdtemp(dir=self._tmp.name), "candidate")
+        proc = tt.cli(self.state["root"], self.state["python"], "package", "--local", "--step-outcomes", os.path.join(self._tmp.name, "absent.json"),
+                      "--wheelhouse", self.state["wheelhouse"], "--venv", self.state["venv"], "--evidence", self.state["evidence"],
+                      "--before", self.state["before"], "--out", out)
+        self.assertRefused(proc, out, "step_outcomes_unreadable")
+        self.assertNotIn("Traceback", proc.stderr)
+
     def test_REGRESSION_the_run_must_be_for_the_commit_that_was_checked_out(self):
         out = os.path.join(tempfile.mkdtemp(dir=self._tmp.name), "candidate")
         env = tt.ci_env("1" * 40)
