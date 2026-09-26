@@ -229,6 +229,17 @@ class Unpacking(unittest.TestCase):
             self.assertFalse(os.path.exists(dest), members)
 
 
+class TheDigestHasOneSpelling(unittest.TestCase):
+    def test_REGRESSION_upload_artifacts_bare_digest_and_the_listings_prefixed_one_name_one_artifact(self):
+        # actions/upload-artifact documents `artifact-digest` as bare hex; the REST listing
+        # carries `sha256:<hex>`. Comparing the two verbatim refused every valid result.
+        hexed = "ab" * 32
+        self.assertEqual(pf.listing_digest(hexed), "sha256:" + hexed)
+        self.assertEqual(pf.listing_digest("sha256:" + hexed), "sha256:" + hexed)
+        for not_a_digest in ("", None, 42, hexed[:-1], "sha256:" + hexed[:-1], "SHA256:" + hexed, "sha512:" + hexed, hexed.upper(), " " + hexed):
+            self.assertIsNone(pf.listing_digest(not_a_digest), repr(not_a_digest))
+
+
 class TimeAndEnvironment(unittest.TestCase):
     def test_CONTROL_the_window_is_24_hours_from_the_start_of_the_evaluation(self):
         self.assertEqual(pf._iso(pf.deadline_ms("2026-09-26T13:00:00.000Z", [])), "2026-09-27T13:00:00.000Z")
@@ -361,6 +372,16 @@ class TheWorkflowDeploysNothingAndHoldsTheTokenApartFromTheScanner(unittest.Test
                     for line in s["run"].splitlines():
                         if "-m release" in line:
                             self.assertIn("python -B -m release", line)
+
+    def test_CONTRACT_the_receiving_check_is_handed_the_assessing_jobs_own_upload_report(self):
+        # The hint is the upload step's own outputs, bare digest and all (listing_digest()
+        # reads that spelling); the result itself is still found in the run's listing.
+        outputs = PREFLIGHT["jobs"]["assess"]["outputs"]
+        self.assertEqual(outputs["preflight_id"], "${{ steps.retain.outputs.artifact-id }}")
+        self.assertEqual(outputs["preflight_digest"], "${{ steps.retain.outputs.artifact-digest }}")
+        receive = named("verify", "Receive")
+        self.assertEqual(receive["env"]["EXPECT_PREFLIGHT_DIGEST"], "${{ needs.assess.outputs.preflight_digest }}")
+        self.assertIn('--expect-preflight-digest "$EXPECT_PREFLIGHT_DIGEST"', receive["run"])
 
     def test_CONTRACT_the_result_is_retained_whether_accepted_or_refused_under_its_run_and_attempt(self):
         retain = named("assess", "Retain")

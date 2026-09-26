@@ -572,19 +572,52 @@ class TheCommandsRunThroughTheirOwnFacts(Fixture):
         return subprocess.run([tt.base_python(), "-B", "-m", "release", "preflight"] + list(args), cwd=self.trusted,
                               env=tt.clean_env(dict(env or {}, GITHUB_REF=cd.MAIN_REF)), capture_output=True, text=True, timeout=300)
 
-    def test_CONTROL_facts_then_verify_through_the_real_commands(self):
-        # The receiving command reads the REAL clock (it has no override), so this
-        # evaluation is dated an hour ago.
+    def fetched_evaluation(self):
+        """A real assessment, served through a stub `gh` and fetched by the real `facts`
+        command as the verify job fetches it. The receiving command reads the REAL clock (it
+        has no override), so the evaluation is dated an hour ago."""
         start = pf._iso(pf._ms(pf.now_iso()) - 3600 * 1000)
         served_facts = self.facts()
         _, out, _, _ = self.assess(served_facts, clock=tt.Clock(start=start))
-        tt.write_evaluation(served_facts, self.trusted, out, started=start[:19] + "Z", created=pf._iso(pf._ms(start) + 600 * 1000)[:19] + "Z")
+        found = tt.write_evaluation(served_facts, self.trusted, out, started=start[:19] + "Z", created=pf._iso(pf._ms(start) + 600 * 1000)[:19] + "Z")
         gh, calls, revision = self.stub_gh(served_facts)
         event = {"PREFLIGHT_EVENT": "workflow_run", "PREFLIGHT_EVENT_RUN": tt.CI_RUN, "PREFLIGHT_EVENT_ATTEMPT": "1",
                  "PREFLIGHT_EVENT_SHA": self.state["commit"], "GH_TOKEN": "read-only"}
         fetched = os.path.join(self.scratch(), "facts")
         proc = self.cli("facts", "--out", fetched, "--revision", revision, "--evaluation-run", tt.EVAL_RUN, "--evaluation-attempt", "1", "--gh", gh, env=event)
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        return served_facts, fetched, found, calls
+
+    def test_REGRESSION_the_verify_job_receives_with_the_hint_exactly_as_upload_artifact_emits_it(self):
+        # actions/upload-artifact's `artifact-digest` output is BARE hex; the REST listing says
+        # `sha256:<hex>`. The workflow forwards the former, so the receiving check must read
+        # both as one digest — or every valid result is refused. A hint that names another
+        # artifact, in either spelling, is still refused, and a malformed one is not a hint.
+        _, fetched, found, _ = self.fetched_evaluation()
+        bare = found["digest"][len("sha256:"):]
+        def verify(*hint):
+            return self.cli("verify", "--facts", fetched, "--work", os.path.join(self.scratch(), "w"), "--evaluation-run", tt.EVAL_RUN,
+                            "--evaluation-attempt", "1", *hint)
+        for spelling in (bare, found["digest"]):
+            proc = verify("--expect-preflight-id", found["id"], "--expect-preflight-digest", spelling)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        for other in ("0" * 64, "sha256:" + "0" * 64):
+            proc = verify("--expect-preflight-id", found["id"], "--expect-preflight-digest", other)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("preflight_wrong_evaluation", proc.stdout + proc.stderr)
+        proc = verify("--expect-preflight-id", "602", "--expect-preflight-digest", bare)
+        self.assertIn("preflight_wrong_evaluation", proc.stdout + proc.stderr)
+        for malformed in (("--expect-preflight-id", found["id"], "--expect-preflight-digest", "sha256:" + bare[:10]),
+                          ("--expect-preflight-id", found["id"], "--expect-preflight-digest", ""),
+                          ("--expect-preflight-id", "", "--expect-preflight-digest", bare),
+                          ("--expect-preflight-id", "abc", "--expect-preflight-digest", bare),
+                          ("--expect-preflight-digest", bare)):
+            proc = verify(*malformed)
+            self.assertEqual(proc.returncode, 1, malformed)
+            self.assertIn("request_invalid", proc.stdout + proc.stderr, malformed)
+
+    def test_CONTROL_facts_then_verify_through_the_real_commands(self):
+        served_facts, fetched, _, calls = self.fetched_evaluation()
         for label in ("candidate", "reconstruction", "preflight"):
             self.assertEqual(sha(os.path.join(fetched, pf.ZIPS, label + ".zip")), sha(os.path.join(served_facts, pf.ZIPS, label + ".zip")))
         outputs = os.path.join(self.scratch(), "outputs")

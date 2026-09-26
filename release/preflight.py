@@ -780,6 +780,17 @@ def assess(root, facts_dir, out, work, evaluation, clock, runner=None, install_s
     return _write_doc(out, doc)
 
 
+def listing_digest(value):
+    """One spelling for an artifact digest: ``sha256:<hex>``, as the REST listing states it.
+    ``actions/upload-artifact``'s ``artifact-digest`` output is the BARE hex of the same
+    digest, and the workflow forwards that output as the receiving check's hint, so both
+    spellings name one artifact. Anything else is not a digest and gives ``None``."""
+    text = value if isinstance(value, str) else ""
+    if _HEX.match(text):
+        return "sha256:" + text
+    return text if _DIGEST.match(text) else None
+
+
 def exit_code(doc):
     return {"accepted": 0, "incomplete": 2}.get(doc.get("decision"), 1)
 
@@ -836,7 +847,7 @@ def receive(root, facts_dir, work, evaluation, now, margin_minutes=RECEIVING_MAR
     if problems:
         return None, problems
     run = found.pop("evaluationRun")
-    if expect_preflight and (expect_preflight.get("id") != found["id"] or expect_preflight.get("digest") != found["digest"]):
+    if expect_preflight and (expect_preflight.get("id") != found["id"] or listing_digest(expect_preflight.get("digest")) != found["digest"]):
         return None, [_problem("preflight_wrong_evaluation", "the listing names artifact %s (%s); the assessing job reported %s (%s)"
                                % (found["id"], found["digest"], expect_preflight.get("id"), expect_preflight.get("digest")))]
     os.makedirs(work, exist_ok=True)

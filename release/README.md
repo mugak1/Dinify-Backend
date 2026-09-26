@@ -288,8 +288,13 @@ result is retained as `backend-preflight-<run>-<attempt>` whatever it decided.
 `preflight verify` trusts nothing it cannot reproduce. It reads its **own** facts and
 selects again. It then finds the result by name in the evaluation run's own artifact
 listing, bound to that run's head commit. The assessing job's reported id and digest are
-hints that must agree. The result zip is admitted by that listing's digest, and the
-receiving side then refuses unless all of the following hold:
+hints that must agree. `upload-artifact` reports its digest as bare hex while the
+listing says `sha256:<hex>`, and `listing_digest()` reads both spellings as one digest.
+Comparing them verbatim refused every valid result; Codex caught it on PR #343. A hint
+given at all must be whole: a numeric id and a digest. An empty output means the upload
+report is missing, which is `request_invalid`, never "no hint". The result zip is admitted
+by the listing's digest, and the receiving side then refuses unless all of the following
+hold:
 
 - the scope is exactly the non-deploying scope, the decision is `accepted`, and the file
   set is exact;

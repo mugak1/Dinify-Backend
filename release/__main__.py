@@ -241,8 +241,14 @@ def cmd_preflight(args):
               % (doc["decision"].upper(), a.get("headline", "no assessment performed"), doc.get("deadline"), args.out))
         return pf.exit_code(doc)
     expect = None
-    if args.expect_preflight_id or args.expect_preflight_digest:
-        expect = {"id": args.expect_preflight_id, "digest": args.expect_preflight_digest}
+    if args.expect_preflight_id is not None or args.expect_preflight_digest is not None:
+        # The assessing job's report of its own upload. Given at all, it must be whole: an
+        # empty output means that report is missing, which is not the same as no hint.
+        if not pf._ID.match(args.expect_preflight_id or "") or pf.listing_digest(args.expect_preflight_digest) is None:
+            return report("PREFLIGHT RECEIVING CHECK", [{"code": "request_invalid", "detail": "--expect-preflight-id and "
+                          "--expect-preflight-digest go together: a numeric artifact id and a sha256 digest (bare, as "
+                          "upload-artifact reports it, or sha256:<hex>, as the listing does)"}], "")
+        expect = {"id": args.expect_preflight_id, "digest": args.expect_preflight_digest}   # receive() reads either spelling
     admitted, problems = pf.receive(ROOT, args.facts, args.work, evaluation, pf.now_iso(), margin_minutes=args.margin_minutes,
                                     expect_preflight=expect)
     ok = ""
