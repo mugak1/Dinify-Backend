@@ -180,7 +180,14 @@ class AReceivedArchiveIsRefusedBeforeItIsWritten(unittest.TestCase):
 
 
 class NothingForbiddenIsPackaged(unittest.TestCase):
-    SECRET = b"-----BEGIN RSA PRIVATE KEY-----\nMIIEsecretsecretsecret\n-----END RSA PRIVATE KEY-----\n"
+    # The fixtures are ASSEMBLED at run time, never spelled: this file is itself part of the
+    # commit the producer archives and scans, and a literal PEM header or access-key id here
+    # would make the candidate refuse to package its own test (the real certification run
+    # found exactly that; the CONTRACT test below is what now pins it).
+    DASHES = b"-" * 5
+    SECRET = (DASHES + b"BEGIN RSA " + b"PRIVATE KEY" + DASHES + b"\nMIIEsecretsecretsecret\n"
+              + DASHES + b"END RSA " + b"PRIVATE KEY" + DASHES + b"\n")
+    ACCESS_KEY_ID = b"AK" + b"IA" + b"ABCDEFGHIJKLMNOP"
 
     def test_REGRESSION_forbidden_paths_and_key_material_are_refused_by_path_only(self):
         for path in (".env", "config/.env", "prod.env", ".env.prod", "db.sqlite3", "deploy/server.pem", "certs/tls.key",
@@ -190,7 +197,7 @@ class NothingForbiddenIsPackaged(unittest.TestCase):
         problems = st.forbidden_problems("app/settings_extra.py", self.SECRET)
         self.assertEqual(codes(problems), ["suspicious_secret"])
         self.assertNotIn("secretsecret", problems[0]["detail"])
-        self.assertEqual(codes(st.forbidden_problems("ops/keys.txt", b"id = AKIAABCDEFGHIJKLMNOP\n")), ["suspicious_secret"])
+        self.assertEqual(codes(st.forbidden_problems("ops/keys.txt", b"id = " + self.ACCESS_KEY_ID + b"\n")), ["suspicious_secret"])
 
     def test_CONTROL_the_documented_template_and_ordinary_source_pass(self):
         for path in (".env.example", "app/env_utils.py", "dinify_backend/settings.py", "restaurants_app/media_paths.py"):
