@@ -8,7 +8,13 @@ on:
 
 jobs:
   suite:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: the candidate this job certifies is TARGET-SPECIFIC
+    # (CPython 3.12.3 on Linux x86_64, glibc 2.39 — release/python-lock.json), and an image
+    # moving under `latest` must be a reviewed change here, not a silent one. 24.04 is what
+    # `latest` resolves to today, so this changes nothing about what runs.
+    runs-on: ubuntu-24.04
+    outputs:
+      candidate: ${{ steps.package.outputs.artifact }}
 
     strategy:
       fail-fast: false
@@ -46,27 +52,61 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No pip cache: nothing below installs from an index. The certified environment is
+      # built from exactly the locked files, and the only network step fetches those files
+      # by address and admits them by hash.
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-          cache-dependency-path: 'requirements.txt'
 
-      - name: Install dependencies
+      # RELEASE CANDIDATE (D08 B2.5 — release/README.md), steps 1-5 of the producer. Every
+      # `python -B -m release` runs with -B so the producer writes no bytecode into the
+      # checkout it is about to observe.
+      - name: Check the Python lock against requirements.txt
+        id: lock
+        run: python -B -m release lock check
+
+      - name: Record source continuity before validation
+        id: observe
+        run: python -B -m release observe --out "$RUNNER_TEMP/continuity-before.json"
+
+      # NETWORK — PyPI's file host only. Each locked file is fetched from the exact address
+      # the lock names and admitted only on an exact size and sha256 match. No resolution,
+      # no index query: nothing is chosen here.
+      - name: Acquire the locked package files
+        id: acquire
+        run: python -B -m release acquire --wheelhouse "$RUNNER_TEMP/wheelhouse"
+
+      # OFFLINE. `venv --without-pip`, the pinned pip wheel installs itself, then the locked
+      # closure installs with --isolated --no-index --no-cache-dir --require-hashes
+      # --no-deps --only-binary=:all:, and the result is reconciled against the lock and
+      # every wheel's own RECORD. The environment's bin/ then leads PATH, so every later
+      # `python` below — the guards, the suites and the dependency audit — runs in it.
+      - name: Install the certified environment from the wheelhouse
+        id: install
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -B -m release install --wheelhouse "$RUNNER_TEMP/wheelhouse" --venv "$RUNNER_TEMP/certified-venv" --work "$RUNNER_TEMP/certified-install"
+          echo "$RUNNER_TEMP/certified-venv/bin" >> "$GITHUB_PATH"
 
       # DEPENDENCY AUDIT, part 1 of 2 (D08 B2.1 — dependency_audit/README.md). Taken
       # IMMEDIATELY after installation with THIS interpreter's own `pip inspect`: the
-      # exact package inventory the suite below runs against — pinned requirements, their
-      # unpinned transitives and the pip upgraded above. Offline. Refuses if a declared
-      # requirement is missing or the interpreter is not the 3.12.3 target.
+      # exact package inventory the suite below runs against — since D08 B2.5 the
+      # certified environment, built from the locked files alone (the pinned pip included).
+      # Offline. Refuses if a declared requirement is missing or the interpreter is not the
+      # 3.12.3 target.
       - name: Dependency audit — snapshot the installed inventory
+        id: snapshot
         run: python -m dependency_audit snapshot
 
+      # The `python` every step below runs is the certified environment's, with nothing
+      # added to its import path.
+      - name: Require the certified interpreter
+        id: interpreter
+        run: python -B -m release interpreter --venv "$RUNNER_TEMP/certified-venv"
+
       - name: Check migrations consistency
+        id: migrations
         env:
           DATABASE_ENGINE: django.db.backends.postgresql
           DATABASE_NAME: test_dinify
@@ -79,6 +119,7 @@ jobs:
           python -m django makemigrations --check --dry-run --settings=dinify_backend.test_settings
 
       - name: Money-field guard
+        id: money
         # Each of the three guards below runs its own --self-test BEFORE its scan (inside
         # the default invocation, so it cannot be bypassed by editing this line), and
         # exits 1 on a violation, 2 when the scan was INCOMPLETE (never clean) and 3 when
@@ -86,6 +127,7 @@ jobs:
         run: python scripts/check_money_fields.py
 
       - name: Ambient-authority gate
+        id: ambient
         # TENANT-AUTH-00: the customer plane must not read User.roles to grant
         # platform authority. A Dinify administrator used to be defined by a role
         # string, and that predicate was wired as a cross-tenant bypass across the
@@ -96,6 +138,7 @@ jobs:
         run: python scripts/check_ambient_authority.py
 
       - name: Tenant-relation ratchet
+        id: ratchet
         # The committed tenant-relation baseline may only SHRINK — a new writable
         # relation must be classified, not baselined. Reads the baseline at the
         # comparison base via git (fetched at runtime by the script); fails closed
@@ -109,6 +152,7 @@ jobs:
         run: python scripts/check_tenant_relation_ratchet.py
 
       - name: Guard qualification tests
+        id: guards
         # D08 B2.3: the three guards above prove they can find what they claim to, and
         # that an incomplete scan is never clean. Each guard's CLI already runs its own
         # self-test before its scan; this suite drives those REAL CLIs against disposable
@@ -118,12 +162,24 @@ jobs:
         run: python -m unittest discover -t . -s scripts -p "tests_*.py"
 
       - name: Dependency-audit evaluator tests
+        id: audit-tests
         # The evaluator's own regression matrix — offline and deterministic, fixtures
         # only, no database. Proves the policy can pass AND refuse; it scans nothing and
         # is not a substitute for the scan at the end of this job.
         run: python -m unittest discover -t . -s dependency_audit -p "tests_*.py"
 
+      - name: Release-candidate tests
+        id: release-tests
+        # The lock, source, producer and consumer rules against disposable repositories,
+        # archives, synthetic wheels and real offline virtual environments (bootstrapped
+        # from the standard library's own bundled pip wheel). Offline, no database.
+        # Two patterns: `tests_*` are the fast rules; `qualify_*` build real environments
+        # and real candidates (~2 minutes) and are named apart so the Django runner's own
+        # `test*.py` discovery below does not run them a second time.
+        run: python -m unittest discover -t . -s release -p "tests_*.py" && python -m unittest discover -t . -s release -p "qualify_*.py"
+
       - name: Tenant-isolation closure gate
+        id: tenant
         # Fail-fast adversarial boundary suite (TENANT-ISO-PR6A): the focused
         # closure matrix + the deep capability / relationship / concurrency /
         # write-surface / delegated-session suites it builds on. Runs BEFORE the
@@ -149,6 +205,7 @@ jobs:
             --settings=dinify_backend.test_settings --verbosity=2 --timing
 
       - name: Run tests
+        id: suite
         env:
           DATABASE_ENGINE: django.db.backends.postgresql
           DATABASE_NAME: test_dinify
@@ -169,6 +226,7 @@ jobs:
       # clean. Placed LAST so the suites above still report when only the audit fails.
       # No `if:`, no `continue-on-error`, no pipe: its exit status is the step's.
       - name: Dependency audit — scan the validated inventory and enforce the policy
+        id: audit
         run: python -m dependency_audit self-test && python -m dependency_audit audit
 
       # The complete raw scanner output, the inventory and the decision, kept whether
@@ -183,6 +241,77 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      # RELEASE CANDIDATE, the packaging step. No `if:` — it runs only when every step
+      # above succeeded, and it re-checks that from the steps' own recorded outcomes. It
+      # re-observes the checkout, re-reconciles the environment, re-decides the audit from
+      # its retained raw output, exports the source from the commit and writes the record.
+      # A push to main produces `backend-candidate-<run>-<attempt>` (promotable: eligible
+      # to be CONSIDERED later; it authorizes nothing); a pull request produces
+      # `backend-candidate-nonpromotable-<run>-<attempt>`. Context reaches it through the
+      # runner's own GITHUB_* variables, never an inline expression.
+      - name: Package the certified candidate
+        id: package
+        env:
+          STEP_OUTCOMES: ${{ toJSON(steps) }}
+        run: python -B -m release package --wheelhouse "$RUNNER_TEMP/wheelhouse" --venv "$RUNNER_TEMP/certified-venv" --evidence dependency_audit/evidence --before "$RUNNER_TEMP/continuity-before.json" --out "$RUNNER_TEMP/backend-candidate"
+
+      - name: Upload the candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.package.outputs.artifact }}
+          path: ${{ runner.temp }}/backend-candidate/
+          if-no-files-found: error
+          retention-days: 30
+
+  # THE RECEIVING SIDE (D08 B2.5). A separate, non-privileged job on a fresh runner: it
+  # holds no credential and contacts no service. It checks out its OWN copy of the
+  # consumer at the expected commit, downloads the candidate as data, and refuses it
+  # unless its identity (commit, tree recomputed from the archive, run, attempt, name,
+  # eligibility), its wheels (against the lock inside the verified source) and its audit
+  # evidence (re-decided from raw output) all hold — BEFORE anything in it runs. Then it
+  # rebuilds the environment offline from the admitted wheels alone and starts both
+  # planes with disposable settings. A passing reconstruction is not deployment approval.
+  reconstruct:
+    name: reconstruct
+    runs-on: ubuntu-24.04
+    needs: [suite]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            release
+            dependency_audit
+
+      - name: Set up Python 3.12.3
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.3'
+
+      - name: Receive the candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.suite.outputs.candidate }}
+          path: ${{ runner.temp }}/received-candidate
+          digest-mismatch: error
+
+      - name: Reconstruct the candidate offline and start both planes
+        id: reconstruct
+        env:
+          RECEIVED_ARTIFACT: ${{ needs.suite.outputs.candidate }}
+        run: python -B -m release reconstruct --candidate "$RUNNER_TEMP/received-candidate" --work "$RUNNER_TEMP/reconstruction" --report "$RUNNER_TEMP/reconstruction.json" --expect-commit "$GITHUB_SHA" --expect-run-id "$GITHUB_RUN_ID" --expect-run-attempt "$GITHUB_RUN_ATTEMPT" --expect-event "$GITHUB_EVENT_NAME" --expect-ref "$GITHUB_REF" --expect-artifact "$RECEIVED_ARTIFACT"
+
+      - name: Retain the reconstruction report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-reconstruction-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/reconstruction.json
+          if-no-files-found: warn
+          retention-days: 30
+
   # Branch protection on `main` requires a status check literally named `test`.
   # A matrix job can never produce one: it always suffixes the leg value, so the
   # single leg above reports as `suite (3.12.3)` and the bare name would sit
@@ -192,28 +321,35 @@ jobs:
   # stays and this job is still needed.
   #
   # This aggregator owns that name and is the ONE required check. It goes green
-  # only when EVERY leg succeeded — and since D08 B2.1 a leg includes the dependency
-  # audit, so an audit that blocked or could not complete makes this red too, with no
-  # change here. It is what decouples the required-check
-  # list from the matrix: legs can be added, removed or re-pinned — as deleting
-  # 3.10.12 at cutover was — with no repo-settings change.
+  # only when EVERY leg succeeded AND the independent reconstruction succeeded — a
+  # leg includes the dependency audit (D08 B2.1) and the candidate producer (D08
+  # B2.5), so an audit that blocked or could not complete, a candidate that could not
+  # be certified, or one that could not be reconstructed makes this red too. It is what
+  # decouples the required-check list from the matrix: legs can be added, removed or
+  # re-pinned — as deleting 3.10.12 at cutover was — with no repo-settings change.
   #
   # `if: always()` is load-bearing. Without it a failed leg would SKIP this job,
   # and a skipped required check never reports a failure — the merge would block
-  # on a pending check instead of failing loudly.
+  # on a pending check instead of failing loudly. A skipped reconstruction (because
+  # the leg failed) is not success either, and is refused below.
   #
   # Do NOT rename this job or drop it, and do not add `continue-on-error`.
   test:
     name: test
     runs-on: ubuntu-latest
-    needs: [suite]
+    needs: [suite, reconstruct]
     if: always()
     steps:
-      - name: Require every Python matrix leg to have passed
+      - name: Require every Python matrix leg and the reconstruction to have passed
         run: |
           echo "Matrix result: ${{ needs.suite.result }}"
+          echo "Reconstruction result: ${{ needs.reconstruct.result }}"
           if [ "${{ needs.suite.result }}" != "success" ]; then
             echo "::error::One or more Python matrix legs did not succeed (${{ needs.suite.result }})." >&2
             exit 1
           fi
-          echo "All Python matrix legs passed."
+          if [ "${{ needs.reconstruct.result }}" != "success" ]; then
+            echo "::error::The candidate was not reconstructed (${{ needs.reconstruct.result }})." >&2
+            exit 1
+          fi
+          echo "All Python matrix legs passed and the candidate was reconstructed."

@@ -31,23 +31,34 @@ def index_of(steps, run):
 
 class TheAuditIsPartOfTheRequiredCheck(unittest.TestCase):
     def test_CONTRACT_the_required_aggregator_keeps_its_name_and_depends_on_the_suite(self):
+        # D08 B2.5 added the independent reconstruction to what `test` requires; the suite
+        # (which carries the audit) is still required, by the same name, first.
         test = CI["jobs"]["test"]
         self.assertEqual(test["name"], "test")
-        self.assertEqual(test["needs"], ["suite"])
+        self.assertEqual(test["needs"], ["suite", "reconstruct"])
         self.assertEqual(test["if"], "always()")
         self.assertNotIn("continue-on-error", test)
 
     def test_CONTRACT_the_snapshot_directly_follows_installation(self):
-        install = next(i for i, s in enumerate(SUITE) if s.get("name") == "Install dependencies")
+        # Since D08 B2.5 the installation is the certified environment built from the
+        # locked files alone; the snapshot still follows it directly.
+        install = next(i for i, s in enumerate(SUITE) if s.get("name") == "Install the certified environment from the wheelhouse")
         self.assertEqual(index_of(SUITE, SNAPSHOT), install + 1)
 
     def test_CONTRACT_the_scan_is_the_last_validation_step_followed_only_by_evidence_retention(self):
+        # After it: the evidence retention (always) and, since D08 B2.5, the candidate's
+        # packaging and upload — neither validates anything, and neither can run unless
+        # every step above succeeded (no `if:`).
         scan = index_of(SUITE, SCAN)
         self.assertGreater(scan, next(i for i, s in enumerate(SUITE) if s.get("name") == "Run tests"))
         after = SUITE[scan + 1:]
-        self.assertEqual([s["name"] for s in after], ["Retain the dependency-audit evidence"])
+        self.assertEqual([s["name"] for s in after], ["Retain the dependency-audit evidence", "Package the certified candidate",
+                                                      "Upload the candidate"])
         self.assertEqual(after[0]["if"], "always()")
         self.assertEqual(after[0]["with"]["path"], "dependency_audit/evidence/")
+        for step in after[1:]:
+            self.assertNotIn("if", step)
+            self.assertNotIn("continue-on-error", step)
 
     def test_CONTRACT_the_pre_existing_gates_are_all_still_present(self):
         names = [s.get("name") for s in SUITE]

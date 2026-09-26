@@ -294,9 +294,14 @@ def run_step(script, stub_exit, stub_name="python", shell=("bash", "-e")):
 
 
 def run_aggregator(script, needs_result):
-    """Execute the aggregator's script with ``${{ needs.suite.result }}`` substituted, as
-    GitHub does before the shell sees it."""
-    text = script.replace("${{ needs.suite.result }}", needs_result)
+    """Execute the aggregator's script with every ``${{ needs.<job>.result }}``
+    substituted, as GitHub does before the shell sees it. ``needs_result`` is one result
+    for every job the aggregator needs, or ``{job: result}`` (a job left out of the map is
+    substituted as ``success``, so a test states only the result it is about)."""
+    def result_of(match):
+        job = match.group(1)
+        return needs_result.get(job, "success") if isinstance(needs_result, dict) else needs_result
+    text = re.sub(r"\$\{\{\s*needs\.([A-Za-z0-9_-]+)\.result\s*\}\}", result_of, script)
     if "${{" in text:
         raise ValueError("the aggregator uses an expression this harness does not model")
     with tempfile.TemporaryDirectory(prefix="agg-") as d:

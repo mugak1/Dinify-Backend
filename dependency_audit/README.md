@@ -17,9 +17,12 @@ Not `requirements.txt` resolved afresh. `pip-audit -r requirements.txt` resolves
 dependencies on its own — it does NOT ignore transitives — but an independent resolution
 is not the inventory the suite ran against. What is audited is the package inventory of
 the **disposable Python 3.12.3 validation environment itself**, read with that
-interpreter's own `pip inspect` right after `pip install -r requirements.txt`: the pinned
-requirements, their unpinned transitives (`cffi`, `pycparser`) and the `pip` that CI
-upgrades to latest — 27 packages on main. Each carries a digest of its installed `RECORD`,
+interpreter's own `pip inspect` right after it is installed: the pinned requirements,
+their transitives (`cffi`, `pycparser`) and `pip` — 27 packages on main. Since D08 B2.5
+that environment is the CERTIFIED one (`release/README.md`): built offline from exactly
+the files `release/python-lock.json` names, the pinned pip 26.2.1 included, where it used
+to be `pip install --upgrade pip` then `pip install -r requirements.txt` resolving the
+transitives and pip at run time. Each carries a digest of its installed `RECORD`,
 so a package that changes in place changes the inventory. That inventory is written out as
 exact `name==version` pins and scanned with `--no-deps --disable-pip --strict`: pip-audit
 resolves nothing, and a package it cannot audit is a failure, not a skip.
@@ -81,7 +84,7 @@ record's: a record's aliases must all be corroborated by the finding it covers. 
 ## How it runs
 
 ```
-pip install -r requirements.txt
+python -B -m release acquire …; python -B -m release install …   # CI: the certified environment
 python -m dependency_audit snapshot      # offline — this interpreter's inventory
 …                                        # every existing gate, plus the offline matrix:
 python -m unittest discover -t . -s dependency_audit -p "tests_*.py"
@@ -110,8 +113,16 @@ Stated so none of it is inferred:
   run on main — which now includes this audit — and then runs `pip install -r
   requirements.txt` into the serving venv on the box. That install resolves the unpinned
   transitives and `pip` independently, at deploy time. This audit describes the CI
-  inventory; it is not an observation of what is installed on the host. A lock/layout for
-  the serving environment belongs with the planned deployment work.
+  inventory; it is not an observation of what is installed on the host. D08 B2.5 added the
+  lock and a certified candidate (`release/`), but the deploy does not consume either yet.
+- **The scanner's own install honours the runner's global pip configuration.** It runs
+  `pip install --isolated` with every `PIP_*` variable scrubbed, and `--isolated` ignores
+  environment variables and the user's file but still reads the global `/etc/pip.conf`
+  and a site `pip.conf` (measured in B2.5 — pip's only switch that loads no file at all is
+  `PIP_CONFIG_FILE=/dev/null`, which the scrub removes). `--require-hashes
+  --only-binary=:all:` still bounds what can be installed, so a configured source can only
+  supply the SAME hashed files; the certified environment's install sets the switch and
+  this one does not. Recorded, not changed: it is a scanner-policy change, outside B2.5.
 - A manual `workflow_dispatch` redeploy can run long after the CI run it cites. Binding a
   fresh audit to what is promoted, and the 24-hour promotion freshness window, are the next
   B2 delivery.

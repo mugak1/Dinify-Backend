@@ -1,0 +1,354 @@
+{
+  "schema": "dinify.backend.python-lock/1",
+  "repository": "mugak1/Dinify-Backend",
+  "target": {
+    "python": "3.12.3",
+    "implementation": "CPython",
+    "platform": "linux",
+    "machine": "x86_64",
+    "glibc": "2.39",
+    "markers": {
+      "implementation_name": "cpython",
+      "implementation_version": "3.12.3",
+      "os_name": "posix",
+      "platform_machine": "x86_64",
+      "platform_python_implementation": "CPython",
+      "platform_system": "Linux",
+      "python_full_version": "3.12.3",
+      "python_version": "3.12",
+      "sys_platform": "linux"
+    }
+  },
+  "directInputs": {
+    "path": "requirements.txt",
+    "sha256": "c0e23c98e89402ddb9845bb29f71bb3dbed79fd10db964995f7f6abd42d05399"
+  },
+  "generator": {
+    "tool": "pip",
+    "version": "26.2.1",
+    "wheelSha256": "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e",
+    "index": "https://pypi.org/simple/",
+    "invocation": [
+      "pip",
+      "install",
+      "--isolated",
+      "--no-input",
+      "--disable-pip-version-check",
+      "--no-cache-dir",
+      "--dry-run",
+      "--ignore-installed",
+      "--only-binary=:all:",
+      "--index-url",
+      "https://pypi.org/simple/",
+      "--report",
+      "<report>",
+      "-r",
+      "requirements.txt"
+    ],
+    "resolvedAt": "2026-09-26T15:42:25Z",
+    "reportSha256": "01a13f676d0a162011f9d85a154d56f3b2c1b5a8918df1132b107eb275304379"
+  },
+  "bootstrap": [
+    {
+      "name": "pip",
+      "version": "26.2.1",
+      "filename": "pip-26.2.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/f3/6e/1736e5b4ae2b778ef2f81c47d797de9f891d4d8acb047a24ca37a60294dd/pip-26.2.1-py3-none-any.whl",
+      "sha256": "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e",
+      "size": 1816632
+    }
+  ],
+  "packages": [
+    {
+      "name": "asgiref",
+      "version": "3.11.1",
+      "filename": "asgiref-3.11.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/5c/0a/a72d10ed65068e115044937873362e6e32fab1b7dce0046aeb224682c989/asgiref-3.11.1-py3-none-any.whl",
+      "sha256": "e8667a091e69529631969fd45dc268fa79b99c92c5fcdda727757e52146ec133",
+      "size": 24345,
+      "direct": true,
+      "requiredBy": [
+        "django",
+        "django-cors-headers"
+      ]
+    },
+    {
+      "name": "certifi",
+      "version": "2026.5.20",
+      "filename": "certifi-2026.5.20-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/59/8c/57e832b7af6d7c5abe66eb3fbe3a3a32f4d11ea23a1aa7131371035be991/certifi-2026.5.20-py3-none-any.whl",
+      "sha256": "3c52e209ba0a4ad7aebe60436a4ab349c39e1e602e8c134221e546902ad25897",
+      "size": 134134,
+      "direct": true,
+      "requiredBy": [
+        "requests"
+      ]
+    },
+    {
+      "name": "cffi",
+      "version": "2.1.1",
+      "filename": "cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/b1/db/dceb9dd5b231e1da801793f8acc9f3c52a7e1afe40bb1aae37e02b0faad5/cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf",
+      "size": 221822,
+      "direct": false,
+      "requiredBy": [
+        "cryptography"
+      ]
+    },
+    {
+      "name": "charset-normalizer",
+      "version": "3.3.2",
+      "filename": "charset_normalizer-3.3.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/ee/fb/14d30eb4956408ee3ae09ad34299131fb383c47df355ddb428a7331cfa1e/charset_normalizer-3.3.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "90d558489962fd4918143277a773316e56c72da56ec7aa3dc3dbbe20fdfed15b",
+      "size": 141869,
+      "direct": true,
+      "requiredBy": [
+        "requests"
+      ]
+    },
+    {
+      "name": "cryptography",
+      "version": "50.0.0",
+      "filename": "cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/da/3a/f05e32c99d440c9bb891ea0e36c9091891e36be5a9a87ab2ee6ea20729f6/cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl",
+      "sha256": "82148ec5bddac30b51a5b3c1945075f896fa022cb93f8e4a01e9f6ee95292c5f",
+      "size": 4734462,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "django",
+      "version": "5.2.17",
+      "filename": "django-5.2.17-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/df/f8/ce120525ca78f12b07daf65786679c5d0b54a75285a8958d3ae55e39da35/django-5.2.17-py3-none-any.whl",
+      "sha256": "f04fb3b36ee119e1af4fa1d397d5fd6cf12700f49321e84d4f4c642c5b1973db",
+      "size": 8315563,
+      "direct": true,
+      "requiredBy": [
+        "django-cors-headers",
+        "djangorestframework",
+        "djangorestframework-simplejwt"
+      ]
+    },
+    {
+      "name": "django-cors-headers",
+      "version": "4.9.0",
+      "filename": "django_cors_headers-4.9.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/30/d8/19ed1e47badf477d17fb177c1c19b5a21da0fd2d9f093f23be3fb86c5fab/django_cors_headers-4.9.0-py3-none-any.whl",
+      "sha256": "15c7f20727f90044dcee2216a9fd7303741a864865f0c3657e28b7056f61b449",
+      "size": 12809,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "djangorestframework",
+      "version": "3.17.2",
+      "filename": "djangorestframework-3.17.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a2/46/c14108e400b208c394325eb63fbae06c81341b6447fa1a6f9da718b17fe7/djangorestframework-3.17.2-py3-none-any.whl",
+      "sha256": "cb0546a7415d5b46c04e0f4fe0a54b2109f4fdd5e83ca773c8c6183a6493d042",
+      "size": 899109,
+      "direct": true,
+      "requiredBy": [
+        "djangorestframework-simplejwt"
+      ]
+    },
+    {
+      "name": "djangorestframework-simplejwt",
+      "version": "5.5.1",
+      "filename": "djangorestframework_simplejwt-5.5.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/60/94/fdfb7b2f0b16cd3ed4d4171c55c1c07a2d1e3b106c5978c8ad0c15b4a48b/djangorestframework_simplejwt-5.5.1-py3-none-any.whl",
+      "sha256": "2c30f3707053d384e9f315d11c2daccfcb548d4faa453111ca19a542b732e469",
+      "size": 107674,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "dnspython",
+      "version": "2.6.1",
+      "filename": "dnspython-2.6.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/87/a1/8c5287991ddb8d3e4662f71356d9656d91ab3a36618c3dd11b280df0d255/dnspython-2.6.1-py3-none-any.whl",
+      "sha256": "5ef3b9680161f6fa89daf8ad451b5f1a33b18ae8a1c6778cdf4b43f08c0a6e50",
+      "size": 307696,
+      "direct": true,
+      "requiredBy": [
+        "pymongo"
+      ]
+    },
+    {
+      "name": "idna",
+      "version": "3.18",
+      "filename": "idna-3.18-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/1e/5e/d4e9f1a599fb8e573b7b87160658329fbf28d19eac2718f51fc3def3aa5a/idna-3.18-py3-none-any.whl",
+      "sha256": "7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2",
+      "size": 65455,
+      "direct": true,
+      "requiredBy": [
+        "requests"
+      ]
+    },
+    {
+      "name": "pillow",
+      "version": "12.3.0",
+      "filename": "pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/84/21/a35af28dcc61f37ed850a2d64c65c701321dfbf25085e469d5559360cbbf/pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91",
+      "size": 6940830,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "psycopg",
+      "version": "3.1.18",
+      "filename": "psycopg-3.1.18-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/fc/ca/dff5452be0b31fab93808b1ff0047bebc08d1ac65939be104c98e081b069/psycopg-3.1.18-py3-none-any.whl",
+      "sha256": "4d5a0a5a8590906daa58ebd5f3cfc34091377354a1acced269dd10faf55da60e",
+      "size": 178087,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "psycopg-binary",
+      "version": "3.1.18",
+      "filename": "psycopg_binary-3.1.18-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/49/1b/82ac6e7faf74ddde5b402254ec7cfe1aee442c84c9a04aebd4b26a658617/psycopg_binary-3.1.18-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "b2f7f95746efd1be2dc240248cc157f4315db3fd09fef2adfcc2a76e24aa5741",
+      "size": 3257712,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "pycparser",
+      "version": "3.0",
+      "filename": "pycparser-3.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
+      "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+      "size": 48172,
+      "direct": false,
+      "requiredBy": [
+        "cffi"
+      ]
+    },
+    {
+      "name": "pyjwt",
+      "version": "2.13.0",
+      "filename": "pyjwt-2.13.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl",
+      "sha256": "66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728",
+      "size": 31274,
+      "direct": true,
+      "requiredBy": [
+        "djangorestframework-simplejwt"
+      ]
+    },
+    {
+      "name": "pymongo",
+      "version": "4.6.3",
+      "filename": "pymongo-4.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/e2/35/4b18e02232a86e7cb4ac478af78d33e3528182965e39c6d4dcac55284802/pymongo-4.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "sha256": "01277a7e183c59081368e4efbde2b8f577014431b257959ca98d3a4e8682dd51",
+      "size": 691985,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "pyotp",
+      "version": "2.10.0",
+      "filename": "pyotp-2.10.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/65/33/7b83bde70eddaaaaef487751a9c3a5cc0c0be54620ded0e120ebdc401ff9/pyotp-2.10.0-py3-none-any.whl",
+      "sha256": "1df2f6a1bcc3bb0716172a5215ddc2f8c7c7fd26a13df9927d52e1746934836c",
+      "size": 13768,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "python-dateutil",
+      "version": "2.9.0.post0",
+      "filename": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "sha256": "a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427",
+      "size": 229892,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "python-decouple",
+      "version": "3.8",
+      "filename": "python_decouple-3.8-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a2/d4/9193206c4563ec771faf2ccf54815ca7918529fe81f6adb22ee6d0e06622/python_decouple-3.8-py3-none-any.whl",
+      "sha256": "d0d45340815b25f4de59c974b855bb38d03151d81b037d9e3f463b0c9f8cbd66",
+      "size": 9947,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "qrcode",
+      "version": "8.2",
+      "filename": "qrcode-8.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl",
+      "sha256": "16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f",
+      "size": 45986,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "requests",
+      "version": "2.34.2",
+      "filename": "requests-2.34.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl",
+      "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0",
+      "size": 73075,
+      "direct": true,
+      "requiredBy": []
+    },
+    {
+      "name": "six",
+      "version": "1.17.0",
+      "filename": "six-1.17.0-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl",
+      "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274",
+      "size": 11050,
+      "direct": true,
+      "requiredBy": [
+        "python-dateutil"
+      ]
+    },
+    {
+      "name": "sqlparse",
+      "version": "0.6.0",
+      "filename": "sqlparse-0.6.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/d9/50/f00935da0ec7cbf325f8dc4f772ae46fbc7b672dd62876e73f0a94adda57/sqlparse-0.6.0-py3-none-any.whl",
+      "sha256": "b861c0288ce2fa56209a9a6412d2e066ac664b3873b89c26c9d8415e8e32996f",
+      "size": 50070,
+      "direct": true,
+      "requiredBy": [
+        "django"
+      ]
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.13.2",
+      "filename": "typing_extensions-4.13.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/8b/54/b1ae86c0973cc6f0210b53d508ca3641fb6d0c56823f288d108bc7ab3cc8/typing_extensions-4.13.2-py3-none-any.whl",
+      "sha256": "a439e7c04b49fec3e5d3e2beaa21755cadbbdc391694e28ccdd36ca4a1408f8c",
+      "size": 45806,
+      "direct": true,
+      "requiredBy": [
+        "psycopg"
+      ]
+    },
+    {
+      "name": "urllib3",
+      "version": "2.7.0",
+      "filename": "urllib3-2.7.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
+      "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897",
+      "size": 131087,
+      "direct": true,
+      "requiredBy": [
+        "requests"
+      ]
+    }
+  ]
+}
