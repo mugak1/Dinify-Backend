@@ -352,6 +352,56 @@ credential, and asserts that it holds none. Top-level `permissions: {}`, and eac
 Exit status for `preflight assess`: **0** accepted · **1** refused or blocking · **2**
 incomplete · **64** usage. `facts` and `verify` are 0 or 1 (and 64).
 
+### Measured at delivery (2026-09-26) — what was real and what was not
+
+**Real facts.** The real public-API facts for main's certifying run `36261585225` attempt
+1 (commit `9a6a7e8`, tree `f8b9ba78`) select cleanly, with:
+- jobs `suite (3.12.3)` `108458322038`, `reconstruct` `108460588526`, `test`
+  `108460716245`;
+- candidate artifact `10912927026` (`sha256:3acbbf64…50c7`);
+- reconstruction `10912347747` (`sha256:742b1ae0…5258`).
+
+Three controls change one fact each and are refused:
+
+| change | refusal |
+|---|---|
+| reconstruct marked failed | `certification_job_not_successful` |
+| suite job carried from another attempt | `certification_mixed_attempt` |
+| truncated listing | `certification_listing_incomplete` |
+
+**That artifact's bytes could not be fetched.** GitHub redirects artifact zips to its blob
+storage, and this environment's egress policy refuses that host (403). This was not routed
+around.
+
+**A genuine local candidate of the same commit stood in for it:**
+- every suite-leg step was run for real, on setup-python's own CPython 3.12.3 build. The
+  deviations: PostgreSQL 16 instead of CI's 15, and a synthetic run id. 4,883 Django tests
+  passed;
+- it was packaged by the real producer and reconstructed by the real consumer;
+- its portable environment digest, `191df5a2…80213`, is **identical** to the one the real
+  run's reconstruction reported.
+
+**A real `preflight assess` over it (this change as the evaluator):**
+- pip-audit 2.10.1 was installed from PyPI by hash, with the isolation above;
+- real queries went to PyPI's vulnerability service: 27 retained application packages and
+  29 scanner packages, no advisories, `within_policy`;
+- about 17 seconds end to end.
+
+**A real `preflight verify` received it** and reproduced the decision. Controls on that
+same result:
+
+| change | refusal |
+|---|---|
+| received 20 minutes before its deadline | `preflight_expired` |
+| re-dated three hours and re-listed under a matching digest | `preflight_time_invalid` |
+
+**A positive control:** the same isolated scanner path asked about `django==4.2.0` gets 50
+advisories back from PyPI and blocks.
+
+**Synthetic in that run: the provenance only.** The run id `9100000001`, the artifact ids,
+the evaluation run `7100000001`, and "main" (the evaluator revision, since this branch is
+unmerged). They are written in exactly the shape `preflight facts` leaves them.
+
 ## Exit codes
 
 `python -B -m release …`: **0** accepted · **1** refused (every problem is printed with a

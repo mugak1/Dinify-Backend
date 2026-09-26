@@ -6020,6 +6020,19 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `/usr/share/python-wheels`, the Debian/Ubuntu ensurepip location, so the qualification
   suites run on a system Python. CI's setup-python build already bundles pip.
 
+  **MEASURED, with the synthetic parts named.** The real public-API facts for main's run
+  `36261585225`/1 select cleanly, but the artifact's BYTES were unreachable here (egress
+  refuses GitHub's artifact blob host). So a genuine local candidate of the same commit
+  was built:
+  - every suite-leg step was run for real on setup-python's CPython 3.12.3, and 4,883
+    Django tests passed;
+  - its environment digest `191df5a2…80213` is identical to the real run's.
+
+  Then real `assess` ran (real hash-pinned scanner, real PyPI queries, 27 + 29 packages,
+  within policy, ~17 s), and real `verify` received the result. Only the GitHub
+  provenance around it was synthetic. `release/README.md` → "Measured at delivery" has
+  the identities and controls.
+
 ## Verification
 Before raising any PR, run `./scripts/verify.sh` (mirrors CI) and confirm:
 1. Confirm migrations are generated for any model changes (CI enforces this)
