@@ -1,0 +1,203 @@
+name: Backend Candidate Preflight
+
+# D08 B2.6 — A NON-DEPLOYING PREFLIGHT FOR ONE RETAINED BACKEND CANDIDATE (release/README.md →
+# "The preflight").
+#
+# Given one exact candidate retained by a successful Backend CI push to main, this workflow
+#   1. establishes FROM OUTSIDE the candidate — the GitHub API's own answers — that the
+#      certifying run completed successfully for that commit, and that the SAME attempt's
+#      suite leg, reconstruction and aggregate `test` job all succeeded (the candidate is
+#      uploaded before the reconstruction and the aggregate run, so its `promotable: true`
+#      is eligibility metadata, never proof);
+#   2. asks the advisory question AGAIN, NOW, over exactly the inventory the candidate
+#      retains, with the pinned scanner installed from this workflow's OWN trusted checkout,
+#      and decides under the CURRENT trusted policy;
+#   3. retains a small, time-limited result, and has a SEPARATE job receive it the way a
+#      later installer must: re-deriving every fact and reproducing the decision.
+#
+# IT DEPLOYS NOTHING. There is no id-token, no stored credential, no AWS, no SSM, no S3 and no
+# deploy step here, and no switch that could add one. A green run means the evidence checks
+# passed and the result says `deploymentAuthorized: false`. It is not production readiness.
+#
+# IT DOES NOT PROTECT THE LIVE DEPLOY. deploy-uat.yml still triggers on "Backend CI" and
+# installs from requirements.txt on the box, independently of this workflow. A red preflight
+# does not stop it, and nothing here claims otherwise. Connecting the two is B3.
+#
+# THE TOKEN BOUNDARY. `contents: read` + `actions: read` only, and the token reaches exactly
+# one step per job — "Read the facts" — which runs `gh` for API reads and artifact zips and
+# executes no scanner. The steps that install and run the scanner (assess) or reproduce its
+# decision (verify) have no token in their environment, and the verifier additionally removes
+# the runner's step-output files and any *_TOKEN / ACTIONS_* variable before anything runs.
+# The trusted checkout persists no git credential.
+
+on:
+  # A coarse pre-filter only: `workflows` matches a DISPLAY NAME. The facts step re-reads the
+  # triggering run from the API and refuses anything but ci.yml's own successful push to main.
+  workflow_run:
+    workflows: ["Backend CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full 40-character lowercase commit SHA on main whose retained candidate to assess"
+        required: true
+        type: string
+      ci_run_id:
+        description: "Optional: the successful push-to-main Backend CI run. Needed only when more than one exists for the SHA."
+        required: false
+        type: string
+        default: ""
+      ci_run_attempt:
+        description: "Optional (needs ci_run_id): the attempt. Omitted means that run's latest attempt."
+        required: false
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  assess:
+    name: assess
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # A CI run that did not succeed is an explicitly SKIPPED preflight, not a red one. Once the
+    # evaluation begins, every candidate, evidence, advisory or scanner failure is red.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      preflight_id: ${{ steps.retain.outputs.artifact-id }}
+      preflight_digest: ${{ steps.retain.outputs.artifact-digest }}
+    steps:
+      # The verifier is THIS workflow's own revision (the default branch), never the target:
+      # the candidate cannot supply the policy, the scanner pin or the code that judges it.
+      - name: Check out the trusted verifier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            release
+            dependency_audit
+
+      - name: Assert the verifier is the workflow revision and holds no credential
+        run: |
+          if git -C trusted config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1; then
+            echo "::error::A git credential is persisted in the trusted checkout." >&2
+            exit 1
+          fi
+          if [ -f "$HOME/.git-credentials" ]; then
+            echo "::error::A git credential file exists." >&2
+            exit 1
+          fi
+          test "$(git -C trusted rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Set up Python 3.12.3
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12.3'
+
+      # READ TOKEN. The request comes from the event through the environment and is
+      # validated by the verifier; nothing event-derived is interpolated into this script.
+      # The zips are written as bytes and not opened here.
+      - name: Read the facts and fetch the artifacts
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFLIGHT_EVENT: ${{ github.event_name }}
+          PREFLIGHT_EVENT_RUN: ${{ github.event.workflow_run.id }}
+          PREFLIGHT_EVENT_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          PREFLIGHT_EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          PREFLIGHT_INPUT_SHA: ${{ inputs.sha }}
+          PREFLIGHT_INPUT_RUN: ${{ inputs.ci_run_id }}
+          PREFLIGHT_INPUT_ATTEMPT: ${{ inputs.ci_run_attempt }}
+        run: timeout 900 python -B -m release preflight facts --out "$RUNNER_TEMP/facts" --revision "$GITHUB_SHA"
+
+      # NO TOKEN. Admit each zip by the listing's digest, verify the candidate (nothing in it
+      # executes), bind the reconstruction, then query advisories now over the RETAINED
+      # inventory and decide under the TRUSTED policy. Exit 0 accepted, 1 refused/blocking,
+      # 2 incomplete.
+      - name: Assess the retained candidate now
+        id: assess
+        working-directory: trusted
+        run: python -B -m release preflight assess --facts "$RUNNER_TEMP/facts" --out "$RUNNER_TEMP/preflight" --work "$RUNNER_TEMP/preflight-work" --evaluation-run "$GITHUB_RUN_ID" --evaluation-attempt "$GITHUB_RUN_ATTEMPT" --revision "$GITHUB_SHA"
+
+      # Kept whether accepted or refused. `always()` only retains evidence; it cannot turn a
+      # refusal green.
+      - name: Retain the preflight result
+        id: retain
+        if: always() && (steps.assess.outcome == 'success' || steps.assess.outcome == 'failure')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/preflight/
+          if-no-files-found: error
+          retention-days: 30
+
+  # THE RECEIVING SIDE, as a later installer must do it: its own checkout, its own facts, the
+  # result found in THIS run's own artifact listing (the assessing job's reported id and
+  # digest are hints that must agree), and the decision reproduced from the raw output.
+  verify:
+    name: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [assess]
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the trusted verifier
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            release
+            dependency_audit
+
+      - name: Assert the verifier is the workflow revision and holds no credential
+        run: |
+          if git -C trusted config --local --get-regexp '^http\..*\.extraheader$' >/dev/null 2>&1; then
+            echo "::error::A git credential is persisted in the trusted checkout." >&2
+            exit 1
+          fi
+          if [ -f "$HOME/.git-credentials" ]; then
+            echo "::error::A git credential file exists." >&2
+            exit 1
+          fi
+          test "$(git -C trusted rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Set up Python 3.12.3
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12.3'
+
+      - name: Read the facts and fetch the artifacts
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFLIGHT_EVENT: ${{ github.event_name }}
+          PREFLIGHT_EVENT_RUN: ${{ github.event.workflow_run.id }}
+          PREFLIGHT_EVENT_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          PREFLIGHT_EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          PREFLIGHT_INPUT_SHA: ${{ inputs.sha }}
+          PREFLIGHT_INPUT_RUN: ${{ inputs.ci_run_id }}
+          PREFLIGHT_INPUT_ATTEMPT: ${{ inputs.ci_run_attempt }}
+        run: timeout 900 python -B -m release preflight facts --out "$RUNNER_TEMP/facts" --revision "$GITHUB_SHA" --evaluation-run "$GITHUB_RUN_ID" --evaluation-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Receive the preflight result
+        working-directory: trusted
+        env:
+          EXPECT_PREFLIGHT_ID: ${{ needs.assess.outputs.preflight_id }}
+          EXPECT_PREFLIGHT_DIGEST: ${{ needs.assess.outputs.preflight_digest }}
+        run: python -B -m release preflight verify --facts "$RUNNER_TEMP/facts" --work "$RUNNER_TEMP/received" --evaluation-run "$GITHUB_RUN_ID" --evaluation-attempt "$GITHUB_RUN_ATTEMPT" --expect-preflight-id "$EXPECT_PREFLIGHT_ID" --expect-preflight-digest "$EXPECT_PREFLIGHT_DIGEST"

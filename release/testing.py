@@ -63,12 +63,15 @@ def make_wheel(directory, name, version, requires=(), tag="py3-none-any", module
 
 
 def bundled_pip():
+    """The interpreter's own pip wheel: ensurepip's ``_bundled`` directory (upstream CPython,
+    as setup-python installs it in CI), or — for Debian and Ubuntu's packaged Python, the one
+    the live host runs — ``/usr/share/python-wheels``, where that ensurepip keeps it."""
     import ensurepip
-    bundled = os.path.join(os.path.dirname(ensurepip.__file__), "_bundled")
-    wheels = sorted(f for f in os.listdir(bundled) if f.startswith("pip-") and f.endswith(".whl"))
-    if not wheels:
-        raise RuntimeError("this interpreter's ensurepip carries no bundled pip wheel; the release tests need it")
-    return os.path.join(bundled, wheels[-1])
+    for bundled in (os.path.join(os.path.dirname(ensurepip.__file__), "_bundled"), "/usr/share/python-wheels"):
+        wheels = sorted(f for f in os.listdir(bundled) if f.startswith("pip-") and f.endswith(".whl")) if os.path.isdir(bundled) else []
+        if wheels:
+            return os.path.join(bundled, wheels[-1])
+    raise RuntimeError("this interpreter's ensurepip carries no bundled pip wheel; the release tests need it")
 
 
 def target():
@@ -285,3 +288,159 @@ STARTUP_STAND_IN = '''import json, sys
 sys.stdout.write(json.dumps({"ok": True, "planes": {"customer": {"detail": {"health": "ok", "imported": []}},
                                                   "admin": {"detail": {"health": "ok"}}}, "failures": []}))
 '''
+
+
+# --- the preflight (D08 B2.6): the API's answers, the scanner's answers, and a clock ----------
+#
+# Everything the preflight reads from outside the candidate arrives through these, so each
+# regression can change exactly ONE fact the way the API, the scanner or time would. The
+# shapes are the GitHub REST API's (runs, attempts, jobs, artifact listings, git commits and
+# trees, compare) and pip-audit's JSON; nothing here is consulted by production code.
+
+CI_RUN, EVAL_RUN = "9001", "7001"
+EVAL_START = "2026-09-26T13:00:00.000Z"
+
+
+def zip_dir(source, destination):
+    """What upload-artifact produces for a directory: its files, by relative name. Returns
+    the listing-style digest ``sha256:<hex>`` of the zip's bytes."""
+    with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as zf:
+        for dirpath, _, filenames in os.walk(source):
+            for f in sorted(filenames):
+                full = os.path.join(dirpath, f)
+                zf.write(full, os.path.relpath(full, source).replace(os.sep, "/"))
+    with open(destination, "rb") as fh:
+        return "sha256:" + hashlib.sha256(fh.read()).hexdigest()
+
+
+def top_trees(root):
+    """``[{path, type, sha}]`` of the top-level tree of HEAD, as GET /git/trees states it."""
+    out = run(GIT + ["-C", root, "ls-tree", "HEAD"])
+    entries = []
+    for line in out.stdout.splitlines():
+        meta, path = line.split("\t", 1)
+        mode, kind, sha = meta.split(" ")
+        entries.append({"path": path, "mode": mode, "type": kind, "sha": sha})
+    return entries
+
+
+def _artifact(artifact_id, name, digest, run_id, head_sha, created="2026-09-26T12:05:00Z", expired=False):
+    return {"id": artifact_id, "name": name, "size_in_bytes": 1000, "digest": digest, "expired": expired, "created_at": created,
+            "expires_at": "2026-10-26T12:05:00Z", "workflow_run": {"id": int(run_id), "head_branch": "main", "head_sha": head_sha}}
+
+
+def write_facts(facts, target, tree, trusted_root, candidate_zip, recon_zip, run_id=CI_RUN, attempt="1", main_root=None, edit=None):
+    """A facts directory exactly as ``preflight facts`` leaves one. ``edit`` maps a fact key
+    to a function that changes that one document (return a replacement, or mutate it)."""
+    from . import preflight as pf
+    os.makedirs(os.path.join(facts, pf.ZIPS), exist_ok=True)
+    revision = git(trusted_root, "rev-parse", "HEAD")
+    main_root = main_root or trusted_root
+    main_sha = git(main_root, "rev-parse", "HEAD")
+    repo = {"full_name": lf.REPOSITORY}
+    with open(candidate_zip, "rb") as fh:
+        cand_digest = "sha256:" + hashlib.sha256(fh.read()).hexdigest()
+    with open(recon_zip, "rb") as fh:
+        recon_digest = "sha256:" + hashlib.sha256(fh.read()).hexdigest()
+    job = lambda i, name: {"id": 100 + i, "run_id": int(run_id), "run_attempt": int(attempt), "name": name, "status": "completed",  # noqa: E731
+                           "conclusion": "success", "head_sha": target, "head_branch": "main"}
+    docs = {
+        "workflow": {"id": 246615041, "name": "Backend CI", "path": ".github/workflows/ci.yml", "state": "active"},
+        "run": {"id": int(run_id), "run_attempt": int(attempt), "workflow_id": 246615041, "path": ".github/workflows/ci.yml", "event": "push",
+                "head_branch": "main", "head_sha": target, "status": "completed", "conclusion": "success",
+                "run_started_at": "2026-09-26T11:50:00Z", "repository": repo, "head_repository": repo},
+        "jobs": {"total_count": 3, "jobs": [job(i, n) for i, n in enumerate(pf.REQUIRED_JOBS)]},
+        "artifacts": {"total_count": 3, "artifacts": [
+            _artifact(501, "backend-candidate-%s-%s" % (run_id, attempt), cand_digest, run_id, target),
+            _artifact(502, "backend-reconstruction-%s-%s" % (run_id, attempt), recon_digest, run_id, target),
+            _artifact(503, "dependency-audit-3.12.3-%s-%s" % (run_id, attempt), "sha256:" + "0" * 64, run_id, target)]},
+        "commit": {"sha": target, "tree": {"sha": tree}},
+        "main": {"sha": main_sha, "commit": {"tree": {"sha": git(main_root, "rev-parse", "HEAD^{tree}")}}},
+        "compare": {"status": "identical" if main_sha == target else "ahead", "merge_base_commit": {"sha": target}},
+        "evaluatorCommit": {"sha": revision, "tree": {"sha": git(trusted_root, "rev-parse", "HEAD^{tree}")}},
+        "evaluatorTree": {"sha": git(trusted_root, "rev-parse", "HEAD^{tree}"), "truncated": False, "tree": top_trees(trusted_root)},
+        "mainTree": {"sha": git(main_root, "rev-parse", "HEAD^{tree}"), "truncated": False, "tree": top_trees(main_root)},
+        "choice": {"target": target, "runId": run_id, "runAttempt": attempt, "source": "automatic", "revision": revision},
+    }
+    for key, fn in (edit or {}).items():
+        changed = fn(docs[key])
+        if changed is not None:
+            docs[key] = changed
+    for key, doc in docs.items():
+        with open(os.path.join(facts, pf.FACT_FILES[key]), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2)
+    shutil.copy(candidate_zip, os.path.join(facts, pf.ZIPS, "candidate.zip"))
+    shutil.copy(recon_zip, os.path.join(facts, pf.ZIPS, "reconstruction.zip"))
+    return docs
+
+
+def write_evaluation(facts, trusted_root, preflight_dir, run_id=EVAL_RUN, attempt="1", started=EVAL_START[:19] + "Z",
+                     created="2026-09-26T13:30:00Z", edit=None):
+    """The receiving side's extra facts: the evaluation run and its listing, and the result zip."""
+    from . import preflight as pf
+    zip_path = os.path.join(facts, pf.ZIPS, "preflight.zip")
+    digest = zip_dir(preflight_dir, zip_path)
+    revision = git(trusted_root, "rev-parse", "HEAD")
+    docs = {"evaluationRun": {"id": int(run_id), "run_attempt": int(attempt), "path": pf.PREFLIGHT_WORKFLOW_PATH, "event": "workflow_run",
+                              "head_sha": revision, "status": "in_progress", "run_started_at": started,
+                              "repository": {"full_name": lf.REPOSITORY}},
+            "evaluationArtifacts": {"total_count": 1, "artifacts": [_artifact(601, pf.preflight_name(run_id, attempt), digest, run_id, revision, created=created)]}}
+    for key, fn in (edit or {}).items():
+        changed = fn(docs[key])
+        if changed is not None:
+            docs[key] = changed
+    for key, doc in docs.items():
+        with open(os.path.join(facts, pf.FACT_FILES[key]), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2)
+    return {"id": "601", "digest": digest}
+
+
+class Clock:
+    """A deterministic clock: each reading is ``step_ms`` after the last."""
+
+    def __init__(self, start=EVAL_START, step_ms=1000):
+        from dependency_audit import core
+        self.ms, self.step = core.parse_instant(start) - step_ms, step_ms
+
+    def __call__(self):
+        from . import preflight as pf
+        self.ms += self.step
+        return pf._iso(self.ms)
+
+
+class FakeScanner:
+    """A process runner standing in for the scanner's processes: venv creation and the
+    hash-pinned install succeed, ``pip inspect`` reports the trusted pinned set, and
+    ``pip-audit`` answers in its real JSON format for exactly the requirements it was given.
+    Every call's argv and environment are kept, so a test can ask what a process was given."""
+
+    def __init__(self, trusted_root, vulns=None, audit=None, install_status=0):
+        from dependency_audit import pip_adapter as pa
+        with open(os.path.join(trusted_root, "dependency_audit", "scanner-requirements.txt"), "r", encoding="utf-8") as fh:
+            self.pins = pa.declared_requirements(fh.read())
+        self.vulns, self.audit, self.install_status, self.calls = vulns or {}, audit, install_status, []
+
+    def __call__(self, command, args, cwd=None, env=None, timeout=None):
+        args = list(args)
+        self.calls.append({"command": command, "args": args, "env": dict(env or {})})
+        result = {"command": command, "args": args, "cwd": cwd, "status": 0, "signal": None, "timedOut": False, "error": None,
+                  "stdout": "", "stderr": "", "durationMs": 1}
+        if args[:2] == ["-m", "venv"]:
+            return result
+        if args[:3] == ["-m", "pip", "install"]:
+            return dict(result, status=self.install_status, stderr="" if self.install_status == 0 else "no matching distribution")
+        if args[:3] == ["-m", "pip", "inspect"]:
+            installed = [{"metadata": {"name": n, "version": v}, "metadata_location": None, "direct_url": None, "installer": "pip"}
+                         for n, v in sorted(self.pins.items())]
+            return dict(result, stdout=json.dumps({"version": "1", "installed": installed}))
+        if command.endswith("pip-audit"):
+            with open(args[args.index("-r") + 1], "r", encoding="utf-8") as fh:
+                pinned = [line.split("==") for line in fh.read().splitlines() if line]
+            graph = "application" if os.path.basename(args[args.index("-r") + 1]).startswith("application") else "scanner"
+            if self.audit is not None:
+                return dict(result, **self.audit(graph))
+            vulns = self.vulns.get(graph, {})
+            deps = [{"name": n, "version": v, "vulns": [{"id": i, "aliases": [], "description": "synthetic", "fix_versions": []}
+                                                        for i in vulns.get(n, [])]} for n, v in pinned]
+            return dict(result, status=1 if any(vulns.get(n) for n, _ in pinned) else 0, stdout=json.dumps({"dependencies": deps, "fixes": []}))
+        return dict(result, status=127, error="unexpected command %s" % command)

@@ -87,7 +87,7 @@ class TheCandidateIsProducedInsideTheRequiredCheck(unittest.TestCase):
         self.assertIn('-p "qualify_*.py"', run)
         self.assertEqual(status_swallowers(run), [])
         heavy = sorted(f for f in os.listdir(os.path.join(ROOT, "release")) if f.startswith("qualify_"))
-        self.assertEqual(heavy, ["qualify_candidate.py", "qualify_environment.py"])
+        self.assertEqual(heavy, ["qualify_candidate.py", "qualify_environment.py", "qualify_preflight.py"])
         self.assertFalse([f for f in heavy if f.startswith("test")], "the Django runner discovers test*.py")
 
     def test_CONTRACT_the_upload_carries_exactly_the_packaged_candidate(self):

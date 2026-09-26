@@ -11,8 +11,15 @@
                                                         offline; after every required step passed
     python -B -m release verify|reconstruct --candidate DIR --expect-commit SHA [...]
                                                         the non-privileged consumer (reconstruct also needs --work)
+    python -B -m release preflight facts --out DIR --revision SHA [--evaluation-run R --evaluation-attempt A]
+                                                        READ TOKEN (gh); the request comes from PREFLIGHT_* variables
+    python -B -m release preflight assess --facts DIR --out DIR --work DIR --evaluation-run R --evaluation-attempt A --revision SHA
+                                                        NO TOKEN; NETWORK (the pinned scanner, PyPI); a fresh query now
+    python -B -m release preflight verify --facts DIR --work DIR --evaluation-run R --evaluation-attempt A [...]
+                                                        NO TOKEN; the receiving check (release/preflight.py)
 
-Exit status: 0 success · 1 refused (the reasons are printed) · 64 usage. Run every command
+Exit status: 0 success · 1 refused (the reasons are printed) · 2 a preflight assessment that
+could not be completed · 64 usage. Run every command
 with ``-B``: the producer's own bytecode must not appear in the checkout it is observing.
 """
 
@@ -28,6 +35,7 @@ from . import candidate as cd
 from . import consumer as cs
 from . import environment as ev
 from . import lockfile as lf
+from . import preflight as pf
 from . import producer as pr
 from . import sourcetree as st
 
@@ -48,15 +56,15 @@ def report(label, problems, ok_line):
     return 0
 
 
-def summary(markdown):
-    target = os.environ.get("GITHUB_STEP_SUMMARY")
+def summary(markdown, environ=None):
+    target = (os.environ if environ is None else environ).get("GITHUB_STEP_SUMMARY")
     if target:
         with open(target, "a", encoding="utf-8") as fh:
             fh.write(markdown + "\n")
 
 
-def output(key, value):
-    target = os.environ.get("GITHUB_OUTPUT")
+def output(key, value, environ=None):
+    target = (os.environ if environ is None else environ).get("GITHUB_OUTPUT")
     if target:
         with open(target, "a", encoding="utf-8") as fh:
             fh.write("%s=%s\n" % (key, value))
@@ -188,6 +196,66 @@ def cmd_consume(args):
     return report("RECONSTRUCTION", problems, ok)
 
 
+def _evaluation(args):
+    for label, value, pattern in (("--evaluation-run", args.evaluation_run, pf._ID), ("--evaluation-attempt", args.evaluation_attempt, pf._ATTEMPT)):
+        if value is not None and not pattern.match(value):
+            return None, [{"code": "request_invalid", "detail": "%s must be numeric" % label}]
+    if (args.evaluation_run is None) != (args.evaluation_attempt is None):
+        return None, [{"code": "request_invalid", "detail": "--evaluation-run and --evaluation-attempt go together"}]
+    return ({"runId": args.evaluation_run, "runAttempt": args.evaluation_attempt} if args.evaluation_run else None), []
+
+
+def cmd_preflight(args):
+    if getattr(args, "revision", None) is not None and not pf._SHA.match(args.revision):
+        return report("PREFLIGHT", [{"code": "request_invalid", "detail": "--revision must be a full commit id"}], "")
+    evaluation, problems = _evaluation(args)
+    if problems:
+        return report("PREFLIGHT", problems, "")
+    if args.action == "facts":
+        request, problems = pf.resolve_request(os.environ)
+        if problems:
+            return report("PREFLIGHT FACTS", problems, "")
+        choice, problems = pf.fetch_facts(args.out, request, args.revision, gh=args.gh, evaluation=evaluation)
+        return report("PREFLIGHT FACTS", problems, "facts read for %s (%s): CI run %s attempt %s; zips downloaded unopened"
+                      % (request["target"], request["source"], (choice or {}).get("runId"), (choice or {}).get("runAttempt")))
+    if evaluation is None:
+        return report("PREFLIGHT", [{"code": "request_invalid", "detail": "the evaluation run and attempt are required"}], "")
+    if args.action == "assess":
+        # The runner's step-output files and any token leave this process's environment
+        # BEFORE anything runs; only this CLI writes outputs, after the scanner has exited.
+        withheld = pf.withhold_runner_authority(os.environ)
+        evaluation["revision"] = args.revision
+        doc = pf.assess(ROOT, args.facts, args.out, args.work, evaluation, pf.now_iso, withheld=sorted(withheld))
+        a = doc.get("assessment") or {}
+        for key, value in (("decision", doc["decision"]), ("deadline", doc.get("deadline") or "")):
+            output(key, value, environ=withheld)
+        summary("### Backend candidate preflight — NOT DEPLOYED\n\n| | |\n|---|---|\n| decision | **%s** |\n| candidate | %s |\n"
+                "| certified by | CI run %s attempt %s |\n| fresh assessment | %s |\n| deadline | %s |\n| deployment authorized | false |\n"
+                % (doc["decision"], (doc.get("candidate") or {}).get("artifact", {}).get("name"), (doc.get("request") or {}).get("runId"),
+                   (doc.get("request") or {}).get("runAttempt"), a.get("headline", "not performed"), doc.get("deadline")), environ=withheld)
+        for p in doc.get("problems") or []:
+            print("  ✗ %s: %s" % (p["code"], p["detail"]), file=sys.stderr)
+        for r in a.get("reasons") or []:
+            print("  - [%s] %s: %s" % (r["outcome"], r["code"], r["detail"]), file=sys.stderr)
+        print("preflight %s: %s; deadline %s; deploymentAuthorized false; result in %s"
+              % (doc["decision"].upper(), a.get("headline", "no assessment performed"), doc.get("deadline"), args.out))
+        return pf.exit_code(doc)
+    expect = None
+    if args.expect_preflight_id or args.expect_preflight_digest:
+        expect = {"id": args.expect_preflight_id, "digest": args.expect_preflight_digest}
+    admitted, problems = pf.receive(ROOT, args.facts, args.work, evaluation, pf.now_iso(), margin_minutes=args.margin_minutes,
+                                    expect_preflight=expect)
+    ok = ""
+    if admitted:
+        for key in ("commit", "candidateArtifactId", "candidateDigest", "environmentDigest", "deadlineEpoch"):
+            output(key, admitted[key])
+        ok = ("RECEIVED: the preflight result for %s (candidate artifact %s, %s) reproduces as %s under the trusted policy; usable until %s "
+              "(with a %d-minute margin); deploymentAuthorized false" % (admitted["commit"], admitted["candidateArtifactId"], admitted["candidateDigest"],
+                                                                        admitted["outcome"], admitted["deadline"], args.margin_minutes))
+        summary("### Backend candidate preflight — received, NOT DEPLOYED\n\n```json\n%s\n```\n" % json.dumps(admitted, indent=2, sort_keys=True))
+    return report("PREFLIGHT RECEIVING CHECK", problems, ok)
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog="python -B -m release")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -223,12 +291,34 @@ def main(argv):
         if name == "reconstruct":
             p.add_argument("--work", required=True)
             p.add_argument("--report")
+    p = sub.add_parser("preflight")
+    p.add_argument("action", choices=("facts", "assess", "verify"))
+    p.add_argument("--facts")
+    p.add_argument("--out")
+    p.add_argument("--work")
+    p.add_argument("--revision")
+    p.add_argument("--evaluation-run")
+    p.add_argument("--evaluation-attempt")
+    p.add_argument("--expect-preflight-id")
+    p.add_argument("--expect-preflight-digest")
+    p.add_argument("--margin-minutes", type=int, default=pf.RECEIVING_MARGIN_MINUTES)
+    p.add_argument("--gh", default="gh")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return 64 if error.code else 0
+    if args.command == "preflight":
+        needed = {"facts": ("out", "revision"), "assess": ("facts", "out", "work", "revision"), "verify": ("facts", "work")}[args.action]
+        if any(getattr(args, n) is None for n in needed):
+            print("preflight %s needs %s" % (args.action, ", ".join("--" + n for n in needed)), file=sys.stderr)
+            return 64
+        if args.margin_minutes < pf.RECEIVING_MARGIN_MINUTES:
+            # A receiver may demand MORE headroom before a deadline, never less.
+            print("--margin-minutes can be raised above %d, never lowered" % pf.RECEIVING_MARGIN_MINUTES, file=sys.stderr)
+            return 64
     handlers = {"lock": cmd_lock, "observe": cmd_observe, "acquire": cmd_acquire, "install": cmd_install,
-                "interpreter": cmd_interpreter, "package": cmd_package, "verify": cmd_consume, "reconstruct": cmd_consume}
+                "interpreter": cmd_interpreter, "package": cmd_package, "verify": cmd_consume, "reconstruct": cmd_consume,
+                "preflight": cmd_preflight}
     return handlers[args.command](args)
 
 

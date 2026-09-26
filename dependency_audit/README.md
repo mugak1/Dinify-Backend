@@ -123,9 +123,18 @@ Stated so none of it is inferred:
   --only-binary=:all:` still bounds what can be installed, so a configured source can only
   supply the SAME hashed files; the certified environment's install sets the switch and
   this one does not. Recorded, not changed: it is a scanner-policy change, outside B2.5.
-- A manual `workflow_dispatch` redeploy can run long after the CI run it cites. Binding a
-  fresh audit to what is promoted, and the 24-hour promotion freshness window, are the next
-  B2 delivery.
+  The same bootstrap run by the B2.6 preflight (`release/preflight.py`) DOES set the switch
+  and withholds the runner's tokens and step-output files. A real-pip test shows a planted
+  `pip.conf` steering this CI install and not the preflight's. So the exposure is closed
+  on that path and remains on this one.
+- **A fresh audit of what would be promoted is not a gate on the deploy.** D08 B2.6 adds a
+  non-deploying preflight (`release/README.md` → "The preflight"). For one retained
+  candidate, it asks this evaluator's question again, now, over the candidate's retained
+  inventory (`--no-deps --disable-pip --strict`, a fresh cache). It decides under the
+  trusted policy with a 24-hour window, and a separate receiving check reproduces the
+  decision. `deploy-uat.yml` consumes none of it: a manual `workflow_dispatch` redeploy
+  can still run long after the CI run it cites, and resolves `requirements.txt` on the
+  box. Connecting the two is B3.
 - **Not audited here:** the GitHub Actions used by the workflows, the runner image's
   tooling, and anything on the host.
 - **Branch protection is not changed.** "The audit is wired into `test`" and "GitHub
