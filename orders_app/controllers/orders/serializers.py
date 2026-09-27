@@ -53,6 +53,34 @@ from orders_app.controllers.services.order_quote import (
 logger = logging.getLogger(__name__)
 
 
+NAME_PROVENANCE_SNAPSHOT = 'snapshot'
+NAME_PROVENANCE_MISSING = 'missing'
+
+
+def historical_name(row: OrderItem):
+    """The name an order line was bought under, and where that name came from (D12).
+
+    ONE reading for every diner-facing historical name site: the order-details
+    ``items`` / ``extra_items``, every ``serialize_order_item_details`` row and its
+    extras, and the quote lines. It returns ``item_name_snapshot`` VERBATIM, never
+    the live ``MenuItem.name``. A catalogue record keeps changing after the purchase:
+    it is renamed, and a soft delete's inline vacuum rewrites it to
+    ``<name>_autodelN``, which then reached the diner as though that were the
+    dish they ordered.
+
+    A BLANK SNAPSHOT IS REPORTED, NEVER FILLED. ``""`` stays ``""`` and the
+    provenance says ``missing``. Borrowing today's catalogue name would present a
+    current fact as history. Nothing is trimmed, stripped or normalised either: a
+    saved name that happens to contain ``_autodel`` is the diner's name. The
+    provenance describes the NAME FIELD ONLY, not the line's money, options or
+    allergens. A blank does not mean the row predates migration 0028, and it does
+    not mean the order has no intent key. The reader cannot tell why the name is
+    missing, and it does not guess.
+    """
+    name = row.item_name_snapshot
+    return name, (NAME_PROVENANCE_SNAPSHOT if name else NAME_PROVENANCE_MISSING)
+
+
 def _legacy_view(item, corrected):
     """``(unit_price, total_cost, savings)`` as the established wire contract.
 
@@ -316,10 +344,12 @@ def _quote_line(item, children, corrected):
         extras_actual = sum(
             (child.actual_cost for child in children), Decimal('0'))
         line_total_with_extras = item.actual_cost + extras_actual
+    item_name, item_name_provenance = historical_name(item)
     return {
         'id': str(item.pk),
         'item': str(item.item_id),
-        'item_name': item.item_name_snapshot or item.item.name,
+        'item_name': item_name,
+        'item_name_provenance': item_name_provenance,
         'quantity': item.quantity,
         'available': item.available,
         'status': item.status,
@@ -359,7 +389,8 @@ def _quote_line(item, children, corrected):
             {
                 'id': str(child.pk),
                 'item': str(child.item_id),
-                'item_name': child.item_name_snapshot or child.item.name,
+                'item_name': historical_name(child)[0],
+                'item_name_provenance': historical_name(child)[1],
                 'quantity': child.quantity,
                 'available': child.available,
                 'status': child.status,
@@ -384,7 +415,8 @@ def serialize_order_item_details(item: OrderItem, corrected=None,
     unit_price, total_cost, savings = _legacy_view(item, corrected)
     extras_list = [
         {
-            'item_name': child.item.name,
+            'item_name': historical_name(child)[0],
+            'item_name_provenance': historical_name(child)[1],
             'quantity': child.quantity,
             'actual_cost': child.actual_cost,
             'available': child.available,
@@ -392,9 +424,11 @@ def serialize_order_item_details(item: OrderItem, corrected=None,
         }
         for child in children
     ]
+    item_name, item_name_provenance = historical_name(item)
     return {
         'item': str(item.item.id),
-        'item_name': item.item.name,
+        'item_name': item_name,
+        'item_name_provenance': item_name_provenance,
         'quantity': item.quantity,
 
         'unit_price': unit_price,

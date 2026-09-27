@@ -1177,6 +1177,13 @@ so keep it current when conventions change.
   compares the responses to each other, so it names no literal and cannot be
   satisfied by two copies that happen to agree. Reverting the three sites fails
   6 of 72. See `BREAKING_CHANGES.md` §16c and `D06_CONSUMER_GATES_CLOSURE.md`
+- Historical order-line names (D12, reader only): ✅ PARTIAL — D12 itself stays OPEN.
+  Every diner-facing historical name returns the SAVED `OrderItem.item_name_snapshot`
+  verbatim through ONE helper, `historical_name()`, with an additive `*_provenance`
+  of `snapshot` / `missing`. Before this, a catalogue rename or a soft delete's inline
+  vacuum (`<name>_autodelN`) rewrote what a past order said was bought. No migration
+  and no backfill. The rule and what it still does not close are under "Key
+  Serializer Notes"; the wire contract is `BREAKING_CHANGES.md` §18
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one
@@ -5567,6 +5574,56 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `SCRIPT_NAME='/uat'` over HTTPS, and GUARDS every project serializer through the
   tenancy discovery, so a new serializer that renders an absolute media URL fails
   the build
+- **A HISTORICAL ORDER LINE STATES THE NAME IT WAS BOUGHT UNDER, AND SAYS WHEN THAT
+  NAME IS MISSING** (D12, reader). `historical_name(row)` in
+  `orders_app/controllers/orders/serializers.py` is THE reading, and every
+  diner-facing name site goes through it. The top-level `orders_app/serializers.py`
+  imports it rather than restating it. It returns `item_name_snapshot` VERBATIM and a
+  provenance of `"snapshot"` (non-empty) or `"missing"` (`""`), emitted as an additive
+  sibling at all six sites:
+  - order-details `items[].item.name` / `items[].extra_items[].name` → `name_provenance`;
+  - every `serialize_order_item_details` row (initiate, including a D04 replay) and its
+    nested `extras[]` → `item_name_provenance`;
+  - `quote[].item_name` / `quote[].extras[].item_name` → `item_name_provenance`.
+
+  **NEVER READ `MenuItem.name` FOR A HISTORICAL LINE**, and never fall back to it: the
+  record keeps changing after the purchase (renamed, or rewritten to
+  `<name>_autodelN` by `Secretary.delete()`'s inline vacuum), and the quote's old
+  `snapshot or live` fallback presented today's name as history.
+  **A BLANK IS REPORTED, NEVER FILLED**: `""` stays `""`, a string, never `null`.
+  It is the column's own value and the value the kitchen feed already emits, and the
+  Frontend's kitchen wire validator rejects a `null` name by dropping the WHOLE feed.
+  Nothing is trimmed or suffix-stripped either: a saved name containing `_autodel` is
+  what the diner saw. **Provenance describes the NAME FIELD ONLY**, never money,
+  options or allergens.
+  **A BLANK PROVES NOTHING ABOUT WHY**: it does not mean the row predates
+  `orders_app/0028` (which added the column with no backfill), and it does not mean
+  the order has no intent key.
+  **DO NOT BACKFILL SNAPSHOTS FROM THE CATALOGUE**. The snapshot columns are inside
+  `order_quote`'s fingerprint, so rewriting a draft's saved name moves its `quote_ref`
+  and its next submit answers `quote_ref_stale`. The live catalogue is also exactly
+  the wrong source, and no trustworthy archive of historical names has been
+  identified (which is not proof none exists).
+  What is NOT a historical-name site, and deliberately stays live: `items[].item.id`
+  and `is_special`, and the menu-performance report, which is a CURRENT-menu report
+  by contract. The kitchen feeds already read the snapshot and are unchanged.
+  **Consumer effect:** a blank quote name no longer pairs with a basket that knows
+  the name (`quote-equivalence.ts`), so the diner gets the itemised review with an
+  empty row name instead of the plain prompt. Nothing in the Frontend displays the
+  provenance yet.
+  **D12 STAYS OPEN, and these remain unfixed:**
+  - `OrderItem.item` is still `on_delete=CASCADE`, so a hard delete of a purchased
+    `MenuItem` destroys its order lines, and an orphaned extra (`parent_item` is
+    SET_NULL) then reads as a main dish. PROTECT is a proposal only.
+  - The kitchen shows `""` and `allergen_tags: []` for a blank legacy row. An unknown
+    allergen list is NOT "no allergens".
+  - There is no description snapshot.
+  Pinned by `orders_app/tests_order_history_names.py` (22 tests over real
+  endpoints, 14 of which fail on `b027e84`). Eight source mutations are each caught:
+  a live name at any one of the six sites, the restored quote fallback, and a false
+  `snapshot` provenance. Its detail-read query pin is 8, down from 10, because the
+  extras no longer load their `MenuItem` for a live name. A live-name read in
+  `get_extra_items` puts it back to 10, and the mutation run shows exactly that.
 - `SerializerPublicGetMenuItem` includes `section` and `in_stock` —
   added deliberately for the diner menu. Do not remove them. It also emits
   read-only `is_discount_active` (bool) and `current_price` (effective base

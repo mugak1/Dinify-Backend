@@ -1,7 +1,7 @@
 from rest_framework.serializers import ModelSerializer, SerializerMethodField
 from misc_app.controllers.money import format_money
 from orders_app.controllers.orders.serializers import (
-    _quote_line, quote_policy_projection,
+    _quote_line, historical_name, quote_policy_projection,
 )
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED,
@@ -70,9 +70,14 @@ class SerializerListOrderItem(ModelSerializer):
         )
 
     def get_item(self, item):
+        # D12: the NAME is the one the line was bought under, never the live
+        # catalogue's (see `historical_name`). `id` and `is_special` are
+        # unchanged and still read the catalogue record.
+        name, name_provenance = historical_name(item)
         return {
             'id': item.item.pk,
-            'name': item.item.name,
+            'name': name,
+            'name_provenance': name_provenance,
             'is_special': item.item.is_special,
         }
 
@@ -80,9 +85,11 @@ class SerializerListOrderItem(ModelSerializer):
         extras = []
         extra_items = OrderItem.objects.filter(parent_item=item)
         for extra in extra_items:
+            name, name_provenance = historical_name(extra)
             extras.append({
                 'id': extra.pk,
-                'name': extra.item.name,
+                'name': name,
+                'name_provenance': name_provenance,
                 'quantity': extra.quantity,
                 'unit_price': extra.unit_price,
                 'discounted_price': extra.discounted_price,
