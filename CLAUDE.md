@@ -2387,7 +2387,37 @@ so keep it current when conventions change.
   in the same PR, or CI refuses it (`stale_lock`). **Nor does it consume the D08 B2.6
   preflight** (`preflight.yml`). That workflow runs beside it, off the same "Backend CI"
   completion. A red preflight does not stop the deploy and cannot protect it. Connecting
-  the two is B3
+  the two is B3, which is BUILT AND STAGED, NOT ACTIVE — see the next bullet
+- **D08 B3 — IMMUTABLE INSTALLATION AND LOADED-PROCESS IDENTITY — IMPLEMENTED, REHEARSED,
+  NOT ACTIVE** (`release/README.md` → "The installation"; `release/CUTOVER.md`). The
+  installer (`release/installation.py`) admits a candidate by repeating the B2.6 receiving
+  check on the host, builds it AS an unprivileged preparer into
+  `<releaseRoot>/<commit>-<16 hex>/` (source, a venv created AT that path from the host's
+  base Python and the retained wheels offline, wheelhouse, static, launcher files, receipt),
+  reconciles and seals it root-owned, and never repairs, overwrites or prunes one. The
+  transition (`release/transition.py`) takes a shared host lock, gates each plane's
+  configuration AS the runtime identity, decides migrations against reviewed entries in
+  `release/migration-decisions.json` (anything unreviewed, contracting or unknown STOPS),
+  switches BOTH planes by rewriting one Apache include per plane that pins python-home /
+  home / python-path to one release, verifies by asking the running workers, and restores on
+  failure; `host resume` settles an interrupted operation by observing what serves. Two
+  unauthenticated routes, `GET /uat/api/v1/release/` and `GET /api/admin/v1/release/`,
+  report the identity a worker's launcher established ONCE at start (never re-read, so a
+  changed file cannot relabel a running process); **under the legacy deploy they answer
+  `unavailable` / `not_started_by_release_launcher`**, which is true and is what merging
+  this actually changes on the live host. **Four states stay separate**: implementation
+  tested (yes), runtime profile verified (NO — `release/profiles/uat-backend.json` is
+  `unverified` with every host fact `null`, and the real path refuses it by name), cutover
+  authorized (NO — every host, AWS, Apache and secret step in `CUTOVER.md` is OWNER),
+  candidate serving (NO). The workflow, SSM script, ordering guard, marker reader and a
+  read-only discovery collector are STAGED under `release/staged/`; nothing under
+  `.github/workflows/` names them, and `release/tests_staged.py` fails the build if the
+  staged workflow and `deploy-uat.yml` ever both exist. The cutover moves it in and deletes
+  `deploy-uat.yml` in ONE reviewed change. The shared lock contract, and the Admin half
+  (staged, not applied), is `release/HOST_LOCK_CONTRACT.md`. **Measured on the disposable
+  rehearsal host**: a graceful reload reclaims the previous mod_wsgi daemons about 3 seconds
+  after the signal regardless of `shutdown-timeout`, so a request longer than that is cut —
+  still gentler than the legacy `systemctl restart apache2`
 - The deploy is HEALTH-GATED (post-incident 2026-07-17, when a `.env` of mode
   600 `ubuntu:ubuntu` let CLI checks pass while mod_wsgi — running as
   `www-data` — died at settings import with `PermissionError`): BEFORE the
@@ -2473,6 +2503,11 @@ so keep it current when conventions change.
   force-logs-out the client (DC-BE-011). DELETE on `upsell-config/items/reorder/`
   now returns 405 instead of silently deleting an item (DC-BE-004)
 - `api/v1/reports/restaurant/<report_name>/` → RestaurantReportsEndpoint
+- `api/v1/release/` (customer) and `admin/v1/release/` (admin) → `ReleaseIdentityView`
+  (`misc_app/endpoints/release_identity.py`, D08 B3) — the loaded-process release identity,
+  unauthenticated, bounded, non-secret and `no-store`, like health. It is NOT health: it
+  says WHICH installed release answered. A process no release launcher started (the legacy
+  install) answers `unavailable`
 - `api/v1/health/` → `misc_app/urls.py` → `HealthCheckView`
   (`misc_app/endpoints/health.py`) — `AllowAny` with `authentication_classes = []`,
   answering `{status, database, timestamp}` after a `SELECT 1`. It is DEPLOY-

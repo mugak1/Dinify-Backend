@@ -24,10 +24,13 @@ that plane's WSGIDaemonProcess (python-home, home and python-path pinned to one 
 WSGIScriptAlias. The vhost files that Include them are never edited here.
 
 WHAT OLD WORKERS DO. Apache's reload replaces each daemon group's processes; a request already
-running in an old process continues under that process's shutdown-timeout with the old
-release's interpreter, packages and source, all still present and immutable, so a lazy import
-there resolves to the release that process started from. That is not zero downtime: requests
-that outlive the timeout are cut, and the restart mode drops connections outright.
+running in an old process continues with the old release's interpreter, packages and source,
+all still present and immutable, so a lazy import there resolves to the release that process
+started from. That is not zero downtime, and the window is SHORT: measured on the rehearsal
+host (Apache 2.4 + mod_wsgi 5.0, Ubuntu 24.04), a graceful reload reclaimed the previous
+daemon processes about 3 seconds after the signal whatever ``shutdown-timeout`` said, so a
+request still running then was cut (the client saw a 500). The restart mode drops connections
+outright, as the legacy deploy's ``systemctl restart apache2`` does today.
 """
 
 from __future__ import annotations

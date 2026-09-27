@@ -1,4 +1,4 @@
-# Backend release candidate — D08 B2.5, and its preflight — D08 B2.6
+# Backend release candidate — D08 B2.5, its preflight — D08 B2.6, and its installation — D08 B3
 
 **One retained candidate whose exact source and complete Python dependency files are the
 ones its identified CI run validated and audited, and an independent proof that those
@@ -12,6 +12,14 @@ venv, so **the live host has not acquired the guarantee this candidate carries**
 pins that statement, so it cannot quietly become false). The preflight does not change
 that either: it runs beside the live deploy, a red preflight does not stop it, and it
 cannot protect it. Connecting promotion to the candidate and a received preflight is B3.
+
+**B3 builds that connection and does not switch it on** — see
+[The installation](#the-installation-d08-b3). The installer, the transition and the
+loaded-process identity are implemented and were rehearsed on a disposable host; the
+workflow and host script that would drive them on the real host are STAGED under
+`release/staged/`, where no workflow can reach them; and the committed UAT host profile is
+`unverified`, so the real mutating path refuses it by name. `deploy-uat.yml` is still the one
+live writer.
 
 ## What is certified
 
@@ -407,6 +415,252 @@ advisories back from PyPI and blocks.
 the evaluation run `7100000001`, and "main" (the evaluator revision, since this branch is
 unmerged). They are written in exactly the shape `preflight facts` leaves them.
 
+## The installation (D08 B3)
+
+**The candidate CI certified, installed as an immutable release on the host, switched onto
+both WSGI planes deliberately, and verified by asking the RUNNING processes what they
+loaded.** Four states are kept apart, and only the first two are claimed here:
+
+| state | where it stands |
+|---|---|
+| implementation tested | **yes** — `tests_host.py`, `tests_staged.py`, `misc_app/tests_release_identity.py`, and the rehearsal below |
+| runtime profile verified | **no** — `release/profiles/uat-backend.json` is `unverified`; every host fact is `null` |
+| cutover authorized | **no** — `release/CUTOVER.md` lists every owner approval, none given |
+| candidate serving | **no** — the live host serves whatever `deploy-uat.yml` last put there |
+
+### What merging this does, and what it does not
+
+- `deploy-uat.yml` is **unchanged** and still triggers on every successful Backend CI run on
+  main. It is the only active writer. Nothing under `.github/workflows/` names the staged
+  files, and `tests_staged.py` fails the build if both deploy workflows ever exist at once.
+- Two **new unauthenticated routes** go live through that legacy deploy:
+  `GET /uat/api/v1/release/` (customer) and `GET /api/admin/v1/release/` (admin). Under the
+  legacy in-place install they answer `unavailable` / `not_started_by_release_launcher` —
+  true, bounded, non-secret, `no-store`, and exactly what the staged ordering guard reads as
+  "legacy". They read no request data and touch no database.
+- Nothing is installed on, copied to or read from the real host by this change.
+
+### The pieces
+
+| module | what it owns |
+|---|---|
+| `dinify_backend/release_identity.py` + `misc_app/endpoints/release_identity.py` | the loaded-process identity document (`dinify.backend.runtime-identity/1`), set ONCE at worker start and never re-read |
+| `release/hostprofile.py` | the host profile (`dinify.backend.host-profile/1`): every host fact the installer relies on, with `null` meaning *nobody has observed it* |
+| `release/installation.py` | admission (the B2.6 receiving check repeated on the host), preparation (build as the unprivileged preparer, reconcile, seal), the launcher and settings files each release carries |
+| `release/transition.py` | the host lock, the journal, the configuration and migration gates, the switch, verification, restoration, resume, legacy adoption and recovery |
+| `release/hostprobe.py`, `release/startup.py` | the probes the transition runs AS the runtime and migration identities, and the start-both-planes check at construction |
+| `release/migration-decisions.json` | reviewed migration decisions, read from the TRUSTED verifier, never the candidate |
+| `release/staged/` | NOT ACTIVE: the workflow template, the SSM host script, the ordering guard, the marker reader, the read-only discovery collector |
+
+### The installed release
+
+```
+<releaseRoot>/<commit>-<16 hex>/          root-owned, nothing group/other-writable, never edited
+    source/      the certified tree, extracted from the candidate's archive and re-hashed
+    venv/        created AT THIS PATH from the host's base python and the retained wheels, offline
+    wheelhouse/  the candidate's wheels, re-verified against the lock
+    static/      collected here: static files are release-owned
+    wsgi/        the launcher, the runtime module, one settings module per plane
+    receipt.json dinify.backend.installed-release/1
+```
+
+- **The id is derived, never chosen**: the commit, then 16 hex of
+  `sha256(environmentDigest:runtimeDigest)`. Two installs of one commit with different launcher
+  files are two releases.
+- **Built as the preparation identity** (a no-login account, not the runtime and not the
+  migrator), offline (`--no-index`, `PIP_CONFIG_FILE=/dev/null`, a scrubbed environment),
+  then **reconciled** exactly as B2.5 reconciles, then **sealed** root-owned. The runtime
+  identity can read it and write nothing in it.
+- **The interpreter is the host's own**: the venv is created from `profile.basePython`, and
+  the profile pins its version, SOABI, and the sha256 of `libpython` and `mod_wsgi.so`. It is
+  **not** claimed to be the interpreter CI ran — CI runs setup-python's upstream build, the
+  host runs Ubuntu's.
+- **Configuration and media live outside every release**: one configuration file per plane
+  (`/etc/dinify-backend/<plane>.env`, root-owned, group-readable by the runtime), read by the
+  runtime module with python-decouple's own reader; `MEDIA_ROOT` is `profile.media.root`.
+  `host_problems` refuses an environment file anywhere at or above the release root, because
+  python-decouple searches upward.
+- **Reuse is verified, never assumed**: an existing directory is reused only if its receipt
+  names it, re-derives its id, names the same record, commit and tree, and every file,
+  owner and mode still matches. Anything else is `installed_release_mismatch` —
+  refused, never repaired or overwritten. A partial directory not started by this operation is
+  `partial_release_foreign` and left for an operator. **Nothing prunes releases.**
+
+### The loaded-process identity
+
+The launcher resolves its own real path to one release, reads that release's receipt, and
+checks that the receipt names this directory and this commit, that `sys.prefix` is the
+release's venv and that the imported `dinify_backend` lives in the release's source. Only then
+is the identity `verified`; anything else is `mismatch` with a reason
+(`receipt_unreadable`, `receipt_names_another_release`, `interpreter_outside_release`,
+`source_outside_release`). It is computed once, at worker start: **a file changed later cannot
+relabel a running process** — measured below, running workers kept reporting their release
+over a tampered receipt, and fresh workers over the same receipt reported `mismatch`. A
+process no launcher started (the legacy install) reports `unavailable`.
+
+### The transition
+
+```
+host lock (bounded 300 s wait, never stolen) -> journal: locked
+  recheck the host, the admission's deadline, the installed release, identity support
+  gate     each plane's configuration probed AS the runtime identity   -> gated
+  plan     migrations read AS the migration identity, decided against the trusted decisions
+  migrate  only a reviewed expand plan, before any switch               -> migrated
+  switch   both includes replaced (previous bytes kept), configtest, ONE reload -> switching, switched
+  verify   identity, processes (cwd + mapped files), health on both planes    -> verified
+  restore  on any failure after the switch                             -> verification-failed, restored
+```
+
+- **One include per plane** (`<includeDir>/dinify-backend-<plane>.conf`) is the only file
+  written outside the release root and the state directory. It pins `python-home`, `home` and
+  `python-path` to one release, so an old worker keeps its old paths while new workers start
+  on the new ones. Vhosts are never edited.
+- **The configuration gate** loads each plane's real settings AS the runtime identity and
+  refuses, before anything moves: a file it cannot read, a file the runtime could write or
+  with group-write or any permission for others, settings that fail to import (which is how
+  `DINER_CAP_KEY` already fails closed), `DEBUG`, an `ENV` outside dev/test/prod, `ENV=dev`
+  unless the profile states a reason for the deterministic test OTP, `ENV=test`/`prod` without
+  the SMS provider keys, an admin `ADMIN_SECRET_ENCRYPTION_KEY` that is not a Fernet key, any
+  deployment system check at ERROR, a database that does not answer `SELECT 1`, a
+  `MEDIA_ROOT` that is not the profile's (or lies inside the release root, or cannot be
+  written), and a `STATIC_ROOT` that is not the release's own. Values are never printed, and
+  no email, SMS, OTP or payment request is ever made to test readiness.
+- **Migrations are decided, not attempted.** Every pending migration needs a reviewed entry
+  (exact file sha256, exact operation types, `expand`, the reviewing PR). Unreviewed,
+  contracting, stale or contradicted plans stop the automated path (`migration_unreviewed`
+  and siblings). A rollback to an older release across newer migrations is allowed only when
+  every such migration is a reviewed `expand` — the older code will run on that schema.
+- **The journal** is `<stateDir>/operations/<op>.jsonl`, one fsynced line per stage, plus
+  `active.json` naming the one open operation. A new transition refuses while one is open
+  (`previous_operation_unresolved`); `host resume` settles it by OBSERVING what serves.
+- **The host lock** is shared with Dinify-Admin's host procedure by contract
+  (`release/HOST_LOCK_CONTRACT.md`); the Admin half is staged there, not applied.
+
+### Stages and exit codes
+
+`python -B -m release host …`: **0** verified / unchanged / adopted · **1** refused (nothing a
+request can reach changed) · **3** the new release failed and the previous one was restored
+and re-verified · **4** restoration failed or the state is unknown (the operation stays open)
+· **64** usage. The host prints its attestations first — `B3-ADMITTED`, `B3-PREPARED`,
+`B3-OUTCOME` (exactly one, including on a refusal before anything moved), and one
+`B3-SERVING` per plane — because SSM keeps only the first 24,000 characters.
+
+### Three recoveries, kept apart
+
+- **Certified rollback** — a normal transition to an older certified commit, which needs its
+  retained candidate and a FRESH preflight. The installed directory is reused only after every
+  byte is re-verified.
+- **Restoration** — automatic, inside a failed transition: the kept previous includes, reload,
+  re-verification. A red run that says `restored` means the new release is not serving.
+- **Legacy recovery** — `host recover-legacy` puts back the directives recorded by
+  `host adopt-legacy`. It is reported as legacy: the processes are healthy, and which code they
+  loaded cannot be established.
+
+### The handover — from source to a running process
+
+| link | where it is recorded | what binds it to the previous link |
+|---|---|---|
+| source | the commit and its tree | git |
+| candidate | `record.json` (`dinify.backend.candidate/1`) in `backend-candidate-<run>-<attempt>` | the archive re-hashed to the tree; CI's own job results read from GitHub |
+| preflight | `dinify.backend.preflight/1` | the candidate's listed digest and record sha256 |
+| admission | the receiving check's values (`preflight verify --admission-out`) | re-derived on the host by `ins.admit` from the same two zips, with the 30-minute margin |
+| installed release | `<releaseRoot>/<id>/receipt.json` | commit, tree, record sha256, environment digest; the id re-derived from them |
+| WSGI | `<includeDir>/dinify-backend-<plane>.conf`, header `# dinify-backend-release: <id> operation: <op>` | real paths into that one release |
+| observed identity | `GET …/release/` from every sample, plus each daemon's cwd and mapped files | the running process's own launcher, checked against its own receipt |
+
+### The rehearsal — what was real and what was modelled
+
+All of it ran on a **disposable host inside this container** (Ubuntu 24.04, Apache 2.4 +
+mod_wsgi 5.0 for Python 3.12, PostgreSQL 16, Python 3.12.3), never the real host.
+
+**Real:** Apache, mod_wsgi daemon mode with two planes, graceful reloads, PostgreSQL and every
+migration, the unprivileged preparation/migration/runtime identities, the offline build,
+reconciliation, sealing, the identity endpoint answered by real workers, `/proc` evidence, the
+journal, the kernel lock, the kill, the clock. The candidates' bytes were real: **R1** used
+main's real CI candidate (artifact `10917740297`, `sha256:18f61328…5d35`), its real
+reconstruction (`10917745336`) and its real preflight (`10917139266`, deadline
+`2026-09-27T22:35:15.028Z` — historical, not an authorization); **R2** used three local
+candidates (A `fe9b308`, B `7c570a0` adding migration `misc_app.0005_rehearsalnote`, C
+`971797a` whose admin health can be broken by a file) — each certified by a local
+reproduction of the suite leg (every step run, ~4,900 Django tests) and admitted through the
+real `preflight assess` (real scanner, real PyPI queries) and real `preflight verify`.
+
+**Modelled:** the GitHub provenance of the R2 candidates (run ids, artifact ids, listings), the
+profile's `observation` block (a placeholder the rehearsal validator requires; nothing was
+reviewed), the migration decision for `0005` (in a disposable trusted snapshot, never
+committed), the loopback vhosts standing in for the real ones, an `apachectl` wrapper used for
+one fault, and — for the staged host script only — an AWS CLI stub copying from a local
+directory. No real host, account, bucket, role, secret or database was touched.
+
+| # | scenario | outcome | evidence |
+|---|---|---|---|
+| R1 | main's real candidate `7e16d4b` admitted and prepared | installed; promotion **refused** `identity_unsupported` — it predates B3 | correct: nothing could verify what it loaded |
+| R1 | a partial directory from another operation | **refused** `partial_release_foreign`, left in place | |
+| F02 | adopt the legacy directives | `adopted` | |
+| F03 | the committed UAT profile | **refused**: `profile_unknown` (34 fields named) + `profile_unverified` | |
+| F04 | legacy → A | `verified`; both planes report A; daemons' cwd in A | 35 s incl. build |
+| F05 | B with an unreviewed migration | **refused** `migration_unreviewed`; A kept serving; `0005` not applied | |
+| F06 | B with a reviewed expand migration, behind a 60 s lock held by the **staged Admin snippet** run verbatim | waited (holder released 01:02:13.843, `locked` 01:02:14), migrated, `verified`; a 2.5 s request started at `switching` completed on A (`marker A`, 200) | |
+| F07 | C with the space floor above free space | **refused** `insufficient_space`; nothing created | |
+| F08a | C with its admin health broken before construction | **refused** at construction (`startup_failed`); nothing installed | |
+| F08b | C broken only after preparation | switched, `verification-failed`, **`restored`** to B and re-verified; exit 3; C retained | |
+| F09 | the same, with the second graceful reload failing | `restoration-failed`, exit 4: includes back on B, processes still on C, operation open | the honest split state |
+| F10 | any deploy while that is open | **refused** `previous_operation_unresolved` | |
+| F12 | `resume` | observed C loaded, refused to accept it, restored B, closed | exit 3 |
+| F13a | rollback B → A across reviewed `0005` | `verified` (the harness's kill missed — it matched its own shell — recorded as such) | |
+| F13 | forward A → B, `kill -9` at `switched` | operation left open at `switched`; the kernel released the lock | |
+| F14 | `resume` | observed B, verified, closed | |
+| F15 | B again | `unchanged`, the same four daemon pids before and after | |
+| F16–F19 | admin key not Fernet · config unreadable by the runtime · config mode 644 · `ENV=dev` | each **refused** at `locked → refused`, nothing switched | |
+| F20 | serving release's receipt edited | running workers still report B; a new deploy **refused** `installed_release_mismatch` | |
+| F21 | fresh workers over the edited receipt | `mismatch` / `receipt_names_another_release`; restored → `verified` | |
+| F22 | `recover-legacy` | legacy serving, login route answers 405 | |
+| F23/F25 | `release/staged/host-run.sh` executed with placeholders substituted, stub AWS CLI | **refused** the committed profile; after the fix below, attests `B3-OUTCOME: refused`, which the marker reader maps to exit 1 | found a defect |
+| F24/F26 | a wrong transfer digest · a reused operation id | **refused** before any Python ran | |
+| — | `release/staged/discover_host.py` on the rehearsal host | ran read-only; no configuration value in its report | |
+| — | every output file, state file and report searched for the six configuration secret values | **0 matches** | |
+
+**What the rehearsal found and fixed** (each with a regression test): the probe's plane was
+read before it was assigned (a refusal, legacy kept serving); an unchanged outcome attested
+one release for both planes, which the staged reader would have called DEGRADED; a reused
+directory whose receipt had been edited was reported reused, now the receipt must re-derive
+its id; and a mutating action refused before any change printed no outcome, which the staged
+reader would have called unknown.
+
+**Measured, and worth knowing before the cutover**: a graceful reload reclaimed the previous
+mod_wsgi daemons about **3 seconds** after the signal regardless of `shutdown-timeout=15`
+(in R2, SIGUSR1 at 00:46:21.97, the old worker cut at 00:46:24.98, the client saw a 500). A
+request shorter than that finishes on the old release. The legacy deploy's
+`systemctl restart apache2` cuts every in-flight request at once.
+
+### The staged integration — NOT ACTIVE
+
+`release/staged/deploy-backend.yml` would run after "Backend Candidate Preflight" (or by
+dispatch with an exact sha, preflight run and attempt): a credential-free `receive` job
+re-reads the facts, repeats `preflight verify`, applies the ordering guard (the served
+identities over the public origins: both planes legacy proceeds as the first transition; a
+target that descends from, or equals, the served commit proceeds — the host then answers
+`unchanged` or installs a differently certified candidate; a target behind it is SKIPPED
+unless the dispatch says `rollback`; a split, mixed or divergent state refuses) and uploads
+the admission; the `deploy` job
+(the only one holding `id-token: write`) re-derives all of it, refuses a changed hint, stages
+the four files by sha256, sends `host-run.sh` through SSM and reads the markers
+(`markers.py`). The host script runs **nothing from the candidate** — the trusted verifier is a
+`git archive` of `release/` and `dependency_audit/` at the workflow's own revision — and uses
+the committed profile, so today it refuses. `release/CUTOVER.md` is the ordered plan; every
+step that touches the real host, AWS, Apache or secrets is marked OWNER.
+
+### What this does not prove
+
+- **Anything about the real host.** Its Apache layout, interpreter, mod_wsgi build, accounts,
+  configuration and disk are unobserved; `release/staged/discover_host.py` is how they will be
+  (read-only, reviewed, OWNER-approved), and the profile stays `unverified` until then.
+- **The installer's build path in CI.** `ins.build` is exercised on the rehearsal host (root,
+  real identities); CI runs the pure rules and the refusals, not a construction.
+- **A byte-identical interpreter** (as above), and **zero downtime** (the ~3 s drain).
+- **GitHub, SSM, S3 and OIDC.** The staged workflow is parsed and its steps and scripts are
+  executed locally by `tests_staged.py`; nothing reached those services.
+
 ## Exit codes
 
 `python -B -m release …`: **0** accepted · **1** refused (every problem is printed with a
@@ -515,12 +769,24 @@ consumer and drives `assess` and `verify` end to end. It includes:
 Advisory answers are synthetic there. The approvals it uses are marked fixtures, never
 policy.
 
+The installation has two fast files. `tests_host.py`: the profile (every unknown named;
+`false` versus `null`), the admission and its margin, the runtime files and the identity a
+launcher derives, the include, the migration decisions, the host lock and journal, and the
+switch/restore/resume sequence through transport doubles. `tests_staged.py`: no second
+active writer, the staged workflow's triggers, permissions and token boundary, the host
+script executed with substituted placeholders, the ordering guard, the marker reader, the
+committed profile's refusal and its attestation, and the discovery collector's read-only
+contract. `misc_app/tests_release_identity.py` covers the two routes.
+
 ## What remains
 
-- **B3 — promotion.** A deploy that installs **this** candidate's environment rather than
-  resolving `requirements.txt` on the box, and that repeats the preflight's receiving
-  check at its own boundary before it does. Until then `deploy-uat.yml` is the live path,
-  and nothing here protects it.
-- A served release identity for the backend (B3). Until then the frontend's gate refuses
-  `peers.backend_serving_unverified`, correctly.
+- **The B3 cutover** (`release/CUTOVER.md`): owner-approved discovery on the real host, a
+  reviewed verified profile, the identities, directories, bucket and grants, the
+  configuration copy, the includes, and ONE reviewed change that activates the staged
+  workflow and deletes `deploy-uat.yml`. Until then `deploy-uat.yml` is the live path, and
+  nothing here protects it.
+- A served release identity the frontend's gate can read. The routes exist (they answer
+  `unavailable` under the legacy install); the frontend keeps refusing
+  `peers.backend_serving_unverified` until a B3-installed release serves, correctly.
+- Dinify-Admin's adoption of the shared host lock (staged in `HOST_LOCK_CONTRACT.md`).
 - The B2.1 CI scanner install's configuration exposure above (the preflight's is closed).
