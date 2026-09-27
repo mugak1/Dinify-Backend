@@ -19,9 +19,13 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 
+from misc_app.endpoints.release_identity import ReleaseIdentityView
+
 urlpatterns = [
     # path('admin/', admin.site.urls),
     path('api/v1/health/', include('misc_app.urls')),
+    # Which installed release the answering worker process loaded (D08 B3); not health.
+    path('api/v1/release/', ReleaseIdentityView.as_view(plane='customer'), name='release-identity'),
     path('api/v1/users/', include('users_app.urls')),
     path('api/v1/restaurant-setup/', include('restaurants_app.urls')),
     path('api/v1/orders/', include('orders_app.urls')),

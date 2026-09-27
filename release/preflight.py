@@ -830,6 +830,83 @@ def find_preflight(facts_dir, evaluation):
     return (dict(found, evaluationRun=run) if not problems else None), problems
 
 
+def reproduce(root, result_dir, doc, candidate, record, stop_after_binding=False):
+    """THE RAW OUTPUT IS THE EVIDENCE: the trusted policy and scanner at ``root`` are the
+    ones the result names, the queried inventories are exactly the candidate's retained one
+    and the trusted scanner's, the raw bytes are the recorded ones, and the decision
+    reproduces under the trusted policy. Shared by the receiving check here and by the host
+    installer (release/installation.py), which has no git checkout and no API facts but
+    must reach the same answer from the same bytes. Returns ``(reproduced, problems)``."""
+    from dependency_audit import core, orchestrate as oc, pip_adapter as pa
+    problems = []
+    a, ev = doc.get("assessment") or {}, doc.get("evaluator") or {}
+    graphs = a.get("graphs") if isinstance(a.get("graphs"), dict) else {}
+    policy, policy_problems = oc.load_policy(root)
+    if policy_problems:
+        return None, [_problem("preflight_policy_changed", p["detail"]) for p in policy_problems]
+    with open(os.path.join(root, "dependency_audit", "policy.json"), "rb") as fh:
+        if ev.get("policySha256") != _sha256(fh.read()):
+            problems.append(_problem("preflight_policy_changed", "the result was decided under a different audit policy than the trusted one"))
+    with open(os.path.join(root, policy["scanner"]["requirements"]), "rb") as fh:
+        scanner_pins = pa.declared_requirements(fh.read().decode("utf-8"))
+        fh.seek(0)
+        if ev.get("scannerRequirementsSha256") != _sha256(fh.read()) or (ev.get("scanner") or {}).get("version") != policy["scanner"]["version"]:
+            problems.append(_problem("preflight_wrong_scanner", "the result's scanner is not the trusted pinned scanner"))
+    if problems or stop_after_binding:
+        return None, problems
+
+    # The raw output IS the evidence: exact files, exact inventories, and the decision reproduced.
+    packages, problems = retained_inventory(candidate, record)
+    if problems:
+        return None, problems
+    incomplete, findings = [], []
+    for graph in GRAPHS:
+        g = graphs.get(graph) if isinstance(graphs.get(graph), dict) else {}
+        recorded = oc._recorded_run(g)
+        if recorded is None or recorded.get("stdoutFile") != "%s.scanner-stdout.txt" % graph or recorded.get("stderrFile") != "%s.scanner-stderr.txt" % graph:
+            problems.append(_problem("preflight_invalid", "%s: no recorded query" % graph))
+            continue
+        with open(os.path.join(result_dir, recorded["stdoutFile"]), "rb") as fh:
+            stdout = fh.read()
+        with open(os.path.join(result_dir, recorded["stderrFile"]), "rb") as fh:
+            stderr = fh.read()
+        with open(os.path.join(result_dir, "%s.inventory-requirements.txt" % graph), "rb") as fh:
+            reqs = fh.read()
+        if _sha256(stdout) != recorded["stdoutSha256"] or _sha256(stderr) != recorded.get("stderrSha256"):
+            problems.append(_problem("preflight_raw_mismatch", "%s: the raw scanner output is not the bytes the result recorded" % graph))
+            continue
+        if graph == "application":
+            pkgs = packages
+            if g.get("observation") != "retained-inventory":
+                problems.append(_problem("preflight_wrong_inventory", "application: the query was not over the retained inventory"))
+        else:
+            listed = oc._recorded_packages(g)
+            if listed is None or {p["name"]: p["version"] for p in listed} != scanner_pins or g.get("observation") != "installed-now":
+                problems.append(_problem("preflight_wrong_scanner", "scanner: the queried scanner graph is not the trusted pinned set"))
+                continue
+            pkgs = [dict(p, path="scanner:site-packages/%s" % p["name"], scope=pa.tooling_scope(p)) for p in listed]
+        if reqs != pa.pins_text(pkgs).encode("utf-8") or g.get("inventorySha256") != pa.inventory_digest(pkgs) \
+                or g.get("requirementsSha256") != _sha256(reqs):
+            problems.append(_problem("preflight_wrong_inventory", "%s: the query did not cover exactly this inventory" % graph))
+            continue
+        found_problems, found_findings = pa.read_report(graph, dict(recorded, stdout=stdout.decode("utf-8")), pkgs)
+        incomplete += found_problems
+        findings += found_findings
+    if problems:
+        return None, problems
+    reproduced = core.evaluate(incomplete, findings, policy.get("records") or [], a.get("decidedAt"))
+    if reproduced["outcome"] != a.get("outcome") or reproduced["counts"] != a.get("counts") \
+            or applied_records(reproduced, policy.get("records") or []) != a.get("recordsApplied"):
+        problems.append(_problem("preflight_unreproducible", "the raw output decides %s under the trusted policy; the result says %s"
+                                 % (reproduced["outcome"], a.get("outcome"))))
+    if reproduced["outcome"] not in PASSING or reproduced["exitCode"] != 0:
+        problems.append(_problem("preflight_not_accepted", core.headline(reproduced)))
+
+    if problems:
+        return None, problems
+    return reproduced, []
+
+
 def receive(root, facts_dir, work, evaluation, now, margin_minutes=RECEIVING_MARGIN_MINUTES, expect_preflight=None):
     """THE RECEIVING CHECK. Everything is re-derived here: the selection from this side's own
     facts, the result from the evaluation run's own listing, the candidate's bytes through
@@ -909,66 +986,10 @@ def receive(root, facts_dir, work, evaluation, now, margin_minutes=RECEIVING_MAR
     if tree_problems or ev.get("trees") != trees:
         problems.append(_problem("preflight_evaluator_changed", "the result's evaluator (%s, trees %s) is not this verifier and main's: %s"
                                  % (ev.get("revision"), ev.get("trees"), "; ".join(p["detail"] for p in tree_problems) or "trees differ")))
-    policy, policy_problems = oc.load_policy(root)
-    if policy_problems:
-        return None, problems + [_problem("preflight_policy_changed", p["detail"]) for p in policy_problems]
-    with open(os.path.join(root, "dependency_audit", "policy.json"), "rb") as fh:
-        if ev.get("policySha256") != _sha256(fh.read()):
-            problems.append(_problem("preflight_policy_changed", "the result was decided under a different audit policy than the trusted one"))
-    with open(os.path.join(root, policy["scanner"]["requirements"]), "rb") as fh:
-        scanner_pins = pa.declared_requirements(fh.read().decode("utf-8"))
-        fh.seek(0)
-        if ev.get("scannerRequirementsSha256") != _sha256(fh.read()) or (ev.get("scanner") or {}).get("version") != policy["scanner"]["version"]:
-            problems.append(_problem("preflight_wrong_scanner", "the result's scanner is not the trusted pinned scanner"))
+    reproduced, repro_problems = reproduce(root, result_dir, doc, candidate, record, stop_after_binding=bool(problems))
+    problems += repro_problems
     if problems:
         return None, problems
-
-    # The raw output IS the evidence: exact files, exact inventories, and the decision reproduced.
-    packages, problems = retained_inventory(candidate, record)
-    if problems:
-        return None, problems
-    incomplete, findings = [], []
-    for graph in GRAPHS:
-        g = graphs.get(graph) if isinstance(graphs.get(graph), dict) else {}
-        recorded = oc._recorded_run(g)
-        if recorded is None or recorded.get("stdoutFile") != "%s.scanner-stdout.txt" % graph or recorded.get("stderrFile") != "%s.scanner-stderr.txt" % graph:
-            problems.append(_problem("preflight_invalid", "%s: no recorded query" % graph))
-            continue
-        with open(os.path.join(result_dir, recorded["stdoutFile"]), "rb") as fh:
-            stdout = fh.read()
-        with open(os.path.join(result_dir, recorded["stderrFile"]), "rb") as fh:
-            stderr = fh.read()
-        with open(os.path.join(result_dir, "%s.inventory-requirements.txt" % graph), "rb") as fh:
-            reqs = fh.read()
-        if _sha256(stdout) != recorded["stdoutSha256"] or _sha256(stderr) != recorded.get("stderrSha256"):
-            problems.append(_problem("preflight_raw_mismatch", "%s: the raw scanner output is not the bytes the result recorded" % graph))
-            continue
-        if graph == "application":
-            pkgs = packages
-            if g.get("observation") != "retained-inventory":
-                problems.append(_problem("preflight_wrong_inventory", "application: the query was not over the retained inventory"))
-        else:
-            listed = oc._recorded_packages(g)
-            if listed is None or {p["name"]: p["version"] for p in listed} != scanner_pins or g.get("observation") != "installed-now":
-                problems.append(_problem("preflight_wrong_scanner", "scanner: the queried scanner graph is not the trusted pinned set"))
-                continue
-            pkgs = [dict(p, path="scanner:site-packages/%s" % p["name"], scope=pa.tooling_scope(p)) for p in listed]
-        if reqs != pa.pins_text(pkgs).encode("utf-8") or g.get("inventorySha256") != pa.inventory_digest(pkgs) \
-                or g.get("requirementsSha256") != _sha256(reqs):
-            problems.append(_problem("preflight_wrong_inventory", "%s: the query did not cover exactly this inventory" % graph))
-            continue
-        found_problems, found_findings = pa.read_report(graph, dict(recorded, stdout=stdout.decode("utf-8")), pkgs)
-        incomplete += found_problems
-        findings += found_findings
-    if problems:
-        return None, problems
-    reproduced = core.evaluate(incomplete, findings, policy.get("records") or [], a.get("decidedAt"))
-    if reproduced["outcome"] != a.get("outcome") or reproduced["counts"] != a.get("counts") \
-            or applied_records(reproduced, policy.get("records") or []) != a.get("recordsApplied"):
-        problems.append(_problem("preflight_unreproducible", "the raw output decides %s under the trusted policy; the result says %s"
-                                 % (reproduced["outcome"], a.get("outcome"))))
-    if reproduced["outcome"] not in PASSING or reproduced["exitCode"] != 0:
-        problems.append(_problem("preflight_not_accepted", core.headline(reproduced)))
 
     # TIME: ordered, inside GitHub's own bounds, and not expired (with the margin).
     times = [doc.get("startedAt")] + [graphs[g].get(k) for g in GRAPHS for k in ("queryStartedAt", "queryFinishedAt")] + [a.get("finishedAt"), a.get("decidedAt")]
