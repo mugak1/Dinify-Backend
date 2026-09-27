@@ -195,6 +195,25 @@ class TheCommittedProfile(unittest.TestCase):
                                   "--candidate-zip", os.path.join(d, "c"), "--preflight-zip", os.path.join(d, "p"), "--trusted", d]), 1)
             self.assertEqual(os.listdir(d), [])
 
+    def test_REGRESSION_a_refusal_before_any_change_still_attests_one_refused_outcome(self):
+        # Found by executing host-run.sh on the rehearsal host: a profile refusal printed no
+        # B3-OUTCOME, so the workflow read an unknown host state (exit 4) for a clean refusal.
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = cli(["host", "deploy", "--profile", PROFILE, "--operation", "x2", "--admission", os.path.join(d, "a"),
+                            "--candidate-zip", os.path.join(d, "c"), "--preflight-zip", os.path.join(d, "p"), "--trusted", d])
+        self.assertEqual(code, 1)
+        self.assertEqual([l for l in out.getvalue().splitlines() if l.startswith("B3-")], ["B3-OUTCOME: refused"])
+        self.assertEqual(markers.read(out.getvalue() + "B3-EXIT: 1\n", "a" * 40, "Failed")[0], 1)
+        # a read-only action attests nothing
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            cli(["host", "validate-profile", "--profile", PROFILE])
+        self.assertNotIn("B3-", out.getvalue())
+
     def test_CONTRACT_source_hints_are_never_read_as_observations(self):
         for name in os.listdir(os.path.join(ROOT, "release")):
             if name.endswith(".py") and not name.startswith("tests_"):

@@ -309,6 +309,19 @@ def _host_outcome(outcome):
     return HOST_EXIT.get(outcome["stage"], 4)
 
 
+MUTATING_HOST_ACTIONS = ("deploy", "resume", "adopt-legacy", "recover-legacy")
+
+
+def _host_refused(args, label, problems):
+    """A mutating action refused before it changed anything a request can reach. It still
+    ATTESTS that (``B3-OUTCOME: refused``): the workflow reads the attestation, and a refusal
+    that printed none reads as an unknown host state, which is not what happened."""
+    code = report(label, problems, "")
+    if args.action in MUTATING_HOST_ACTIONS:
+        print("B3-OUTCOME: refused")
+    return code
+
+
 def cmd_host(args):
     from . import hostprofile as hp
     from . import installation as ins
@@ -323,14 +336,14 @@ def cmd_host(args):
         return 1 if answer.get("problems") else 0
     profile, problems = _profile(args)
     if problems:
-        return report("HOST", problems, "")
+        return _host_refused(args, "HOST", problems)
     if args.action == "validate-profile":
         return report("PROFILE", [], "profile %s is structurally valid (%s, %s)" % (args.profile, profile["kind"], profile["status"]))
     if args.action == "status":
         print(json.dumps(tr.status(profile), indent=2, sort_keys=True))
         return 0
     if not ins._OPERATION.match(args.operation or ""):
-        return report("HOST", [{"code": "operation_invalid", "detail": "--operation is lowercase words and digits"}], "")
+        return _host_refused(args, "HOST", [{"code": "operation_invalid", "detail": "--operation is lowercase words and digits"}])
     if args.action == "resume":
         return _host_outcome(tr.resume(profile, args.operation))
     if args.action == "adopt-legacy":
@@ -346,20 +359,20 @@ def cmd_host(args):
     if err:
         problems.append({"code": "admission_invalid", "detail": err})
     if problems:
-        return report("HOST DEPLOY", problems, "")
+        return _host_refused(args, "HOST DEPLOY", problems)
     work = os.path.join(profile["releaseRoot"], ".work", args.operation)
     if os.path.lexists(work):
-        return report("HOST DEPLOY", [{"code": "operation_reused", "detail": "%s exists: an operation id is used once" % work}], "")
+        return _host_refused(args, "HOST DEPLOY", [{"code": "operation_reused", "detail": "%s exists: an operation id is used once" % work}])
     os.makedirs(work, mode=0o755)
     try:
         import time as _time
         state, problems = ins.admit(trusted, admission, args.candidate_zip, args.preflight_zip, os.path.join(work, "admitted"), int(_time.time()))
         if problems:
-            return report("HOST ADMISSION", problems, "")
+            return _host_refused(args, "HOST ADMISSION", problems)
         print("B3-ADMITTED: %s %s preflight %s until %s" % (admission["commit"], admission["candidateDigest"], admission["preflightDigest"], admission["deadline"]))
         receipt, problems = ins.prepare(profile, state, args.operation, trusted, work, rehearsal=args.rehearsal)
         if problems:
-            return report("HOST PREPARATION", problems, "")
+            return _host_refused(args, "HOST PREPARATION", problems)
         release = os.path.join(profile["releaseRoot"], receipt["releaseId"])
         print("B3-PREPARED: %s (%s)" % (receipt["releaseId"], "reused" if receipt.get("reused") else "installed"))
         return _host_outcome(tr.promote(profile, args.operation, release, admission, trusted, rehearsal=args.rehearsal))
