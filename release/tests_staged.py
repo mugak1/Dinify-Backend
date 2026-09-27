@@ -214,6 +214,18 @@ class TheCommittedProfile(unittest.TestCase):
             cli(["host", "validate-profile", "--profile", PROFILE])
         self.assertNotIn("B3-", out.getvalue())
 
+    def test_REGRESSION_an_unchanged_outcome_attests_serving_per_plane_so_the_reader_accepts_it(self):
+        # The unchanged control reports ONE release id; attested as-is it read as DEGRADED.
+        import contextlib
+        import io
+        from release.__main__ import _host_outcome
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = _host_outcome({"stage": "unchanged", "release": RID})
+        text_ = "B3-ADMITTED: %s sha256:x preflight sha256:y until z\nB3-PREPARED: %s (reused)\n%s" % ("a" * 40, RID, out.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(markers.read(text_, "a" * 40, "Success")[:2], (0, RID))
+
     def test_CONTRACT_source_hints_are_never_read_as_observations(self):
         for name in os.listdir(os.path.join(ROOT, "release")):
             if name.endswith(".py") and not name.startswith("tests_"):
