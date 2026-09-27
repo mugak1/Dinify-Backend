@@ -1534,6 +1534,124 @@ as the CURRENT catalogue name will now see the purchase name.
 
 ---
 
+## 19. Admin commands can name the session they were issued under (D10, B1)
+
+**What changed.** Two additive response fields, one optional request header and three
+new refusals, all on the admin control plane (`admin.dinifyapp.com`; browser paths are
+`/api/admin/v1/...`, reached as `admin/v1/...` after Apache strips `/api`). No
+migration, no settings change, no new route and no CORS change (the plane is
+same-origin).
+
+`POST /api/admin/v1/auth/verify/` and `GET /api/admin/v1/auth/session/` add
+`data.command_owner`:
+
+```
+"command_owner": {"version": 1, "actor": "<User.pk>", "session": "<AdminSession.id>"}
+```
+
+`verify/` names the session it has just issued (the one its `Set-Cookie` carries).
+`session/` names the session that authenticated that read. Both ids are canonical
+lowercase UUID strings. They identify and grant nothing: neither is the session token
+or its hash. Every existing field, the envelope and every cookie are unchanged.
+
+A client may name that owner on any unsafe admin request:
+
+```
+X-Admin-Command-Owner: 1;<actor>;<session>
+```
+
+| Header | Result |
+|---|---|
+| absent | unchanged: the pre-D10 contract |
+| names the session that authenticated the request | unchanged: CSRF, permissions and elevation still apply |
+| present, but not exactly one well-formed value | `400 {"detail": "…", "code": "admin_command_owner_malformed"}` |
+| names a different administrator | `409 {"detail": "…", "code": "admin_command_actor_changed"}` |
+| same administrator, a different session | `409 {"detail": "…", "code": "admin_command_session_changed"}` |
+
+The check runs in `AdminSessionAuthentication`, in this order: the session cookie is
+resolved (a missing, unknown, expired, idle or revoked session is still the existing
+`401`); the account's eligibility is re-checked (still the existing `401`); then the
+owner; then CSRF (`403`); then permissions, including recent elevation (`403`);
+throttles; the handler. So an owner refusal is never reported as a CSRF failure, and
+it happens before any second factor is checked or spent. Safe methods ignore the header
+entirely. Each refusal carries one fixed sentence and its code, never an id, the header
+or a cookie value, and is not audited: like a CSRF failure it is refused inside
+authentication, before any administrative decision exists.
+
+**The session comparison is what enforces.** The actor comparison only chooses which
+409 is returned: "somebody else is signed in now" and "you signed in again" need
+different screens.
+
+**Parsing is strict, and only absence is legacy.** The value must be exactly `1;`
+followed by two lowercase, hyphenated UUIDs joined by `;` (75 characters). An empty
+value, whitespace, a missing or extra field, another version, an uppercase, braced or
+`urn:` id, surrounding whitespace and two values joined by a proxy (`a, b`) are all
+`400`. Nothing is trimmed or lower-cased.
+
+`POST /api/admin/v1/auth/logout/` does not use the authenticator, so it applies the same
+rules itself:
+
+| Header | Live session behind the cookie | Result |
+|---|---|---|
+| absent | any | unchanged: revoke it if live, clear both cookies, one audit entry |
+| malformed | any | `400`; nothing revoked, no cookie cleared, no audit |
+| well-formed | none (no, unknown, expired, idle or revoked cookie) | `200 {"status": 200, "message": "Signed out."}` with NO `Set-Cookie`; nothing revoked, no audit |
+| well-formed, another session | live | `409` as above; no `Set-Cookie`, nothing revoked, no audit |
+| names this session | live | unchanged |
+
+**Why.** A matched CSRF pair says a request came from this origin. It does not say
+which session a command was issued under. `session/` calls `get_token`, which
+re-emits whatever CSRF secret the request carried. So a `session/` response sent
+before another sign-in and delivered after it puts the old CSRF cookie back beside the
+new session cookie. A tab still holding the old token then passes CSRF, and its command
+runs as whoever signed in since. A second sign-in by the SAME administrator has the same
+shape, with nothing about CSRF stale at all.
+
+**This corrects §12, item 3.** It said the rotated token "is bound to the
+`AdminSession`, the way `django.contrib.auth.login()` binds it". It is not. Rotation
+gives each sign-in a fresh secret, but nothing records which secret belongs to which
+session, `logout/` leaves the CSRF cookie in place, and `session/` re-emits an old one.
+§12's advice for a CSRF `403` (re-bootstrap with `session/` and retry once) is still
+right for a genuine CSRF failure. A client that names its owner never reaches it after a
+session change, because the `409` comes first.
+
+**Frontend action (Dinify-Admin).** None to keep working: an absent header is the old
+contract, and the deployed client sends none. To be protected, a client must:
+
+1. keep the `command_owner` it was established under, from `verify/` or `session/`;
+2. send it on every unsafe request except `login/` and `verify/`, unchanged on the one
+   CSRF retry and on the replay after re-authentication;
+3. treat both `409` codes as "the command was not run", and never retry, elevate or
+   re-bootstrap and retry after one;
+4. treat `400 admin_command_owner_malformed` as a client defect;
+5. name its owner on `logout/`, so a stale tab cannot sign out a later session.
+
+A client that consumes this contract must not ship before this change is merged and
+deployed.
+
+**What this does NOT close.**
+
+- **A client that sends no header is still exposed.** The deployed Admin client sends
+  none, so the counterexample stays open for it until a client that names its owner is
+  deployed.
+- **A delayed MATCHING sign-out** still clears the cookie of a session started after it
+  was sent, because its response cannot know what the browser holds by the time it
+  lands. The later session's row is untouched and nothing runs; that browser has to
+  sign in again.
+- **An outcome that was already uncertain stays uncertain.** A command sent under the
+  right owner whose response is lost may or may not have run, exactly as before.
+- **The serving path must carry the header, and this repository cannot show that it
+  does.** A proxy that strips `X-Admin-Command-Owner` turns every request into the
+  absent-header case: nothing fails, and the protection is silently gone. A `GET` of
+  `session/` cannot detect that. Before a client relies on the header, an
+  owner-authorized negative probe on controlled, disposable fixtures must show the
+  deployed path returning the `409`.
+- **Rolling this back is not neutral.** A backend that ignores the header runs every
+  command a new client sends, with no error. Keep this contract when reverting a client:
+  reverting client files does not replace tabs that are already open.
+
+---
+
 
 ## Summary of frontend changes needed before merge
 

@@ -56,12 +56,11 @@ answered ``403 CSRF Failed: CSRF cookie not set.``: ``auth/elevate/``,
 which is every write the control plane has. This module is therefore the issuer, at
 the two points that bracket a session's life:
 
-* ``verify/`` ROTATES (``rotate_token``) on the success path. Rotating rather than
-  ensuring ties the CSRF secret's lifetime to the ``AdminSession`` just minted —
-  what ``django.contrib.auth.login()`` does, and which this plane skips only because
-  its session is an ``AdminSession`` row rather than a Django login. ``get_token``
-  would instead carry one secret across logout and re-login for ``CSRF_COOKIE_AGE``
-  (a year).
+* ``verify/`` ROTATES (``rotate_token``) on the success path, so each sign-in starts
+  from a fresh secret — what ``django.contrib.auth.login()`` does, and which this
+  plane skips only because its session is an ``AdminSession`` row rather than a
+  Django login. ``get_token`` would instead carry one secret across logout and
+  re-login for ``CSRF_COOKIE_AGE`` (a year).
 * ``session/`` ENSURES (``get_token``) on the SPA's bootstrap read. Ensure, not
   rotate: ``get_token`` reuses an existing secret, so refreshing one tab does not
   invalidate the token every other tab is holding.
@@ -74,6 +73,23 @@ rebinds.) Neither call touches the database, so neither is inside a transaction,
 neither is audited: ``session/`` is a safe GET, and ``verify/`` already emits exactly
 one entry per request.
 
+ROTATION DOES NOT BIND THE CSRF SECRET TO A SESSION. This docstring used to say that
+rotating "ties the CSRF secret's lifetime to the AdminSession just minted", and that
+was false. Nothing records which secret belongs to which session, ``logout/`` leaves
+the CSRF cookie in place, and ``get_token`` RE-EMITS whatever secret the request
+carried. So a ``session/`` response sent before another sign-in and delivered after it
+puts the OLD secret back beside the NEW session cookie, and the pair matches. A
+matched CSRF pair shows that a request came from this origin. It does not show which
+session, or which administrator, a command was issued under.
+
+COMMAND OWNER (D10). That is what ``platform_admin_app.command_owner`` answers.
+``verify/`` and ``session/`` publish ``command_owner`` (``{version, actor, session}``:
+the ``User.pk`` and ``AdminSession.id`` of the session the response is about, never
+the token or its hash). A client that names it in ``X-Admin-Command-Owner`` on an
+unsafe request is refused when the browser's session has changed since.
+``AdminSessionAuthentication`` applies that to every authenticated unsafe route;
+``logout/`` bypasses the authenticator, so it applies it itself.
+
 AUDIT. Exactly one entry per request, on every path including denial — the
 convention ``AdminAPIView`` documents. A failure that crosses the lockout threshold
 emits the distinct ``lockout`` action INSTEAD of the ordinary failure entry, and a
@@ -83,7 +99,10 @@ audit INSIDE the transaction and commit with their own failure accounting — ei
 failure is both counted and recorded, or neither. The one path that must ROLL BACK
 (losing a race for the challenge, having already consumed the factor) audits after the
 block instead, the house pattern from ``restaurants_app.controllers.lifecycle`` and
-``platform_admin_app.delegated_sessions``.
+``platform_admin_app.delegated_sessions``. The exceptions are requests refused before
+any decision exists, and they write NO entry: a CSRF failure or a command-owner
+refusal inside the authenticator, and at ``logout/`` a command-owner refusal or a
+named sign-out with no live session to end.
 """
 from django.contrib.auth import get_user_model
 from django.db import transaction
@@ -97,6 +116,7 @@ from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STA
 from platform_admin_app import (
     audit,
     challenges,
+    command_owner,
     lockout,
     recovery,
     second_factor,
@@ -387,8 +407,9 @@ class AdminVerifyView(APIView):
 
         # Issue the CSRF cookie for the session just minted. Without it every unsafe
         # admin route fails enforce_csrf — nothing else in the codebase issues one.
-        # ROTATE, not ensure: a fresh secret per session, mirroring
-        # django.contrib.auth.login(). See the module docstring.
+        # ROTATE, not ensure: a fresh secret at each sign-in, mirroring
+        # django.contrib.auth.login(). It does not bind the secret to this session;
+        # command_owner below is what names the session. See the module docstring.
         rotate_token(request)
 
         response = Response(
@@ -401,6 +422,8 @@ class AdminVerifyView(APIView):
                     'used_recovery_code': used_recovery,
                     'lockout_cleared': cleared_lock,
                     'recovery_codes_remaining': recovery.remaining(auth_row),
+                    # The session just ISSUED, which the cookie below carries.
+                    'command_owner': command_owner.describe(session),
                 },
             },
             status=200,
@@ -438,13 +461,39 @@ class AdminLogoutView(APIView):
     Deliberately ``AllowAny`` with a manual cookie read: logging out must succeed
     (200, cookies cleared) even when the session is already gone or invalid, rather
     than 401-ing and leaving a stale cookie in the browser.
+
+    A SIGN-OUT MAY NAME ITS SESSION (D10). This view bypasses the authenticator, so it
+    applies the command-owner precondition itself, in this order:
+
+    * no ``X-Admin-Command-Owner`` header: the behaviour above, unchanged;
+    * a header that cannot be read: 400, whether or not a session is live — it is
+      never treated as absent;
+    * a well-formed header, and no live session behind this request's cookie (none,
+      unknown, expired, idle or revoked): the ordinary success body as a quiet no-op,
+      with NO cookie cleared, nothing revoked and nothing audited. The session it
+      names has already ended, and the cookie in this browser may by now belong to
+      somebody else;
+    * a well-formed header naming a DIFFERENT live session: 409, with no cookie
+      cleared, nothing revoked and nothing audited — a stale tab cannot sign out
+      whoever signed in since;
+    * a header naming THIS session: the behaviour above, unchanged.
+
+    A matching sign-out whose RESPONSE is delayed past a later sign-in still clears
+    the later cookie from the browser, because the response cannot know what the
+    browser holds by the time it lands. The later session's row is untouched; the
+    browser simply has to sign in again.
     """
 
     authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
+        named = command_owner.read(request.META)   # a malformed header refuses here
         session = sessions.resolve_session(request.COOKIES.get(cookie_name()))
+        if named is not None:
+            if session is None:
+                return Response({'status': 200, 'message': 'Signed out.'}, status=200)
+            command_owner.compare(named, session)   # before revoke, audit or cookies
         if session is not None:
             sessions.revoke(session, 'logout')
 
@@ -473,8 +522,10 @@ class AdminSessionView(APIView):
         # cookie — a client that has a session but no token (new tab, cleared jar,
         # cookie expired ahead of the session) can recover here rather than having to
         # sign in again. ENSURE, not rotate: get_token reuses an existing secret, so
-        # one tab refreshing does not invalidate the token the others hold. Safe
-        # method, so enforce_csrf exempts it — this only issues, never checks.
+        # one tab refreshing does not invalidate the token the others hold. It also
+        # RE-EMITS that secret, which is why a CSRF pair is not a session binding —
+        # see the module docstring. Safe method, so enforce_csrf exempts it — this
+        # only issues, never checks.
         get_token(request)
 
         return Response(
@@ -491,6 +542,8 @@ class AdminSessionView(APIView):
                         if session.elevated_at else None
                     ),
                     'server_time': timezone.now().isoformat(),
+                    # The session that authenticated THIS read.
+                    'command_owner': command_owner.describe(session),
                 },
             },
             status=200,
