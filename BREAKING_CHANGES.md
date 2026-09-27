@@ -1416,6 +1416,124 @@ schema-free: no migration accompanies it, so the databases match either way.
 
 ---
 
+## 18. Historical order lines carry the name they were bought under, and say when it is missing (D12, reader)
+
+**What changed.** Six diner-facing name fields used to read the LIVE catalogue
+record (`MenuItem.name`), or fell back to it. They now return the line's saved
+`OrderItem.item_name_snapshot` VERBATIM, and each gains an additive sibling that
+says where the name came from:
+
+| Existing name field | New sibling |
+|---|---|
+| `GET orders/journey/order-details/` → `data.items[].item.name` | `data.items[].item.name_provenance` |
+| same → `data.items[].extra_items[].name` | `data.items[].extra_items[].name_provenance` |
+| `POST orders/initiate/` (including a D04 replay) → every `serialize_order_item_details` row's `item_name` (`order_items`, `available_items`, `unavailable_items`, `extras`, `available_extras`, `unavailable_extras`) | `item_name_provenance` |
+| same rows → nested `extras[].item_name` | `item_name_provenance` |
+| `quote[].item_name` (initiate and order-details) | `item_name_provenance` |
+| `quote[].extras[].item_name` | `item_name_provenance` |
+
+`*_provenance` is `"snapshot"` when the saved name is non-empty and `"missing"`
+when it is `""`. It describes THAT NAME FIELD ONLY, and says nothing about the
+line's money, options or allergens.
+
+**Why.** A catalogue record keeps changing after the purchase. A rename moved
+three of these fields to the new name. A soft delete's inline vacuum rewrote the
+record to `<name>_autodelN`, and that string reached the diner as the dish they
+ordered. The quote already preferred the saved name, but when the saved name was
+blank it silently substituted today's catalogue name as though it were history.
+
+**Before / after**, for a line bought as "Beef Burger" with a "Cheese Slice"
+extra, after the operator renamed the extra "Vegan Cheese" and then deleted the
+dish (whose record the inline vacuum rewrote to `Beef Burger_autodel1`):
+
+```
+before  items[0].item            {"id": "…", "name": "Beef Burger_autodel1", "is_special": false}
+        items[0].extra_items[0]  {"id": "…", "name": "Vegan Cheese", …}
+after   items[0].item            {"id": "…", "name": "Beef Burger",
+                                  "name_provenance": "snapshot", "is_special": false}
+        items[0].extra_items[0]  {"id": "…", "name": "Cheese Slice",
+                                  "name_provenance": "snapshot", …}
+```
+
+and for a line whose saved name is blank:
+
+```
+before  quote[0]  {"item_name": "Chicken Burger", …}          # today's name, unlabelled
+after   quote[0]  {"item_name": "", "item_name_provenance": "missing", …}
+```
+
+**A blank is reported, never filled.** `""` stays `""`, a string, never `null`
+and never a substituted current name. Nothing is trimmed, suffix-stripped or
+normalised. A saved name that happens to contain `_autodel` is kept intact,
+because it is what the diner saw. **What a blank does NOT tell you:** that the row
+predates migration `orders_app/0028` (which added the column with no backfill), or
+that the order carries no intent key. The tests include an intent-bearing blank
+row read through a D04 replay and through `?intent=`. The server does not know why
+a name is missing, and it does not guess.
+
+**What is unchanged.** Money: every legacy numeric key keeps its form, and every
+quote amount stays an exact decimal string. Identity: `id`, `item`,
+`items[].item.id`, `is_special`, `selected_modifiers`, `modifiers`, `options`
+and allergens are unchanged. Also unchanged: availability, status and deletion
+fields, row order, the population of every list (and which extras sit under which
+parent), grouping, `quote_total`, `quote_complete`, `quote_ref`, and the
+acceptance and closure projections. **`quote_ref` does not move**: it fingerprints
+the SAVED columns, never the reader's output. The kitchen feeds are unchanged
+(they already read the snapshot), and so is the menu-performance report, which is
+a current-menu report by contract. The detail read costs two fewer queries in
+the tested fixture (the extras no longer load their `MenuItem` to read a live
+name). The query population was not otherwise touched.
+
+**No migration, no backfill, no data write.** A backfill was considered and
+refused. The snapshot columns are inside the quote fingerprint, so rewriting a
+DRAFT's saved name moves its `quote_ref` and its next submit answers
+`quote_ref_stale`. That is a re-review, not a terminal closure, but it is still
+a change to what the diner agreed to. And no trustworthy source for a
+historically correct name was identified: the live catalogue is exactly the
+wrong source. That is not proof that no archive exists anywhere.
+
+### Frontend consumers (Dinify-Frontend `0ea7e9b`)
+
+The basket review sheet reads `quote[].item_name` and `quote[].extras[].item_name`,
+and those values change for blank rows. A probe ran the pinned
+`quote-review.ts` / `quote-equivalence.ts` against real wire payloads from this
+branch:
+
+- normal names are readable and pair with the basket (the plain prompt stays
+  available);
+- an equal-total basket whose two line prices moved by offsetting amounts is still
+  refused (control);
+- a blank parent name, a blank extra name, or both are READABLE (`""` passes
+  `displayableName`), but no longer pair with a basket that knows the name. So
+  the diner gets the itemised review, which shows a blank name, instead of the
+  plain prompt;
+- blank against an equally blank basket name pairs (recorded, not asserted).
+
+Against the pre-change reader the same blank rows were filled with the live name
+and paired. `""` parses everywhere, and nothing at `0ea7e9b` DISPLAYS the new
+provenance fields: a blank renders as an empty name, not as "name unavailable".
+No Frontend change is required for this to be safe, and none is made here. The
+kitchen board is untouched, and its wire validator still rejects a `null` name,
+which is why the blank stays `""`. **Consumers outside the three repositories
+are unknown.** Any that treated `items[].item.name` or the initiate `item_name`s
+as the CURRENT catalogue name will now see the purchase name.
+
+### What this does NOT close (D12 stays open)
+
+- **Hard deletion.** `OrderItem.item` is still `on_delete=CASCADE`, so a hard
+  delete of a purchased `MenuItem` destroys the order's lines, and an orphaned
+  extra (`parent_item` is SET_NULL) then reads as a main dish. PROTECT is a
+  proposal only. A rollback could restore CASCADE, and a waiver is not a repair.
+- **The kitchen gap.** A blank legacy row shows `""` and `allergen_tags: []` on
+  the kitchen board. An unknown allergen list is NOT "no allergens", and the
+  kitchen serializer is unchanged here.
+- **Descriptions and other catalogue text.** There is no description snapshot,
+  and this change adds none.
+- **Retention.** Nothing here decides how long saved names are kept, or recovers
+  a name that was never saved.
+
+---
+
 
 ## Summary of frontend changes needed before merge
 
@@ -1442,6 +1560,9 @@ schema-free: no migration accompanies it, so the databases match either way.
    cancellations and refunds) and `sales_amount` to become non-null. Optionally
    read the new `orders_placed` and `payment_tracking_enabled` keys. No field was
    renamed or removed — see §11.
+10. **Historical line names (D12):** none required. Order-line names are the
+    saved purchase name, and a missing one is `""` beside an additive
+    `*_provenance: "missing"`. Optionally render that as "name unavailable" — see §18.
 
 ---
 
