@@ -6,6 +6,9 @@ completion receipt. Nothing here touches what is serving; release/transition.py 
         source/      the verified source archive, extracted (plus bytecode compiled there)
         venv/        created AT THIS PATH from the host's base interpreter, offline, from the
                      admitted wheels alone, then reconciled — never built elsewhere and moved
+        wheelhouse/  the admitted wheels, retained so the sealed environment can be reconciled
+                     against the exact bytes it was installed from (B2.5's own check), for as
+                     long as the release exists
         static/      collectstatic output, generated from THIS release under disposable
                      settings; release-owned, retained with the release
         wsgi/        trusted launcher files the installer writes (not from the candidate)
@@ -62,7 +65,7 @@ from . import sourcetree as st
 ADMISSION_SCHEMA = "dinify.backend.admission/1"
 RECEIPT_SCHEMA = "dinify.backend.installed-release/1"
 RECEIPT = "receipt.json"
-TOP_LEVEL = ("receipt.json", "source", "static", "venv", "wsgi")
+TOP_LEVEL = ("receipt.json", "source", "static", "venv", "wheelhouse", "wsgi")
 RUNTIME_MODULE = "dinify_release_runtime.py"
 STARTUP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "startup.py")
 CONSTRUCTION_WAIT_SECONDS = 600
@@ -419,7 +422,13 @@ def prepare(profile, state, operation, trusted_root, work, rehearsal=False, disk
                                        "Nothing was created; already-installed releases remain available for recovery" % (available, profile["minFreeBytes"]))]
             os.makedirs(os.path.dirname(_marker_path(profile, rid)), mode=0o755, exist_ok=True)
             _write_json(_marker_path(profile, rid), {"operation": operation, "startedAt": now_iso(), "releaseId": rid})
-            problems = _construct(profile, state, operation, trusted_root, work, release, rid, runtime, rehearsal)
+            try:
+                problems = _construct(profile, state, operation, trusted_root, work, release, rid, runtime, rehearsal)
+            except BaseException:
+                # Whatever went wrong, what THIS operation started is removed; nothing else is.
+                _remove_attributable(release)
+                os.remove(_marker_path(profile, rid))
+                raise
             if problems:
                 _remove_attributable(release)
                 os.remove(_marker_path(profile, rid))
@@ -468,8 +477,8 @@ def _construct(profile, state, operation, trusted_root, work, release, rid, runt
     # SEAL: root-owned (or the rehearsal's own account), nothing writable by group or others,
     # nothing writable by the preparer or the runtime identity. Links only where a venv has them.
     names = sorted(os.listdir(release))
-    if names != ["source", "static", "venv"]:
-        return [_problem("build_unexpected", "the preparer left %s in the release; exactly source, static and venv are expected" % names)]
+    if names != ["source", "static", "venv", "wheelhouse"]:
+        return [_problem("build_unexpected", "the preparer left %s in the release; exactly source, static, venv and wheelhouse are expected" % names)]
     problems = _seal(release, owner)
     if problems:
         return problems
@@ -487,10 +496,10 @@ def _construct(profile, state, operation, trusted_root, work, release, rid, runt
     inventory, problems = reconcile_sealed(profile, release, trusted_root)
     if problems:
         return problems
-    if inventory["digest"] != state["record"]["environment"]["digest"]:
-        return [_problem("environment_mismatch", "the sealed environment is not the certified one")]
+    if inventory["digest"] != state["record"]["environment"]["digest"] or inventory.get("wheelhouseDigest") != state["record"]["wheelhouse"]["digest"]:
+        return [_problem("environment_mismatch", "the sealed environment or its retained wheels are not the certified ones")]
     source_files = read_tree(os.path.join(release, "source"), skip_bytecode=True)
-    if st.tree_id(source_files) != state["record"]["tree"]:
+    if st.archive_tree(source_files) != state["record"]["tree"]:
         return [_problem("source_mismatch", "the installed source does not hash to the certified tree")]
     static_listing = listing(os.path.join(release, "static"))
     admission = state["admission"]
@@ -615,8 +624,10 @@ def verify_installed(profile, release, trusted_root, rehearsal=False):
         for name in [dirpath] + [os.path.join(dirpath, n) for n in dirnames + filenames]:
             st_ = os.lstat(name)
             rel = os.path.relpath(name, release)
-            if stat.S_ISLNK(st_.st_mode) and not _VENV_LINKS.match(rel):
-                problems.append(_problem("release_altered", "%s is an unexpected link" % rel))
+            if stat.S_ISLNK(st_.st_mode):
+                # A link's own mode is always 0777 and means nothing; its owner and target do.
+                if not _VENV_LINKS.match(rel) or st_.st_uid != owner:
+                    problems.append(_problem("release_altered", "%s is an unexpected link" % rel))
             elif st_.st_uid != owner or st_.st_mode & 0o022:
                 problems.append(_problem("release_unsealed", "%s is owned by uid %d with mode %o" % (rel, st_.st_uid, stat.S_IMODE(st_.st_mode))))
         if len(problems) > 20:
@@ -624,7 +635,7 @@ def verify_installed(profile, release, trusted_root, rehearsal=False):
     if problems:
         return None, problems
     source_files = read_tree(os.path.join(release, "source"), skip_bytecode=True)
-    if st.tree_id(source_files) != receipt.get("tree") or st.listing_digest(source_files) != (receipt.get("source") or {}).get("contentSha256"):
+    if st.archive_tree(source_files) != receipt.get("tree") or st.listing_digest(source_files) != (receipt.get("source") or {}).get("contentSha256"):
         problems.append(_problem("release_altered", "the installed source no longer hashes to the certified tree"))
     if digest_listing(listing(os.path.join(release, "source"), only_bytecode=True)) != (receipt.get("source") or {}).get("bytecodeDigest"):
         problems.append(_problem("release_altered", "the installed bytecode is not what was compiled at installation"))
@@ -639,8 +650,10 @@ def verify_installed(profile, release, trusted_root, rehearsal=False):
     inventory, problems = reconcile_sealed(profile, release, trusted_root)
     if problems:
         return None, problems
-    if inventory["digest"] != receipt.get("environmentDigest"):
-        return None, [_problem("release_altered", "the environment reconciles to %s, the receipt says %s" % (inventory["digest"], receipt.get("environmentDigest")))]
+    if inventory["digest"] != receipt.get("environmentDigest") or inventory.get("wheelhouseDigest") != (receipt.get("candidate") or {}).get("wheelhouseDigest"):
+        return None, [_problem("release_altered", "the environment reconciles to %s over wheels %s; the receipt says %s over %s"
+                               % (inventory["digest"], inventory.get("wheelhouseDigest"), receipt.get("environmentDigest"),
+                                  (receipt.get("candidate") or {}).get("wheelhouseDigest")))]
     return receipt, []
 
 
@@ -672,7 +685,13 @@ def build(candidate, release, work, expect_tree, base_python):
         return dict(report, problems=[_problem("environment_file_nearby", "an environment file sits above the release (%s)" % ", ".join(found))])
     source, venv, static = os.path.join(release, "source"), os.path.join(release, "venv"), os.path.join(release, "static")
     st.extract(files, source)
-    wheelhouse = os.path.join(candidate, cd.WHEELHOUSE)
+    wheelhouse = os.path.join(release, "wheelhouse")
+    os.makedirs(wheelhouse)
+    for entry in lf.entries(lock):
+        shutil.copyfile(os.path.join(candidate, cd.WHEELHOUSE, entry["filename"]), os.path.join(wheelhouse, entry["filename"]))
+    listing_, problems = ev.verify_wheelhouse(lock, wheelhouse)
+    if problems or cd.listing_digest(listing_) != record["wheelhouse"]["digest"]:
+        return dict(report, problems=problems or [_problem("wheelhouse_mismatch", "the copied wheels are not the certified wheelhouse")])
     install, problems = ev.create_environment(lock, wheelhouse, venv, os.path.join(work, "install"), base_python=base_python)
     report["install"] = [{k: s[k] for k in ("name", "status", "seconds")} for s in install.get("steps", [])]
     if problems:
@@ -725,7 +744,9 @@ def build(candidate, release, work, expect_tree, base_python):
 
 
 def reconcile_worker(release):
-    """As the preparer, against a sealed release: the reconciliation, from the source's own lock."""
+    """As the preparer, against a sealed release: B2.5's own reconciliation (every installed
+    file against the retained wheel it came from, the markers, pip check), after the retained
+    wheels are shown to be exactly the locked ones, from the source's own lock."""
     source = os.path.join(release, "source")
     with open(os.path.join(source, lf.LOCK_PATH), "rb") as fh:
         lock_bytes = fh.read()
@@ -734,53 +755,12 @@ def reconcile_worker(release):
     lock, problems = lf.check(lock_bytes, requirements)
     if problems:
         return {"problems": problems}
+    wheelhouse = os.path.join(release, "wheelhouse")
+    listing_, problems = ev.verify_wheelhouse(lock, wheelhouse)
+    if problems:
+        return {"problems": problems}
     pins, _ = lf.parse_direct_inputs(requirements.decode("utf-8"))
-    inventory, problems = reconcile_without_wheels(lock, os.path.join(release, "venv"), pins)
+    inventory, problems = ev.reconcile(lock, wheelhouse, os.path.join(release, "venv"), pins)
+    if inventory is not None:
+        inventory["wheelhouseDigest"] = cd.listing_digest(listing_)
     return {"problems": problems, "inventory": inventory}
-
-
-def reconcile_without_wheels(lock, venv, pins):
-    """Reconcile a sealed environment against the lock using the installed RECORDs (the
-    wheels themselves are not retained inside a release). The portable digest is recomputed
-    from the installed files' own hashes, so it equals the certified one only if every file
-    is still the wheel's."""
-    answer, problems = ev.probe(ev.venv_python(venv), "inspect", {"wheels": sorted(e["filename"] for e in lf.entries(lock)), "direct": pins})
-    if answer is None:
-        return None, problems
-    problems = list(answer["problems"])
-    expected = {e["name"]: e for e in lf.entries(lock)}
-    installed = {d["name"]: d for d in answer["distributions"]}
-    if sorted(installed) != sorted(expected):
-        problems.append(_problem("environment_altered", "installed %s; locked %s" % (sorted(installed), sorted(expected))))
-    for rel in answer["unowned"]:
-        problems.append(_problem("unowned_file", "site-packages/%s belongs to no installed distribution" % rel))
-    site = answer["sitePackages"]
-    packages = []
-    for name in sorted(set(expected) & set(installed)):
-        entry, dist = expected[name], installed[name]
-        if dist["version"] != entry["version"]:
-            problems.append(_problem("version_mismatch", "%s %s is installed; the lock says %s" % (name, dist["version"], entry["version"])))
-            continue
-        manifest = {}
-        for row in dist["record"]:
-            rel = os.path.normpath(row[0])
-            parts = rel.split(os.sep)
-            if rel.startswith("..") or (len(parts) == 2 and parts[0] == dist["distInfo"] and parts[1] in ev._GENERATED_DIST_INFO) \
-                    or (len(parts) >= 2 and parts[-2] == "__pycache__" and rel.endswith(".pyc")):
-                continue
-            recorded = ev._record_hash(row[1] if len(row) > 1 else "")
-            path = os.path.join(site, rel)
-            if recorded is None or not os.path.isfile(path) or os.path.islink(path) or ev.file_sha256(path) != recorded:
-                problems.append(_problem("installed_file_mismatch", "%s: site-packages/%s is not its recorded file" % (name, rel)))
-                continue
-            manifest[row[0]] = recorded
-        files = "".join("%s\0%s\n" % (rel, manifest[rel]) for rel in sorted(manifest))
-        packages.append({"name": name, "version": entry["version"], "role": entry["role"], "filename": entry["filename"],
-                         "wheelSha256": entry["sha256"], "files": len(manifest), "filesSha256": lf.sha256(files),
-                         "outsideSitePackages": _outside_count(dist)})
-    digest = lf.sha256(json.dumps(packages, sort_keys=True, separators=(",", ":")))
-    return {"packages": packages, "digest": digest, "facts": answer["facts"]}, problems
-
-
-def _outside_count(dist):
-    return sum(1 for row in dist["record"] if os.path.normpath(row[0]).startswith(".."))

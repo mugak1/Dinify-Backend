@@ -128,6 +128,8 @@ def validate(doc, rehearsal=False):
         need(base + "threads", p.get("threads"), lambda v: isinstance(v, int) and 1 <= v <= 64, "1..64")
         need(base + "shutdownTimeout", p.get("shutdownTimeout"), lambda v: isinstance(v, int) and 1 <= v <= 300, "1..300 seconds")
         need(base + "passAuthorization", p.get("passAuthorization"), lambda v: isinstance(v, bool), "a boolean")
+        if "staticUrl" not in p or (p.get("staticUrl") is not None and not _MOUNT.match(str(p["staticUrl"]).rstrip("/"))):
+            problems.append(_problem("profile_invalid", base + "staticUrl must be present: a URL path or null (static files not served here)"))
         probe = p.get("probe") or {}
         need(base + "probe.base", probe.get("base"), lambda v: _URL.match(str(v)), "an http(s) URL")
         need(base + "probe.connectTo", probe.get("connectTo"), lambda v: _IPV4.match(str(v)), "a loopback address")
@@ -139,9 +141,6 @@ def validate(doc, rehearsal=False):
     need("media.root", media.get("root"), _abs, "an absolute path")
     if "url" not in media or (media.get("url") is not None and not _MOUNT.match(str(media["url"]).rstrip("/"))):
         problems.append(_problem("profile_invalid", "media.url must be present: a URL path or null (not served by this Apache)"))
-    static = doc.get("static") or {}
-    if "url" not in static or (static.get("url") is not None and not _MOUNT.match(str(static["url"]).rstrip("/"))):
-        problems.append(_problem("profile_invalid", "static.url must be present: a URL path or null (not served by this Apache)"))
     otp = doc.get("otp") or {}
     need("otp.deterministicTestOtpAllowed", otp.get("deterministicTestOtpAllowed"), lambda v: isinstance(v, bool), "a boolean")
     if otp.get("deterministicTestOtpAllowed") is True and not (isinstance(otp.get("reason"), str) and len(otp["reason"].strip()) >= 20):
