@@ -68,6 +68,23 @@ class Profile(unittest.TestCase):
         self.assertIn("basePython", detail)
         self.assertIn("interpreter.libpythonSha256", detail)
 
+    def test_REGRESSION_not_serving_static_or_media_is_false_and_never_the_same_as_unknown(self):
+        # false: this Apache deliberately serves nothing there, so no Alias is written
+        doc = profile(planes__admin__staticUrl=False, media__url=False)
+        self.assertEqual(hp.validate(doc), [])
+        admin = tr.render_include(doc, "admin", RID, "op-1").decode()
+        customer = tr.render_include(doc, "customer", RID, "op-1").decode()
+        self.assertNotIn("/static/", admin)
+        self.assertNotIn("/srv/media", customer)
+        # null: nobody has looked, which the live path refuses by name
+        found = hp.validate(profile(planes__admin__staticUrl=None, media__url=None))
+        detail = [p["detail"] for p in found if p["code"] == "profile_unknown"][0]
+        self.assertIn("planes.admin.staticUrl", detail)
+        self.assertIn("media.url", detail)
+        # anything else is neither
+        self.assertIn("profile_invalid", codes(hp.validate(profile(media__url=True))))
+        self.assertIn("profile_invalid", codes(hp.validate(profile(planes__customer__staticUrl="static"))))
+
     def test_REGRESSION_a_rehearsal_profile_never_drives_the_live_path_and_a_live_one_never_needs_the_flag(self):
         self.assertEqual(codes(hp.validate(profile(kind="rehearsal"))), ["profile_rehearsal_only"])
         self.assertEqual(hp.validate(profile(kind="rehearsal"), rehearsal=True), [])
@@ -190,13 +207,39 @@ class RuntimeFiles(unittest.TestCase):
             doc = self._identity(self._release(tmp, None))
             self.assertEqual((doc["state"], doc["reason"], doc["release"]), ("mismatch", "receipt_unreadable", None))
         with tempfile.TemporaryDirectory() as tmp:
+            # valid JSON that is not an object is as unreadable as no file at all
+            doc = self._identity(self._release(tmp, [RID]))
+            self.assertEqual((doc["state"], doc["reason"]), ("mismatch", "receipt_unreadable"))
+        with tempfile.TemporaryDirectory() as tmp:
             doc = self._identity(self._release(tmp, {"releaseId": OLD}))
             self.assertEqual((doc["state"], doc["reason"]), ("mismatch", "receipt_names_another_release"))
         with tempfile.TemporaryDirectory() as tmp:
-            doc = self._identity(self._release(tmp, {"releaseId": RID}))
+            # the receipt names this directory but a different commit: the id and the commit
+            # it was built from must agree before the process is labelled with either
+            doc = self._identity(self._release(tmp, {"releaseId": RID, "commit": "b" * 40}))
+            self.assertEqual((doc["state"], doc["reason"]), ("mismatch", "receipt_names_another_release"))
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = self._identity(self._release(tmp, {"releaseId": RID, "commit": RID[:40]}))
             # this test's interpreter is not the release's venv
             self.assertEqual((doc["state"], doc["reason"]), ("mismatch", "interpreter_outside_release"))
             self.assertRegex(doc["process"]["instance"], r"^[0-9a-f]{32}$")
+
+
+class InstalledReceipt(unittest.TestCase):
+    def test_REGRESSION_a_receipt_that_no_longer_derives_its_directory_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ins.runtime_digest(ins.runtime_files(profile()))
+            rid = ins.release_id("a" * 40, "e" * 64, runtime)
+            rel = os.path.join(tmp, rid)
+            os.makedirs(rel)
+            receipt = {"schema": ins.RECEIPT_SCHEMA, "releaseId": rid, "commit": "a" * 40, "environmentDigest": "e" * 64,
+                       "runtime": {"digest": runtime}}
+            for name, commit in (("CONTROL", "a" * 40), ("edited", "f" * 40)):
+                with open(os.path.join(rel, ins.RECEIPT), "w") as fh:
+                    json.dump(dict(receipt, commit=commit), fh)
+                _, problems = ins.verify_installed(profile(), rel, tmp)
+                derives = [p for p in problems if p["code"] == "receipt_invalid"]
+                self.assertEqual(bool(derives), name == "edited", (name, problems))
 
 
 class Include(unittest.TestCase):

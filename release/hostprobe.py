@@ -63,7 +63,8 @@ def _setup(release, plane):
 
 
 def config(request):
-    release, plane, out = request["release"], request["plane"], {"plane": plane}
+    release, plane = request["release"], request["plane"]
+    out = {"plane": plane}
     problems = []
     path = request["configPath"]
     try:

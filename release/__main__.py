@@ -15,8 +15,9 @@
                                                         READ TOKEN (gh); the request comes from PREFLIGHT_* variables
     python -B -m release preflight assess --facts DIR --out DIR --work DIR --evaluation-run R --evaluation-attempt A --revision SHA
                                                         NO TOKEN; NETWORK (the pinned scanner, PyPI); a fresh query now
-    python -B -m release preflight verify --facts DIR --work DIR --evaluation-run R --evaluation-attempt A [...]
-                                                        NO TOKEN; the receiving check (release/preflight.py)
+    python -B -m release preflight verify --facts DIR --work DIR --evaluation-run R --evaluation-attempt A [--admission-out FILE] [...]
+                                                        NO TOKEN; the receiving check (release/preflight.py); the
+                                                        installer's admission document when asked
     python -B -m release host validate-profile --profile FILE [--rehearsal]
                                                         offline; the installation profile, with every unknown field named
     python -B -m release host deploy --profile FILE --operation ID --admission FILE --candidate-zip ZIP --preflight-zip ZIP --trusted DIR
@@ -264,6 +265,12 @@ def cmd_preflight(args):
     if admitted:
         for key in ("commit", "candidateArtifactId", "candidateDigest", "environmentDigest", "deadlineEpoch"):
             output(key, admitted[key])
+        if args.admission_out:
+            # The installer's input (release/installation.py): the admitted identities, nothing
+            # else. It authorizes nothing: the host re-derives every one of them from the bytes.
+            from . import installation as ins
+            with open(args.admission_out, "w", encoding="utf-8") as fh:
+                json.dump(ins.admission_from_receive(admitted), fh, indent=2, sort_keys=True)
         ok = ("RECEIVED: the preflight result for %s (candidate artifact %s, %s) reproduces as %s under the trusted policy; usable until %s "
               "(with a %d-minute margin); deploymentAuthorized false" % (admitted["commit"], admitted["candidateArtifactId"], admitted["candidateDigest"],
                                                                         admitted["outcome"], admitted["deadline"], args.margin_minutes))
@@ -292,11 +299,13 @@ def _host_outcome(outcome):
     print(json.dumps({k: v for k, v in outcome.items() if k != "problems"}, indent=2, sort_keys=True, default=str))
     print("B3-OUTCOME: %s" % outcome["stage"])
     serving = outcome.get("release")
+    if isinstance(serving, str):
+        # One release on both planes (the unchanged control): attested per plane all the same,
+        # so a reader never has to know which outcome spelled it which way.
+        serving = {plane: serving for plane in ("customer", "admin")}
     if isinstance(serving, dict):
         for plane, rid in sorted(serving.items()):
             print("B3-SERVING: %s %s" % (plane, rid or "legacy"))
-    elif serving:
-        print("B3-SERVING: both %s" % serving)
     return HOST_EXIT.get(outcome["stage"], 4)
 
 
@@ -404,6 +413,7 @@ def main(argv):
     p.add_argument("--expect-preflight-id")
     p.add_argument("--expect-preflight-digest")
     p.add_argument("--margin-minutes", type=int, default=pf.RECEIVING_MARGIN_MINUTES)
+    p.add_argument("--admission-out")
     p.add_argument("--gh", default="gh")
     p = sub.add_parser("host")
     p.add_argument("action", choices=("validate-profile", "deploy", "status", "resume", "adopt-legacy", "recover-legacy", "build", "reconcile"))

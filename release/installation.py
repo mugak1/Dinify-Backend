@@ -255,7 +255,10 @@ def identity(plane):
             receipt = json.loads(fh.read().decode("utf-8"))
     except (OSError, ValueError):
         reason = "receipt_unreadable"
-    if reason is None and receipt.get("releaseId") != os.path.basename(RELEASE):
+    if not isinstance(receipt, dict):
+        receipt, reason = {}, "receipt_unreadable"
+    if reason is None and (receipt.get("releaseId") != os.path.basename(RELEASE)
+                           or receipt.get("commit") != os.path.basename(RELEASE)[:40]):
         reason = "receipt_names_another_release"
     if reason is None and os.path.realpath(sys.prefix) != os.path.join(RELEASE, "venv"):
         reason = "interpreter_outside_release"
@@ -407,7 +410,8 @@ def prepare(profile, state, operation, trusted_root, work, rehearsal=False, disk
                 if problems:
                     return None, [_problem("installed_release_mismatch", "an installed release named %s exists and is not intact: %s — it is "
                                            "refused, never repaired or overwritten" % (rid, "; ".join(p["detail"] for p in problems)[:600]))]
-                if receipt["candidate"]["recordSha256"] != state["recordSha256"]:
+                if receipt["candidate"]["recordSha256"] != state["recordSha256"] or receipt.get("commit") != record["commit"] \
+                        or receipt.get("tree") != record["tree"]:
                     return None, [_problem("installed_release_mismatch", "%s was installed from another record" % rid)]
                 return dict(receipt, reused=True), []
             marker, _ = read_json(_marker_path(profile, rid))
@@ -616,6 +620,11 @@ def verify_installed(profile, release, trusted_root, rehearsal=False):
     problems = []
     if receipt.get("releaseId") != rid or not RELEASE_ID.match(rid):
         problems.append(_problem("receipt_invalid", "the receipt names %r, not this directory" % receipt.get("releaseId")))
+    elif release_id(str(receipt.get("commit")), str(receipt.get("environmentDigest")),
+                    str((receipt.get("runtime") or {}).get("digest"))) != rid:
+        # The directory name is derived from the commit, the environment and the launcher; a
+        # receipt that no longer derives it has been edited, whatever else still matches.
+        problems.append(_problem("receipt_invalid", "the receipt's commit, environment and launcher do not derive %s" % rid))
     if sorted(os.listdir(release)) != sorted(TOP_LEVEL):
         problems.append(_problem("release_altered", "the release holds %s" % sorted(os.listdir(release))))
         return None, problems
