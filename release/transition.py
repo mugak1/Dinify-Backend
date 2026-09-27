@@ -522,7 +522,8 @@ def _promote_locked(profile, operation, release, rid, admission, trusted_root, c
             # Deliberately NOT closed: a failed migrate leaves the schema in a state this
             # operation cannot describe; the next transition must first establish it.
             return _outcome("refused", problems + [_problem("schema_state_unknown", "a migration failed part-way: nothing was switched and "
-                                                            "the old release is still serving; resume establishes what the schema is")])
+                                                            "the old release is still serving; the operation stays open until an operator establishes the schema "
+                                                            "(`host resume --schema-established`)")])
         journal.record("migrated", {"applied": answer.get("applied")})
     problems = ins.deadline_problems(admission["deadlineEpoch"], int(clock()))
     if problems:
@@ -585,17 +586,43 @@ def restore(profile, journal, current):
     return evidence, []
 
 
-def resume(profile, operation):
+SCHEMA_STATEMENT_MIN = 20
+
+
+def migration_unresolved(entries):
+    """True when this operation reached the migrations with some pending and never recorded
+    that they completed: killed during ``hostprobe migrate``, or a migration that failed
+    part-way. Re-reading the plan cannot settle it: Django records a migration only once it
+    completes, so a non-atomic one that stopped half-way leaves a schema no plan describes.
+    Conservative on purpose: killed between ``gated`` and the migrate step reads the same."""
+    gated = [e for e in entries if e.get("stage") == "gated"]
+    if not gated:
+        return False
+    pending = (((gated[-1].get("detail") or {}).get("plan")) or {}).get("pending") or []
+    return bool(pending) and not any(e.get("stage") == "migrated" for e in entries)
+
+
+def resume(profile, operation, schema_established=None):
     """Settle an operation a killed process left open: establish what is serving now; if the
     journal shows a switch that never verified, verify its target, and restore the kept
-    previous files if it does not. Never guesses."""
+    previous files if it does not. Never guesses: an operation whose migrations are unresolved
+    stays OPEN until an operator states, with ``schema_established``, what they found in the
+    database; the statement is recorded verbatim and is the only thing that closes it."""
     journal = Journal(profile, operation)
     try:
         with HostLock(profile["lockPath"], "backend:resume:%s" % operation):
             doc, _ = ins.read_json(journal.active)
             if not isinstance(doc, dict) or doc.get("operation") != operation:
                 return _outcome("refused", [_problem("not_open", "operation %s is not the open one" % operation)])
-            stages = [e["stage"] for e in journal.entries()]
+            entries = journal.entries()
+            stages = [e["stage"] for e in entries]
+            unresolved = migration_unresolved(entries)
+            if schema_established is not None and not unresolved:
+                return _outcome("refused", [_problem("schema_statement_unexpected", "operation %s left no migration unresolved; a schema "
+                                                     "statement is recorded only where one is needed" % operation)])
+            if unresolved and schema_established is not None and len(schema_established.strip()) < SCHEMA_STATEMENT_MIN:
+                return _outcome("refused", [_problem("schema_statement_invalid", "the schema statement must say what was found, in at "
+                                                     "least %d characters" % SCHEMA_STATEMENT_MIN)])
             current = {p: read_include(profile, p) for p in hp.PLANES}
             serving = {p: current[p][1] for p in hp.PLANES}
             evidence, problems = verify_serving(profile, serving, _budget(profile), {p: include_group(current[p][0]) for p in hp.PLANES})
@@ -618,8 +645,20 @@ def resume(profile, operation):
             if problems:
                 journal.record("restoration-failed", {"problems": problems, "note": "nothing was switched and the serving state does not verify"})
                 return _outcome("restoration-failed", problems, evidence)
+            if unresolved and schema_established is None:
+                # Deliberately NOT closed: what serves verifies, but the schema this operation
+                # began to change does not describe itself, and closing would let the next
+                # transition run its gates against a database nobody has established.
+                problems = [_problem("schema_state_unknown", "operation %s began applying migrations and never recorded that they "
+                                     "completed; the old release is serving and verifies, but the schema is not established. Inspect "
+                                     "the database, then run `host resume --operation %s --schema-established \"<what you found>\"`"
+                                     % (operation, operation))]
+                journal.record("refused", {"problems": problems, "serving": serving, "evidence": evidence})
+                return _outcome("refused", problems, evidence)
+            applied = [e.get("detail", {}).get("applied") for e in entries if e.get("stage") == "migrated"]
             journal.record("resumed", {"serving": serving, "note": "nothing was switched; the serving state verifies",
-                                       "schemaNote": "a migration may have run" if "migrated" in stages or "gated" in stages else None})
+                                       "migrationsApplied": applied[-1] if applied else None,
+                                       "schemaEstablished": schema_established.strip() if unresolved else None})
             journal.close()
             return _outcome("resumed", [], evidence, release=serving)
     except TimeoutError as error:

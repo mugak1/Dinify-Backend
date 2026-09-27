@@ -196,6 +196,25 @@ def _root_owned_not_writable(path, label, problems, mode_mask=0o022):
                                  % (label, path, stat.S_IMODE(st.st_mode), st.st_uid)))
 
 
+def untraversable(path):
+    """Directories on the way to ``path`` (itself included) that an account which is neither
+    root nor in the owning group cannot pass through. The preparation, migration and runtime
+    identities are such accounts, and each is started with its working directory and its
+    imports inside the trusted verifier, so one ``0700`` ancestor fails every step with
+    EACCES before anything is decided. A path that cannot be examined is reported too."""
+    blocked, current = [], os.path.realpath(path)
+    while True:
+        try:
+            if not os.stat(current).st_mode & stat.S_IXOTH:
+                blocked.append(current)
+        except OSError:
+            blocked.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            return blocked
+        current = parent
+
+
 def env_files_above(path):
     found, current = [], os.path.realpath(path)
     while True:

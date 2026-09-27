@@ -532,7 +532,20 @@ host lock (bounded 300 s wait, never stolen) -> journal: locked
   every such migration is a reviewed `expand` — the older code will run on that schema.
 - **The journal** is `<stateDir>/operations/<op>.jsonl`, one fsynced line per stage, plus
   `active.json` naming the one open operation. A new transition refuses while one is open
-  (`previous_operation_unresolved`); `host resume` settles it by OBSERVING what serves.
+  (`previous_operation_unresolved`); `host resume` settles it by OBSERVING what serves. One
+  thing it does not settle by observation: an operation that began applying migrations and
+  never recorded that they completed stays OPEN (`schema_state_unknown`) even when what serves
+  verifies, because re-reading the plan cannot describe a non-atomic migration that stopped
+  half-way. Only an operator's statement, `--schema-established "<what was found>"` (at least
+  20 characters, recorded verbatim), closes it; the statement is refused where no migration is
+  unresolved, so it cannot become a habit.
+- **The trusted verifier must be traversable.** The preparation, migration and runtime
+  identities import it and run from inside it, so every directory on the way to it grants
+  execute to others (`0711`: passable, not listable); `host deploy` refuses otherwise
+  (`trusted_not_traversable`) and `host-run.sh` requires exactly `0711` for its base and
+  `trusted/`, `0700` for `incoming/`. The rehearsal's F23/F25 ran the earlier `0700` check and
+  stopped at the profile refusal, before any unprivileged step, so it could not see this; the
+  review of the PR did.
 - **The host lock** is shared with Dinify-Admin's host procedure by contract
   (`release/HOST_LOCK_CONTRACT.md`); the Admin half is staged there, not applied.
 

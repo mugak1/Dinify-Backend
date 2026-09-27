@@ -50,8 +50,12 @@ Decisions that PR records, each explicitly:
 - [ ] Create the preparation and migration accounts (no shell, no password, no sudo).
 - [ ] Create root-owned `0755` `/srv/dinify-backend/releases`, root-owned `0700`
       `/srv/dinify-backend/state`, root-owned `0755` `/var/lib/dinify-host`, root-owned `0755`
-      `/etc/apache2/dinify-backend`, root-owned `0700` `/opt/dinify-backend-release` with
-      `incoming/` and `trusted/` (both `0700`).
+      `/etc/apache2/dinify-backend`, root-owned `0711` `/opt/dinify-backend-release` with
+      `incoming/` `0700` and `trusted/` `0711`. The two `0711`s are not a loosening: the
+      preparation, migration and runtime identities import the trusted verifier and run from
+      inside it, so they must be able to pass through (never list or write); the transferred
+      files in `incoming/` stay private. `host-run.sh` and `host deploy` both refuse any other
+      mode by name.
 - [ ] Confirm no `.env` or `settings.ini` sits at or above `/srv/dinify-backend/releases`
       (`host_problems` refuses one: python-decouple searches upward from each release).
 
@@ -108,6 +112,12 @@ Apache reclaims the previous mod_wsgi daemons about **3 seconds** after the sign
   shown healthy; which code they loaded cannot be established).
 - **An open operation** — `host status`, then `host resume --operation <id>`: it observes what
   serves, verifies it, and restores the kept previous files if a switch never verified.
+  An operation that began applying migrations and never recorded that they completed stays
+  OPEN after `resume` (`schema_state_unknown`) even when what serves verifies: re-reading the
+  migration plan cannot describe a non-atomic migration that stopped half-way. **OWNER**:
+  inspect the database, decide what state it is in (and any repair, which this path never
+  performs), then `host resume --operation <id> --schema-established "<what was found>"`; the
+  statement is recorded in the journal verbatim and is the only thing that closes it.
 
 Nothing prunes releases. Retention is what keeps rollback cheap; a retention policy is a later,
 separate decision.

@@ -24,6 +24,7 @@
                                                         ROOT, on the host: admit, install beside what serves, gate, switch
                                                         both planes, verify, restore on failure (release/transition.py)
     python -B -m release host status|resume|adopt-legacy|recover-legacy --profile FILE [--operation ID]
+    python -B -m release host resume --profile FILE --operation ID [--schema-established STATEMENT]
                                                         ROOT, on the host; see release/README.md -> "The installation"
     python -B -m release host build|reconcile ...       the UNPRIVILEGED preparation worker; the installer runs it
 
@@ -345,7 +346,7 @@ def cmd_host(args):
     if not ins._OPERATION.match(args.operation or ""):
         return _host_refused(args, "HOST", [{"code": "operation_invalid", "detail": "--operation is lowercase words and digits"}])
     if args.action == "resume":
-        return _host_outcome(tr.resume(profile, args.operation))
+        return _host_outcome(tr.resume(profile, args.operation, schema_established=args.schema_established))
     if args.action == "adopt-legacy":
         return _host_outcome(tr.adopt_legacy(profile, args.operation))
     if args.action == "recover-legacy":
@@ -355,6 +356,11 @@ def cmd_host(args):
     problems = hp.host_problems(profile)
     for path in (trusted, os.path.join(trusted, "release"), os.path.join(trusted, "dependency_audit")):
         hp._root_owned_not_writable(path, "the trusted verifier", problems)
+    blocked = hp.untraversable(os.path.join(trusted, "release"))
+    if blocked:
+        problems.append({"code": "trusted_not_traversable", "detail": "the unprivileged identities import the trusted verifier and run "
+                         "from inside it, so every directory on the way to it must grant execute to others (0711 keeps it unlistable): "
+                         "%s" % ", ".join(blocked)})
     admission, err = ins.read_json(args.admission)
     if err:
         problems.append({"code": "admission_invalid", "detail": err})
@@ -434,6 +440,8 @@ def main(argv):
                  "--candidate", "--release", "--work", "--expect-tree", "--base-python"):
         p.add_argument(flag)
     p.add_argument("--rehearsal", action="store_true")
+    p.add_argument("--schema-established", help="resume only: an operator's statement, after inspecting the database, of the schema "
+                   "state a migration left unresolved (at least 20 characters); recorded in the journal verbatim")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:

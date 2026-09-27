@@ -122,6 +122,34 @@ class TheHostScript(unittest.TestCase):
             self.assertIn("B3-OUTCOME: refused", proc.stdout)
             self.assertEqual(os.listdir(d), ["host-run.sh"])
 
+    def test_REGRESSION_the_verifier_is_traversable_and_only_the_incoming_files_are_private(self):
+        # Codex P1 on #345: 0700 on BASE and trusted/ stopped every unprivileged step with EACCES.
+        script = text(os.path.join(STAGED, "host-run.sh"))
+        self.assertIn('"$BASE:711" "$BASE/incoming:700" "$BASE/trusted:711"', script)
+        self.assertNotIn('= "0 700" ]', script)
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "the mode check requires root-owned directories")
+    def test_REGRESSION_the_modes_are_enforced_as_stated(self):
+        for modes, refused in (((0o700, 0o700, 0o700), "must be root-owned mode 711"),
+                               ((0o711, 0o711, 0o711), "incoming must be root-owned mode 700"),
+                               ((0o711, 0o700, 0o711), None)):
+            with tempfile.TemporaryDirectory() as d:
+                base = os.path.join(d, "base")
+                for sub, mode in zip(("", "incoming", "trusted"), modes):
+                    os.makedirs(os.path.join(base, sub), exist_ok=True)
+                    os.chmod(os.path.join(base, sub), mode)
+                path = os.path.join(d, "host-run.sh")
+                with open(path, "w") as fh:
+                    fh.write(self.substituted().replace("BASE=/opt/dinify-backend-release", "BASE=%s" % base)
+                             .replace("AWS=/usr/local/bin/aws", "AWS=%s" % os.path.join(d, "no-aws")))
+                proc = subprocess.run(["bash", path], cwd=d, capture_output=True, text=True, timeout=30)
+                self.assertEqual(proc.returncode, 1)
+                if refused:
+                    self.assertIn(refused, proc.stdout)
+                else:   # past the modes: stops at the next check, having created nothing
+                    self.assertIn("the base interpreter or the AWS CLI is missing", proc.stdout)
+                    self.assertEqual(os.listdir(os.path.join(base, "trusted")), [])
+
     def test_CONTRACT_attestations_come_first_and_the_full_report_stays_on_the_host(self):
         script = text(os.path.join(STAGED, "host-run.sh"))
         self.assertIn("> \"$IN/report.out\" 2> \"$IN/report.err\"", script)

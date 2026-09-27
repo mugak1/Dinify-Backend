@@ -434,3 +434,119 @@ class Switch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrustedTraversal(unittest.TestCase):
+    """Codex P1 on #345: the unprivileged identities import the trusted verifier and run from
+    inside it, so a 0700 ancestor fails every step with EACCES before anything is decided."""
+
+    def test_REGRESSION_a_private_ancestor_is_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chmod(tmp, 0o711)
+            os.makedirs(os.path.join(tmp, "base", "trusted", "op", "release"))
+            os.chmod(os.path.join(tmp, "base"), 0o700)
+            self.assertEqual(hp.untraversable(os.path.join(tmp, "base", "trusted", "op", "release")), [os.path.join(os.path.realpath(tmp), "base")])
+
+    def test_CONTROL_0711_is_passable_and_needs_no_listing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chmod(tmp, 0o711)
+            target = os.path.join(tmp, "base", "trusted", "op", "release")
+            os.makedirs(target)
+            for d in ("base", os.path.join("base", "trusted")):
+                os.chmod(os.path.join(tmp, d), 0o711)
+            self.assertEqual(hp.untraversable(target), [])
+
+    def test_REGRESSION_the_deploy_refuses_it_by_name(self):
+        import contextlib
+        import io
+        from release.__main__ import main as cli
+        with tempfile.TemporaryDirectory() as tmp:   # mkdtemp is 0700: exactly the defect
+            os.makedirs(os.path.join(tmp, "release"))
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+                    mock.patch("release.__main__._profile", return_value=(profile(tmp), [])):
+                code = cli(["host", "deploy", "--profile", "p.json",
+                            "--operation", "op-trav-1", "--admission", os.path.join(tmp, "a"), "--candidate-zip", os.path.join(tmp, "c"),
+                            "--preflight-zip", os.path.join(tmp, "p"), "--trusted", tmp])
+        self.assertEqual(code, 1)
+        self.assertIn("trusted_not_traversable", err.getvalue())
+
+
+class ResumeSchema(unittest.TestCase):
+    """Codex P1 on #345: an operation killed during, or failing part-way through, the migrations
+    must not be closed by observing that the old release still serves."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.profile = profile(self.tmp)
+        os.makedirs(self.profile["apache"]["includeDir"])
+        os.makedirs(self.profile["stateDir"])
+        os.makedirs(os.path.dirname(self.profile["lockPath"]))
+        for p in hp.PLANES:
+            with open(tr.include_path(self.profile, p), "wb") as fh:
+                fh.write(tr.render_include(self.profile, p, OLD, "op-0"))
+        self.verified = []
+
+    def left_open(self, pending, migrated=False, failed=False):
+        journal = tr.Journal(self.profile, "op-1")
+        journal.open({})
+        journal.record("gated", {"config": {}, "plan": {"pending": pending, "appliedUnknown": []}})
+        if migrated:
+            journal.record("migrated", {"applied": pending})
+        if failed:
+            journal.record("refused", {"problems": [{"code": "migrate_failed", "detail": "x"}]})
+        return journal
+
+    def resume(self, **kw):
+        def verify_serving(profile_, expect, budget, groups=None):
+            self.verified.append(expect)
+            return {"serving": expect}, []
+        with mock.patch.object(tr, "verify_serving", verify_serving):
+            return tr.resume(self.profile, "op-1", **kw)
+
+    def test_REGRESSION_an_unresolved_migration_stays_open_even_though_the_old_release_verifies(self):
+        for failed in (False, True):   # killed during the migrate step / reported failure part-way
+            with self.subTest(failed=failed):
+                journal = self.left_open(["misc_app.0005_x"], failed=failed)
+                outcome = self.resume()
+                self.assertEqual((outcome["stage"], codes(outcome["problems"])), ("refused", ["schema_state_unknown"]))
+                self.assertTrue(os.path.exists(journal.active))
+                self.assertEqual(codes(tr.Journal(self.profile, "op-2").open({})), ["previous_operation_unresolved"])
+                self.assertEqual(self.verified[-1], {p: OLD for p in hp.PLANES})
+                journal.close()
+                os.remove(journal.path)
+
+    def test_REGRESSION_only_a_stated_finding_closes_it_and_it_is_recorded_verbatim(self):
+        journal = self.left_open(["misc_app.0005_x"])
+        self.assertEqual(codes(self.resume(schema_established="looked fine")["problems"]), ["schema_statement_invalid"])
+        self.assertTrue(os.path.exists(journal.active))
+        statement = "0005 absent from django_migrations; column not present; nothing applied"
+        outcome = self.resume(schema_established=statement)
+        self.assertEqual(outcome["stage"], "resumed")
+        self.assertFalse(os.path.exists(journal.active))
+        self.assertEqual(journal.entries()[-1]["detail"]["schemaEstablished"], statement)
+
+    def test_CONTROL_no_pending_migration_or_a_completed_one_closes_on_observation(self):
+        for pending, migrated in (([], False), (["misc_app.0005_x"], True)):
+            with self.subTest(pending=pending, migrated=migrated):
+                journal = self.left_open(pending, migrated=migrated)
+                self.assertEqual(self.resume()["stage"], "resumed")
+                self.assertFalse(os.path.exists(journal.active))
+                os.remove(journal.path)
+
+    def test_REGRESSION_a_statement_where_none_is_needed_is_refused_and_changes_nothing(self):
+        journal = self.left_open([])
+        outcome = self.resume(schema_established="0005 absent from django_migrations; nothing applied")
+        self.assertEqual(codes(outcome["problems"]), ["schema_statement_unexpected"])
+        self.assertTrue(os.path.exists(journal.active))
+
+    def test_CONTRACT_the_cli_passes_the_statement_through(self):
+        from release.__main__ import main as cli
+        with mock.patch.object(tr, "resume", return_value={"stage": "resumed", "problems": [], "release": {p: OLD for p in hp.PLANES}}) as called, \
+                mock.patch.object(hp, "load", return_value=(self.profile, None, [])), mock.patch.object(hp, "validate", return_value=[]):
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                cli(["host", "resume", "--profile", "p.json", "--operation", "op-1", "--schema-established", "what was found in the db"])
+        self.assertEqual(called.call_args.kwargs["schema_established"], "what was found in the db")

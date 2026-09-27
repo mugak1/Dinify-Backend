@@ -28,7 +28,7 @@ declare -A WANT=(
 
 # Host facts this script needs BEFORE the profile can be read. Each is created by the reviewed
 # cutover (release/CUTOVER.md) and checked here, never created or repaired here.
-BASE=/opt/dinify-backend-release          # root:root 0700: incoming files and trusted verifiers
+BASE=/opt/dinify-backend-release          # root:root 0711; incoming/ 0700, trusted/ 0711 (see below)
 PY=/usr/bin/python3.12                    # the base interpreter the profile names (checked again there)
 AWS=/usr/local/bin/aws                    # AWS CLI v2, hand-installed (see CLAUDE.md)
 
@@ -36,9 +36,14 @@ fail() { echo "B3-OUTCOME: refused"; echo "B3-HOST: $*"; exit 1; }
 
 printf '%s' "$OPERATION" | grep -Eq '^[a-z0-9][a-z0-9-]{2,79}$' || fail "operation id malformed"
 [ "$(id -u)" = "0" ] || fail "not root"
-for d in "$BASE" "$BASE/incoming" "$BASE/trusted"; do
+# incoming/ holds the transferred files and stays private. BASE and trusted/ are 0711 —
+# traversable, not listable, not writable — because the preparation, migration and runtime
+# identities import the trusted verifier and run from inside it; 0700 there fails every one of
+# them with EACCES before anything is decided (the CLI refuses that by name too).
+for entry in "$BASE:711" "$BASE/incoming:700" "$BASE/trusted:711"; do
+  d="${entry%:*}"; mode="${entry##*:}"
   [ -d "$d" ] && [ ! -L "$d" ] || fail "$d is not a directory"
-  [ "$(stat -c '%u %a' "$d")" = "0 700" ] || fail "$d must be root-owned mode 700"
+  [ "$(stat -c '%u %a' "$d")" = "0 $mode" ] || fail "$d must be root-owned mode $mode"
 done
 [ -x "$PY" ] && [ -x "$AWS" ] || fail "the base interpreter or the AWS CLI is missing"
 

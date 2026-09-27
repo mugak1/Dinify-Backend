@@ -2400,8 +2400,10 @@ so keep it current when conventions change.
   `release/migration-decisions.json` (anything unreviewed, contracting or unknown STOPS),
   switches BOTH planes by rewriting one Apache include per plane that pins python-home /
   home / python-path to one release, verifies by asking the running workers, and restores on
-  failure; `host resume` settles an interrupted operation by observing what serves. Two
-  unauthenticated routes, `GET /uat/api/v1/release/` and `GET /api/admin/v1/release/`,
+  failure; `host resume` settles an interrupted operation by observing what serves, EXCEPT
+  one whose migrations began and never recorded completion, which stays open until an
+  operator states what the database holds (`--schema-established`). The trusted verifier
+  must be traversable (`0711`) by the unprivileged identities. Two unauthenticated routes, `GET /uat/api/v1/release/` and `GET /api/admin/v1/release/`,
   report the identity a worker's launcher established ONCE at start (never re-read, so a
   changed file cannot relabel a running process); **under the legacy deploy they answer
   `unavailable` / `not_started_by_release_launcher`**, which is true and is what merging
