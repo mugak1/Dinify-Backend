@@ -37,9 +37,13 @@ from platform_admin_app.endpoints.restaurants import (
     AdminRestaurantTransitionView,
 )
 from platform_admin_app.views import AdminHealthView
+from misc_app.endpoints.release_identity import ReleaseIdentityView
 
 urlpatterns = [
     path('health/', AdminHealthView.as_view(), name='admin-health'),
+    # Which installed release the answering admin worker loaded (D08 B3). Unauthenticated,
+    # bounded and non-secret, like health; see dinify_backend/release_identity.py.
+    path('release/', ReleaseIdentityView.as_view(plane='admin'), name='admin-release-identity'),
 
     # Two-step authentication: password -> challenge -> second factor -> session.
     path('auth/login/', AdminLoginView.as_view(), name='admin-auth-login'),

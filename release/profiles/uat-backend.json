@@ -1,0 +1,82 @@
+{
+  "schema": "dinify.backend.host-profile/1",
+  "kind": "live",
+  "status": "unverified",
+  "_note": "UNVERIFIED. Every null is a host fact nobody has observed; `host deploy` refuses this profile and names each one. It is filled in from a reviewed run of release/staged/discover_host.py (release/CUTOVER.md step 1) and changed to status=verified in that same reviewed change, with `observation` naming the report. Values that ARE set here are design decisions this change makes (the release/state/lock layout the cutover creates, the drain and space policy), not observations. `_sourceHints` records what the repository's own files suggest about unknown fields; a hint is NOT an observation and is never read by the installer.",
+  "_sourceHints": {
+    "planes.customer.probe.base": "https://api-test.dinifyapp.com/uat (deploy-uat.yml probes this vhost)",
+    "planes.admin.probe.base": "https://admin.dinifyapp.com/api (Admin CLAUDE.md: Apache mounts the admin WSGI app at /api)",
+    "planes.customer.mount": "/uat",
+    "planes.admin.mount": "/api",
+    "legacy tree": "/home/ubuntu/dinify_backend_handover_uat with venv /home/ubuntu/venv_uat_handover (deploy-uat.yml)",
+    "otp": "CLAUDE.md records ENV=dev on the UAT server as a deliberate pre-launch state; whether it still is, and whether that is still wanted, is the owner's decision at cutover",
+    "interpreter.python": "3.12.3 (CLAUDE.md: the live EC2 runtime since 2026-08)"
+  },
+  "observation": null,
+  "releaseRoot": "/srv/dinify-backend/releases",
+  "stateDir": "/srv/dinify-backend/state",
+  "lockPath": "/var/lib/dinify-host/host.lock",
+  "basePython": null,
+  "interpreter": {
+    "python": null,
+    "soabi": null,
+    "libpython": null,
+    "libpythonSha256": null
+  },
+  "modWsgi": {
+    "module": null,
+    "sha256": null,
+    "version": null
+  },
+  "identities": {
+    "prepare": null,
+    "runtime": null,
+    "runtimeGroup": null,
+    "migrate": null
+  },
+  "apache": {
+    "ctl": null,
+    "includeDir": "/etc/apache2/dinify-backend",
+    "reload": "graceful",
+    "drainSeconds": 30
+  },
+  "planes": {
+    "customer": {
+      "daemon": null,
+      "mount": null,
+      "config": "/etc/dinify-backend/customer.env",
+      "processes": null,
+      "threads": null,
+      "shutdownTimeout": null,
+      "passAuthorization": null,
+      "staticUrl": null,
+      "probe": {
+        "base": null,
+        "connectTo": null
+      }
+    },
+    "admin": {
+      "daemon": null,
+      "mount": null,
+      "config": "/etc/dinify-backend/admin.env",
+      "processes": null,
+      "threads": null,
+      "shutdownTimeout": null,
+      "passAuthorization": null,
+      "staticUrl": null,
+      "probe": {
+        "base": null,
+        "connectTo": null
+      }
+    }
+  },
+  "media": {
+    "root": null,
+    "url": null
+  },
+  "otp": {
+    "deterministicTestOtpAllowed": null,
+    "reason": null
+  },
+  "minFreeBytes": 1073741824
+}

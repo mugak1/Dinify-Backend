@@ -1,0 +1,5 @@
+{
+  "schema": "dinify.backend.migration-decisions/1",
+  "_note": "Reviewed compatibility decisions for migrations the B3 transition may apply automatically. A pending migration with no entry here stops the automated path. Each entry names the migration file's sha256 and its exact operation types (as release/hostprobe.py reports them), a class (expand = an older release still runs against the result; contract or data = it does not, so a maintenance window or forward fix is required) and the reviewing pull request. The evidence may refuse a decision; it never widens one.",
+  "decisions": {}
+}

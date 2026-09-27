@@ -15,11 +15,22 @@
                                                         READ TOKEN (gh); the request comes from PREFLIGHT_* variables
     python -B -m release preflight assess --facts DIR --out DIR --work DIR --evaluation-run R --evaluation-attempt A --revision SHA
                                                         NO TOKEN; NETWORK (the pinned scanner, PyPI); a fresh query now
-    python -B -m release preflight verify --facts DIR --work DIR --evaluation-run R --evaluation-attempt A [...]
-                                                        NO TOKEN; the receiving check (release/preflight.py)
+    python -B -m release preflight verify --facts DIR --work DIR --evaluation-run R --evaluation-attempt A [--admission-out FILE] [...]
+                                                        NO TOKEN; the receiving check (release/preflight.py); the
+                                                        installer's admission document when asked
+    python -B -m release host validate-profile --profile FILE [--rehearsal]
+                                                        offline; the installation profile, with every unknown field named
+    python -B -m release host deploy --profile FILE --operation ID --admission FILE --candidate-zip ZIP --preflight-zip ZIP --trusted DIR
+                                                        ROOT, on the host: admit, install beside what serves, gate, switch
+                                                        both planes, verify, restore on failure (release/transition.py)
+    python -B -m release host status|resume|adopt-legacy|recover-legacy --profile FILE [--operation ID]
+    python -B -m release host resume --profile FILE --operation ID [--schema-established STATEMENT]
+                                                        ROOT, on the host; see release/README.md -> "The installation"
+    python -B -m release host build|reconcile ...       the UNPRIVILEGED preparation worker; the installer runs it
 
 Exit status: 0 success · 1 refused (the reasons are printed) · 2 a preflight assessment that
-could not be completed · 64 usage. Run every command
+could not be completed · 3 a transition that failed verification and was RESTORED · 4 a
+transition whose restoration failed or could not be established · 64 usage. Run every command
 with ``-B``: the producer's own bytecode must not appear in the checkout it is observing.
 """
 
@@ -255,11 +266,124 @@ def cmd_preflight(args):
     if admitted:
         for key in ("commit", "candidateArtifactId", "candidateDigest", "environmentDigest", "deadlineEpoch"):
             output(key, admitted[key])
+        if args.admission_out:
+            # The installer's input (release/installation.py): the admitted identities, nothing
+            # else. It authorizes nothing: the host re-derives every one of them from the bytes.
+            from . import installation as ins
+            with open(args.admission_out, "w", encoding="utf-8") as fh:
+                json.dump(ins.admission_from_receive(admitted), fh, indent=2, sort_keys=True)
         ok = ("RECEIVED: the preflight result for %s (candidate artifact %s, %s) reproduces as %s under the trusted policy; usable until %s "
               "(with a %d-minute margin); deploymentAuthorized false" % (admitted["commit"], admitted["candidateArtifactId"], admitted["candidateDigest"],
                                                                         admitted["outcome"], admitted["deadline"], args.margin_minutes))
         summary("### Backend candidate preflight — received, NOT DEPLOYED\n\n```json\n%s\n```\n" % json.dumps(admitted, indent=2, sort_keys=True))
     return report("PREFLIGHT RECEIVING CHECK", problems, ok)
+
+
+def _profile(args):
+    from . import hostprofile as hp
+    doc, digest, problems = hp.load(args.profile)
+    if not problems:
+        problems = hp.validate(doc, rehearsal=args.rehearsal)
+    if problems:
+        return None, problems
+    doc["_sha256"] = digest
+    return doc, []
+
+
+HOST_EXIT = {"verified": 0, "unchanged": 0, "adopted": 0, "resumed": 0, "refused": 1, "verification-failed": 3, "restored": 3,
+             "restoration-failed": 4}
+
+
+def _host_outcome(outcome):
+    for p in outcome.get("problems") or []:
+        print("  ✗ %s: %s" % (p["code"], p["detail"]), file=sys.stderr)
+    print(json.dumps({k: v for k, v in outcome.items() if k != "problems"}, indent=2, sort_keys=True, default=str))
+    print("B3-OUTCOME: %s" % outcome["stage"])
+    serving = outcome.get("release")
+    if isinstance(serving, str):
+        # One release on both planes (the unchanged control): attested per plane all the same,
+        # so a reader never has to know which outcome spelled it which way.
+        serving = {plane: serving for plane in ("customer", "admin")}
+    if isinstance(serving, dict):
+        for plane, rid in sorted(serving.items()):
+            print("B3-SERVING: %s %s" % (plane, rid or "legacy"))
+    return HOST_EXIT.get(outcome["stage"], 4)
+
+
+MUTATING_HOST_ACTIONS = ("deploy", "resume", "adopt-legacy", "recover-legacy")
+
+
+def _host_refused(args, label, problems):
+    """A mutating action refused before it changed anything a request can reach. It still
+    ATTESTS that (``B3-OUTCOME: refused``): the workflow reads the attestation, and a refusal
+    that printed none reads as an unknown host state, which is not what happened."""
+    code = report(label, problems, "")
+    if args.action in MUTATING_HOST_ACTIONS:
+        print("B3-OUTCOME: refused")
+    return code
+
+
+def cmd_host(args):
+    from . import hostprofile as hp
+    from . import installation as ins
+    from . import transition as tr
+    if args.action == "build":
+        report_ = ins.build(args.candidate, args.release, args.work, args.expect_tree, args.base_python)
+        print(json.dumps(report_, sort_keys=True))
+        return 1 if report_.get("problems") else 0
+    if args.action == "reconcile":
+        answer = ins.reconcile_worker(args.release)
+        print(json.dumps(answer, sort_keys=True))
+        return 1 if answer.get("problems") else 0
+    profile, problems = _profile(args)
+    if problems:
+        return _host_refused(args, "HOST", problems)
+    if args.action == "validate-profile":
+        return report("PROFILE", [], "profile %s is structurally valid (%s, %s)" % (args.profile, profile["kind"], profile["status"]))
+    if args.action == "status":
+        print(json.dumps(tr.status(profile), indent=2, sort_keys=True))
+        return 0
+    if not ins._OPERATION.match(args.operation or ""):
+        return _host_refused(args, "HOST", [{"code": "operation_invalid", "detail": "--operation is lowercase words and digits"}])
+    if args.action == "resume":
+        return _host_outcome(tr.resume(profile, args.operation, schema_established=args.schema_established))
+    if args.action == "adopt-legacy":
+        return _host_outcome(tr.adopt_legacy(profile, args.operation))
+    if args.action == "recover-legacy":
+        return _host_outcome(tr.recover_legacy(profile, args.operation))
+    # deploy: admit -> prepare -> promote. Serving is not touched until promote holds the lock.
+    trusted = os.path.realpath(args.trusted)
+    problems = hp.host_problems(profile)
+    for path in (trusted, os.path.join(trusted, "release"), os.path.join(trusted, "dependency_audit")):
+        hp._root_owned_not_writable(path, "the trusted verifier", problems)
+    blocked = hp.untraversable(os.path.join(trusted, "release"))
+    if blocked:
+        problems.append({"code": "trusted_not_traversable", "detail": "the unprivileged identities import the trusted verifier and run "
+                         "from inside it, so every directory on the way to it must grant execute to others (0711 keeps it unlistable): "
+                         "%s" % ", ".join(blocked)})
+    admission, err = ins.read_json(args.admission)
+    if err:
+        problems.append({"code": "admission_invalid", "detail": err})
+    if problems:
+        return _host_refused(args, "HOST DEPLOY", problems)
+    work = os.path.join(profile["releaseRoot"], ".work", args.operation)
+    if os.path.lexists(work):
+        return _host_refused(args, "HOST DEPLOY", [{"code": "operation_reused", "detail": "%s exists: an operation id is used once" % work}])
+    os.makedirs(work, mode=0o755)
+    try:
+        import time as _time
+        state, problems = ins.admit(trusted, admission, args.candidate_zip, args.preflight_zip, os.path.join(work, "admitted"), int(_time.time()))
+        if problems:
+            return _host_refused(args, "HOST ADMISSION", problems)
+        print("B3-ADMITTED: %s %s preflight %s until %s" % (admission["commit"], admission["candidateDigest"], admission["preflightDigest"], admission["deadline"]))
+        receipt, problems = ins.prepare(profile, state, args.operation, trusted, work, rehearsal=args.rehearsal)
+        if problems:
+            return _host_refused(args, "HOST PREPARATION", problems)
+        release = os.path.join(profile["releaseRoot"], receipt["releaseId"])
+        print("B3-PREPARED: %s (%s)" % (receipt["releaseId"], "reused" if receipt.get("reused") else "installed"))
+        return _host_outcome(tr.promote(profile, args.operation, release, admission, trusted, rehearsal=args.rehearsal))
+    finally:
+        ins._remove_attributable(work)
 
 
 def main(argv):
@@ -308,7 +432,16 @@ def main(argv):
     p.add_argument("--expect-preflight-id")
     p.add_argument("--expect-preflight-digest")
     p.add_argument("--margin-minutes", type=int, default=pf.RECEIVING_MARGIN_MINUTES)
+    p.add_argument("--admission-out")
     p.add_argument("--gh", default="gh")
+    p = sub.add_parser("host")
+    p.add_argument("action", choices=("validate-profile", "deploy", "status", "resume", "adopt-legacy", "recover-legacy", "build", "reconcile"))
+    for flag in ("--profile", "--operation", "--admission", "--candidate-zip", "--preflight-zip", "--trusted",
+                 "--candidate", "--release", "--work", "--expect-tree", "--base-python"):
+        p.add_argument(flag)
+    p.add_argument("--rehearsal", action="store_true")
+    p.add_argument("--schema-established", help="resume only: an operator's statement, after inspecting the database, of the schema "
+                   "state a migration left unresolved (at least 20 characters); recorded in the journal verbatim")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
@@ -322,7 +455,15 @@ def main(argv):
             # A receiver may demand MORE headroom before a deadline, never less.
             print("--margin-minutes can be raised above %d, never lowered" % pf.RECEIVING_MARGIN_MINUTES, file=sys.stderr)
             return 64
-    handlers = {"lock": cmd_lock, "observe": cmd_observe, "acquire": cmd_acquire, "install": cmd_install,
+    if args.command == "host":
+        needed = {"validate-profile": ("profile",), "status": ("profile",), "resume": ("profile", "operation"),
+                  "adopt-legacy": ("profile", "operation"), "recover-legacy": ("profile", "operation"),
+                  "deploy": ("profile", "operation", "admission", "candidate_zip", "preflight_zip", "trusted"),
+                  "build": ("candidate", "release", "work", "expect_tree", "base_python"), "reconcile": ("release",)}[args.action]
+        if any(getattr(args, n) is None for n in needed):
+            print("host %s needs %s" % (args.action, ", ".join("--" + n.replace("_", "-") for n in needed)), file=sys.stderr)
+            return 64
+    handlers = {"host": cmd_host, "lock": cmd_lock, "observe": cmd_observe, "acquire": cmd_acquire, "install": cmd_install,
                 "interpreter": cmd_interpreter, "package": cmd_package, "verify": cmd_consume, "reconstruct": cmd_consume,
                 "preflight": cmd_preflight}
     return handlers[args.command](args)
