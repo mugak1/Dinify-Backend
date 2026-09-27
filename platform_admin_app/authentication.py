@@ -17,7 +17,7 @@ from rest_framework import exceptions
 from rest_framework.authentication import BaseAuthentication, CSRFCheck
 
 from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
-from platform_admin_app import sessions
+from platform_admin_app import command_owner, sessions
 from platform_admin_app.cookies import cookie_name
 from platform_admin_app.services import has_active_membership
 
@@ -49,6 +49,13 @@ class AdminSessionAuthentication(BaseAuthentication):
             raise exceptions.AuthenticationFailed(
                 'Account holds an active restaurant membership.'
             )
+
+        # D10: an unsafe request that names the session it was issued under is
+        # refused when this is not that session. After eligibility, BEFORE CSRF, so a
+        # stale tab is never sent into a CSRF retry that the new session's token would
+        # pass. It only refuses; an absent header proceeds. See command_owner.
+        if request.method not in _SAFE_METHODS:
+            command_owner.enforce(request, session)
 
         self.enforce_csrf(request)
         sessions.touch(session)

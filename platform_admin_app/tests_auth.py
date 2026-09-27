@@ -580,9 +580,12 @@ class CsrfCookieIssuanceTests(ThrottleIsolationMixin, TestCase):
         """
         verify/ ROTATES: a second sign-in must not inherit the first one's secret.
 
-        This is what ties the CSRF secret's lifetime to the AdminSession, the way
-        django.contrib.auth.login() does. get_token() here would reuse one secret
-        across logout and re-login for CSRF_COOKIE_AGE (a year).
+        Rotation gives each sign-in a fresh secret, the way
+        django.contrib.auth.login() does; get_token() here would reuse one secret
+        across logout and re-login for CSRF_COOKIE_AGE (a year). It does NOT tie the
+        secret to the AdminSession: session/ re-emits whatever secret it is sent, so
+        an older one can come back beside a newer session. What binds a command to
+        its session is the command-owner precondition (tests_command_owner).
         """
         user, _auth, secret, _codes = _make_admin(
             email='csrf_rot@t.com', username='csrf-rotate',

@@ -1653,6 +1653,38 @@ so keep it current when conventions change.
     the attempted method the audit `reason`. Break-glass sequence:
     `BACKGROUND_TASKS.md`; contract: `BREAKING_CHANGES.md` §7. Key rotation /
     `MultiFernet` is NOT built
+  - A COMMAND CAN NAME THE SESSION IT WAS ISSUED UNDER (D10 B1,
+    `platform_admin_app/command_owner.py`). `auth/verify/` and `auth/session/` publish
+    `command_owner` — `{version: 1, actor: <User.pk>, session: <AdminSession.id>}`,
+    canonical lowercase UUID strings, never the token or its hash — and a client that
+    echoes it as `X-Admin-Command-Owner: 1;<actor>;<session>` on an unsafe request is
+    refused when the session behind the cookie is not that one: `400
+    admin_command_owner_malformed`, `409 admin_command_actor_changed`, `409
+    admin_command_session_changed`. **A CSRF PAIR IS NOT A SESSION BINDING**, and the
+    old docstring claim that `verify/`'s `rotate_token` "ties the CSRF secret's lifetime
+    to the AdminSession" was false (corrected in `endpoints/auth.py`, a `tests_auth.py`
+    docstring and `BREAKING_CHANGES.md` §19, which also corrects §12 item 3): `get_token` in
+    `session/` RE-EMITS whatever secret it is sent, so a delayed `session/` response
+    puts an old CSRF cookie back beside a newer session cookie, and the old tab's token
+    matches. `AdminSessionAuthentication` checks the owner AFTER resolving the session
+    and re-checking eligibility (both still the existing 401s) and BEFORE CSRF,
+    permissions and the handler, so a mismatch is never a CSRF failure (whose one
+    re-bootstrap-and-retry would run the command under the new session) and no second
+    factor is checked or spent. The SESSION comparison enforces; the actor comparison
+    only classifies. ONLY AN ABSENT HEADER is legacy: parsing is exact (one length, no
+    trimming or case-folding), so an empty, partial, extra-field, other-version,
+    uppercase or proxy-joined (`a, b`) value is `400`, never "absent". Safe methods
+    ignore the header. Refusals are fixed sentences, name no id and are NOT audited.
+    `auth/logout/` bypasses the authenticator and applies it itself: a malformed header
+    is `400` with or without a session; a named sign-out with no live session is the
+    ordinary `200` body with NO `Set-Cookie`, no revoke and no audit; a mismatch is
+    `409` with none of those; absent or matching is unchanged. **THIS IS B1 ONLY, NOT
+    D10 CLOSURE**: a client that sends no header (the deployed Admin client) is still
+    exposed; a delayed MATCHING sign-out can still clear a later session's cookie (its
+    row survives); a proxy that strips the header silently turns protection off, which
+    a `GET` cannot detect; and rolling the backend back to one that ignores the header
+    silently unprotects any client that sends it. Pinned by
+    `platform_admin_app/tests_command_owner.py`
   - `AdminAuditLog` — append-only (an update raises `AppendOnlyViolation`),
     recording actor / session / action / resource / restaurant / delegation /
     reason / before+after state / result / request id. THE AUDIT CONTRACT, stated
