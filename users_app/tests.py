@@ -122,9 +122,10 @@ class UsersAppTestFunctions(TestCase):
         self.assertEqual(response.get('message'), MESSAGES.get('WRONG_PASSWORD'))
 
     def test_login_no_username(self, *mocks):
+        # D11 B1: an unknown identity is refused with the wrong-password envelope, so
+        # login no longer discloses which phone numbers and emails hold accounts.
         response = login('123456780', 'password')
-        self.assertEqual(response.get('status'), 401)
-        self.assertEqual(response.get('message'), MESSAGES.get('NO_USERNAME'))
+        self.assertEqual(response, {'status': 401, 'message': MESSAGES.get('WRONG_PASSWORD')})
 
     def test_change_password(self, *mocks):
         user = User.objects.get(phone_number=TEST_PHONE)

@@ -61,10 +61,22 @@ def login(
     logger.info("login [%s]: authenticate %.3fs", username, t_auth - t_lookup)
 
     if auth_user is None:
-        # Single query to check why auth failed (replaces exists() + get())
+        # ONE REFUSAL BEFORE SUCCESSFUL AUTHENTICATION (D11 B1). Login is AllowAny, so
+        # the answer to an unknown identity, a wrong password and an inactive account
+        # must be the same envelope — the existing wrong-password one — or the route
+        # tells an anonymous caller which phone numbers and emails hold accounts. The
+        # reason is still told apart BELOW, for the internal action log and the
+        # server log only; it never reaches the response.
+        #
+        # This is a body/status property. It is not a claim that the three cases take
+        # the same time, and it does not close the disclosures on the reset, register
+        # and lookup routes, which are separate work.
         try:
             existing_user = User.objects.get(username=username)
         except User.DoesNotExist:
+            existing_user = None
+
+        if existing_user is None:
             save_action(
                 affected_model='User',
                 affected_record=None,
@@ -78,12 +90,7 @@ def login(
                 filter_information=None
             )
             logger.info("login [%s]: failed (no user) total %.3fs", username, time.monotonic() - t_start)
-            return {
-                'status': 401,
-                'message': MESSAGES.get('NO_USERNAME')
-            }
-
-        if not existing_user.is_active:
+        elif not existing_user.is_active:
             save_action(
                 affected_model='User',
                 affected_record=None,
@@ -97,12 +104,9 @@ def login(
                 filter_information=None
             )
             logger.info("login [%s]: failed (inactive) total %.3fs", username, time.monotonic() - t_start)
-            return {
-                'status': 401,
-                'message': MESSAGES.get('ACCOUNT_NOT_ACTIVE')
-            }
+        else:
+            logger.info("login [%s]: failed (wrong password) total %.3fs", username, time.monotonic() - t_start)
 
-        logger.info("login [%s]: failed (wrong password) total %.3fs", username, time.monotonic() - t_start)
         return {
             'status': 401,
             'message': MESSAGES.get('WRONG_PASSWORD')

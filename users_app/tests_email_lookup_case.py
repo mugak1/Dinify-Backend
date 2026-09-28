@@ -113,9 +113,10 @@ class LoginEmailCaseTests(TestCase):
         self.assertEqual(wrong['status'], 401)
         self.assertEqual(wrong['message'], MESSAGES.get('WRONG_PASSWORD'))
 
+        # D11 B1: an unknown identity gets the SAME refusal as a wrong password, so
+        # the answer no longer says whether the number holds an account.
         unknown = login('256772000999', PASSWORD)
-        self.assertEqual(unknown['status'], 401)
-        self.assertEqual(unknown['message'], MESSAGES.get('NO_USERNAME'))
+        self.assertEqual(unknown, wrong)
 
     def test_an_address_typed_exactly_still_logs_into_its_own_account(self, *mocks):
         """CONTROL: lower-casing every lookup would log this owner into the twin."""
