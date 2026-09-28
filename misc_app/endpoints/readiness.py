@@ -15,13 +15,22 @@ connection. The admin plane's health route stays pure liveness. No deploy step, 
 staged release check reads THIS route; switching one is a separate decision.
 
 AUTHORITY. A plain Django view, deliberately not a DRF ``APIView``: it never authenticates
-(no header, cookie or token is read, so none can change the answer), and there is no
-content negotiation, so neither ``Accept`` nor ``?format=`` can change the response. No
-request data is read at all: the query string cannot move the probe target. GET and HEAD
-only; every other method is 405. It writes nothing, audits nothing and performs no Mongo,
-provider or in-process database I/O — the probe runs in a helper process
-(``misc_app/readiness_probe.py``), never on the request's persistent connection, which a
-frozen server would hang indefinitely.
+(this view reads no header, cookie or token), and there is no content negotiation, so
+neither ``Accept`` nor ``?format=`` can change the response. No request data is read at
+all: the query string cannot move the probe target. GET and HEAD only; every other method
+is 405. It writes nothing, audits nothing and performs no Mongo, provider or in-process
+database I/O — the probe runs in a helper process (``misc_app/readiness_probe.py``), never
+on the request's persistent connection, which a frozen server would hang indefinitely.
+
+KNOWN LIMIT — ``X-Delegation-Session``. Everything above describes THIS VIEW. The customer
+plane's ``DelegatedAccessMiddleware`` runs before every view, and a request that carries
+that header is resolved there first: a database query on the request's own connection,
+then a 401 or 403 and an audit row, and this view is never reached. Such a request is
+therefore outside this contract AND outside the 2 s budget (measured against a frozen
+database: no answer within 8 s, where the same request without the header answers 503 in
+1.76 s). Exempting this route belongs in that middleware, which D15 R1 does not change; it
+is a separate reservation. A caller that sends no delegation header — a monitor, a load
+balancer, a deploy gate — is unaffected.
 
 COALESCING, PER APPLICATION PROCESS. At most one probe is in flight in this process. A
 completed result is served for at most ``FRESH_FOR_S`` seconds after it completed (a

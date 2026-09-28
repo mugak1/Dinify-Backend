@@ -3,8 +3,10 @@
 What is proved here, against the REAL test database, a real helper process and (for the
 HTTP class) a real threaded HTTP server:
 
-* the contract — exact 200/503 bodies, ``no-store, private``, GET/HEAD only, request data
-  and credentials ignored, no in-process query, audit, Mongo or provider side effect;
+* the contract — exact 200/503 bodies, ``no-store, private``, GET/HEAD only, request data,
+  ``Authorization`` and cookies ignored, no in-process query, audit, Mongo or provider side
+  effect. NOT covered: a request carrying ``X-Delegation-Session``, which the delegated-access
+  middleware answers before this view runs (see the KNOWN LIMIT in the view's docstring);
 * the bound — refused, never-handshaking, stalled-after-handshake (query and result read),
   a helper blocked in a resolver-style read that ignores every catchable signal: each
   answers within ``BOUND_S`` (the 2.0 s budget + 0.5 s STATED scheduling/test tolerance)

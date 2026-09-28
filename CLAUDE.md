@@ -2569,7 +2569,12 @@ so keep it current when conventions change.
   per change of state, never per caller. Non-PostgreSQL engines answer 503. It changes
   NOTHING above: `api/v1/health/` still answers 200 `degraded` and is still unbounded,
   admin health is still liveness, and no deploy step, staged release check or monitor
-  reads this route yet
+  reads this route yet. **KNOWN LIMIT:** a request carrying `X-Delegation-Session` is
+  resolved by `DelegatedAccessMiddleware` first (a DB query on the request's own
+  connection, then a 401/403 and an audit row) and never reaches this view, so it is
+  outside both the contract and the bound. Exempting the route belongs in that
+  middleware and is a separate reservation; callers that send no such header are
+  unaffected
 - `api/v1/orders/` → v1 orders (urls.py) — `submit` and `retire-quote` (both
   PUT) are live. **`retire-quote` is a SEPARATE ACTION, never a flag on
   `submit`** (D06): placing an order and establishing that it can no longer be
