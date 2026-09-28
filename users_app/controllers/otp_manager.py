@@ -149,14 +149,17 @@ class OtpManager:
             # short-circuit are a deliberate pre-launch state; the SMS sender's
             # own ENV gate makes the threaded send a no-op here anyway.
             def _send_otp_notifications():
+                # The catches log a FIXED category and never the exception: an
+                # adapter's exception text can carry the destination, the gateway URL
+                # and query (with credentials) or the message itself (D11 B1).
                 try:
                     send_sms(message=otp_message, msisdn=msisdn)
-                except Exception as error:
-                    logger.error("OTP SMS send error: %s", error)
+                except Exception:
+                    logger.error("OTP SMS dispatch raised an exception")
                 try:
                     _send_email()
-                except Exception as error:
-                    logger.error("OTP email send error: %s", error)
+                except Exception:
+                    logger.error("OTP email dispatch raised an exception")
 
             threading.Thread(target=_send_otp_notifications, daemon=True).start()
             return True
@@ -173,8 +176,8 @@ class OtpManager:
                 def _send_email_async():
                     try:
                         _send_email()
-                    except Exception as error:
-                        logger.error("OTP email send error: %s", error)
+                    except Exception:
+                        logger.error("OTP email dispatch raised an exception")
 
                 threading.Thread(target=_send_email_async, daemon=True).start()
                 return True
@@ -183,8 +186,8 @@ class OtpManager:
             # email can still log in.
             try:
                 return _send_email()
-            except Exception as error:
-                logger.error("OTP email send error: %s", error)
+            except Exception:
+                logger.error("OTP email dispatch raised an exception")
                 return False
 
         # prod is SMS-only by design — no email channel here.
@@ -429,19 +432,34 @@ class OtpManager:
                 'message': 'User not found'
             }
 
-        # if the purpose is login, check if there is a recent otp,
-        # the otp should not be older than 5 minutes
+        # A LOGIN resend is only honoured within five minutes of a PASSWORD proof
+        # (D11 B1). The proof is the challenge `login` itself created: it calls
+        # `make_otp(user=..., purpose='login')` with no msisdn, so that row — and only
+        # that row — stores `msisdn IS NULL`. A resend stores the destination phone, so
+        # its own row can never satisfy this check. Before B1 any recent login-purpose
+        # row qualified, which let each resend renew the window it was admitted under:
+        # one genuine login kept resends (and fresh verification budgets) available for
+        # ever to anyone holding the user id.
+        #
+        # The anchor's time is `time_created`, which nothing rewrites, so a resend never
+        # refreshes it; a new genuine login replaces it (make_otp's `(user, None)`
+        # replacement) and so restores eligibility. Deliberately NOT considered: whether
+        # the anchor was consumed or how many attempts it holds, and nothing about how a
+        # later verify selects its challenge — those are unchanged.
+        #
+        # An account with NO phone is refused outright: its resend row would also store
+        # `msisdn IS NULL`, replace the anchor through that same `(user, None)` key and
+        # so renew it — the exact loop this closes — and there is nowhere to send an
+        # SMS anyway.
         if purpose == 'login':
             five_minutes_ago = timezone.now() - timedelta(minutes=5)
-            recent = UserOtp.objects.filter(
-                purpose=purpose,
+            anchored = user is not None and bool(user.phone_number) and UserOtp.objects.filter(
+                user_id=user.id,
+                purpose='login',
+                msisdn__isnull=True,
                 time_created__gte=five_minutes_ago,
-            )
-            if user is not None:
-                recent = recent.filter(user_id=user.id)
-            elif msisdn is not None:
-                recent = recent.filter(msisdn=msisdn)
-            if recent.count() < 1:
+            ).exists()
+            if not anchored:
                 return {
                     'status': 400,
                     'message': 'Please provide your username and password again to get a login OTP'
