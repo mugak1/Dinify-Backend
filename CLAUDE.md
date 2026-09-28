@@ -2557,6 +2557,24 @@ so keep it current when conventions change.
   database is unreachable** (`status: degraded`, `database: unreachable`) — a
   consumer must read the body, never the status code. Distinct from the admin
   plane's own `admin/v1/` health route
+- `api/v1/health/ready/` → `misc_app/endpoints/readiness.py` (D15 R1, customer plane
+  only) — additive READINESS: `200 {status: ready, database: connected}` or
+  `503 {status: not_ready, database: unreachable}`, exactly two keys, `no-store,
+  private`, GET/HEAD only, unauthenticated, request data ignored. The `SELECT 1` runs
+  in a HELPER PROCESS (`misc_app/readiness_probe.py`) on a new connection built from
+  Django's own connection parameters, and is SIGKILLed and reaped inside one 2 s
+  monotonic budget (admission through disposal) — the only bound that also covers
+  DNS, a frozen server and a stalled result read. Per process: one probe at a time, a
+  result served ≤ 2 s after it completed, non-owners wait ≤ 0.25 s; one fixed log line
+  per change of state, never per caller. Non-PostgreSQL engines answer 503. It changes
+  NOTHING above: `api/v1/health/` still answers 200 `degraded` and is still unbounded,
+  admin health is still liveness, and no deploy step, staged release check or monitor
+  reads this route yet. **KNOWN LIMIT:** a request carrying `X-Delegation-Session` is
+  resolved by `DelegatedAccessMiddleware` first (a DB query on the request's own
+  connection, then a 401/403 and an audit row) and never reaches this view, so it is
+  outside both the contract and the bound. Exempting the route belongs in that
+  middleware and is a separate reservation; callers that send no such header are
+  unaffected
 - `api/v1/orders/` → v1 orders (urls.py) — `submit` and `retire-quote` (both
   PUT) are live. **`retire-quote` is a SEPARATE ACTION, never a flag on
   `submit`** (D06): placing an order and establishing that it can no longer be
