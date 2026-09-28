@@ -13,9 +13,18 @@ one place:
 - One retry on ``requests.RequestException`` only — a transport blip may
   deserve a second attempt; a non-2xx or a parsed gateway failure is a
   definitive answer and is never retried.
-- Failure logs include the HTTP status and the body truncated to 300 chars.
-  Failure paths only: bodies contain msisdns, and the pre-existing error log
-  already named the destination, so this adds no new exposure class.
+- Diagnostics are SANITIZED AT THE SOURCE (D11 B1). A log line carries a fixed
+  event category plus bounded, allowlisted metadata only: the numeric HTTP
+  status, the attempt number, a count of reported destinations, a closed
+  gateway-status category and a closed transport-error category. It never
+  carries the destination, the message (an OTP), the gateway URL or query (the
+  account password travels as a query parameter, and ``requests`` exception
+  text quotes the full URL), the response body, an arbitrary provider string or
+  the raw exception. Masking or truncating would not be enough: the body and the
+  exception text are not phone-shaped.
+- ``capture`` is a SEPARATE, deliberate contract: the operator command
+  ``send_test_sms`` asks for the raw exchange and prints it to its own stdout.
+  Nothing about it changed.
 """
 import logging
 import time
@@ -29,6 +38,35 @@ logger = logging.getLogger(__name__)
 YO_SMS_URL = 'http://smgw1.yo.co.ug:9100/sendsms'
 DEFAULT_TIMEOUT = 10  # seconds
 RETRY_BACKOFF_SECONDS = 0.5
+
+# The gateway status words a log line may repeat. Anything else the provider says
+# is reduced to a category, never echoed.
+_KNOWN_GATEWAY_STATUSES = frozenset({'OK', 'ERROR'})
+
+
+def _numeric_status(value):
+    """The HTTP status as a plain int, or -1 when it is not one."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return -1
+
+
+def _gateway_status_category(parsed):
+    values = parsed.get('ybs_autocreate_status')
+    if not values:
+        return 'missing'
+    if len(values) == 1 and values[0] in _KNOWN_GATEWAY_STATUSES:
+        return values[0]
+    return 'unrecognised'
+
+
+def _transport_error_category(exc):
+    # Timeout first: ConnectTimeout is both a Timeout and a ConnectionError.
+    if isinstance(exc, requests.Timeout):
+        return 'timeout'
+    if isinstance(exc, requests.ConnectionError):
+        return 'connection'
+    return 'other'
 
 
 def send_sms(
@@ -74,7 +112,10 @@ def send_sms(
             response = requests.get(YO_SMS_URL, params=params, timeout=timeout)
             break
         except requests.RequestException as exc:
-            logger.error("SMS send failed to %s (attempt %d): %s", msisdn, attempt, exc)
+            logger.error(
+                "SMS transport error (attempt %d of 2, category=%s)",
+                attempt, _transport_error_category(exc),
+            )
             if attempt == 1:
                 time.sleep(RETRY_BACKOFF_SECONDS)
     if response is None:
@@ -88,15 +129,15 @@ def send_sms(
     destination_states = parsed.get('ybs_autocreate_message', [])
 
     if 200 <= response.status_code < 300 and parsed.get('ybs_autocreate_status') == ['OK']:
-        for state in destination_states:
-            logger.info("SMS accepted by gateway: %s", state)
+        logger.info(
+            "SMS accepted by gateway (destination states reported=%d)",
+            len(destination_states),
+        )
         return True
 
     logger.error(
-        "SMS gateway rejected send to %s: HTTP %s ybs_autocreate_status=%s body=%.300s",
-        msisdn,
-        response.status_code,
-        (parsed.get('ybs_autocreate_status') or ['<missing>'])[0],
-        body,
+        "SMS gateway rejected send (HTTP %d, gateway_status=%s)",
+        _numeric_status(response.status_code),
+        _gateway_status_category(parsed),
     )
     return False
