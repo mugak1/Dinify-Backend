@@ -14,18 +14,21 @@ either way). The controls are the other half of the contract: the match is EXACT
 on the URL PATTERN, and every other route — the liveness route beside it included —
 is gated exactly as before.
 
-The readiness view itself arrives with #349, so the exempt route is exercised here
-through a URLconf that mounts a probe view the way ``dinify_backend.urls`` mounts
-``misc_app.urls`` — ``api/v1/health/`` + ``ready/`` — which yields the same
-``resolver_match.route``, the only thing the middleware reads. The controls against
-real routes use the real URLconf.
+Two URLconfs. The REAL one pins the entry to the readiness view (a rename must not
+strand it) and shows the real view answers the same with the header. A MIRROR one mounts
+a probe view the way ``dinify_backend.urls`` mounts ``misc_app.urls`` —
+``api/v1/health/`` + ``ready/``, the same ``resolver_match.route``, which is all the
+middleware reads — beside lookalike routes the real URLconf does not have, so exactness
+can be shown. Every other control uses the real URLconf.
 """
 from unittest import mock
 
 from django.http import JsonResponse
 from django.test import Client, TestCase, override_settings
-from django.urls import include, path, resolve
+from django.urls import get_resolver, include, path, resolve
 
+from misc_app import readiness_probe
+from misc_app.endpoints import readiness
 from platform_admin_app import delegated_middleware
 from platform_admin_app.delegated_middleware import (
     ACTING_AS_HEADER,
@@ -97,6 +100,72 @@ class _PatternNotPathUrls:
 
 def _audit_count():
     return AdminAuditLog.objects.count()
+
+
+def _real_routes():
+    routes = set()
+
+    def walk(patterns, prefix=''):
+        for pattern in patterns:
+            if hasattr(pattern, 'url_patterns'):
+                walk(pattern.url_patterns, prefix + str(pattern.pattern))
+            else:
+                routes.add(prefix + str(pattern.pattern))
+
+    walk(get_resolver().url_patterns)
+    return routes
+
+
+class RealReadinessRouteTests(_ThrottleIsolation, TestCase):
+    """The real URLconf and the real readiness view. The probe itself is stubbed: what is
+    under test is the gate in front of the view, not the helper behind it (the helper's
+    own contract, header included, is in ``misc_app.tests_readiness``)."""
+
+    def setUp(self):
+        super().setUp()
+        readiness._reset_for_tests()
+        stub = mock.patch.object(
+            readiness_probe, 'run', return_value=readiness_probe.Outcome(True, 'ready'),
+        )
+        self.run = stub.start()
+        self.addCleanup(stub.stop)
+        self.addCleanup(readiness._reset_for_tests)
+        self.client = Client()
+
+    def test_CONTRACT_every_exempt_route_is_a_real_url_pattern(self):
+        """A rename that strands an entry would silently put the gate back in front of
+        the route; this fails first."""
+        routes = _real_routes()
+        for route in EXEMPT_ROUTES:
+            self.assertIn(route, routes, f'{route} matches no URL pattern')
+
+    def test_CONTRACT_the_entry_is_the_readiness_view(self):
+        match = resolve(READY_URL)
+        self.assertIn(match.route, EXEMPT_ROUTES)
+        self.assertIs(match.func, readiness.readiness)
+
+    def test_REGRESSION_the_real_view_answers_the_same_with_the_header(self):
+        admin = _make_admin()
+        restaurant = _make_restaurant('Alpha Grill')
+        token, _context = _session_for(admin, restaurant, scope=SCOPE_SUPPORT)
+        baseline = self.client.get(READY_URL)
+        self.assertEqual(baseline.status_code, 200)
+        before = _audit_count()
+        for extra in (
+            {_SESSION_META: JUNK},
+            {_SESSION_META: token},
+            {_SESSION_META: token, 'HTTP_AUTHORIZATION': 'Bearer x'},
+        ):
+            with self.subTest(headers=sorted(extra)):
+                readiness._reset_for_tests()
+                with self.assertNumQueries(0):
+                    response = self.client.get(READY_URL, **extra)
+                self.assertEqual(response.status_code, baseline.status_code)
+                self.assertEqual(response.content, baseline.content)
+                self.assertEqual(response['Cache-Control'], 'no-store, private')
+                self.assertNotIn(ACTING_AS_HEADER, response)
+        self.assertEqual(_audit_count(), before)
+        self.assertEqual(self.run.call_count, 4, 'every request reached the view and probed')
 
 
 @override_settings(ROOT_URLCONF=_MirrorUrls)
