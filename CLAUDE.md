@@ -1721,7 +1721,12 @@ so keep it current when conventions change.
     `platform_admin_app/configs/delegation_scopes.py`, which mirrors
     `restaurants_app/configs/role_defaults.py` and must stay import-light — it is
     imported by the customer-plane permission resolver. Credentials ride the
-    `X-Delegation-Session` / `X-Delegation-Code` headers
+    `X-Delegation-Session` / `X-Delegation-Code` headers. ONE route is never
+    evaluated at all: `EXEMPT_ROUTES` in `delegated_middleware.py`, exactly
+    `api/v1/health/ready/` (D15 readiness), matched on the URL pattern before the
+    header is read, so a request to it is an undelegated one whatever it carries —
+    no lookup, no audit row, no authority. Resolving the header is a query on the
+    request's own connection, which let a header stall readiness past its 2 s bound
 - Admin restaurant directory + detail READS: ✅ (Phase 1, Step 1 — backend slice)
   `GET admin/v1/restaurants/` and `GET admin/v1/restaurants/<uuid:id>/`, projected by
   `platform_admin_app/restaurant_reads.py` (the views are thin). Session-gated, NOT
@@ -2569,12 +2574,10 @@ so keep it current when conventions change.
   per change of state, never per caller. Non-PostgreSQL engines answer 503. It changes
   NOTHING above: `api/v1/health/` still answers 200 `degraded` and is still unbounded,
   admin health is still liveness, and no deploy step, staged release check or monitor
-  reads this route yet. **KNOWN LIMIT:** a request carrying `X-Delegation-Session` is
-  resolved by `DelegatedAccessMiddleware` first (a DB query on the request's own
-  connection, then a 401/403 and an audit row) and never reaches this view, so it is
-  outside both the contract and the bound. Exempting the route belongs in that
-  middleware and is a separate reservation; callers that send no such header are
-  unaffected
+  reads this route yet. A request carrying `X-Delegation-Session` gets the same answer
+  inside the same bound: the route is in `DelegatedAccessMiddleware.EXEMPT_ROUTES`, so
+  the gate never evaluates it (no lookup, no 401/403, no audit row, no authority).
+  Before that exemption, such a request against a frozen database got no answer at all
 - `api/v1/orders/` → v1 orders (urls.py) — `submit` and `retire-quote` (both
   PUT) are live. **`retire-quote` is a SEPARATE ACTION, never a flag on
   `submit`** (D06): placing an order and establishing that it can no longer be

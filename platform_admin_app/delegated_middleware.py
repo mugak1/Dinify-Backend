@@ -12,6 +12,11 @@ plane is byte-identical to what it was for every existing caller — diners, JWT
 staff, anonymous readers alike. There is exactly one entry point into the delegated
 path, and it is a header this middleware reads and no one else does.
 
+The same is true of a request to one of the ``EXEMPT_ROUTES``, whatever it carries:
+the route is checked before the header is read, so such a request is never a
+delegated one and nothing below runs for it. See the constant for the one entry and
+why it is there.
+
 Why a middleware AND an authenticator, rather than one or the other:
 
 * A DRF authentication class alone can be bypassed by any view that sets
@@ -61,6 +66,30 @@ ACTING_AS_VALUE = 'delegation'
 # Where the validated context is parked for the authenticator to pick up. Read from
 # the underlying HttpRequest, which DRF's Request proxies.
 CONTEXT_ATTR = 'delegation_context'
+
+# Routes this gate never evaluates. Matched EXACTLY on ``resolver_match.route`` — the
+# URL pattern, never the request path and never a prefix — and checked before the
+# header is read. A request to one of these proceeds as an undelegated request
+# whatever it carries: no header is read, no session resolved, no context bound, no
+# response stamped and nothing audited. It confers NO delegated authority; it is a
+# narrower outcome than any ``ALLOWED_ROUTES`` entry, not a wider one.
+#
+# An entry belongs here only when the route has no delegated purpose AND must answer
+# the same way, within its own bound, whatever headers a caller sends. Resolving a
+# delegated session is a query on the request's own database connection, so gating
+# such a route lets a header decide whether, and how late, it answers:
+#
+#   api/v1/health/ready/  D15 readiness. Unauthenticated, reads no header, and its
+#       contract is a fixed 200/503 inside 2 s. Gated, a request carrying this
+#       header was answered 401/403 with an audit row, and against a frozen database
+#       got no answer within 8 s, where the same request without the header got a
+#       503 in 1.76 s (Codex P2 on #349, reproduced over real HTTP).
+#
+# Deliberately NOT here: ``api/v1/health/`` (liveness, unchanged by D15, still gated)
+# and every other route. Add an entry only with a reason written beside it.
+EXEMPT_ROUTES = frozenset({
+    'api/v1/health/ready/',
+})
 
 
 def session_token_from_request(request):
@@ -135,6 +164,11 @@ class DelegatedAccessMiddleware:
 
     # --- the gate --------------------------------------------------------------
     def process_view(self, request, view_func, view_args, view_kwargs):
+        if (getattr(request.resolver_match, 'route', '') or '') in EXEMPT_ROUTES:
+            # Never a delegated request, whatever it carries — see EXEMPT_ROUTES.
+            # Checked BEFORE the header is read, so nothing below can run for it.
+            return None
+
         raw_token = session_token_from_request(request)
         if not raw_token:
             # No delegated credential presented. Nothing is read, nothing is set,
@@ -321,6 +355,7 @@ __all__ = [
     'ACTING_AS_HEADER',
     'ACTING_AS_VALUE',
     'CODE_HEADER',
+    'EXEMPT_ROUTES',
     'SESSION_HEADER',
     'DelegatedAccessMiddleware',
     'code_from_request',

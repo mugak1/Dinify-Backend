@@ -22,15 +22,13 @@ is 405. It writes nothing, audits nothing and performs no Mongo, provider or in-
 database I/O — the probe runs in a helper process (``misc_app/readiness_probe.py``), never
 on the request's persistent connection, which a frozen server would hang indefinitely.
 
-KNOWN LIMIT — ``X-Delegation-Session``. Everything above describes THIS VIEW. The customer
-plane's ``DelegatedAccessMiddleware`` runs before every view, and a request that carries
-that header is resolved there first: a database query on the request's own connection,
-then a 401 or 403 and an audit row, and this view is never reached. Such a request is
-therefore outside this contract AND outside the 2 s budget (measured against a frozen
-database: no answer within 8 s, where the same request without the header answers 503 in
-1.76 s). Exempting this route belongs in that middleware, which D15 R1 does not change; it
-is a separate reservation. A caller that sends no delegation header — a monitor, a load
-balancer, a deploy gate — is unaffected.
+DELEGATION. The customer plane's ``DelegatedAccessMiddleware`` runs before every view and
+resolves an ``X-Delegation-Session`` header with a query on the request's own connection.
+This route is in its ``EXEMPT_ROUTES``, matched on the URL pattern before the header is
+read, so a request to it is never a delegated one: no lookup, no 401/403, no audit row,
+and the same answer inside the same budget whatever it carries. Without the exemption such
+a request, against a frozen database, got no answer within 8 s where the same request
+without the header answered 503 in 1.76 s.
 
 COALESCING, PER APPLICATION PROCESS. At most one probe is in flight in this process. A
 completed result is served for at most ``FRESH_FOR_S`` seconds after it completed (a

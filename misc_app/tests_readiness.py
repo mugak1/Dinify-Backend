@@ -4,9 +4,10 @@ What is proved here, against the REAL test database, a real helper process and (
 HTTP class) a real threaded HTTP server:
 
 * the contract — exact 200/503 bodies, ``no-store, private``, GET/HEAD only, request data,
-  ``Authorization`` and cookies ignored, no in-process query, audit, Mongo or provider side
-  effect. NOT covered: a request carrying ``X-Delegation-Session``, which the delegated-access
-  middleware answers before this view runs (see the KNOWN LIMIT in the view's docstring);
+  ``Authorization``, cookies and an ``X-Delegation-Session`` header ignored (the
+  delegated-access gate exempts this route; the gate's side is proved in
+  ``platform_admin_app.tests_delegated_exempt_routes``), no in-process query, audit, Mongo
+  or provider side effect;
 * the bound — refused, never-handshaking, stalled-after-handshake (query and result read),
   a helper blocked in a resolver-style read that ignores every catchable signal: each
   answers within ``BOUND_S`` (the 2.0 s budget + 0.5 s STATED scheduling/test tolerance)
@@ -414,6 +415,25 @@ class ReadinessContractTests(_ReadinessCase, TestCase):
         self.assertEqual(mongo.MONGO_DB.mock_calls, [])
         self.assertEqual(mail.outbox, [])
         provider.assert_not_called()
+
+    def test_a_delegation_header_changes_nothing(self):
+        """The delegated-access gate never evaluates this route (its ``EXEMPT_ROUTES``): a
+        session header, alone or beside a token, gets the same answer, makes no query on the
+        request's connection and writes no audit row. Gated, it was a 401/403 with an audit
+        row, and no answer at all against a frozen database."""
+        from platform_admin_app.delegated_middleware import ACTING_AS_HEADER, SESSION_HEADER
+        from platform_admin_app.models import AdminAuditLog
+        meta = 'HTTP_' + SESSION_HEADER.upper().replace('-', '_')
+        before = AdminAuditLog.objects.count()
+        for extra in ({meta: 'not-a-delegated-session'},
+                      {meta: 'not-a-delegated-session', 'HTTP_AUTHORIZATION': 'Bearer not-a-token'}):
+            readiness._reset_for_tests()
+            response, queries = _get_counting_queries(self, **extra)
+            self.assertEqual(response.status_code, 200, sorted(extra))
+            self.assertEqual(json.loads(response.content), READY)
+            self.assertEqual(queries, 0, 'the gate must not resolve the header on this route')
+            self.assertNotIn(ACTING_AS_HEADER, response)
+        self.assertEqual(AdminAuditLog.objects.count(), before)
 
     def test_configured_options_reach_the_helper_unchanged_and_settings_are_not_mutated(self):
         options = connections['default'].settings_dict['OPTIONS']
