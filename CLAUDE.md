@@ -1721,7 +1721,12 @@ so keep it current when conventions change.
     `platform_admin_app/configs/delegation_scopes.py`, which mirrors
     `restaurants_app/configs/role_defaults.py` and must stay import-light — it is
     imported by the customer-plane permission resolver. Credentials ride the
-    `X-Delegation-Session` / `X-Delegation-Code` headers
+    `X-Delegation-Session` / `X-Delegation-Code` headers. ONE route is never
+    evaluated at all: `EXEMPT_ROUTES` in `delegated_middleware.py`, exactly
+    `api/v1/health/ready/` (D15 readiness), matched on the URL pattern before the
+    header is read, so a request to it is an undelegated one whatever it carries —
+    no lookup, no audit row, no authority. Resolving the header is a query on the
+    request's own connection, which let a header stall readiness past its 2 s bound
 - Admin restaurant directory + detail READS: ✅ (Phase 1, Step 1 — backend slice)
   `GET admin/v1/restaurants/` and `GET admin/v1/restaurants/<uuid:id>/`, projected by
   `platform_admin_app/restaurant_reads.py` (the views are thin). Session-gated, NOT
