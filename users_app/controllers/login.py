@@ -207,7 +207,7 @@ def login(
         # before OTP is verified.  When prompt_password_change is True
         # the frontend should complete OTP first, then call
         # change-password with the token returned by verify-otp.
-        otp = OtpManager().make_otp(user=auth_user, purpose='login')
+        otp = OtpManager().make_otp(user=auth_user, purpose='login', origin='password_login')
 
         logger.info("login [%s]: otp created, total %.3fs", username, time.monotonic() - t_start)
 

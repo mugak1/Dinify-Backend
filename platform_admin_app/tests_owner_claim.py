@@ -32,12 +32,12 @@ produces outside dev.
 """
 import ast
 import pathlib
+import re
 from unittest import mock
 
 from django.core.cache import cache
 from django.db import connection, transaction
 from django.test import TestCase, TransactionTestCase
-from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
 from dinify_backend.configss.string_definitions import (
@@ -891,6 +891,15 @@ class NoLockSpansDeliveryTests(TransactionTestCase):
     ``TransactionTestCase``, not ``TestCase``: the latter wraps every test in a
     transaction, so ``in_atomic_block`` would be ``True`` throughout and the central
     assertion would pass vacuously.
+
+    WHAT CHANGED WITH D11 B2-C, AND WHAT DID NOT. Issuing the challenge now writes the
+    replacement delete, the new challenge and its accounting row in ONE short
+    transaction, which takes the owner's ``users`` row ``FOR KEY SHARE`` first (the
+    order that keeps it from deadlocking a redemption). That is the ONLY locking read on
+    this path, and it is confined to that transaction, which commits before delivery.
+    The claim PREFLIGHT still takes no lock and opens no transaction, and nothing is
+    held when a sender is entered — which is the property these tests exist for, now
+    asserted at the sender itself rather than at ``make_otp``'s door.
     """
 
     reset_sequences = False
@@ -937,15 +946,71 @@ class NoLockSpansDeliveryTests(TransactionTestCase):
         self.assertEqual(observed, [False], 'OTP delivery ran inside a transaction')
 
     @_UNTHROTTLED
-    def test_the_challenge_issues_no_locking_read_at_all(self):
+    def test_nothing_is_held_when_the_sender_is_entered(self):
+        """
+        At the sender itself: no transaction open, and no transaction id held by this
+        backend — so no row lock of any kind survives into delivery. ``ENV=test`` so the
+        SMS goes out synchronously on this very connection; ``dev`` would hand it to a
+        thread and prove nothing about this one.
+        """
         if connection.vendor != 'postgresql':
-            self.skipTest('FOR UPDATE is PostgreSQL-specific.')
-        with CaptureQueriesContext(connection) as captured:
+            self.skipTest('pg_locks is PostgreSQL-specific.')
+        observed = []
+
+        def sms_spy(message, msisdn, **kwargs):
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM pg_locks WHERE pid = pg_backend_pid() "
+                    "AND locktype = 'transactionid'",
+                )
+                held = cursor.fetchone()[0]
+            observed.append((transaction.get_connection().in_atomic_block, held))
+            return True
+
+        def env(key, **kwargs):
+            return 'test' if key == 'ENV' else kwargs.get('default')
+
+        with mock.patch('users_app.controllers.otp_manager.config', side_effect=env), \
+                mock.patch('users_app.controllers.otp_manager.send_sms', sms_spy), \
+                mock.patch('users_app.controllers.otp_manager.Messenger'):
             self.assertEqual(self.challenge().status_code, 200)
+
+        self.assertEqual(observed, [(False, 0)], 'delivery ran with something held')
+
+    @_UNTHROTTLED
+    def test_the_only_locking_read_is_the_issuance_key_share_inside_its_transaction(self):
+        if connection.vendor != 'postgresql':
+            self.skipTest('Row-lock clauses are PostgreSQL-specific.')
+        statements = []
+
+        def record(execute, sql, params, many, context):
+            statements.append((sql, connection.in_atomic_block))
+            return execute(sql, params, many, context)
+
+        with mock.patch('users_app.controllers.otp_manager.send_sms', return_value=True), \
+                connection.execute_wrapper(record):
+            self.assertEqual(self.challenge().status_code, 200)
+
         locking = [
-            q['sql'] for q in captured.captured_queries if 'FOR UPDATE' in q['sql']
+            (sql, atomic) for sql, atomic in statements
+            if re.search(r'\bFOR (UPDATE|NO KEY UPDATE|SHARE|KEY SHARE)\b', sql)
         ]
-        self.assertEqual(locking, [], 'the challenge took a row lock')
+        self.assertEqual(len(locking), 1, locking)
+        sql, atomic = locking[0]
+        self.assertIn('FOR KEY SHARE', sql)
+        self.assertIn('"users"', sql)
+        self.assertTrue(atomic, 'the key share must sit inside the issuance transaction')
+
+        # The preflight — everything before the issuance transaction opens — runs in
+        # autocommit and locks nothing.
+        first_atomic = next(i for i, (_, atomic) in enumerate(statements) if atomic)
+        self.assertTrue(first_atomic > 0)
+        self.assertFalse(any(atomic for _, atomic in statements[:first_atomic]))
+        # And it had closed before the send was concluded: the ledger's finalization,
+        # which runs after delivery, runs in autocommit.
+        finalize = [atomic for sql, atomic in statements
+                    if sql.startswith('UPDATE "otp_issuances"')]
+        self.assertEqual(finalize, [False])
 
     @_UNTHROTTLED
     def test_the_membership_barrier_is_never_acquired(self):
