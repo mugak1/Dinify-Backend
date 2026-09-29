@@ -1,32 +1,21 @@
 """
-Admin-plane middleware (wired only into ``settings_admin.MIDDLEWARE``).
+Admin-plane middleware.
 
-No custom middleware existed in the repo before this, so these follow the standard
-new-style callable convention. Both attach a request attribute the PR-3 audit log
-will consume, and always call ``get_response``.
+``ClientIPMiddleware`` is wired only into ``settings_admin.MIDDLEWARE``. Both names
+here attach a request attribute the audit log consumes, and always call
+``get_response``.
 """
-import uuid
-
 from django.conf import settings
 
+from dinify_backend.request_context import RequestContextMiddleware
 
-class RequestIDMiddleware:
-    """
-    Attach a server-generated ``request.request_id`` to every request.
-
-    Always a fresh ``uuid4`` — NEVER read from a client header, so a caller cannot
-    forge or pin the audit correlation id. Echoed on the response as ``X-Request-ID``
-    for log correlation.
-    """
-
-    def __init__(self, get_response):
-        self.get_response = get_response
-
-    def __call__(self, request):
-        request.request_id = uuid.uuid4().hex
-        response = self.get_response(request)
-        response['X-Request-ID'] = request.request_id
-        return response
+#: The admin plane's historical name for the request-ID middleware, kept so every
+#: existing import and dotted path keeps working. Since D15 R2 it IS the common
+#: implementation both planes install (``dinify_backend.request_context``): a fresh
+#: ``uuid4().hex`` per request, NEVER read from a client header, so a caller cannot
+#: forge or pin the audit correlation ID, and echoed as ``X-Request-ID``. A stack that
+#: lists it twice still yields one ID and one outcome record per request.
+RequestIDMiddleware = RequestContextMiddleware
 
 
 def client_ip_from_request(request):

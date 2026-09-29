@@ -76,6 +76,11 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # One server request ID per HTTP request (D15 R2). OUTERMOST, so every answer —
+    # including one another middleware refuses — carries it as X-Request-ID, and so
+    # the order-command outcome line records the status actually sent. Never read
+    # from a client. settings_admin.py installs the same class first on its plane.
+    'dinify_backend.request_context.RequestContextMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
@@ -120,6 +125,13 @@ CORS_ALLOW_HEADERS = (
     # test and every curl call keeps passing.
     'x-owner-claim-token',    # the raw owner-invitation claim credential
 )
+# Response headers an allowed origin's script may READ (D15 R2). None were exposed
+# before; add to this list rather than replacing it. Exposing X-Request-ID lets a
+# client quote the ID of a failed call. It is NOT in CORS_ALLOW_HEADERS: a client is
+# not invited to send one, and the server would ignore it if it did.
+CORS_EXPOSE_HEADERS = [
+    'X-Request-ID',
+]
 
 # --- Diner table-session capability ----------------------------------------
 # Anonymous diner operations are authorised by an opaque, expiring, server-issued
@@ -332,9 +344,19 @@ EMAIL_TIMEOUT = config('EMAIL_TIMEOUT', default=10, cast=int)
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    # D15 R2: every console line names the request that wrote it (`rid=<32 hex>`,
+    # or `-` outside a request), and a traced order command's lines keep exception
+    # classes and project frames but never exception text. See
+    # dinify_backend/request_context.py.
+    'filters': {
+        'request_context': {
+            '()': 'dinify_backend.request_context.RequestContextFilter',
+        },
+    },
     'formatters': {
         'verbose': {
-            'format': '{asctime} [{levelname}] {name}: {message}',
+            'class': 'dinify_backend.request_context.RequestContextFormatter',
+            'format': '{asctime} [{levelname}] {name} rid={request_id}: {message}',
             'style': '{',
         },
     },
@@ -342,6 +364,7 @@ LOGGING = {
         'console': {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
+            'filters': ['request_context'],
         },
     },
     'root': {
