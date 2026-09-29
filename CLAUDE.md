@@ -1328,6 +1328,48 @@ so keep it current when conventions change.
   on False with a 500 "We couldn't send your verification code" envelope —
   login previously FELL THROUGH to the token branch on a falsy make_otp, which
   would have bypassed OTP for privileged users
+- OTP evidence collection (D11 B2-C): ✅ COLLECTION ONLY — **it is not budget
+  enforcement and it does not close D11** (policy, enforcement and operational
+  acceptance stay open). `users_app/otp_accounting.py` is the only writer of two tables
+  (migration `users_app/0015_otp_accounting`, expand-only): `otp_issuances`, one row per
+  challenge `make_otp` wrote, and `otp_verification_failures`, one row per wrong code
+  actually compared. The rows serve their own provenance, finalization and cleanup;
+  **no rate-limit, shadow, admission or refusal decision reads them.**
+  - **Keys are PSEUDONYMOUS, not anonymous**: `u:<User UUID>` or `p1:` + a versioned,
+    domain-separated HMAC of the CANONICAL phone under the existing OTP pepper. The OTP
+    HASH is not stored here; the phone HMAC key is. Rotating the pepper (or
+    `SECRET_KEY` while the pepper derives from it) changes phone keys and splits
+    historical grouping; no rotation or reconciliation exists. An unusable legacy phone
+    gives a NULL key, and a failed wrong-code observation writes nothing, so coverage
+    has gaps. `CHECK`s enforce shapes, vocabularies and state consistency, not the
+    truth of a producer's claim.
+  - **Origin is server-owned** (`password_login`, `reset_initiation`,
+    `owner_claim_challenge`, `login_resend`, `resend_request`, `unattributed`; a
+    failure on a pre-ledger challenge records `unrecorded`).
+  - **`make_otp` is now one short `atomic(durable=True)`**: `User` `FOR KEY SHARE`
+    first (user-backed only), then the replacement delete, the challenge and the
+    `pending` row, committed BEFORE any sender runs. The key share first is what keeps
+    a replacement from deadlocking an owner-claim redemption. A caller's transaction is
+    refused before any write or send; a ledger failure sends nothing and returns
+    `False`. Nothing — no `Restaurant`/ownership barrier, no `User`/`UserOtp` lock, no
+    transaction — is held across transport.
+  - **Finalization is one conditional update after the send**, never changing the
+    return value: dev `not_dispatched` (no e-mail recipient) or `unknown`; test/prod
+    `accepted` when the existing sender REPORTED acceptance (not handset delivery),
+    else `unknown`. The intentional `ENV=dev` OTP `1234`, async dev notifications and
+    every return/failure contract are unchanged.
+  - **Wrong codes are observed in a savepoint AFTER the attempt counter is saved**: an
+    origin-read or row-write failure costs only the observation (the counter, and an
+    owner claim's `claim_failed_attempts`, still commit with the ordinary refusal); a
+    lost connection re-raises.
+  - **Retention is ELIGIBILITY, not a maximum age**: strictly older than 7 days by the
+    row's own timestamp, any state, exact boundary kept. One bounded oldest-first batch
+    per table is attempted after each finalization ATTEMPT (a finalization error does
+    not skip it), outside the issuance transaction; and `manage.py
+    prune_otp_accounting` (see Existing Management Commands). Nothing schedules either.
+  - **Rollback** keeps the tables and rows; old code stops collection AND automatic
+    cleanup. No reverse migration or deletion is authorized.
+  - Notes: `docs/engineering/d11-b2-collection.md`; contract: `BREAKING_CHANGES.md` §20
 - MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
   `+`) is the canonical stored/compared form for `User.phone_number` /
   `User.username`, enforced at every write site (registration, profile update,
@@ -1900,9 +1942,12 @@ so keep it current when conventions change.
   delegated session or admin cookie has zero influence on who is resolved), every
   unclaimable state collapses to ONE public 400, and the success body carries a single
   `credential_setup_required` boolean read from `customer_access_state` and nothing
-  else. **It is a PREFLIGHT: no lock, no transaction, nothing durable written** — the
+  else. **Its eligibility check is a PREFLIGHT: no lock, no transaction** — the
   invitation, the access state and the password are all untouched, and `owner_control`
-  stays `not_established`. Step 2F.2 (the atomic consume) HAS SINCE LANDED — see the
+  stays `not_established`. Since D11 B2-C the OTP it then issues is written in
+  `make_otp`'s own short durable transaction (`User` `FOR KEY SHARE`, the replacement
+  delete, the challenge and its ledger row), which commits before the SMS is sent; see
+  "THIS IS A PREFLIGHT" below. Step 2F.2 (the atomic consume) HAS SINCE LANDED — see the
   next bullet — so two things this bullet used to describe as future work are now
   facts: `verify_otp` purpose-binds, and the challenge passes the canonical
   destination explicitly so `UserOtp.msisdn` records where the code went. See the
@@ -4500,8 +4545,8 @@ The token is hashed with `platform_admin_app.sessions.hash_token` — **the same
 primitive the invitation was minted with**; there is no second implementation.
 
 ### THIS IS A PREFLIGHT, NOT THE CLAIM BOUNDARY
-**It takes NO lock and opens NO transaction.** The challenge grants no durable
-authority, so a snapshot is enough for it. If the invitation is reissued, cancelled,
+**The eligibility preflight takes NO lock and opens NO transaction.** The challenge
+grants no durable authority, so a snapshot is enough for it. If the invitation is reissued, cancelled,
 expires or ownership drifts a millisecond later, the only consequence is an OTP that
 Step 2F.2 will refuse to honour — harmless.
 
@@ -4509,10 +4554,24 @@ Holding the `Restaurant` row across delivery would not be. PR #306 measured the 
 a lifecycle transition waiting on that row holds the EXCLUSIVE admission advisory lock
 while it waits, and every diner order at the restaurant queues behind it. **A harmless
 stale OTP is always preferable to external I/O under the ownership serialization
-lock.** Pinned structurally, not by timing: `no transaction is open when the OTP is
-sent` (and no open transaction means no held row lock — a `select_for_update` in
-autocommit is released by the statement that took it), no `FOR UPDATE` in any query,
-and the membership barrier is never acquired.
+lock.**
+
+**THE ISSUANCE THAT FOLLOWS IS ONE SHORT TRANSACTION (D11 B2-C), AND IT ENDS BEFORE
+TRANSPORT.** `make_otp` opens `atomic(durable=True)`, takes the owner's `users` row
+`FOR KEY SHARE` FIRST, then deletes the challenge it replaces, inserts the new one and
+its `pending` ledger row, and COMMITS — only then is the sender entered. The key share
+comes first because the challenge's foreign key to `users` is deferred: without it the
+`users` row would be reached only at COMMIT, after the old challenge was locked, which
+is the reverse of redemption's `users` then `user_otps` order and deadlocks. It takes
+no `Restaurant` row and never the ownership/membership barrier.
+
+Pinned structurally, not by timing (`platform_admin_app/tests_owner_claim.py`):
+AT THE SENDER no transaction is open and no transaction id is held (`pg_locks`); the
+ONLY locking read in the whole call is that single `FOR KEY SHARE` on `users`, inside
+the issuance transaction; the claim preflight before it runs in autocommit with no
+lock; finalization runs after COMMIT; and the membership barrier is never acquired.
+This replaced the older oracle "no `FOR UPDATE` in any query", which asserted the
+absence of a lock the issuance now correctly takes.
 
 ### THE `owner-claim` OTP PURPOSE
 Exactly that spelling. **NOT in `CUSTOMER_AUTH_OTP_PURPOSES`** (`login`,
@@ -4715,8 +4774,10 @@ Restaurant -> RestaurantOnboarding -> head OwnerInvitation -> owner User -> User
 ```
 A tail extension of the documented global order, all `select_for_update(of=('self',))`
 where a join could otherwise widen the lock. `Restaurant -> RestaurantOnboarding ->
-OwnerInvitation` is what `onboarding_invitations` already takes; `UserOtp` is locked by
-nothing except `verify_otp`; `User` is taken AFTER `Restaurant`, the same direction as
+OwnerInvitation` is what `onboarding_invitations` already takes; `UserOtp` is otherwise
+locked only by `make_otp`'s replacement delete, inside its short issuance transaction,
+which takes `User` `FOR KEY SHARE` BEFORE that delete so the two cannot deadlock (D11
+B2-C); `User` is taken AFTER `Restaurant`, the same direction as
 the lifecycle transition. The one service that locks `User` FIRST — `onboarding_creation`
 — goes on to INSERT a `Restaurant` and never waits on an existing one, so it cannot close
 a cycle. **NO ADMISSION ADVISORY LOCK**: the order path reads no invitation, OTP or
@@ -5865,6 +5926,18 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   recovery codes, and needs no encryption key. The narrow tool: do NOT reach for
   `reset_platform_admin_totp` to undo a lockout — it destroys the authenticator and all
   ten recovery codes. See the nuisance-lockout section of `BACKGROUND_TASKS.md`
+- `prune_otp_accounting` in `users_app/management/commands/` — deletes D11 B2-C OTP
+  ledger rows that are strictly older than the fixed seven days, any state, in bounded
+  oldest-first batches. `--batch-size` 1–1000 (default 500), `--max-batches` 1–10000
+  (default 100), and NO retention override; nothing schedules it. It prints one line per
+  batch and a total per table, and every count printed has COMMITTED (it refuses to run
+  inside a caller's transaction). It says `complete` only after a short batch AND a
+  fresh bounded check found nothing eligible, and says so only for that moment; a short
+  batch alone is not proof, because a concurrent cleanup can take the rows it selected.
+  Otherwise it says `batch limit reached: eligible rows may remain`. On any failure it
+  exits 1: the confirmed counts are printed first, the failed statement's outcome is
+  called UNKNOWN, and the message carries a fixed category. No database text, key, id,
+  timestamp or SQL is printed, and the exception is not chained
 - Five more exist and are equally not-to-be-recreated: `vacuum_deleted_records` +
   `vacuum_configuration` (`misc_app`), `send_messages` + `send_test_sms`
   (`notifications_app`, the latter being the ENV-bypassing SMS credential probe
@@ -5895,6 +5968,17 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
     `f8acc50` to `010fd8dd` succeeded *because no migration sat between them*.
     That property is what this rule preserves — see the ROLLBACK / MANUAL
     REDEPLOY bullet under "Deployment Rules — CRITICAL"
+- A TEST THAT REWINDS MIGRATIONS RESTORES THE WHOLE PROJECT GRAPH (#353). Rewinding one
+  app also unapplies every migration in other apps that depends on it, and a
+  `TransactionTestCase`'s DDL is not rolled back, so a tearDown that restores only its
+  own app leaves the rest unapplied for every later test (the 0055 sanitize test did
+  exactly that and broke an owner-claim race test ordered after it). Restore
+  `executor.loader.graph.leaf_nodes()` with NO app argument.
+  `dinify_backend/tests_migration_test_isolation.py` enforces it: it finds test modules
+  the way Django's default runner does (`test*.py` from the repository root, recursing
+  only into packages), requires every one that drives `MigrationExecutor` to be listed,
+  checks each listed tearDown restores the whole graph, and runs each listed class to
+  prove nothing is left unapplied
 - Latest migration: `restaurants_app/migrations/0058_table_qr_mode_order_only_default.py`
   (0058 is MODEL-STATE ONLY — one `AlterField` moving `Table.qr_mode`'s default
   `order_pay` → `order_only`, with NO `RunPython`, no row rewrite and no backfill:
@@ -5945,14 +6029,17 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   rollback across this change),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
-  `users_app/migrations/0014_customer_access_state.py` (0010 adds
+  `users_app/migrations/0015_otp_accounting.py` (0010 adds
   `User.account_type`; 0011 flips existing platform-role holders to
   `platform_staff`; 0012 makes `phone_number` unique — see the "Platform-admin
   identity layer" bullet; 0013 blacklists outstanding platform-staff refresh
   tokens and strips platform-only roles from `restaurant_user` rows, data-only and
   idempotent — see "Tenant Isolation / Role-Permission ENFORCEMENT"; 0014 adds the
   Step-2D.1 `customer_access_state` gate, one `AddField` plus its vocabulary
-  `AddConstraint`, NO `RunPython` — see "Pre-Claim Customer Access"),
+  `AddConstraint`, NO `RunPython` — see "Pre-Claim Customer Access"; 0015 follows
+  0014 and creates the D11 B2-C OTP ledger, two `CreateModel`s and nothing else — no
+  existing table touched, no `RunPython`, no backfill. A rollback leaves the tables and
+  rows in place and stops collection and automatic cleanup),
   `platform_admin_app/migrations/0009_restaurantonboarding_ownerinvitation_and_more.py`
   (0001 identity, 0002 `AdminSession`, 0003 `AdminAuditLog`, 0004 TOTP replay counter,
   0005 `DelegationGrant`, 0006 `DelegatedSession`, 0007 the break-glass

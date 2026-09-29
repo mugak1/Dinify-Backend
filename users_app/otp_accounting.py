@@ -23,9 +23,9 @@ and never stored raw: the key is NULL and a fixed category is logged.
 
 RETENTION. A row strictly older than ``RETENTION`` is ELIGIBLE for deletion, in any
 state. Deletion happens in bounded, oldest-first batches: opportunistically after each
-issuance is finalized, and through ``manage.py prune_otp_accounting``. Eligibility is
-not a deadline — nothing here runs on a schedule, so a row is only removed when one of
-those two runs.
+issuance's finalization ATTEMPT (a finalization error does not skip it), and through
+``manage.py prune_otp_accounting``. Eligibility is not a deadline — nothing here runs on
+a schedule, so a row is only removed when one of those two runs.
 """
 import datetime
 import hashlib
@@ -275,6 +275,44 @@ def observe_verification_failure(challenge, *, bound_redemption: bool, pepper: b
 
 # ── cleanup ──────────────────────────────────────────────────────────────────────
 
+# The two tables, in the order a batch visits them. The key is the name the result
+# and the operator command report; it is a table name, never a row's content.
+_PRUNE_TABLES = (
+    ('otp_issuances', OtpIssuance, 'created_at'),
+    ('otp_verification_failures', OtpVerificationFailure, 'failed_at'),
+)
+PRUNE_TABLE_NAMES = tuple(table for table, _, _ in _PRUNE_TABLES)
+
+
+class PruneFailure(Exception):
+    """
+    A cleanup statement failed. Carries only what is safe to report:
+
+    * ``completed`` — the counts of the tables whose delete RETURNED in this call, in
+      table order. When ``prune`` runs outside a transaction (the operator command
+      refuses to run inside one), each returned delete has committed.
+    * ``failed_table`` — the table whose statement failed. Its outcome is UNKNOWN: the
+      statement may have been refused, or it may have committed just before the
+      connection was lost.
+    * ``category`` — a closed failure category, never the database's own text.
+
+    The original exception is kept as ``__cause__`` for a developer's traceback; nothing
+    that prints for an operator may render it.
+    """
+
+    def __init__(self, *, completed: dict, failed_table: str, category: str):
+        super().__init__(f'prune failed on {failed_table} (category={category})')
+        self.completed = dict(completed)
+        self.failed_table = failed_table
+        self.category = category
+
+
+def _cutoff(now: Optional[datetime.datetime]):
+    if now is None:
+        return ExpressionWrapper(Now() - Value(RETENTION), output_field=DateTimeField())
+    return now - RETENTION
+
+
 def prune(*, batch_size: int, now: Optional[datetime.datetime] = None) -> dict:
     """
     Delete at most ``batch_size`` eligible rows from EACH table, oldest first, and
@@ -282,23 +320,28 @@ def prune(*, batch_size: int, now: Optional[datetime.datetime] = None) -> dict:
     ``pending`` included; a row exactly at the boundary is kept.
 
     ``now`` defaults to the database's own clock (the one that stamped the rows).
+
+    Each table is ONE statement, run one after the other, so a failure on the second
+    table leaves the first table's delete in place. That is reported rather than hidden:
+    the failure is a ``PruneFailure`` carrying the count that did go.
+
+    A short count does not mean nothing eligible is left — a concurrent cleanup can take
+    rows this statement selected. Ask ``eligible_rows_remain`` for that.
     """
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not (
         1 <= batch_size <= MAX_PRUNE_BATCH
     ):
         raise ValueError('batch_size out of range')
-    if now is None:
-        cutoff = ExpressionWrapper(
-            Now() - Value(RETENTION), output_field=DateTimeField(),
-        )
-    else:
-        cutoff = now - RETENTION
-    return {
-        'otp_issuances': _prune_table(OtpIssuance, 'created_at', cutoff, batch_size),
-        'otp_verification_failures': _prune_table(
-            OtpVerificationFailure, 'failed_at', cutoff, batch_size,
-        ),
-    }
+    cutoff = _cutoff(now)
+    completed = {}
+    for table, model, field in _PRUNE_TABLES:
+        try:
+            completed[table] = _prune_table(model, field, cutoff, batch_size)
+        except Exception as exc:  # noqa: BLE001 - re-raised as a sanitised result
+            raise PruneFailure(
+                completed=completed, failed_table=table, category=failure_category(exc),
+            ) from exc
+    return completed
 
 
 def _prune_table(model, field, cutoff, batch_size) -> int:
@@ -313,10 +356,27 @@ def _prune_table(model, field, cutoff, batch_size) -> int:
     return deleted
 
 
+def eligible_rows_remain(*, now: Optional[datetime.datetime] = None) -> dict:
+    """
+    For each table, whether ANY row is eligible at the moment of asking. One bounded
+    ``EXISTS`` per table over its timestamp index; it deletes nothing and locks nothing.
+
+    The answer is a snapshot. Rows keep crossing the retention boundary as time passes,
+    so "none remain" is only ever true WHEN IT WAS CHECKED.
+    """
+    cutoff = _cutoff(now)
+    return {
+        table: model.objects.filter(**{f'{field}__lt': cutoff}).exists()
+        for table, model, field in _PRUNE_TABLES
+    }
+
+
 def prune_opportunistically() -> None:
     """One bounded batch per table. Never raises."""
     try:
         prune(batch_size=OPPORTUNISTIC_PRUNE_BATCH)
+    except PruneFailure as exc:
+        logger.warning('otp_accounting: prune_failed (category=%s)', exc.category)
     except Exception as exc:  # noqa: BLE001 - evidence only
         logger.warning('otp_accounting: prune_failed (category=%s)', failure_category(exc))
 

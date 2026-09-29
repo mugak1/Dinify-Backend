@@ -1653,6 +1653,66 @@ deployed.
 ---
 
 
+## 20. OTP issuances and wrong codes are recorded as evidence, and `make_otp` refuses an enclosing transaction (D11 B2-C)
+
+**This is evidence collection, not enforcement.** No rate-limit, shadow, admission or
+refusal decision reads these rows, and D11 stays open for policy, enforcement and
+operational acceptance. No request shape, response shape, status code, message or
+cookie changes.
+
+**Schema.** Migration `users_app/0015_otp_accounting` follows `0014` and adds two
+tables, `otp_issuances` and `otp_verification_failures`. It is expand-only: two
+`CreateModel`s, no backfill, no `RunPython`, no existing table altered. The keys are
+pseudonymous, not anonymous (`u:<User UUID>`, or a versioned HMAC of the canonical
+phone under the existing OTP pepper; the OTP hash itself is not stored). A pepper
+rotation would change phone keys and split historical grouping; nothing rotates or
+reconciles them. See `docs/engineering/d11-b2-collection.md`.
+
+**Internal contract changes a caller can notice.**
+
+- `OtpManager.make_otp` gains an optional `origin` keyword. The production callers
+  name theirs; any other caller is recorded as `unattributed`.
+- `make_otp` now writes the replacement delete, the new challenge and its ledger row in
+  one `transaction.atomic(durable=True)`, taking the user's row `FOR KEY SHARE` first
+  (user-backed challenges only). **Calling it inside a caller's transaction raises
+  `RuntimeError`** before any write or send; no production caller does. A test wrapped
+  in `TestCase` is unaffected (Django exempts its own wrappers). The transaction
+  commits before any sender runs, and nothing is held across transport.
+- If the ledger row cannot be written, the challenge rolls back, nothing is sent and
+  `make_otp` returns `False`, which every caller already treats as a delivery failure.
+- An issuance's `accepted` state means the existing sender REPORTED acceptance, not
+  that a handset received the code. The dev OTP `1234` is unchanged.
+- A wrong code is observed in a savepoint after the attempt counter is saved; if the
+  observation fails, the counters (and an owner claim's `claim_failed_attempts`) still
+  commit with the ordinary refusal. A lost connection is re-raised.
+- `manage.py prune_otp_accounting` (`--batch-size` 1–1000, default 500;
+  `--max-batches` 1–10000, default 100; no retention override; not scheduled). It
+  prints committed counts per batch and in total, refuses to run inside a caller's
+  transaction, says `complete` only after a fresh bounded check, and on failure exits 1
+  with the confirmed counts, a fixed category and the failed statement's outcome called
+  unknown — never database text.
+
+**Rollback.** Code without this change neither reads nor writes the tables, so a
+rollback stops collection and automatic cleanup and leaves the tables and their rows in
+place. No reverse migration and no deletion is authorized; removing collected rows
+later needs an operator to run cleanup under separate authority. Claude-reported and
+local only: before #352 merged, the users_app, notifications_app and owner-claim suites
+of the then-current `origin/main` (639 tests) passed against a database migrated with
+`0015`. That run did not record its commit; `origin/main` was `0513adb` at that time.
+
+**Deployment, as the workflow recorded it.** The legacy UAT deploy of #352 (run
+36568672986) reports target `ef376b2`, `Applying users_app.0015_otp_accounting... OK`,
+the routing probe at HTTP 405 and the database probe at HTTP 200 / `connected`, around
+12:32 UTC on 2026-09-29. The #353 deploy (run 36573040494) reports `ef302f3` and `No
+migrations to apply`. These are workflow observations: they do not show a collected
+row, a first-record time or a verified runtime identity. Collection happens only when
+the new code runs an OTP path against the migrated schema. Seven days is when a row
+becomes ELIGIBLE for deletion, not a guaranteed maximum age: rows go only when the
+opportunistic batch or the command runs.
+
+---
+
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
