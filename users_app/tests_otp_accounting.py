@@ -1141,22 +1141,6 @@ class ReplacementVersusRedemptionTests(_RealTransactions):
     confirmed from ``pg_stat_activity`` under a deadline.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        # Defensive, not part of the proof. ``restaurants_app.tests_migration_0055_sanitize``
-        # rewinds restaurants_app, which also unapplies the platform_admin_app migrations
-        # that depend on it, and its tearDown restores only the restaurants_app and
-        # users_app leaves. Every TransactionTestCase ordered after it then runs without
-        # ``restaurant_onboarding`` (reproduced on unmodified main). This class needs that
-        # table, so it restores the whole graph's leaves first; a no-op when nothing leaked.
-        if _POSTGRES:
-            from django.db.migrations.executor import MigrationExecutor
-            executor = MigrationExecutor(connection)
-            leaves = executor.loader.graph.leaf_nodes()
-            if executor.migration_plan(leaves):
-                executor.migrate(leaves)
-
     def setUp(self):
         super().setUp()
         from platform_admin_app import onboarding_creation
