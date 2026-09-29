@@ -352,6 +352,10 @@ LOGGING = {
         'request_context': {
             '()': 'dinify_backend.request_context.RequestContextFilter',
         },
+        # Django's own filter, redeclared only for `mail_admins` below.
+        'require_debug_false': {
+            '()': 'django.utils.log.RequireDebugFalse',
+        },
     },
     'formatters': {
         'verbose': {
@@ -366,12 +370,35 @@ LOGGING = {
             'formatter': 'verbose',
             'filters': ['request_context'],
         },
+        # Django's default `mail_admins` handler, UNCHANGED (class, level, filter).
+        # Declared here only because configuring the `django` logger below replaces
+        # that logger's handler list.
+        'mail_admins': {
+            'level': 'ERROR',
+            'filters': ['require_debug_false'],
+            'class': 'django.utils.log.AdminEmailHandler',
+        },
     },
     'root': {
         'handlers': ['console'],
         'level': 'INFO',
     },
     'loggers': {
+        # D15 R2: Django's DEFAULT_LOGGING leaves two console handlers of its own —
+        # on `django` (DEBUG only) and `django.server` (the development server) — that
+        # bypass the filter and formatter above. `django` keeps its mail handler and
+        # reaches the console through root; `django.server` writes through the same
+        # console handler. A deployed mod_wsgi process at DEBUG=False used neither.
+        'django': {
+            'handlers': ['mail_admins'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'django.server': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
         'django.request': {
             'handlers': ['console'],
             'level': 'ERROR',

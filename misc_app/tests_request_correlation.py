@@ -365,6 +365,59 @@ class ConfiguredSettingsTests(SimpleTestCase):
         # the SAME handler object serves root, so every console line is covered
         self.assertIn(handler, logging.getLogger().handlers)
 
+    def test_no_console_handler_django_retained_bypasses_the_request_context(self):
+        """Django's own DEFAULT_LOGGING installs two console handlers before this
+        configuration runs: one on ``django`` (DEBUG only) and one on ``django.server``
+        (the development server). ``disable_existing_loggers`` is False, so unless they
+        are replaced they keep writing with neither the filter nor the formatter, and a
+        DEBUG run prints a traced request's ``django.*`` records unwithheld."""
+        from dinify_backend.request_context import (
+            RequestContextFilter, RequestContextFormatter,
+        )
+        loggers = [('root', logging.getLogger())] + [
+            (name, lg) for name, lg in sorted(logging.Logger.manager.loggerDict.items())
+            if isinstance(lg, logging.Logger)]
+        bypassing = []
+        for name, lg in loggers:
+            for h in lg.handlers:
+                if not isinstance(h, logging.StreamHandler):
+                    continue
+                if not (any(isinstance(f, RequestContextFilter) for f in h.filters)
+                        and isinstance(h.formatter, RequestContextFormatter)):
+                    bypassing.append((name, type(h).__name__))
+        self.assertEqual(bypassing, [])
+        self.assertEqual(logging.getLogger('django.server').handlers, [console_handler()])
+        self.assertFalse(logging.getLogger('django.server').propagate)
+        # CONTROL: Django's admin-error mail handler is kept exactly as its default —
+        # same class, level and DEBUG-false filter — and ``django`` still propagates.
+        django_logger = logging.getLogger('django')
+        self.assertTrue(django_logger.propagate)
+        self.assertEqual(django_logger.level, logging.INFO)
+        from django.utils.log import AdminEmailHandler, RequireDebugFalse
+        mail = [h for h in django_logger.handlers if isinstance(h, AdminEmailHandler)]
+        self.assertEqual(len(mail), 1, django_logger.handlers)
+        self.assertEqual(mail[0].level, logging.ERROR)
+        self.assertEqual([type(f) for f in mail[0].filters], [RequireDebugFalse])
+
+    def test_a_development_server_line_is_stamped_and_names_no_request(self):
+        """The development server logs from its own thread after the application has
+        returned, with ``record.request`` set to the SOCKET. That names no request this
+        module stamped, so the line carries ``rid=-``, never a borrowed ID."""
+        server = logging.getLogger('django.server')
+        socket_like = object()
+        with captured_console() as buf:
+            server.info('"%s" %s %s', 'GET /probe/ok/ HTTP/1.1', '200', '12',
+                        extra={'request': socket_like, 'server_time': 'now',
+                               'status_code': 200})
+            server.error('"%s" %s %s', 'GET /probe/h500/1/ HTTP/1.1', '500', '0',
+                         extra={'request': socket_like, 'server_time': 'now',
+                                'status_code': 500})
+        records = console_records(buf)
+        self.assertEqual(len(records), 2, buf.getvalue())
+        self.assertIn('[INFO] django.server rid=-: "GET /probe/ok/ HTTP/1.1" 200 12',
+                      records[0])
+        self.assertIn('[ERROR] django.server rid=-:', records[1])
+
     def test_the_request_id_is_exposed_but_never_invited(self):
         self.assertIn('x-request-id', [h.lower() for h in settings.CORS_EXPOSE_HEADERS])
         self.assertNotIn('x-request-id', [h.lower() for h in settings.CORS_ALLOW_HEADERS])
