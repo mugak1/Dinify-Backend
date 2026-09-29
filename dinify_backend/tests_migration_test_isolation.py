@@ -19,18 +19,22 @@ Two checks, because they fail in different ways:
   project graph may be left unapplied.
 """
 import ast
+import fnmatch
 import importlib
 import inspect
 import pathlib
 import textwrap
 import unittest
 
-from django.apps import apps
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import SimpleTestCase, TransactionTestCase
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+# unittest's default, which Django's DiscoverRunner uses when no ``--pattern`` is given
+# (neither ci.yml nor verify.sh passes one).
+DISCOVERY_PATTERN = 'test*.py'
 
 # module -> the TransactionTestCase in it that rewinds migrations.
 REWINDING_CLASSES = {
@@ -52,14 +56,23 @@ def _restore_everything():
 
 
 def _test_modules():
-    """Every test module of this repository's own apps and project package."""
-    roots = {REPO_ROOT / 'dinify_backend'} | {
-        pathlib.Path(config.path) for config in apps.get_app_configs()
-        if pathlib.Path(config.path).is_relative_to(REPO_ROOT)
-    }
-    for root in sorted(roots):
-        for path in sorted(root.rglob('tests*.py')):
-            yield path
+    """Every module the test runner would discover, by the runner's own rules.
+
+    Django's runner discovers ``test*.py`` -- not only ``tests*.py``, so a
+    ``test_migrations.py`` counts -- from the repository root, and recurses only into
+    directories that carry an ``__init__.py`` (a directory without one, such as
+    ``orders_app/controllers/``, is not searched by the runner either). This walks the
+    same way: the same pattern, the same root, the same recursion rule.
+    """
+    pending = [REPO_ROOT]
+    while pending:
+        directory = pending.pop()
+        for path in sorted(directory.iterdir()):
+            if path.is_dir():
+                if (path / '__init__.py').is_file():
+                    pending.append(path)
+            elif path.is_file() and fnmatch.fnmatch(path.name, DISCOVERY_PATTERN):
+                yield path
 
 
 class RewindingTestsAreListedTests(SimpleTestCase):
