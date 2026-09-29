@@ -23,13 +23,19 @@ refusal, and nothing here should be read as closing D11. What is pinned:
     row FOR KEY SHARE before it deletes the challenge it replaces, which is what keeps a
     replacement from deadlocking an owner-claim redemption in either arrival order.
 §7  CLEANUP. Strictly older than seven days, any state, oldest first, bounded; the exact
-    boundary is kept.
+    boundary is kept. The operator command, run through the real command line, prints
+    only committed counts, calls a failed statement's outcome unknown, exits non-zero
+    with no database text, and says "complete" only after a fresh check. The REAL
+    owner-claim redemption keeps both counters and its ordinary refusal when the
+    wrong-code observation fails, and cleanup overlapping finalization on separate
+    connections keeps strict eligibility, finite work and no resurrection.
 
 Every test stubs the SMS sender and the e-mail sender, and replaces the notification
 thread with a synchronous stand-in wherever the environment would start one — ``ENV=dev``
 does not suppress e-mail on its own.
 """
 import ast
+import contextlib
 import datetime
 import hashlib
 import hmac
@@ -589,6 +595,30 @@ class FinalizationTests(TestCase):
             self.assertTrue(OtpManager().make_otp(user=user, purpose='login'))
         self.assertEqual(Issuance().objects.get().state, 'accepted')
         self.assertFalse(any('secret-y' in line for line in logs.output))
+
+    def test_a_cleanup_statement_failure_is_logged_by_category_only(self):
+        user = _user()
+        with Senders('prod', sms=True), mock.patch.object(
+            acct(), '_prune_table', side_effect=OperationalError(CANARY),
+        ), self.assertLogs('users_app', level='WARNING') as logs:
+            self.assertTrue(OtpManager().make_otp(user=user, purpose='login'))
+        self.assertEqual(Issuance().objects.get().state, 'accepted')
+        self.assertEqual(logs.output, [
+            'WARNING:users_app.otp_accounting:otp_accounting: prune_failed '
+            '(category=operational)',
+        ])
+
+    def test_a_finalize_failure_does_not_prevent_the_cleanup_attempt(self):
+        user = _user()
+        pruned = []
+        with Senders('prod', sms=True) as senders, mock.patch.object(
+            acct(), 'finalize_issuance', side_effect=OperationalError(CANARY),
+        ), mock.patch.object(
+            acct(), 'prune', side_effect=lambda **kwargs: pruned.append(kwargs) or {},
+        ), self.assertLogs('users_app', level='WARNING'):
+            self.assertTrue(OtpManager().make_otp(user=user, purpose='login'))
+        self.assertEqual(pruned, [{'batch_size': acct().OPPORTUNISTIC_PRUNE_BATCH}])
+        self.assertEqual(senders.sms.call_count, 1, 'no resend')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1370,52 +1400,585 @@ class CleanupTests(TestCase):
         self.assertEqual(acct().RETENTION, datetime.timedelta(days=7))
 
 
-class PruneCommandTests(TestCase):
+# A database error whose text looks like everything that must never be printed: a key,
+# an id, a timestamp, SQL and a parameter.
+CANARY = (
+    'p1:' + 'ab' * 32 + ' 1f0e3c9a-0000-4000-8000-00000000c0de '
+    '2026-09-21 12:00:00+00 DELETE FROM "otp_issuances" WHERE id = %s password=hunter2'
+)
 
-    def old(self, n):
+
+def _run_cli(*args):
+    """
+    The operator's path: ``manage.py prune_otp_accounting ...``, discovered and run by
+    Django's own command-line utility, with its real stdout, stderr and exit status.
+    """
+    from django.core.management import execute_from_command_line
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            execute_from_command_line(['manage.py', 'prune_otp_accounting', *args])
+        except SystemExit as exc:
+            code = exc.code
+    return code, out.getvalue(), err.getvalue()
+
+
+class PruneCommandTests(_RealTransactions):
+    """
+    The operator command, run through the real command-line path against real
+    PostgreSQL, with its durable effect read back from a SEPARATE connection.
+
+    What an operator is told must be true: every count printed is a deletion that has
+    COMMITTED, a failure exits non-zero with a fixed category and no database text, a
+    failed statement's outcome is called unknown rather than guessed, and "complete" is
+    only said after a fresh check found nothing eligible.
+    """
+
+    def seed(self, n, *, failures=None):
+        """``n`` eligible rows in each table (``failures`` overrides the second)."""
         created = timezone.now() - datetime.timedelta(days=9)
         for _ in range(n):
             Issuance().objects.create(
                 id=uuid.uuid4(), origin='unattributed', created_at=created,
             )
+        for _ in range(n if failures is None else failures):
             Failure().objects.create(origin='unrecorded', failed_at=created)
 
-    def run_command(self, *args):
-        out = io.StringIO()
-        call_command('prune_otp_accounting', *args, stdout=out)
-        return out.getvalue()
+    def seed_young(self):
+        """Rows the command must never touch: a day old, and an hour inside retention."""
+        for age in (datetime.timedelta(days=1),
+                    datetime.timedelta(days=7) - datetime.timedelta(hours=1)):
+            created = timezone.now() - age
+            Issuance().objects.create(
+                id=uuid.uuid4(), origin='unattributed', created_at=created,
+            )
+            Failure().objects.create(origin='unrecorded', failed_at=created)
 
-    def test_it_drains_in_bounded_batches_and_prints_counts_only(self):
-        self.old(5)
-        output = self.run_command('--batch-size', '2', '--max-batches', '10')
-        self.assertEqual(Issuance().objects.count(), 0)
-        self.assertEqual(Failure().objects.count(), 0)
-        self.assertIn('otp_issuances: deleted 5', output)
-        self.assertIn('otp_verification_failures: deleted 5', output)
-        self.assertIn('complete', output)
-        self.assertIsNone(re.search(r'[0-9a-f]{8}-[0-9a-f]{4}', output), output)
+    def durable(self):
+        """Row counts as another connection sees them: only what has committed."""
+        with self.raw() as other:
+            return (
+                other.execute('SELECT count(*) FROM otp_issuances').fetchone()[0],
+                other.execute('SELECT count(*) FROM otp_verification_failures').fetchone()[0],
+            )
+
+    def assertSanitized(self, *texts):
+        for text in texts:
+            for fragment in ('p1:', 'c0de', '2026-09-21', 'DELETE', 'hunter2',
+                             'Traceback', 'lock timeout', 'otp_issuances"'):
+                self.assertNotIn(fragment, text)
+            self.assertIsNone(
+                re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}', text), text,
+            )
+
+    def failing_after(self, calls, exc):
+        """``_prune_table`` that performs ``calls`` real deletes, then raises ``exc``."""
+        real = acct()._prune_table
+        seen = []
+
+        def prune_table(*args, **kwargs):
+            seen.append(args[0])
+            if len(seen) > calls:
+                raise exc
+            return real(*args, **kwargs)
+        return mock.patch.object(acct(), '_prune_table', side_effect=prune_table)
+
+    # --- success ---
+
+    def test_it_drains_in_bounded_batches_and_reports_each_one(self):
+        self.seed(5)
+        self.seed_young()
+        code, out, err = _run_cli('--batch-size', '2', '--max-batches', '10')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.durable(), (2, 2), 'only the young rows survive')
+        self.assertIn('batch 1: otp_issuances deleted 2, otp_verification_failures deleted 2', out)
+        self.assertIn('batch 3: otp_issuances deleted 1, otp_verification_failures deleted 1', out)
+        self.assertIn('otp_issuances: deleted 5', out)
+        self.assertIn('otp_verification_failures: deleted 5', out)
+        self.assertIn('complete: no eligible rows found when last checked', out)
+        self.assertEqual(err, '')
+        self.assertSanitized(out)
 
     def test_it_stops_at_the_batch_limit_and_says_so(self):
-        self.old(5)
-        output = self.run_command('--batch-size', '2', '--max-batches', '1')
-        self.assertEqual(Issuance().objects.count(), 3)
-        self.assertIn('otp_issuances: deleted 2', output)
-        self.assertIn('limit reached', output)
+        self.seed(5)
+        code, out, err = _run_cli('--batch-size', '2', '--max-batches', '1')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.durable(), (3, 3))
+        self.assertIn('otp_issuances: deleted 2', out)
+        self.assertIn('batch limit reached: eligible rows may remain', out)
+        self.assertNotIn('complete:', out)
 
-    def test_the_limits_are_finite(self):
-        # The command exists and accepts its own bounds, so a refusal below is about
-        # the value and not about an unknown command.
-        self.run_command('--batch-size', '1000', '--max-batches', '1')
-        for args in (('--batch-size', '0'), ('--batch-size', '100000'),
-                     ('--max-batches', '0'), ('--max-batches', '100000000')):
-            with self.subTest(args), self.assertRaises(CommandError):
-                self.run_command(*args)
+    def test_nothing_eligible_is_complete_after_one_checked_batch(self):
+        self.seed_young()
+        code, out, err = _run_cli()
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.durable(), (2, 2))
+        self.assertIn('otp_issuances: deleted 0', out)
+        self.assertIn('complete: no eligible rows found when last checked', out)
+
+    def test_the_defaults_and_limits_are_finite(self):
+        from users_app.management.commands import prune_otp_accounting as command
+        self.assertEqual((command.DEFAULT_BATCH_SIZE, command.DEFAULT_MAX_BATCHES,
+                          command.MAX_BATCHES), (500, 100, 10000))
+        code, _, err = _run_cli('--batch-size', '1000', '--max-batches', '1')
+        self.assertEqual(code, 0, err)
+        for args in (('--batch-size', '0'), ('--batch-size', '1001'),
+                     ('--max-batches', '0'), ('--max-batches', '10001')):
+            with self.subTest(args):
+                code, out, err = _run_cli(*args)
+                self.assertNotEqual(code, 0)
+                self.assertIn('CommandError', err)
 
     def test_there_is_no_retention_override(self):
         from users_app.management.commands.prune_otp_accounting import Command
         parser = Command().create_parser('manage.py', 'prune_otp_accounting')
         options = {a.dest for a in parser._actions}
         self.assertFalse({o for o in options if 'retention' in o or 'days' in o or 'older' in o})
+
+    def test_it_refuses_to_run_inside_a_callers_transaction(self):
+        """Counts printed inside someone else's transaction would not be committed."""
+        self.seed(3)
+        with self.assertRaises(CommandError):
+            with transaction.atomic():
+                call_command('prune_otp_accounting', stdout=io.StringIO())
+        self.assertEqual(self.durable(), (3, 3))
+
+    def test_it_refuses_when_the_caller_has_turned_autocommit_off(self):
+        """
+        No atomic block, but no autocommit either: every delete would join the caller's
+        open transaction, which the caller can still roll back.
+        """
+        self.seed(3)
+        transaction.set_autocommit(False)
+        try:
+            with self.assertRaises(CommandError):
+                call_command('prune_otp_accounting', stdout=io.StringIO())
+        finally:
+            transaction.rollback()
+            transaction.set_autocommit(True)
+        self.assertEqual(self.durable(), (3, 3))
+
+    # --- failure: exit status, sanitised text, confirmed counts only ---
+
+    def test_a_failure_before_any_work_exits_nonzero_and_prints_no_database_text(self):
+        self.seed(3)
+        with self.failing_after(0, OperationalError(CANARY)):
+            code, out, err = _run_cli('--batch-size', '2')
+        self.assertEqual(code, 1)
+        self.assertEqual(self.durable(), (3, 3))
+        self.assertIn('otp_issuances: deleted 0', out)
+        self.assertIn('category=operational', err)
+        self.assertIn('outcome is unknown', err)
+        self.assertIn('eligible rows may remain', err)
+        self.assertNotIn('complete:', out + err)
+        self.assertSanitized(out, err)
+
+    def test_a_failure_after_a_completed_batch_reports_that_batch(self):
+        self.seed(5)
+        with self.failing_after(2, OperationalError(CANARY)):
+            code, out, err = _run_cli('--batch-size', '2', '--max-batches', '10')
+        self.assertEqual(code, 1)
+        self.assertEqual(self.durable(), (3, 3), 'batch 1 committed; nothing after it')
+        self.assertIn('batch 1: otp_issuances deleted 2, otp_verification_failures deleted 2', out)
+        self.assertIn('otp_issuances: deleted 2', out)
+        self.assertIn('otp_verification_failures: deleted 2', out)
+        self.assertIn('otp_issuances delete in batch 2', err)
+        self.assertNotIn('complete:', out + err)
+        self.assertSanitized(out, err)
+
+    def test_a_failure_between_the_tables_keeps_the_first_tables_committed_count(self):
+        self.seed(3)
+        with self.failing_after(1, DatabaseError(CANARY)):
+            code, out, err = _run_cli('--batch-size', '5')
+        self.assertEqual(code, 1)
+        self.assertEqual(self.durable(), (0, 3))
+        self.assertIn(
+            'batch 1 (incomplete): otp_issuances deleted 3, '
+            'otp_verification_failures outcome unknown', out,
+        )
+        self.assertIn('otp_issuances: deleted 3', out)
+        self.assertIn('otp_verification_failures: deleted 0', out)
+        self.assertIn('category=database', err)
+        self.assertIn('otp_verification_failures delete in batch 1', err)
+        self.assertSanitized(out, err)
+
+    def test_a_real_lock_timeout_between_the_tables_is_a_real_partial_commit(self):
+        """
+        No stub: the second table is locked by another connection and the command's
+        session gives up waiting. PostgreSQL has already committed the first table's
+        delete, and the command says exactly that.
+        """
+        self.seed(3)
+        with self.raw() as holder:
+            holder.autocommit = False
+            holder.execute('LOCK TABLE otp_verification_failures IN ACCESS EXCLUSIVE MODE')
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '300ms'")
+            code, out, err = _run_cli('--batch-size', '5')
+            holder.rollback()
+        self.assertEqual(code, 1)
+        self.assertEqual(self.durable(), (0, 3))
+        self.assertIn('otp_issuances: deleted 3', out)
+        self.assertIn('category=operational', err)
+        self.assertIn('outcome is unknown', err)
+        self.assertSanitized(out, err)
+
+    def test_the_command_line_error_carries_no_chained_exception(self):
+        self.seed(1)
+        with self.failing_after(0, OperationalError(CANARY)):
+            with self.assertRaises(CommandError) as caught:
+                call_command('prune_otp_accounting', stdout=io.StringIO())
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assertEqual(caught.exception.returncode, 1)
+        self.assertSanitized(str(caught.exception))
+
+    def test_a_failed_freshness_check_is_not_reported_as_complete(self):
+        self.seed(1)
+        with mock.patch.object(
+            acct(), 'eligible_rows_remain', side_effect=OperationalError(CANARY),
+        ):
+            code, out, err = _run_cli('--batch-size', '5')
+        self.assertEqual(code, 1)
+        self.assertEqual(self.durable(), (0, 0))
+        self.assertIn('otp_issuances: deleted 1', out)
+        self.assertIn('could not check', err)
+        self.assertNotIn('complete:', out + err)
+        self.assertSanitized(out, err)
+
+    # --- a short batch is not proof that nothing is eligible ---
+
+    def test_a_short_batch_caused_by_concurrent_cleanup_is_not_called_complete(self):
+        """
+        Another cleanup deletes the two oldest rows but has not committed. This
+        command's first batch selects those same two rows, waits for their locks, and
+        finds them gone — a SHORT batch of zero while three eligible rows remain. It
+        must look again rather than say nothing was left.
+        """
+        self.seed(5, failures=0)
+        oldest = list(
+            Issuance().objects.order_by('created_at', 'pk').values_list('pk', flat=True)[:2]
+        )
+        outcome, done = {}, threading.Event()
+
+        def command():
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT set_config('application_name', 'd11-prune', false)")
+                outcome['result'] = _run_cli('--batch-size', '2', '--max-batches', '5')
+            finally:
+                done.set()
+                connections.close_all()
+
+        with self.raw() as other:
+            other.autocommit = False
+            other.execute(
+                'DELETE FROM otp_issuances WHERE id = ANY(%s)', [[str(p) for p in oldest]],
+            )
+            thread = threading.Thread(target=command, name='prune-command')
+            thread.start()
+            deadline = time.monotonic() + WAIT
+            with self.raw() as monitor:
+                while time.monotonic() < deadline and not done.is_set():
+                    row = monitor.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity "
+                        "WHERE application_name = 'd11-prune'",
+                    ).fetchone()
+                    if row and row[0] == 'Lock':
+                        break
+                    time.sleep(0.02)
+                else:
+                    other.rollback()
+                    thread.join(timeout=WAIT)
+                    self.fail('the command never waited on the concurrent cleanup')
+            other.commit()
+        thread.join(timeout=WAIT)
+        self.assertFalse(thread.is_alive())
+        code, out, err = outcome['result']
+        self.assertEqual(code, 0, err)
+        self.assertIn('batch 1: otp_issuances deleted 0', out)
+        self.assertEqual(self.durable(), (0, 0), 'the remaining three were still found')
+        self.assertIn('otp_issuances: deleted 3', out)
+        self.assertIn('complete: no eligible rows found when last checked', out)
+
+
+class RedemptionTelemetryFailureTests(_RealTransactions):
+    """
+    The REAL owner-claim redemption, through its endpoint, with a wrong code — and the
+    observation of that wrong code failing inside redemption's own transaction.
+
+    Redemption is the consumer the savepoint exists for: its wrong-code branch COMMITS
+    two counters (the challenge's ``attempts`` and the invitation's
+    ``claim_failed_attempts``) so that guessing cannot be erased by an error. A telemetry
+    failure inside it must cost neither counter, must not change the refusal, and must
+    not let the claim through. Everything is read back from a SEPARATE connection, so
+    only what committed counts.
+    """
+
+    CLAIM_PASSWORD = 'Accounting-Claim-Pass-7'
+
+    def setUp(self):
+        super().setUp()
+        from platform_admin_app import onboarding_creation
+        from platform_admin_app.onboarding_creation import NewOwner
+        staff = User.objects.create_user(
+            first_name='Ada', last_name='Min', email='telemetry-admin@example.test',
+            username='telemetry-admin', country='UG', password='x', roles=[],
+            account_type=ACCOUNT_TYPE_PLATFORM_STAFF,
+        )
+        creation = onboarding_creation.create_admin_restaurant(
+            name='Telemetry Cafe', location='Kansanga', is_test=False,
+            owner=NewOwner('Tele', 'Metry', next(_PHONES), None),
+            actor=staff, reason='Creating the telemetry-failure fixture.',
+        )
+        self.owner, self.token = creation.owner, creation.claim_token
+        self.invitation_id = creation.invitation.pk
+        self.senders = Senders()
+        self.senders.__enter__()
+        self.addCleanup(self.senders.__exit__, None, None, None)
+        self.client = APIClient()
+        response = self.client.post(
+            CHALLENGE_URL, {}, format='json', headers={'X-Owner-Claim-Token': self.token},
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def redeem(self, otp):
+        return self.client.post(
+            REDEEM_URL, {'otp': otp, 'new_password': self.CLAIM_PASSWORD}, format='json',
+            headers={'X-Owner-Claim-Token': self.token},
+        )
+
+    def committed(self):
+        with self.raw() as other:
+            attempts = other.execute(
+                "SELECT attempts FROM user_otps WHERE user_id = %s AND purpose = 'owner-claim'",
+                [self.owner.pk],
+            ).fetchone()[0]
+            claim_failed, consumed = other.execute(
+                'SELECT claim_failed_attempts, consumed_at FROM owner_invitation WHERE id = %s',
+                [self.invitation_id],
+            ).fetchone()
+            access, password = other.execute(
+                'SELECT customer_access_state, password FROM users WHERE id = %s',
+                [self.owner.pk],
+            ).fetchone()
+            tokens = other.execute(
+                'SELECT count(*) FROM token_blacklist_outstandingtoken WHERE user_id = %s',
+                [self.owner.pk],
+            ).fetchone()[0]
+            failures = other.execute(
+                'SELECT origin, bound_redemption FROM otp_verification_failures',
+            ).fetchall()
+        return {
+            'attempts': attempts, 'claim_failed_attempts': claim_failed,
+            'consumed': consumed is not None, 'access': access,
+            'usable_password': not password.startswith('!'), 'tokens': tokens,
+            'failures': failures,
+        }
+
+    def assertOrdinaryRefusal(self, response):
+        from platform_admin_app.endpoints.owner_claim import REDEEM_REFUSAL_MESSAGE
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(
+            dict(response.data), {'status': 400, 'message': REDEEM_REFUSAL_MESSAGE},
+        )
+
+    def assertCountedButNotClaimed(self, state, failures):
+        self.assertEqual(state['attempts'], 1)
+        self.assertEqual(state['claim_failed_attempts'], 1)
+        self.assertFalse(state['consumed'])
+        self.assertEqual(state['access'], 'pending_initial_claim')
+        self.assertFalse(state['usable_password'])
+        self.assertEqual(state['tokens'], 0)
+        self.assertEqual(state['failures'], failures)
+
+    def test_control_the_observation_commits_with_both_counters(self):
+        response = self.redeem('9999')
+        self.assertOrdinaryRefusal(response)
+        self.assertCountedButNotClaimed(
+            self.committed(), [('owner_claim_challenge', True)],
+        )
+
+    def test_a_failed_origin_read_costs_neither_counter_nor_the_refusal(self):
+        """
+        The origin read raises a REAL database error (division by zero in the same
+        transaction), which puts PostgreSQL's transaction into the aborted state — the
+        case only a savepoint rollback recovers from.
+        """
+        def failing_read(challenge, pepper):
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT 1 / 0')
+        with mock.patch.object(acct(), '_failure_identity', side_effect=failing_read), \
+                self.assertLogs('users_app.otp_accounting', level='WARNING') as logs:
+            response = self.redeem('9999')
+        self.assertOrdinaryRefusal(response)
+        self.assertCountedButNotClaimed(self.committed(), [])
+        self.assertEqual(logs.output, [
+            'WARNING:users_app.otp_accounting:otp_accounting: '
+            'verification_failure_unrecorded (category=database)',
+        ])
+
+    def test_a_failed_observation_write_costs_neither_counter_nor_the_refusal(self):
+        """The row itself is refused by the database's origin CHECK constraint."""
+        with mock.patch.object(acct(), '_failure_origin', return_value='not-an-origin'), \
+                self.assertLogs('users_app.otp_accounting', level='WARNING') as logs:
+            response = self.redeem('9999')
+        self.assertOrdinaryRefusal(response)
+        self.assertCountedButNotClaimed(self.committed(), [])
+        self.assertIn('category=integrity', logs.output[0])
+
+    def test_the_right_code_still_claims_after_a_contained_failure(self):
+        """The contained failure left the challenge usable: the owner can still claim."""
+        with mock.patch.object(acct(), '_failure_origin', return_value='not-an-origin'):
+            self.assertOrdinaryRefusal(self.redeem('9999'))
+        response = self.redeem(DEV_OTP)
+        self.assertEqual(response.status_code, 200, response.data)
+        state = self.committed()
+        self.assertTrue(state['consumed'])
+        self.assertEqual(state['access'], 'established')
+        self.assertEqual(state['tokens'], 1)
+
+
+class CleanupOverlapTests(_RealTransactions):
+    """
+    Cleanup and finalization on SEPARATE connections, interleaved deterministically: one
+    side holds a row lock in an open transaction, the other is started and observed
+    waiting on it in ``pg_stat_activity`` under a deadline, then the holder commits.
+
+    What must survive the overlap: strict eligibility (the exact-boundary and young rows
+    are never touched), finite work (at most one batch per table), and no resurrection
+    (a finalization that arrives after the delete changes nothing and inserts nothing).
+    """
+
+    def seed(self, now):
+        seven = datetime.timedelta(days=7)
+        ids = {}
+        for label, created in (
+            ('old_a', now - seven - datetime.timedelta(days=3)),
+            ('old_b', now - seven - datetime.timedelta(days=2)),
+            ('old_c', now - seven - datetime.timedelta(days=1)),
+            ('boundary', now - seven),
+            ('young', now - datetime.timedelta(days=1)),
+        ):
+            ids[label] = Issuance().objects.create(
+                id=uuid.uuid4(), origin='unattributed', created_at=created,
+            ).pk
+        return ids
+
+    def in_thread(self, name, target):
+        outcome, done = {}, threading.Event()
+
+        def run():
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT set_config('application_name', %s, false)", [name])
+                outcome['value'] = target()
+            except Exception as exc:  # noqa: BLE001 - reported to the test
+                outcome['error'] = exc
+            finally:
+                done.set()
+                connections.close_all()
+
+        thread = threading.Thread(target=run, name=name)
+        thread.start()
+        return thread, done, outcome
+
+    def await_lock_wait(self, name, done):
+        deadline = time.monotonic() + WAIT
+        with self.raw() as monitor:
+            while time.monotonic() < deadline:
+                if done.is_set():
+                    self.fail(f'{name} finished without waiting on the held row')
+                row = monitor.execute(
+                    'SELECT wait_event_type FROM pg_stat_activity WHERE application_name = %s',
+                    [name],
+                ).fetchone()
+                if row and row[0] == 'Lock':
+                    return
+                time.sleep(0.02)
+        self.fail(f'{name} never waited on the held row')
+
+    def finish(self, thread, outcome):
+        thread.join(timeout=WAIT)
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn('error', outcome, outcome.get('error'))
+        return outcome['value']
+
+    def remaining(self):
+        with self.raw() as other:
+            return dict(other.execute('SELECT id, state FROM otp_issuances').fetchall())
+
+    def test_cleanup_waits_for_an_inflight_finalization_and_a_late_one_resurrects_nothing(self):
+        now = timezone.now()
+        ids = self.seed(now)
+        with self.raw() as holder:
+            holder.autocommit = False
+            holder.execute(
+                "UPDATE otp_issuances SET state = 'accepted', finalized_at = now() "
+                "WHERE id = %s AND state = 'pending'", [ids['old_a']],
+            )
+            thread, done, outcome = self.in_thread(
+                'd11-overlap-prune', lambda: acct().prune(batch_size=2, now=now),
+            )
+            self.await_lock_wait('d11-overlap-prune', done)
+            holder.commit()
+        counts = self.finish(thread, outcome)
+        self.assertEqual(counts['otp_issuances'], 2, 'one bounded batch, no more')
+        left = self.remaining()
+        self.assertNotIn(ids['old_a'], left)
+        self.assertEqual(
+            set(left), {ids['old_c'], ids['boundary'], ids['young']},
+            'oldest-first, and the boundary and young rows are never eligible',
+        )
+        # A finalization that arrives after the delete is a no-op, not an insert.
+        self.assertEqual(acct().finalize_issuance(ids['old_a'], 'accepted'), 0)
+        self.assertNotIn(ids['old_a'], self.remaining())
+
+    def test_a_finalization_waiting_on_an_inflight_delete_changes_nothing(self):
+        now = timezone.now()
+        ids = self.seed(now)
+        with self.raw() as holder:
+            holder.autocommit = False
+            holder.execute('DELETE FROM otp_issuances WHERE id = %s', [ids['old_b']])
+            thread, done, outcome = self.in_thread(
+                'd11-overlap-finalize',
+                lambda: acct().finalize_issuance(ids['old_b'], 'accepted'),
+            )
+            self.await_lock_wait('d11-overlap-finalize', done)
+            holder.commit()
+        self.assertEqual(self.finish(thread, outcome), 0)
+        left = self.remaining()
+        self.assertNotIn(ids['old_b'], left)
+        self.assertEqual(left[ids['boundary']], 'pending')
+        self.assertEqual(left[ids['young']], 'pending')
+
+    def test_concurrent_cleanup_makes_a_short_batch_while_eligible_rows_remain(self):
+        """
+        The control for the command's wording: a batch can come back short because
+        another cleanup took the rows it selected, while other eligible rows are still
+        there. Only a fresh check can tell.
+        """
+        now = timezone.now()
+        ids = self.seed(now)
+        with self.raw() as holder:
+            holder.autocommit = False
+            holder.execute(
+                'DELETE FROM otp_issuances WHERE id = ANY(%s)',
+                [[str(ids['old_a']), str(ids['old_b'])]],
+            )
+            thread, done, outcome = self.in_thread(
+                'd11-overlap-short', lambda: acct().prune(batch_size=2, now=now),
+            )
+            self.await_lock_wait('d11-overlap-short', done)
+            holder.commit()
+        counts = self.finish(thread, outcome)
+        self.assertEqual(counts['otp_issuances'], 0, 'short: its selected rows were taken')
+        self.assertEqual(
+            acct().eligible_rows_remain(now=now),
+            {'otp_issuances': True, 'otp_verification_failures': False},
+        )
+        self.assertEqual(set(self.remaining()), {ids['old_c'], ids['boundary'], ids['young']})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
