@@ -50,7 +50,10 @@ anything its raiser put there, and three existing sinks on the order path print 
 traced request, ``RequestContextFormatter`` formats a COPY of the record with the
 exception class and project-relative frames kept and every message removed — the
 exception chain, a cached ``exc_text``, an exception passed as an argument or as the
-message itself, and ``stack_info`` included. The shared record is never mutated, so
+message itself (inside tuples, lists, sets and mappings too, keys included, to a fixed
+depth past which a container is withheld whole), and ``stack_info`` included. A
+container holding no exception is left exactly as it was. The shared record is never
+mutated, so
 another handler sees exactly what it saw before. Nothing here calls ``str()`` on an
 exception. Every other route keeps today's full tracebacks.
 
@@ -94,6 +97,13 @@ MAX_WHERE = 160
 MAX_FRAMES = 8
 MAX_CHAINED = 3
 _MAX_TRAVERSAL = 1000
+
+#: A log call's arguments are searched for exceptions through this many levels of
+#: containers (the argument tuple is level 0); a container deeper than that is replaced
+#: by ``ARGUMENT_WITHHELD`` rather than printed unsearched.
+MAX_ARGUMENT_DEPTH = 3
+ARGUMENT_WITHHELD = '<withheld>'
+_CONTAINERS = (tuple, list, set, frozenset, dict)
 
 WITHHELD_HEADER = 'Traceback (exception text withheld; project frames only):'
 CHAINED_SEPARATOR = 'The exception above led to the one below (text withheld):'
@@ -451,17 +461,33 @@ def _withheld_traceback(exception):
 
 
 def _safe_argument(value, depth=0):
+    """``value`` with every exception replaced by its class name. A container is
+    rebuilt only when something inside it changed, so one holding no exception keeps
+    its own type and text; one nested deeper than ``MAX_ARGUMENT_DEPTH`` is withheld
+    whole rather than searched."""
     if isinstance(value, BaseException):
         return _class_name(value)
-    if depth >= 2:
+    if not isinstance(value, _CONTAINERS):
         return value
-    if isinstance(value, tuple):
-        return tuple(_safe_argument(item, depth + 1) for item in value)
-    if isinstance(value, list):
-        return [_safe_argument(item, depth + 1) for item in value]
+    if depth >= MAX_ARGUMENT_DEPTH:
+        return ARGUMENT_WITHHELD
     if isinstance(value, dict):
-        return {key: _safe_argument(item, depth + 1) for key, item in value.items()}
-    return value
+        pairs = [(key, item, _safe_argument(key, depth + 1), _safe_argument(item, depth + 1))
+                 for key, item in value.items()]
+        if all(new_key is key and new_item is item for key, item, new_key, new_item in pairs):
+            return value
+        return {new_key: new_item for _, _, new_key, new_item in pairs}
+    items = [(item, _safe_argument(item, depth + 1)) for item in value]
+    if all(new is item for item, new in items):
+        return value
+    rebuilt = [new for _, new in items]
+    if isinstance(value, tuple):
+        return tuple(rebuilt)
+    if isinstance(value, frozenset):
+        return frozenset(rebuilt)
+    if isinstance(value, set):
+        return set(rebuilt)
+    return rebuilt
 
 
 def _withhold(safe):
@@ -474,8 +500,7 @@ def _withhold(safe):
         safe.exc_text = _withheld_traceback(exc_info[1])
     if safe.stack_info:
         safe.stack_info = STACK_WITHHELD
-    if isinstance(safe.msg, BaseException):
-        safe.msg = _class_name(safe.msg)
+    safe.msg = _safe_argument(safe.msg, 1)     # the message is formatted like an argument
     safe.args = _safe_argument(safe.args)
 
 

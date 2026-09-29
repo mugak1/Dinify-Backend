@@ -37,6 +37,7 @@ import json
 import logging
 import re
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
@@ -238,6 +239,16 @@ def traced_logging_view(request):
         logger.error(error)                                 # the exception AS the message
         nested = LookupError(SECRET_ARGUMENT)                # one level down in an argument
         logger.warning('traced sink five: %s', ('context', nested), stack_info=True)
+        # Deeper in an argument, and past the depth bound: an exception is still its
+        # class, and a container nested beyond the bound is withheld whole.
+        logger.warning('traced sink six: %s',
+                       [[LookupError(SECRET_ARGUMENT)], [['deeper', nested]]])
+        # A set member and a mapping KEY are arguments too.
+        logger.warning('traced sink seven: %s %s', {nested}, {nested: 'key'})
+        logger.warning(['traced sink eight', nested])       # a container AS the message
+        # CONTROL: a container holding no exception is formatted exactly as before,
+        # its own type and all.
+        logger.warning('traced sink nine: %s', OrderedDict([('kept', ['as', 'is'])]))
     return JsonResponse({'status': 400, 'message': 'handled'}, status=400)
 
 
@@ -750,7 +761,7 @@ class ExceptionWithholdingTests(SimpleTestCase):
         rid = r.headers.get('X-Request-ID')
         records = console_records(buf)
         sinks = [x for x in records if '.sinks rid=' in x.splitlines()[0]]
-        self.assertEqual(len(sinks), 5, records)
+        self.assertEqual(len(sinks), 9, records)
         text = '\n'.join(records)
         for record in records:
             self.assertEqual(rid_of(record), rid)
@@ -763,6 +774,10 @@ class ExceptionWithholdingTests(SimpleTestCase):
         self.assertIn('traced sink two: ValueError', text)
         self.assertIn('traced sink three: ValueError', text)
         self.assertIn("traced sink five: ('context', 'LookupError')", text)
+        self.assertIn("traced sink six: [['LookupError'], ['<withheld>']]", text)
+        self.assertIn("traced sink seven: {'LookupError'} {'LookupError': 'key'}", text)
+        self.assertIn("['traced sink eight', 'LookupError']", text)
+        self.assertIn("traced sink nine: OrderedDict({'kept': ['as', 'is']})", text)
         self.assertTrue(any(x.splitlines()[0].endswith(': ValueError') for x in sinks),
                         'an exception passed AS the message renders as its class')
         self.assertIn('Stack (withheld)', text)
