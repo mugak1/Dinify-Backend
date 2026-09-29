@@ -12,8 +12,9 @@ runs when an operator runs it.
 WHAT IT REPORTS, AND WHAT IT MEANS.
 
 * One line per batch, then a total per table. Every count printed is a delete that has
-  COMMITTED: the command runs in autocommit (it refuses to run inside a caller's
-  transaction), and each table's delete commits before the next statement starts.
+  COMMITTED: the command requires autocommit (it refuses to run inside a caller's
+  transaction, including one opened by turning autocommit off), and each table's delete
+  commits before the next statement starts.
 * ``complete: no eligible rows found when last checked`` only after a batch in which
   every table came back short AND a fresh check then found nothing eligible. A short
   batch alone is not enough: a concurrent cleanup can take rows this batch selected
@@ -57,9 +58,10 @@ class Command(BaseCommand):
             )
         if not 1 <= max_batches <= MAX_BATCHES:
             raise CommandError(f'--max-batches must be between 1 and {MAX_BATCHES}.')
-        if connection.in_atomic_block:
-            # Inside a caller's transaction nothing below would be committed when it is
-            # reported, and every batch would share one transaction.
+        if connection.in_atomic_block or not connection.get_autocommit():
+            # Inside a caller's transaction — an atomic block, or autocommit turned off —
+            # nothing below would be committed when it is reported, the caller could
+            # still roll it back, and every batch would share one transaction.
             raise CommandError('refusing to run inside a transaction; nothing was deleted.')
 
         totals = dict.fromkeys(TABLES, 0)

@@ -1544,6 +1544,21 @@ class PruneCommandTests(_RealTransactions):
                 call_command('prune_otp_accounting', stdout=io.StringIO())
         self.assertEqual(self.durable(), (3, 3))
 
+    def test_it_refuses_when_the_caller_has_turned_autocommit_off(self):
+        """
+        No atomic block, but no autocommit either: every delete would join the caller's
+        open transaction, which the caller can still roll back.
+        """
+        self.seed(3)
+        transaction.set_autocommit(False)
+        try:
+            with self.assertRaises(CommandError):
+                call_command('prune_otp_accounting', stdout=io.StringIO())
+        finally:
+            transaction.rollback()
+            transaction.set_autocommit(True)
+        self.assertEqual(self.durable(), (3, 3))
+
     # --- failure: exit status, sanitised text, confirmed counts only ---
 
     def test_a_failure_before_any_work_exits_nonzero_and_prints_no_database_text(self):

@@ -123,8 +123,8 @@ runs.
   `--batch-size` 1–1000 (default 500), `--max-batches` 1–10000 (default 100), no
   retention override. Nothing schedules it.
   - It prints one line per batch, then a total per table. **Every count printed has
-    committed**: it refuses to run inside a caller's transaction, and each table's
-    delete commits before the next statement.
+    committed**: it refuses to run inside a caller's transaction (an atomic block, or
+    autocommit turned off), and each table's delete commits before the next statement.
   - `complete: no eligible rows found when last checked` only after a short batch AND a
     fresh bounded check found nothing eligible. A short batch alone is not enough (a
     concurrent cleanup can take the rows it selected), and rows keep becoming eligible.
