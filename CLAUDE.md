@@ -1184,6 +1184,20 @@ so keep it current when conventions change.
   vacuum (`<name>_autodelN`) rewrote what a past order said was bought. No migration
   and no backfill. The rule and what it still does not close are under "Key
   Serializer Notes"; the wire contract is `BREAKING_CHANGES.md` §18
+- Request correlation and order-command trace (D15 R2): ✅ `dinify_backend/request_context.py`,
+  installed ONCE and OUTERMOST on both planes (`settings_admin.py` re-adds it first, then
+  ClientIP; `RequestIDMiddleware` is now an alias). Every HTTP request gets one fresh server
+  `uuid4().hex` as `X-Request-ID` (exposed to allowed CORS origins only), NEVER read from a
+  client, and every console line carries `rid=<32 hex>` or `-` — Django's late
+  `log_response` line recovers it from `record.request`; the delegated audit row reuses it.
+  **ONE ID PER HTTP REQUEST, NOT PER CHECKOUT**: the validated intent key and the authorized
+  order relate a checkout's requests. Only `initiate`, `submit` and `retire-quote` are traced:
+  one `dinify.outcome` line with the FINAL status and fixed words (`order_returned` for any
+  initiate success, never "new"/"draft"; `refused` only with a reason in `orders.py`'s explicit
+  allowlist; `unhandled`/`unclassified` never prove nothing committed). For those requests
+  only, console output keeps exception classes and project frames and WITHHOLDS exception text;
+  other routes are unchanged. A log line is diagnostic, not durable and not a ledger — an absent
+  line proves nothing, and host log parsing/retention is unknown. D15 itself stays OPEN
 - Order-path READ BUDGET: ✅ (PR-H §4, tightened by D02) — the per-line cost inside
   `_create_order`'s transaction is **1 query** (the INSERT, and nothing else); a
   4-line order runs **22** and a 1-line order **19**. The ladder, measured on one

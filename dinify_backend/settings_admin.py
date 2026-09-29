@@ -27,10 +27,13 @@ ALLOWED_HOSTS = config(
 )
 
 # --- Middleware -------------------------------------------------------------------
-# Prepend the admin request-id / client-ip middleware to the inherited base stack.
-# Prepend-only: keeping Session/Auth/Message middleware satisfies the
-# admin.E408/E409/E410 system checks (django.contrib.admin is installed) and lets
-# CsrfViewMiddleware manage the CSRF cookie.
+# The request-ID middleware first, then the admin client-ip middleware, then the
+# inherited base stack. The base stack already starts with the SAME request-ID class
+# (D15 R2 moved it into settings.py for both planes), so it is removed from the
+# inherited list and re-added first: installed exactly once, and the admin order is
+# unchanged — request ID, client IP, base stack. Keeping Session/Auth/Message
+# middleware satisfies the admin.E408/E409/E410 system checks (django.contrib.admin is
+# installed) and lets CsrfViewMiddleware manage the CSRF cookie.
 #
 # The delegated-access gate is REMOVED here rather than inherited. Delegation is a
 # customer-plane credential; it has no meaning on the control plane, and no admin
@@ -39,10 +42,12 @@ ALLOWED_HOSTS = config(
 _DELEGATED_ACCESS_MIDDLEWARE = (
     'platform_admin_app.delegated_middleware.DelegatedAccessMiddleware'
 )
+_REQUEST_CONTEXT_MIDDLEWARE = 'dinify_backend.request_context.RequestContextMiddleware'
 MIDDLEWARE = [
-    'platform_admin_app.middleware.RequestIDMiddleware',
+    _REQUEST_CONTEXT_MIDDLEWARE,
     'platform_admin_app.middleware.ClientIPMiddleware',
-    *(m for m in MIDDLEWARE if m != _DELEGATED_ACCESS_MIDDLEWARE),
+    *(m for m in MIDDLEWARE
+      if m not in (_REQUEST_CONTEXT_MIDDLEWARE, _DELEGATED_ACCESS_MIDDLEWARE)),
 ]
 
 # --- DRF: admin authenticator only, deny-by-default -------------------------------

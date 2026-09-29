@@ -37,6 +37,7 @@ import uuid
 from django.http import JsonResponse
 from django.utils.cache import patch_vary_headers
 
+from dinify_backend.request_context import request_id_for
 from misc_app.controllers.http import no_store
 from platform_admin_app import delegated_sessions
 from platform_admin_app.audit_actions import ADMIN_DELEGATION_ACTION_DENIED
@@ -111,14 +112,18 @@ def stamp_audit_context(request):
     """
     Give a delegated request the audit context ``audit.record_from_request`` expects.
 
-    The customer plane does not install the admin ``RequestIDMiddleware`` /
-    ``ClientIPMiddleware`` (they belong to the admin plane, and adding them here
-    would touch every request on the plane), so without this a delegated audit row
-    would silently carry no request id and no source IP. The id is ALWAYS
-    server-generated and never read from a client header, so the correlation id
-    cannot be forged or pinned by the caller.
+    The request ID is REUSED when the common request-context middleware already gave
+    this request one (D15 R2; it is outermost on the customer plane), so the delegated
+    audit row, the ``X-Request-ID`` header and the request's log lines carry ONE value.
+    It used to be minted here unconditionally, which gave the audit row an ID that
+    appeared nowhere else. A standalone caller with no trusted ID still gets a fresh
+    one. Either way it is server-generated and never read from a client header, so the
+    correlation ID cannot be forged or pinned by the caller.
+
+    The customer plane does not install the admin ``ClientIPMiddleware``, so the
+    source IP is attached here.
     """
-    request.request_id = uuid.uuid4().hex
+    request.request_id = request_id_for(request) or uuid.uuid4().hex
     request.client_ip = client_ip_from_request(request)
     return request
 
