@@ -43,9 +43,14 @@ class FlipAccountTypeMigrationTests(TransactionTestCase):
         # The target is RESOLVED from the graph rather than named, so it cannot drift
         # again when a 0014 lands. (`None` would migrate correctly but `_migrate`
         # also builds a project_state, which needs a real node.)
+        #
+        # The WHOLE project graph's leaves, not users_app's: rewinding users_app also
+        # unapplies every migration in other apps that depends on it, and restoring
+        # one app would leave those rolled back for the rest of the suite. Pinned by
+        # `dinify_backend/tests_migration_test_isolation.py`.
         executor = MigrationExecutor(connection)
         executor.loader.build_graph()
-        self._migrate(executor.loader.graph.leaf_nodes('users_app'))
+        self._migrate(executor.loader.graph.leaf_nodes())
 
     def test_forward_flips_only_role_holders(self):
         old_apps = self._migrate(self.migrate_from)   # 0010: account_type exists, all default

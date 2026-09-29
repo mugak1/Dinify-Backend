@@ -171,8 +171,8 @@ class Migration0055ExecutorTests(TransactionTestCase):
     #
     # The pin still wants bumping when a users_app migration lands — it decides which
     # historical User model THIS class's own tests see — but a stale one can no
-    # longer damage the rest of the suite: ``tearDown`` now restores users_app to its
-    # graph leaf as well as restaurants_app. It used to restore only restaurants_app,
+    # longer damage the rest of the suite: ``tearDown`` now restores every app to
+    # its graph leaf. It used to restore only restaurants_app,
     # so a stale pin left users_app migrated BACKWARD for every test ordered after
     # this class, dropping whichever column the newer migrations had added. That is
     # exactly what happened when ``users_app/0014`` added ``customer_access_state``
@@ -324,11 +324,15 @@ class Migration0055ExecutorTests(TransactionTestCase):
         # `leaf_nodes` cannot go stale: a new migration moves the leaf, and this
         # follows it. There is exactly one leaf per app unless the graph has been
         # forked, which `makemigrations --check` in CI already refuses.
-        # BOTH apps this class rewinds, not just one. users_app is pinned in the
-        # targets above, so a stale pin would otherwise leave it rolled back here.
+        #
+        # THE WHOLE PROJECT GRAPH, not the apps this class names. Rewinding
+        # restaurants_app also unapplies every migration in OTHER apps that depends on
+        # it, and restoring only restaurants_app and users_app left them unapplied:
+        # measured on 0513adb, `commercial_app.0001` and `platform_admin_app.0005`-`0010`
+        # stayed rolled back for every later test, so the next TransactionTestCase to
+        # touch `restaurant_onboarding` died with "relation does not exist".
+        # `leaf_nodes()` with no app names every app's leaf, including ones this class
+        # has never heard of. Pinned by `dinify_backend/tests_migration_test_isolation.py`.
         executor = MigrationExecutor(connection)
         executor.loader.build_graph()
-        self._migrate(
-            executor.loader.graph.leaf_nodes('restaurants_app')
-            + executor.loader.graph.leaf_nodes('users_app')
-        )
+        self._migrate(executor.loader.graph.leaf_nodes())

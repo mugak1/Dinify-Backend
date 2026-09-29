@@ -108,13 +108,15 @@ class OnboardingMigrationApplicationTests(TransactionTestCase):
         return executor.loader.project_state(targets).apps
 
     def tearDown(self):
-        # Restore the schema to the CURRENT graph leaf of this app, resolved rather
-        # than named: a TransactionTestCase's DDL is not rolled back, so stopping
-        # short would leave every following test on a stale schema — and a hardcoded
-        # target goes stale the moment a 0010 lands.
+        # Restore the schema to the CURRENT graph leaves, resolved rather than named:
+        # a TransactionTestCase's DDL is not rolled back, so stopping short would leave
+        # every following test on a stale schema — and a hardcoded target goes stale
+        # the moment a 0010 lands. Every app's leaves, not this app's: rewinding it
+        # also unapplies any migration elsewhere that depends on it. Pinned by
+        # `dinify_backend/tests_migration_test_isolation.py`.
         executor = MigrationExecutor(connection)
         executor.loader.build_graph()
-        self._migrate(executor.loader.graph.leaf_nodes(APP_LABEL))
+        self._migrate(executor.loader.graph.leaf_nodes())
         super().tearDown()
 
     @staticmethod
