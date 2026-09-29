@@ -41,7 +41,7 @@ def initiate_password_reset(username):
             'message': MESSAGES.get('NO_PHONE_NUMBER')
         }
 
-    otp_sent = OtpManager().make_otp(user=user, purpose='reset-password')
+    otp_sent = OtpManager().make_otp(user=user, purpose='reset-password', origin='reset_initiation')
     if otp_sent:
         return {
             'status': 200,

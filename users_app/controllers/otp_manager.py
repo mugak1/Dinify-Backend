@@ -7,7 +7,7 @@ import threading
 from decouple import config
 from datetime import timedelta
 from django.conf import settings
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.utils import timezone
 from users_app.models import User, UserOtp
 from misc_app.controllers.notifications.notification import Notification
@@ -15,7 +15,7 @@ from notifications_app.controllers.messenger import Messenger
 from notifications_app.controllers.sms import send_sms
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
-from users_app import customer_access
+from users_app import customer_access, otp_accounting
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,31 @@ class OtpManager:
         user: Optional[User] = None,
         msisdn: Optional[str] = None,
         purpose: Optional[str] = None,
+        origin: Optional[str] = None,
     ) -> bool:
+        """
+        Write one challenge and deliver its code. Returns whether delivery was
+        established (see each environment branch below).
+
+        ``origin`` is the SERVER-OWNED reason the code was requested, recorded in the
+        OTP accounting ledger (D11 B2-C). Each production caller names its own; any
+        other value, or none, is recorded as ``unattributed``. It changes nothing about
+        what is sent or returned.
+
+        ━━ THE ISSUANCE TRANSACTION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        The replacement delete, the new challenge and its ``pending`` ledger row are
+        written in ONE durable transaction that COMMITS BEFORE ANY SENDER IS ENTERED,
+        so no lock and no transaction is held across SMS or e-mail I/O. For a
+        user-backed challenge it takes the user's row ``FOR KEY SHARE`` first; see
+        ``otp_accounting.hold_subject`` for the deadlock that ordering prevents.
+
+        ``durable=True`` REFUSES to run inside a caller's transaction, before any write
+        or send: an enclosing transaction would hold the new challenge's locks across
+        delivery. If the ledger cannot be written, the whole transaction rolls back —
+        the challenge it would have replaced survives — nothing is sent, and the answer
+        is ``False``, the value every caller already handles as a delivery failure.
+        """
         # Canonicalise the msisdn at OTP creation so the stored UserOtp.msisdn,
         # the dedup filter and the SMS target are all canonical, and verify
         # (which also canonicalises) compares canonical-to-canonical. Defensive:
@@ -101,9 +125,10 @@ class OtpManager:
         # Salted HMAC-SHA256 (keyed by the server pepper): the stored hash can
         # neither be reversed nor precomputed from a DB read alone. make_otp and
         # verify_otp hash identically (same pepper + per-row salt).
+        pepper = _otp_pepper()
         salt = secrets.token_hex(16)
         otp_hash = hmac.new(
-            _otp_pepper(), (salt + otp_str).encode(), hashlib.sha256
+            pepper, (salt + otp_str).encode(), hashlib.sha256
         ).hexdigest()
 
         # Stable identity for this challenge (also the per-identifier throttle key).
@@ -114,8 +139,10 @@ class OtpManager:
         else:
             identifier = ''
 
-        # delete any old otps associated with the user
-        UserOtp.objects.filter(user=user, msisdn=msisdn).delete()
+        origin = otp_accounting.server_origin(origin)
+        subject_key, destination_key = otp_accounting.issuance_keys(
+            user=user, msisdn=msisdn, pepper=pepper,
+        )
 
         user_otp = UserOtp(
             user=user,
@@ -127,8 +154,40 @@ class OtpManager:
             attempts=0,
             consumed_at=None,
         )
-        user_otp.save()
+        try:
+            with transaction.atomic(durable=True):
+                if user is not None:
+                    otp_accounting.hold_subject(user.pk)
+                # delete any old otps associated with the user
+                UserOtp.objects.filter(user=user, msisdn=msisdn).delete()
+                user_otp.save()
+                otp_accounting.record_issuance(
+                    otp_id=user_otp.pk, subject_key=subject_key,
+                    destination_key=destination_key, origin=origin,
+                )
+        except DatabaseError as exc:
+            logger.error(
+                'make_otp: challenge not recorded; nothing was sent (category=%s)',
+                otp_accounting.failure_category(exc),
+            )
+            return False
 
+        # Until a branch below establishes otherwise, the outcome is not known — which
+        # is also what is recorded if a sender raises.
+        dispatch_state = otp_accounting.STATE_UNKNOWN
+        try:
+            delivered, dispatch_state = self._dispatch(user, msisdn, otp_str, env)
+        finally:
+            otp_accounting.conclude_issuance(user_otp.pk, dispatch_state)
+        return delivered
+
+    @staticmethod
+    def _dispatch(user, msisdn, otp_str, env):
+        """
+        Deliver a committed challenge's code. Returns ``(delivered, ledger_state)``;
+        ``delivered`` is exactly what ``make_otp`` has always returned for the branch.
+        Runs with no transaction open.
+        """
         otp_message = f"Your Dinify OTP is {otp_str}."
         if msisdn is None:
             msisdn = user.phone_number
@@ -145,7 +204,7 @@ class OtpManager:
 
         if env == 'dev':
             # dev: UNCHANGED contract — fire-and-forget thread, immediate True,
-            # zero added latency. The hardcoded '1234' flow (above) plus this
+            # no delivery latency. The hardcoded '1234' flow (above) plus this
             # short-circuit are a deliberate pre-launch state; the SMS sender's
             # own ENV gate makes the threaded send a no-op here anyway.
             def _send_otp_notifications():
@@ -162,7 +221,14 @@ class OtpManager:
                     logger.error("OTP email dispatch raised an exception")
 
             threading.Thread(target=_send_otp_notifications, daemon=True).start()
-            return True
+            # The SMS sender's own ENV gate makes the SMS a no-op here, so what may
+            # still go out is e-mail — asynchronously, with no outcome ever reported.
+            # With nobody to e-mail, nothing is dispatched at all.
+            has_email = bool(user and user.email)
+            return True, (
+                otp_accounting.STATE_UNKNOWN if has_email
+                else otp_accounting.STATE_NOT_DISPATCHED
+            )
 
         # test/prod: the caller needs the TRUTH, so the SMS goes out
         # synchronously with a tight cap (3s — never the default 10s) and the
@@ -180,18 +246,23 @@ class OtpManager:
                         logger.error("OTP email dispatch raised an exception")
 
                 threading.Thread(target=_send_email_async, daemon=True).start()
-                return True
+                return True, otp_accounting.STATE_ACCEPTED
             # SMS failed: email is a REAL delivery channel in test — send it
             # synchronously and report ITS truth, so a user who received the
             # email can still log in.
             try:
-                return _send_email()
+                emailed = _send_email()
             except Exception:
                 logger.error("OTP email dispatch raised an exception")
-                return False
+                return False, otp_accounting.STATE_UNKNOWN
+            return emailed, (
+                otp_accounting.STATE_ACCEPTED if emailed else otp_accounting.STATE_UNKNOWN
+            )
 
         # prod is SMS-only by design — no email channel here.
-        return sms_ok
+        return sms_ok, (
+            otp_accounting.STATE_ACCEPTED if sms_ok else otp_accounting.STATE_UNKNOWN
+        )
 
     def verify_otp(
         self,
@@ -329,6 +400,15 @@ class OtpManager:
                 # Wrong guess — count it (the row is locked, so this is race-free).
                 challenge.attempts += 1
                 challenge.save(update_fields=['attempts'])
+                # Evidence only (D11 B2-C), in its own savepoint AFTER the counter:
+                # its failure never costs the counter or changes this answer.
+                otp_accounting.observe_verification_failure(
+                    challenge,
+                    bound_redemption=(
+                        expected_purpose == otp_accounting.BOUND_REDEMPTION_PURPOSE
+                    ),
+                    pepper=_otp_pepper(),
+                )
                 return invalid
 
             # Correct: mark single-use so a verified code can never be replayed.
@@ -466,10 +546,22 @@ class OtpManager:
                 }
 
         # Issue the OTP against whichever identity we resolved.
+        # The origin says WHY a code was requested: a resend admitted under a login
+        # anchor, or any other resend request.
         if user is not None:
-            made = self.make_otp(user=user, purpose=purpose, msisdn=user.phone_number)
+            made = self.make_otp(
+                user=user, purpose=purpose, msisdn=user.phone_number,
+                origin=(
+                    otp_accounting.ORIGIN_LOGIN_RESEND if purpose == 'login'
+                    else otp_accounting.ORIGIN_RESEND_REQUEST
+                ),
+            )
         elif msisdn is not None:
-            made = self.make_otp(msisdn=msisdn, purpose=purpose)
+            # Never a login resend: that is refused above without a user.
+            made = self.make_otp(
+                msisdn=msisdn, purpose=purpose,
+                origin=otp_accounting.ORIGIN_RESEND_REQUEST,
+            )
         else:
             return {
                 'status': 400,

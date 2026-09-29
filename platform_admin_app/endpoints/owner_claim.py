@@ -195,6 +195,7 @@ class OwnerClaimChallengeView(APIView):
             user=preflight.invited_user,
             msisdn=preflight.canonical_phone,
             purpose=OWNER_CLAIM_OTP_PURPOSE,
+            origin='owner_claim_challenge',
         )
         if not delivered:
             # Fail CLOSED, exactly as login and password reset do on a falsy make_otp:

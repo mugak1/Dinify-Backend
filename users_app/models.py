@@ -4,6 +4,7 @@ the models for the Users app
 import uuid
 import datetime
 from django.db import models
+from django.db.models.functions import Now
 from django.contrib.auth.models import AbstractUser
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
@@ -190,3 +191,141 @@ class UserOtp(models.Model):
 @receiver(pre_save, sender=UserOtp)
 def set_expiry_time(sender, instance, **kwargs):
     instance.expiry_time = timezone.now() + datetime.timedelta(minutes=5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OTP accounting (D11 B2-C). EVIDENCE ONLY: nothing reads these tables to decide
+# anything, and they are written by `users_app.otp_accounting` and nothing else.
+#
+# Two deliberate absences shape both models:
+#   * NO FOREIGN KEY. A challenge row is deleted when it is replaced, and a user may be
+#     deleted; the ledger outlives both, and an FK would also make every insert take a
+#     lock on the parent row inside the issuance transaction.
+#   * NO RAW IDENTIFIER. A subject is `u:<User UUID>` or `p1:<HMAC of a canonical
+#     phone>`; a destination is only ever the latter. The database refuses anything
+#     else, so a raw phone, e-mail or code cannot land here even through a bug.
+# The OTP purpose is not stored either: `origin` is set by the server path that asked
+# for the code, which is the fact this evidence is for.
+# ─────────────────────────────────────────────────────────────────────────────
+
+OTP_ORIGIN_PASSWORD_LOGIN = 'password_login'
+OTP_ORIGIN_RESET_INITIATION = 'reset_initiation'
+OTP_ORIGIN_OWNER_CLAIM_CHALLENGE = 'owner_claim_challenge'
+OTP_ORIGIN_LOGIN_RESEND = 'login_resend'
+OTP_ORIGIN_RESEND_REQUEST = 'resend_request'
+OTP_ORIGIN_UNATTRIBUTED = 'unattributed'
+OTP_ORIGINS = (
+    OTP_ORIGIN_PASSWORD_LOGIN,
+    OTP_ORIGIN_RESET_INITIATION,
+    OTP_ORIGIN_OWNER_CLAIM_CHALLENGE,
+    OTP_ORIGIN_LOGIN_RESEND,
+    OTP_ORIGIN_RESEND_REQUEST,
+    OTP_ORIGIN_UNATTRIBUTED,
+)
+# A wrong code against a challenge written before the ledger existed.
+OTP_FAILURE_ORIGIN_UNRECORDED = 'unrecorded'
+OTP_FAILURE_ORIGINS = OTP_ORIGINS + (OTP_FAILURE_ORIGIN_UNRECORDED,)
+
+OTP_ISSUANCE_PENDING = 'pending'
+OTP_ISSUANCE_ACCEPTED = 'accepted'
+OTP_ISSUANCE_UNKNOWN = 'unknown'
+OTP_ISSUANCE_NOT_DISPATCHED = 'not_dispatched'
+OTP_ISSUANCE_STATES = (
+    OTP_ISSUANCE_PENDING,
+    OTP_ISSUANCE_ACCEPTED,
+    OTP_ISSUANCE_UNKNOWN,
+    OTP_ISSUANCE_NOT_DISPATCHED,
+)
+
+_UUID_RE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+OTP_PHONE_KEY_RE = r'^p1:[0-9a-f]{64}$'
+OTP_SUBJECT_KEY_RE = rf'^(u:{_UUID_RE}|p1:[0-9a-f]{{64}})$'
+
+
+class OtpIssuance(models.Model):
+    """
+    One row per challenge `make_otp` wrote, recorded in the SAME transaction as the
+    challenge and committed before any sender runs. `pending` until the send's outcome
+    is known; then exactly one conditional transition to a terminal state.
+    """
+    # The UserOtp's own id. Not a foreign key: see above.
+    id = models.UUIDField(primary_key=True, editable=False)
+    subject_key = models.CharField(max_length=80, null=True, blank=True)
+    # NULL means the destination could not be keyed (an unusable stored phone).
+    destination_key = models.CharField(max_length=80, null=True, blank=True)
+    origin = models.CharField(max_length=32, default=OTP_ORIGIN_UNATTRIBUTED)
+    state = models.CharField(max_length=16, default=OTP_ISSUANCE_PENDING)
+    created_at = models.DateTimeField(db_default=Now())
+    finalized_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'otp_issuances'
+        indexes = [
+            models.Index(fields=['created_at'], name='otp_issuance_created_idx'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(origin__in=OTP_ORIGINS),
+                name='otp_issuance_origin_vocabulary',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(state__in=OTP_ISSUANCE_STATES),
+                name='otp_issuance_state_vocabulary',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(state=OTP_ISSUANCE_PENDING, finalized_at__isnull=True)
+                    | (~models.Q(state=OTP_ISSUANCE_PENDING)
+                       & models.Q(finalized_at__isnull=False))
+                ),
+                name='otp_issuance_pending_iff_unfinalized',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(subject_key__isnull=True)
+                    | models.Q(subject_key__regex=OTP_SUBJECT_KEY_RE)
+                ),
+                name='otp_issuance_subject_is_a_key',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(destination_key__isnull=True)
+                    | models.Q(destination_key__regex=OTP_PHONE_KEY_RE)
+                ),
+                name='otp_issuance_destination_is_a_phone_key',
+            ),
+        ]
+
+
+class OtpVerificationFailure(models.Model):
+    """
+    One row per WRONG code that was actually compared against a live challenge. A
+    missing, expired, consumed or locked challenge is not a guess and is not recorded.
+    """
+    failed_at = models.DateTimeField(db_default=Now())
+    # NULL means no key could be derived (a user-less challenge with an unusable phone).
+    subject_key = models.CharField(max_length=80, null=True, blank=True)
+    origin = models.CharField(max_length=32, default=OTP_FAILURE_ORIGIN_UNRECORDED)
+    # True only when the verifier was bound to the owner-claim purpose, i.e. redemption.
+    bound_redemption = models.BooleanField(default=False)
+    # The OtpIssuance (= UserOtp) id when one was recorded. Not a foreign key.
+    issuance_id = models.UUIDField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'otp_verification_failures'
+        indexes = [
+            models.Index(fields=['failed_at'], name='otp_failure_failed_idx'),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(origin__in=OTP_FAILURE_ORIGINS),
+                name='otp_failure_origin_vocabulary',
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(subject_key__isnull=True)
+                    | models.Q(subject_key__regex=OTP_SUBJECT_KEY_RE)
+                ),
+                name='otp_failure_subject_is_a_key',
+            ),
+        ]
