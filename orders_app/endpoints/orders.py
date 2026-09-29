@@ -1,6 +1,8 @@
 """
 endpoints to handle order
 """
+import uuid
+
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
@@ -21,9 +23,186 @@ from restaurants_app.controllers.diner_capability import (
     DinerCapabilityError,
 )
 from restaurants_app.controllers import diner_capability
+from dinify_backend.request_context import ORDER_COMMAND, note_outcome
+from orders_app.controllers import manage_order
+from orders_app.controllers.services import (
+    order_eligibility, order_intent, quote_closure, quote_policy,
+)
+from orders_app.controllers.services.acceptance_result import (
+    ACCEPTANCE_ACCEPTED, OUTCOME_ALREADY_ACCEPTED, OUTCOME_NEWLY_ACCEPTED,
+)
 
 
-class OrdersEndpoint(NoStoreResponseMixin, APIView):
+# --- D15 R2: the bounded order-command trace ----------------------------------------
+#
+# Three commands — `initiate`, `submit` and `retire-quote` — are MARKED before DRF
+# authenticates them, and each existing return point below attaches only what that
+# point has ALREADY established: a fixed outcome word, a fixed reason code, the channel,
+# and the order and intent key once they are authorized and validated. The middleware
+# (dinify_backend.request_context) writes one `dinify.outcome` line per marked request
+# with the status actually sent. Nothing here queries, re-orders a check or changes a
+# response; an attempted identifier the caller is not entitled to is never recorded.
+
+# The endpoint's own refusal codes — one per early return below.
+_TRACE_ORDER_REQUIRED = 'order_required'
+_TRACE_CAPABILITY_DENIED = 'capability_denied'
+_TRACE_CAPABILITY_INVALID = 'capability_invalid'
+_TRACE_NOT_FOUND = 'not_found'
+_TRACE_SESSION_REQUIRED = 'session_required'
+_TRACE_LOGIN_REQUIRED = 'login_required'
+_TRACE_INVALID_REQUEST = 'invalid_request'
+_TRACE_SCOPE_MISMATCH = 'scope_mismatch'
+
+#: EXPLICIT, never discovered at runtime: a controller `reason` reaches the trace only
+#: if it is one of these server constants, so a free-text reason added later stays
+#: unknown instead of being echoed. `tests_order_trace` fails when a controller gains a
+#: `REASON_*` this list does not name. (purchase_integrity's `purchase_needs_review` is
+#: the same value as quote_closure's REASON_PURCHASE_CHANGED, taken from there because
+#: that module is already in this endpoint's import graph.)
+_TRACED_REASONS = frozenset({
+    manage_order.REASON_LEGACY_PRICING,
+    manage_order.REASON_QUOTE_REQUIRED,
+    manage_order.REASON_QUOTE_STALE,
+    manage_order.REASON_QUOTE_INCOMPLETE,
+    manage_order.REASON_NOTHING_TO_PREPARE,
+    manage_order.REASON_ALREADY_ACCEPTED,
+    order_eligibility.REASON_RESTAURANT_PAUSED,
+    order_eligibility.REASON_RESTAURANT_UNAVAILABLE,
+    order_eligibility.REASON_TABLE_ORDERING_UNAVAILABLE,
+    order_eligibility.REASON_TABLE_UNAVAILABLE,
+    order_intent.REASON_INTENT_MISMATCH,
+    order_intent.REASON_INTENT_UNUSABLE,
+    order_intent.REASON_INTENT_BINDING_UNAVAILABLE,
+    quote_closure.REASON_EXPIRED,
+    quote_closure.REASON_PURCHASE_CHANGED,
+    quote_closure.REASON_ALREADY_ACCEPTED,
+    quote_closure.REASON_EVIDENCE_UNAVAILABLE,
+    quote_closure.REASON_QUOTE_REF_MISMATCH,
+    quote_closure.REASON_QUOTE_CLOSED,
+    quote_policy.REASON_QUOTE_EXPIRED,
+    quote_policy.REASON_QUOTE_UNVERIFIABLE,
+    _TRACE_ORDER_REQUIRED,
+    _TRACE_CAPABILITY_DENIED,
+    _TRACE_CAPABILITY_INVALID,
+    _TRACE_NOT_FOUND,
+    _TRACE_SESSION_REQUIRED,
+    _TRACE_LOGIN_REQUIRED,
+    _TRACE_INVALID_REQUEST,
+    _TRACE_SCOPE_MISMATCH,
+})
+
+#: retire-quote's own success words, copied into the trace unchanged.
+_RETIRE_OUTCOMES = {
+    quote_closure.OUTCOME_STILL_VALID: 'quote_still_valid',
+    quote_closure.OUTCOME_CLOSED: 'quote_closed',
+    quote_closure.OUTCOME_ALREADY_CLOSED: 'quote_already_closed',
+}
+
+
+def _trace(request, **fields):
+    note_outcome(request, ORDER_COMMAND, **fields)
+
+
+def _trace_refused(request, reason):
+    if reason in _TRACED_REASONS:
+        _trace(request, outcome='refused', reason=reason)
+
+
+def _trace_capability_refusal(request, exc):
+    _trace_refused(request, _TRACE_CAPABILITY_DENIED
+                   if isinstance(exc, diner_capability.DinerCapabilityDenied)
+                   else _TRACE_CAPABILITY_INVALID)
+
+
+def _acceptance_outcome(response, order):
+    """`accepted` / `already_accepted` ONLY when the answer states it consistently: an
+    explicit boolean `idempotent`, AND the correlated acceptance answer naming THIS
+    order as accepted with the matching attempt outcome. Anything missing, malformed or
+    inconsistent is no success claim. Reads those fields and nothing else — never the
+    quote reference or the rest of the projection."""
+    if order is None:
+        return None
+    idempotent = response.get('idempotent')
+    if idempotent is not True and idempotent is not False:
+        return None
+    checkout = response.get('checkout')
+    if not isinstance(checkout, dict) or checkout.get('order_id') != str(order.pk):
+        return None
+    acceptance = checkout.get('acceptance')
+    if not isinstance(acceptance, dict) or acceptance.get('state') != ACCEPTANCE_ACCEPTED:
+        return None
+    expected = OUTCOME_ALREADY_ACCEPTED if idempotent else OUTCOME_NEWLY_ACCEPTED
+    if acceptance.get('outcome') != expected:
+        return None
+    return 'already_accepted' if idempotent else 'accepted'
+
+
+def _returned_order(response):
+    data = response.get('data')
+    details = data.get('order_details') if isinstance(data, dict) else None
+    returned = details.get('id') if isinstance(details, dict) else None
+    if not isinstance(returned, str):
+        return None
+    try:
+        return str(uuid.UUID(returned))
+    except ValueError:
+        return None
+
+
+def _trace_result(request, command, response, order=None):
+    """Classify a controller's answer from what the answer itself states. A generic
+    400 with no known reason — the shape a swallowed exception produces — is left
+    `unclassified`, never called a refusal."""
+    try:
+        if not isinstance(response, dict):
+            return
+        if response.get('status', 200) != 200:
+            reason = response.get('reason')
+            if isinstance(reason, str) and reason in _TRACED_REASONS:
+                _trace(request, outcome='refused', reason=reason)
+            return
+        if command == 'retire_quote':
+            word = response.get('outcome')
+            if isinstance(word, str) and word in _RETIRE_OUTCOMES:
+                reason = response.get('reason')
+                _trace(request, outcome=_RETIRE_OUTCOMES[word],
+                       reason=(reason if isinstance(reason, str)
+                               and reason in _TRACED_REASONS else None))
+        elif command == 'submit':
+            outcome = _acceptance_outcome(response, order)
+            if outcome is not None:
+                _trace(request, outcome=outcome)
+        elif command == 'initiate':
+            # An authorized order came back. NOT that it is new, a draft or accepted:
+            # the controller drops its replay flag, and a replay returns whatever the
+            # order has become since.
+            returned = _returned_order(response)
+            if returned is not None:
+                _trace(request, outcome='order_returned', order=returned)
+    except Exception:
+        return
+
+
+class _TracedCommandsMixin:
+    """Mark a traced command before DRF authentication, then initialise normally."""
+
+    _TRACED_COMMANDS = {}
+
+    def initial(self, request, *args, **kwargs):
+        # BEFORE authentication, so a refusal DRF makes itself (401, 415, a
+        # malformed body) is traced too. A request rejected by a MIDDLEWARE never
+        # gets here; it still carries its request ID.
+        command = None
+        try:
+            command = self._TRACED_COMMANDS.get((request.method, kwargs.get('action')))
+        except Exception:
+            pass
+        if command is not None:
+            _trace(request, action=command)
+        super().initial(request, *args, **kwargs)
+
+
+class OrdersEndpoint(_TracedCommandsMixin, NoStoreResponseMixin, APIView):
     """
     The endpoint for handling orders
     """
@@ -54,6 +233,7 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
     # reasoning is on `retire_quote_for_review`; do not add a second, laxer
     # capability resolution for this one action.
     _DRAFT_ACTIONS = ('submit', 'retire-quote')
+    _TRACED_COMMANDS = {('PUT', 'submit'): 'submit', ('PUT', 'retire-quote'): 'retire_quote'}
 
     def put(self, request, action):
         # Only `submit` (the anonymous diner placing their already-initiated
@@ -69,6 +249,7 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
 
             order_id = data.get('order')
             if not order_id:
+                _trace_refused(request, _TRACE_ORDER_REQUIRED)
                 return Response(
                     {'status': 400, 'message': 'Invalid order id'},
                     status=400,
@@ -85,6 +266,7 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                 try:
                     table = resolve_table_session(session_token)
                 except DinerCapabilityError as exc:
+                    _trace_capability_refusal(request, exc)
                     return Response(
                         {'status': exc.status, 'message': exc.message},
                         status=exc.status,
@@ -96,9 +278,12 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                         table_id=table.id,
                     )
                 except (Order.DoesNotExist, ValidationError, ValueError):
+                    _trace_refused(request, _TRACE_NOT_FOUND)
                     return Response(
                         {'status': 404, 'message': 'Order not found'}, status=404,
                     )
+                _trace(request, channel='diner', order=order.pk,
+                       intent=order.client_order_id)
                 user = None  # anonymous diner — attribution stays null
                 # CARRY WHAT THIS SESSION ASSERTED to the protected boundary
                 # (D06). The checks above ran in autocommit; the transition then
@@ -115,6 +300,7 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                 try:
                     decode_jwt_token(request)
                 except Exception:
+                    _trace_refused(request, _TRACE_SESSION_REQUIRED)
                     return Response(
                         {'status': 400, 'message': 'A diner table session is required.'},
                         status=400,
@@ -122,13 +308,19 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                 try:
                     order = Order.objects.get(id=order_id)
                 except (Order.DoesNotExist, ValidationError, ValueError):
+                    _trace_refused(request, _TRACE_NOT_FOUND)
                     return Response(
                         {'status': 404, 'message': 'Order not found'}, status=404,
                     )
                 if not can_user_access_module(
                     request.user, str(order.restaurant_id), MODULE_TABLES,
                 ):
+                    # The order found above is NOT this caller's: nothing about it
+                    # is recorded.
+                    _trace_refused(request, _TRACE_NOT_FOUND)
                     return Response({'status': 404, 'message': 'Not found'}, status=404)
+                _trace(request, channel='staff', order=order.pk,
+                       intent=order.client_order_id)
                 user = request.user
                 # NO CAPABILITY CHANNEL WAS USED, so there is no QR generation to
                 # re-verify. That is NOT the same as having nothing to re-ask,
@@ -192,6 +384,8 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
                     capability=capability,
                     authority=authority,
                 )
+            _trace_result(request, 'retire_quote' if action == 'retire-quote' else 'submit',
+                          response, order)
             return Response(response, status=response.get('status', 200))
 
         # Retired actions (prepare / cancel / update-item) and any unknown
@@ -199,11 +393,12 @@ class OrdersEndpoint(NoStoreResponseMixin, APIView):
         return Response({'status': 404, 'message': 'Not found'}, status=404)
 
 
-class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
+class V2OrdersEndpoint(_TracedCommandsMixin, NoStoreResponseMixin, APIView):
     """
     The V2 endpoint for handling orders
     """
     permission_classes = [AllowAny]
+    _TRACED_COMMANDS = {('POST', 'initiate'): 'initiate'}
 
     def post(self, request, action):
         if action == 'initiate':
@@ -215,6 +410,7 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
             # that there is a mapping to read at all.
             data = request.data
             if not isinstance(data, dict):
+                _trace_refused(request, _TRACE_INVALID_REQUEST)
                 return Response(
                     {'status': 400,
                      'message': 'The order request is not valid. Please try again.'},
@@ -236,6 +432,7 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
 
             if source == 'admin':
                 if user is None:
+                    _trace_refused(request, _TRACE_LOGIN_REQUIRED)
                     return Response(
                         {'status': 401, 'message': 'Please log in'}, status=401,
                     )
@@ -251,6 +448,7 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                 if not can_user_access_module(
                     request.user, restaurant_id, MODULE_TABLES,
                 ):
+                    _trace_refused(request, _TRACE_NOT_FOUND)
                     return Response({'status': 404, 'message': 'Not found'}, status=404)
                 created_by = request.user
                 # A1 — THE MINIMAL RECORD OF WHAT WAS JUST AUTHORIZED, carried
@@ -274,6 +472,7 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                 )
                 table_id = data.get('table')
                 if restaurant_id is None or table_id is None:
+                    _trace_refused(request, _TRACE_INVALID_REQUEST)
                     return Response(
                         {'status': 400,
                          'message': 'Please provide the restaurant and table ID'},
@@ -287,6 +486,7 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                 try:
                     table = require_table_session(request)
                 except DinerCapabilityError as exc:
+                    _trace_capability_refusal(request, exc)
                     return Response(
                         {'status': exc.status, 'message': exc.message},
                         status=exc.status,
@@ -298,12 +498,14 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                 body_restaurant = data.get('restaurant')
                 body_table = data.get('table')
                 if body_restaurant is not None and str(body_restaurant) != restaurant_id:
+                    _trace_refused(request, _TRACE_SCOPE_MISMATCH)
                     return Response(
                         {'status': 400,
                          'message': 'restaurant does not match your table session'},
                         status=400,
                     )
                 if body_table is not None and str(body_table) != table_id:
+                    _trace_refused(request, _TRACE_SCOPE_MISMATCH)
                     return Response(
                         {'status': 400,
                          'message': 'table does not match your table session'},
@@ -325,9 +527,12 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
             # nothing. The endpoint validates to give the caller useful
             # feedback — it is NOT what makes the order safe: `initiate_order`
             # and `_create_order` each run the same rule themselves.
+            _trace(request, channel='staff' if authority is not None else 'diner')
             validated = validate_order_request(data)
             if validated.get('status') != 200:
+                _trace_refused(request, _TRACE_INVALID_REQUEST)
                 return Response(validated, status=400)
+            _trace(request, intent=validated['client_order_id'])
 
             response = ConOrder.initiate_order(
                 restaurant_id=restaurant_id,
@@ -339,6 +544,7 @@ class V2OrdersEndpoint(NoStoreResponseMixin, APIView):
                 capability=capability,
                 authority=authority,
             )
+            _trace_result(request, 'initiate', response)
             return Response(response, status=response.get('status', 200))
 
         # `add-items` (POST) is retired (orphaned, unscoped); any other action
