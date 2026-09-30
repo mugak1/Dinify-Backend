@@ -5936,8 +5936,10 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   batch alone is not proof, because a concurrent cleanup can take the rows it selected.
   Otherwise it says `batch limit reached: eligible rows may remain`. On any failure it
   exits 1: the confirmed counts are printed first, the failed statement's outcome is
-  called UNKNOWN, and the message carries a fixed category. No database text, key, id,
-  timestamp or SQL is printed, and the exception is not chained
+  called UNKNOWN, and the message carries a fixed category. The one failure with no
+  statement to report on is opening the connection for its initial transaction-state
+  check: that prints zero deletions and says no cleanup statement was attempted. No
+  database text, key, id, timestamp or SQL is printed, and the exception is not chained
 - Five more exist and are equally not-to-be-recreated: `vacuum_deleted_records` +
   `vacuum_configuration` (`misc_app`), `send_messages` + `send_test_sms`
   (`notifications_app`, the latter being the ENV-bypassing SMS credential probe
