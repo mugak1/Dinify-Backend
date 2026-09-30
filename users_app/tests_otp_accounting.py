@@ -1559,6 +1559,101 @@ class PruneCommandTests(_RealTransactions):
             transaction.set_autocommit(True)
         self.assertEqual(self.durable(), (3, 3))
 
+    # --- failure before cleanup: reading the connection's transaction state ---
+
+    def state_connection(self, **overrides):
+        """
+        A connection handle that has never connected, to stand in for the command's
+        ``connection``. Asking whether it is in autocommit has to OPEN it, which is
+        where a fresh invocation meets a database it cannot reach. Only the command's
+        lookup is replaced: the test runner's connection, and the one the cleanup
+        itself uses, are untouched.
+        """
+        default = connections['default']
+        wrapper = type(default)({**default.settings_dict, **overrides},
+                                alias='prune-state-probe')
+        self.addCleanup(wrapper.close)
+        return wrapper
+
+    def run_with_state_connection(self, wrapper, *args):
+        """``_run_cli`` with the command's state check pointed at ``wrapper``."""
+        from users_app.management.commands import prune_otp_accounting as command
+        with mock.patch.object(command, 'connection', wrapper), \
+                mock.patch.object(acct(), 'prune', wraps=acct().prune) as prune, \
+                mock.patch.object(acct(), 'eligible_rows_remain',
+                                  wraps=acct().eligible_rows_remain) as fresh:
+            result = _run_cli(*args)
+        return result, prune, fresh
+
+    def assertStoppedBeforeCleanup(self, result, prune, fresh):
+        code, out, err = result
+        self.assertEqual(code, 1)
+        self.assertEqual(prune.call_count, 0, 'no cleanup statement may follow')
+        self.assertEqual(fresh.call_count, 0)
+        self.assertEqual(self.durable(), (3, 3))
+        self.assertIn('otp_issuances: deleted 0', out)
+        self.assertIn('otp_verification_failures: deleted 0', out)
+        self.assertNotIn('batch', out)
+        self.assertIn('category=operational', err)
+        self.assertIn('no cleanup statement was attempted', err)
+        self.assertNotIn('outcome is unknown', err)
+        self.assertNotIn('complete:', out + err)
+        self.assertSanitized(out, err)
+
+    def test_a_failure_opening_the_connection_for_the_state_check_is_sanitized(self):
+        """
+        The state check is the command's first database contact. A connection error
+        there — here carrying a secret-shaped canary — must end in the command's own
+        sanitized failure, not escape the command line as the raw exception.
+        """
+        self.seed(3)
+        wrapper = self.state_connection()
+        with mock.patch.object(wrapper, 'get_new_connection',
+                               side_effect=psycopg.OperationalError(CANARY)) as connect:
+            outcome = self.run_with_state_connection(wrapper, '--batch-size', '2')
+        connect.assert_called_once()  # the failure came from the state check itself
+        self.assertStoppedBeforeCleanup(*outcome)
+
+    def test_a_real_refused_connection_at_the_state_check_is_sanitized(self):
+        """
+        No stub on the connection: the handle names a role that does not exist, so the
+        real server refuses the connection, and its FATAL message echoes that name.
+        """
+        refused = {'USER': 'probe_hunter2_c0de'}
+        premise = self.state_connection(**refused)
+        with self.assertRaises(OperationalError) as raw:
+            premise.ensure_connection()
+        self.assertIn('hunter2', str(raw.exception), 'the raw error would leak the name')
+
+        self.seed(3)
+        self.assertStoppedBeforeCleanup(*self.run_with_state_connection(
+            self.state_connection(**refused), '--batch-size', '2',
+        ))
+
+    def test_a_state_check_failure_carries_no_chained_exception(self):
+        from users_app.management.commands import prune_otp_accounting as command
+        wrapper = self.state_connection()
+        with mock.patch.object(wrapper, 'get_new_connection',
+                               side_effect=psycopg.OperationalError(CANARY)), \
+                mock.patch.object(command, 'connection', wrapper):
+            with self.assertRaises(CommandError) as caught:
+                call_command('prune_otp_accounting', stdout=io.StringIO())
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assertEqual(caught.exception.returncode, 1)
+        self.assertSanitized(str(caught.exception))
+
+    def test_control_a_reachable_state_connection_lets_cleanup_run(self):
+        """The substitution alone changes nothing: a handle that CAN connect is fine."""
+        self.seed(3)
+        wrapper = self.state_connection()
+        (code, out, err), prune, _ = self.run_with_state_connection(wrapper)
+        self.assertEqual(code, 0, err)
+        self.assertIsNotNone(wrapper.connection, 'the state check opened the handle')
+        self.assertEqual(prune.call_count, 1)
+        self.assertEqual(self.durable(), (0, 0))
+        self.assertIn('complete: no eligible rows found when last checked', out)
+
     # --- failure: exit status, sanitised text, confirmed counts only ---
 
     def test_a_failure_before_any_work_exits_nonzero_and_prints_no_database_text(self):

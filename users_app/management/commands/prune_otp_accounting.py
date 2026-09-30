@@ -24,7 +24,9 @@ WHAT IT REPORTS, AND WHAT IT MEANS.
 * ON FAILURE it exits non-zero (1). Everything confirmed so far has already been
   printed; the failed statement's outcome is called UNKNOWN (it may have been refused,
   or have committed just before the connection was lost); and the message carries a
-  fixed category, never the database's text. Nothing is retried.
+  fixed category, never the database's text. Nothing is retried. A failure before
+  cleanup starts (opening the connection to check its transaction state) prints zero
+  deletions and says no cleanup statement was attempted.
 """
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
@@ -58,13 +60,23 @@ class Command(BaseCommand):
             )
         if not 1 <= max_batches <= MAX_BATCHES:
             raise CommandError(f'--max-batches must be between 1 and {MAX_BATCHES}.')
-        if connection.in_atomic_block or not connection.get_autocommit():
+        totals = dict.fromkeys(TABLES, 0)
+        try:
+            # Asking for autocommit OPENS the connection on a fresh invocation, so this
+            # is the command's first database contact and can fail like any other.
+            in_transaction = connection.in_atomic_block or not connection.get_autocommit()
+        except Exception as exc:  # noqa: BLE001 - reported by category only
+            self._fail(
+                totals, otp_accounting.failure_category(exc),
+                "could not read the connection's transaction state, so no cleanup "
+                'statement was attempted',
+            )
+        if in_transaction:
             # Inside a caller's transaction — an atomic block, or autocommit turned off —
             # nothing below would be committed when it is reported, the caller could
             # still roll it back, and every batch would share one transaction.
             raise CommandError('refusing to run inside a transaction; nothing was deleted.')
 
-        totals = dict.fromkeys(TABLES, 0)
         for batch in range(1, max_batches + 1):
             try:
                 counts = otp_accounting.prune(batch_size=batch_size)

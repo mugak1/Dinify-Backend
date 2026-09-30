@@ -1698,7 +1698,8 @@ place. No reverse migration and no deletion is authorized; removing collected ro
 later needs an operator to run cleanup under separate authority. Claude-reported and
 local only: before #352 merged, the users_app, notifications_app and owner-claim suites
 of the then-current `origin/main` (639 tests) passed against a database migrated with
-`0015`. That run did not record its commit; `origin/main` was `0513adb` at that time.
+`0015`. That run did not record its commit; `0513adb` is inferred from the chronology
+and is not a demonstrated tested revision.
 
 **Deployment, as the workflow recorded it.** The legacy UAT deploy of #352 (run
 36568672986) reports target `ef376b2`, `Applying users_app.0015_otp_accounting... OK`,
