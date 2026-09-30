@@ -133,6 +133,9 @@ runs.
     statement's outcome is reported as unknown, and the message carries a fixed
     category. No database text, key, id, timestamp or SQL is printed, and the
     database exception is not chained into the error.
+  - **If opening the connection for the initial transaction-state check fails,** it
+    exits 1 the same way, prints zero deletions and says no cleanup statement was
+    attempted.
 
 ## Rollback
 
