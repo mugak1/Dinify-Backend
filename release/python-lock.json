@@ -21,7 +21,7 @@
   },
   "directInputs": {
     "path": "requirements.txt",
-    "sha256": "c0e23c98e89402ddb9845bb29f71bb3dbed79fd10db964995f7f6abd42d05399"
+    "sha256": "b23c57ca577b5bfa40c8cc2b041c9d62d3c8166961ff355fe20ceb1fe87b6b28"
   },
   "generator": {
     "tool": "pip",
@@ -45,8 +45,8 @@
       "-r",
       "requirements.txt"
     ],
-    "resolvedAt": "2026-09-26T15:42:25Z",
-    "reportSha256": "01a13f676d0a162011f9d85a154d56f3b2c1b5a8918df1132b107eb275304379"
+    "resolvedAt": "2026-09-30T16:12:43Z",
+    "reportSha256": "e6fed7816905fe26709dc470657872217904afba58da355ed513e8ba49e8b565"
   },
   "bootstrap": [
     {
@@ -232,11 +232,11 @@
     },
     {
       "name": "pyjwt",
-      "version": "2.13.0",
-      "filename": "pyjwt-2.13.0-py3-none-any.whl",
-      "url": "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl",
-      "sha256": "66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728",
-      "size": 31274,
+      "version": "2.15.1",
+      "filename": "pyjwt-2.15.1-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/50/ca/44de4e75f8aadc457f0634be3b542815078ded46dca30efb960edeecad6e/pyjwt-2.15.1-py3-none-any.whl",
+      "sha256": "42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193",
+      "size": 33860,
       "direct": true,
       "requiredBy": [
         "djangorestframework-simplejwt"
@@ -340,11 +340,11 @@
     },
     {
       "name": "urllib3",
-      "version": "2.7.0",
-      "filename": "urllib3-2.7.0-py3-none-any.whl",
-      "url": "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl",
-      "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897",
-      "size": 131087,
+      "version": "2.8.0",
+      "filename": "urllib3-2.8.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+      "sha256": "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+      "size": 135717,
       "direct": true,
       "requiredBy": [
         "requests"
