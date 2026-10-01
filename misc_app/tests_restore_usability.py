@@ -8,7 +8,10 @@ Four groups, each answering a different question:
   matched the real lifecycle constants, supplied evidence that compared nothing
   (``{existingOrderId: {}}``, an unknown state, an empty golden set), and a sticker
   check that took HTTP 200 as identity. Each sits beside the positive control that
-  must keep passing.
+  must keep passing. The review round on #357 added four more, each named for the
+  finding: a menu or order read held only to "nothing foreign" (so an empty or partial
+  answer passed), media paths beyond the sampling cap called unreferenced, and an
+  inputs phase with no bound before the documents were read.
 * STARTUP ORDER — real subprocesses with SENTINEL ``django`` and settings modules on
   the path: the supported bootstrap refuses an unsafe environment WITHOUT importing
   either, and a direct ``manage.py`` invocation refuses outright.
@@ -300,6 +303,59 @@ class InputsContractTests(SimpleTestCase):
         self.assertNotIn('SECRET-TOKEN', text)
         self.assertIn(U3, text)
         self.assertRegex(ru.redacted_digest(inputs), r'^[0-9a-f]{64}$')
+
+
+class InputBoundTests(SimpleTestCase):
+    """The inputs and the manifest are read with a size bound fixed before reading."""
+
+    def load(self, inputs_doc, manifest_bytes=None, **limits):
+        with tempfile.TemporaryDirectory() as d:
+            if manifest_bytes is not None:
+                (Path(d) / 'manifest.json').write_bytes(manifest_bytes)
+                inputs_doc = dict(inputs_doc, manifest={'path': str(Path(d) / 'manifest.json'),
+                                                        'sha256': ru.sha256(manifest_bytes)})
+            path = Path(d) / 'inputs.json'
+            path.write_text(json.dumps(inputs_doc) + ' ' * 4096)        # valid JSON, padded
+            result, state = ru.new_result(NONCE), {}
+            with contextlib.ExitStack() as stack:
+                for name, value in limits.items():
+                    stack.enter_context(mock.patch.object(ru, name, value, create=True))
+                ru._load_inputs(str(path), result, state)
+            return result['checks']['P.inputs'], state
+
+    def test_CONTROL_documents_within_the_bounds_are_read(self):
+        manifest = json.dumps(_manifest()).encode()
+        check, state = self.load(_inputs(), manifest)
+        self.assertEqual(check['status'], 'PASS', check)
+        self.assertEqual(state['manifest']['schema'], ru.MANIFEST_SCHEMA)
+
+    def test_REGRESSION_an_oversized_inputs_document_is_refused(self):
+        check, state = self.load(_inputs(), MAX_INPUTS_BYTES=1024)
+        self.assertEqual(check['status'], 'FAIL', check)
+        self.assertIn('larger than 1024 bytes', json.dumps(check))
+        self.assertEqual(state, {})
+
+    def test_REGRESSION_an_oversized_manifest_is_refused(self):
+        manifest = json.dumps(_manifest()).encode()
+        self.assertGreater(len(manifest), 64)
+        check, state = self.load(_inputs(), manifest, MAX_MANIFEST_BYTES=64)
+        self.assertEqual(check['status'], 'FAIL', check)
+        self.assertIn('larger than 64 bytes', json.dumps(check))
+        self.assertEqual(state, {})
+
+    def test_the_reader_refuses_what_is_not_a_bounded_regular_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            exact = Path(d) / 'exact.json'
+            exact.write_bytes(b'x' * 32)
+            self.assertEqual(ru.read_bounded(str(exact), 32), (b'x' * 32, None), 'CONTROL: at the bound')
+            self.assertEqual(ru.read_bounded(str(exact), 31), (None, 'larger than 31 bytes'))
+            self.assertEqual(ru.read_bounded(d, 1 << 20), (None, 'not a regular file'))
+            self.assertEqual(ru.read_bounded(str(Path(d) / 'absent.json'), 32),
+                             (None, 'unreadable (FileNotFoundError)'))
+
+    def test_the_bounds_are_fixed_constants(self):
+        self.assertEqual((ru.MAX_INPUTS_BYTES, ru.MAX_MANIFEST_BYTES, ru.INPUTS_PHASE_SECONDS),
+                         (1 << 20, 64 << 20, 60))
 
 
 class ManifestContractTests(SimpleTestCase):
@@ -625,10 +681,10 @@ class StartupOrderTests(SimpleTestCase):
         path.write_text(json.dumps(doc))
         return path
 
-    def run_bootstrap(self, argv_prefix, inputs, env=None):
+    def run_bootstrap(self, argv_prefix, inputs, env=None, timeout=120):
         result = self.dir / 'result.json'
         proc = subprocess.run(argv_prefix + ['--inputs', str(inputs), '--result', str(result), '--nonce', NONCE],
-                              cwd=ROOT, env=env or self.env, capture_output=True, text=True, timeout=120)
+                              cwd=ROOT, env=env or self.env, capture_output=True, text=True, timeout=timeout)
         doc = json.loads(result.read_text()) if result.exists() else None
         return proc, doc
 
@@ -693,6 +749,47 @@ class StartupOrderTests(SimpleTestCase):
         self.assertEqual(proc.returncode, ru.EXIT_REFUSED)
         self.assertEqual(sorted(doc['checks']), ['P.inputs'])
         self.assertEqual(doc['run']['refused_before'], 'any other check (the inputs are not acceptable)')
+
+    def test_REGRESSION_an_inputs_or_manifest_fifo_is_refused_promptly_and_imports_nothing(self):
+        # Codex P2 on #357: the inputs phase ran with no bound, so opening a FIFO with no
+        # writer blocked for ever and nothing was ever published. Both documents are now
+        # opened without blocking and must be regular files.
+        fifo = self.dir / 'blocking.fifo'
+        os.mkfifo(fifo)
+        manifest_fifo = self.write_inputs(manifest={'path': str(fifo), 'sha256': '0' * 64})
+        for name, inputs in (('inputs', fifo), ('manifest', manifest_fifo)):
+            with self.subTest(name):
+                started = time.monotonic()
+                proc, doc = self.run_bootstrap([sys.executable, '-m', ru.BOOTSTRAP_MODULE], inputs, timeout=30)
+                self.assertLess(time.monotonic() - started, 25)
+                self.assertEqual(proc.returncode, ru.EXIT_REFUSED, proc.stderr)
+                self.assert_no_sentinel(proc, doc)
+                self.assertEqual(sorted(doc['checks']), ['P.inputs'])
+                self.assertIn('not a regular file', json.dumps(doc['checks']['P.inputs']))
+                (self.dir / 'result.json').unlink()
+
+    def test_REGRESSION_the_inputs_phase_has_its_own_deadline(self):
+        # A read that does not end (a stalled filesystem; here a parser made to stall) is
+        # interrupted, classified and published — never left running unbounded.
+        driver = self.dir / 'stall.py'
+        driver.write_text(
+            'import json, sys, time\n'
+            '_real = json.loads\n'
+            'def _stall(*a, **k):\n'
+            '    time.sleep(120)\n'
+            '    return _real(*a, **k)\n'
+            'json.loads = _stall\n'
+            'from misc_app import restore_usability as ru\n'
+            'ru.INPUTS_PHASE_SECONDS = 1\n'
+            'sys.exit(ru.main(sys.argv[1:]))\n')
+        started = time.monotonic()
+        proc, doc = self.run_bootstrap([sys.executable, str(driver)], self.write_inputs(), timeout=30)
+        self.assertLess(time.monotonic() - started, 25)
+        self.assertEqual(proc.returncode, ru.EXIT_INTERRUPTED, proc.stderr)
+        self.assert_no_sentinel(proc, doc)
+        self.assertEqual((doc['run']['status'], doc['run']['phase']), ('TIMED_OUT', 'inputs'))
+        self.assertEqual(set(doc['verdicts'].values()), {'INTERRUPTED'}, doc['verdicts'])
+        self.assertTrue(doc['partial'])
 
     def test_manage_py_refuses_and_is_not_presented_as_pre_start_protection(self):
         env = dict(os.environ, DJANGO_SETTINGS_MODULE='dinify_backend.test_settings')
@@ -919,6 +1016,42 @@ def _png(path):
     Image.new('RGB', (4, 4), (200, 30, 30)).save(path, 'PNG')
 
 
+def _settle_readiness():
+    """Start from the readiness state a FRESH process has, as every real run does.
+
+    The readiness endpoint keeps one observation per process and serves it for up to two
+    seconds (``FRESH_FOR_S``). Another module's test can leave a not-ready one behind —
+    a stalled probe records ``timeout`` — and a read made inside that window is answered
+    503 without a probe. That is the endpoint working as designed, not a restore fault,
+    and it made two of these tests fail only when the whole suite ran.
+    """
+    from misc_app import readiness_probe
+    from misc_app.endpoints import readiness
+    deadline = time.monotonic() + readiness_probe.BUDGET_S + 2
+    while readiness_probe.helper_busy() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    readiness._reset_for_tests()
+
+
+def _order_with_extra(v, table):
+    """An accepted order whose one dish carries one extra: two saved lines, one nested."""
+    from orders_app.controllers.manage_order import update_order_status
+    from orders_app.controllers.services.create_order import _create_order
+    from orders_app.controllers.services.order_quote import quote_ref
+    from restaurants_app.models import MenuItem
+    extra = MenuItem.objects.create(name='Avocado', section=v.section, primary_price=Decimal('2000'),
+                                    approved=True, enabled=True, available=True, in_stock=True, is_extra=True)
+    type(v.item).objects.filter(pk=v.item.pk).update(has_extras=True, extras_applicable=[str(extra.pk)])
+    v.item.refresh_from_db()
+    res = _create_order(restaurant=v.restaurant, table=table,
+                        items=[{'item': str(v.item.pk), 'quantity': 2, 'extras': [str(extra.pk)]}],
+                        client_order_id=str(uuid.uuid4()))
+    order = res['order']
+    update_order_status(order, OrderStatus_Pending, None, quote_ref=quote_ref(order))
+    order.refresh_from_db()
+    return order
+
+
 class PublicMenuContractTests(TestCase):
 
     def read(self, v):
@@ -974,6 +1107,125 @@ class PublicMenuContractTests(TestCase):
         self.assertEqual(ru.check_public_menu({f'menu.public.{v.rid}': {'status': 200, 'body': body}},
                                               [v.rid])['status'], 'FAIL')
 
+    @staticmethod
+    def forged(done, rid, mutate):
+        """The same read (status, observation window) with its body altered."""
+        read = done[f'menu.public.{rid}']
+        body = copy.deepcopy(read['body'])
+        mutate(body)
+        return {f'menu.public.{rid}': dict(read, body=body)}
+
+    @staticmethod
+    def section(v, name, **flags):
+        from restaurants_app.models import MenuSection
+        values = dict(approved=True, enabled=True, available=True)
+        values.update(flags)
+        return MenuSection.objects.create(name=name, restaurant=v.restaurant, **values)
+
+    @staticmethod
+    def item(section, name, **flags):
+        from restaurants_app.models import MenuItem
+        values = dict(approved=True, enabled=True, available=True, in_stock=True)
+        values.update(flags)
+        return MenuItem.objects.create(name=name, section=section, primary_price=Decimal('3000'), **values)
+
+    def test_REGRESSION_an_empty_or_partial_menu_fails(self):
+        # Codex P1 on #357: the check asked only whether each RETURNED section was one of
+        # this restaurant's, so a 200 carrying no sections, or some of them, passed.
+        v = _venue()
+        self.item(self.section(v, 'Drinks'), 'Juice')
+        done = self.read(v)
+        self.assertEqual(len(done[f'menu.public.{v.rid}']['body']['data']), 2, 'premise: two sections served')
+        self.assertEqual(ru.check_public_menu(done, [v.rid])['status'], 'PASS')
+
+        def no_sections(body):
+            body['data'] = []
+
+        def one_section_missing(body):
+            body['data'].pop()
+
+        def one_item_missing(body):
+            body['data'][0]['items'] = []
+            body['data'][0]['item_count'] = 0
+
+        def a_section_twice(body):
+            body['data'].append(copy.deepcopy(body['data'][0]))
+
+        for mutate in (no_sections, one_section_missing, one_item_missing, a_section_twice):
+            with self.subTest(mutate.__name__):
+                res = ru.check_public_menu(self.forged(done, v.rid, mutate), [v.rid])
+                self.assertEqual(res['status'], 'FAIL', res)
+
+    def test_REGRESSION_hidden_content_that_is_served_fails(self):
+        # "Published" (approved, enabled, not deleted) is not what the public may SEE: an
+        # unavailable section or item is published and still hidden. Comparing against the
+        # published rows accepted either one being served.
+        v = _venue()
+        closed = self.section(v, 'Closed', available=False)
+        off = self.item(v.section, 'Off', available=False)
+        done = self.read(v)
+        self.assertEqual(ru.check_public_menu(done, [v.rid])['status'], 'PASS', 'CONTROL: both are absent')
+
+        def serve_the_closed_section(body):
+            body['data'].append(dict(copy.deepcopy(body['data'][0]), id=str(closed.pk), items=[], item_count=0))
+
+        def serve_the_unavailable_item(body):
+            mains = body['data'][0]
+            mains['items'].append(dict(copy.deepcopy(mains['items'][0]), id=str(off.pk)))
+            mains['item_count'] += 1
+
+        for mutate in (serve_the_closed_section, serve_the_unavailable_item):
+            with self.subTest(mutate.__name__):
+                res = ru.check_public_menu(self.forged(done, v.rid, mutate), [v.rid])
+                self.assertEqual(res['status'], 'FAIL', res)
+
+    def test_a_schedule_boundary_inside_the_read_is_tolerated_and_nothing_else_is(self):
+        # The endpoint reads its clock once, somewhere inside the read; the check evaluates
+        # the policy at both ends of that read. Content that changes visibility in between
+        # may be present or absent; everything else is held exactly.
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from django.utils import timezone as dj_timezone
+        v = _venue()
+        days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+        lunch = self.section(v, 'Lunch', availability='scheduled',
+                             schedules=[{'days': days, 'startTime': '11:00', 'endTime': '12:00'}])
+        self.item(lunch, 'Matooke')
+        zone = ZoneInfo(settings.TIME_ZONE)
+        real = dj_timezone.localtime
+
+        def at(h, m, s=0):
+            return datetime(2026, 9, 30, h, m, s, tzinfo=zone)
+
+        def read_at(instant):
+            def localtime(value=None, timezone=None):
+                return instant if value is None else real(value, timezone)
+            with mock.patch('django.utils.timezone.localtime', side_effect=localtime):
+                return self.read(v)
+
+        key = f'menu.public.{v.rid}'
+        served, not_served = read_at(at(11, 30)), read_at(at(10, 0))
+        for done, has_lunch in ((served, True), (not_served, False)):
+            self.assertEqual(any(s['id'] == str(lunch.pk) for s in done[key]['body']['data']), has_lunch)
+            for window, ok in (((at(10, 59, 59), at(11, 0, 1)), True),
+                               ((at(11, 30), at(11, 30)), has_lunch),
+                               ((at(10, 0), at(10, 0)), not has_lunch)):
+                with self.subTest(has_lunch=has_lunch, window=window):
+                    res = ru.check_public_menu({key: dict(done[key], window=window)}, [v.rid])
+                    self.assertEqual(res['status'], 'PASS' if ok else 'FAIL', res)
+
+    def test_a_restaurant_with_nothing_visible_compares_nothing(self):
+        v = _venue()
+        type(v.section).objects.filter(pk=v.section.pk).update(available=False)
+        done = self.read(v)
+        self.assertEqual(done[f'menu.public.{v.rid}']['body']['data'], [])
+        res = ru.check_public_menu(done, [v.rid])
+        self.assertEqual(res['status'], 'INCOMPLETE', res)
+        both = _venue(RestaurantStatus_Suspended, phone='256700000982', name='S')
+        done.update(self.read(both))
+        self.assertEqual(ru.check_public_menu(done, [v.rid, both.rid])['status'], 'PASS',
+                         'CONTROL: an exact refusal is a comparison')
+
     def test_a_suspended_menu_answering_200_fails(self):
         v = _venue(RestaurantStatus_Suspended)
         live = _venue(phone='256700000990')
@@ -1014,6 +1266,7 @@ class PublicMenuContractTests(TestCase):
 class IndependentEvidenceTests(TestCase):
 
     def setUp(self):
+        _settle_readiness()
         self.v = _venue()
         self.t1, self.t2 = self.v.tables
         self.c1, self.c2 = _credential(self.t1), _credential(self.t2)
@@ -1035,7 +1288,9 @@ class IndependentEvidenceTests(TestCase):
     def test_REGRESSION_two_valid_stickers_swapped_between_tables_fail(self):
         # Both scans answer 200; the prototype took that as identity.
         res, reads = self.stickers([self.record(self.t1, self.c2), self.record(self.t2, self.c1)])
-        self.assertEqual({r['status'] for r in reads.done.values()}, {200})
+        scans = {k: r['status'] for k, r in reads.done.items() if k.startswith('qr.scan.')}
+        self.assertEqual(set(scans.values()), {200}, scans)
+        self.assertEqual(len(scans), 2)
         self.assertEqual(res['status'], 'FAIL')
         self.assertTrue(all('different table' in v for v in res['tables'].values()), res)
 
@@ -1105,6 +1360,7 @@ class IndependentEvidenceTests(TestCase):
 class IntrinsicReadTests(TestCase):
 
     def setUp(self):
+        _settle_readiness()
         self.v = _venue()
         self.order, self.ref = _accepted_order(self.v, self.v.tables[0])
         self.sample = {'restaurant_ids': [self.v.rid], 'order_ids': [str(self.order.pk)]}
@@ -1139,6 +1395,64 @@ class IntrinsicReadTests(TestCase):
                     node = node[part]
                 node[path[-1]] = value
                 self.assertEqual(ru.check_order_reads(done, plan['orders'])['status'], 'FAIL')
+
+    def test_REGRESSION_an_order_read_that_omits_or_alters_a_saved_line_fails(self):
+        # Codex P1 on #357: the check asked only whether the RETURNED names were saved
+        # snapshots, so an empty or partial set of lines was always a subset. Both selectors
+        # are altered alike so that only the line comparison can tell.
+        order = _order_with_extra(self.v, self.v.tables[1])
+        self.sample['order_ids'] = [str(order.pk)]
+        reads, plan = self.plan()
+        keys = [f'order.details.{order.pk}', f'order.details_by_intent.{order.pk}']
+        data = reads.done[keys[0]]['body']['data']
+        self.assertEqual((len(data['items']), len(data['quote']), len(data['quote'][0]['extras'])), (2, 1, 1),
+                         'premise: a dish row, an extra row, one quoted line carrying the extra')
+        self.assertEqual(ru.check_order_reads(reads.done, plan['orders'])['status'], 'PASS')
+
+        def no_lines(d):
+            d['items'], d['quote'] = [], []
+
+        def no_quote(d):
+            d['quote'] = []
+
+        def no_quoted_extra(d):
+            d['quote'][0]['extras'] = []
+
+        def no_nested_extra(d):
+            for row in d['items']:
+                row['extra_items'] = []
+
+        def a_quantity_changed(d):
+            d['quote'][0]['quantity'] += 1
+
+        def a_line_twice(d):
+            d['quote'].append(copy.deepcopy(d['quote'][0]))
+
+        def a_foreign_line(d):
+            d['items'][0]['id'] = U1
+
+        def a_name_changed(d):
+            d['quote'][0]['item_name'] = d['quote'][0]['extras'][0]['item_name']
+
+        for mutate in (no_lines, no_quote, no_quoted_extra, no_nested_extra, a_quantity_changed,
+                       a_line_twice, a_foreign_line, a_name_changed):
+            with self.subTest(mutate.__name__):
+                done = copy.deepcopy(reads.done)
+                for key in keys:
+                    mutate(done[key]['body']['data'])
+                res = ru.check_order_reads(done, plan['orders'])
+                self.assertEqual(res['status'], 'FAIL', res)
+
+    def test_a_soft_deleted_line_is_listed_but_never_quoted(self):
+        # The endpoint's own contract: ``items`` is every row, ``quote`` the live population.
+        from orders_app.models import OrderItem
+        order = _order_with_extra(self.v, self.v.tables[1])
+        OrderItem.objects.filter(order=order, parent_item__isnull=False).update(deleted=True)
+        self.sample['order_ids'] = [str(order.pk)]
+        reads, plan = self.plan()
+        data = reads.done[f'order.details.{order.pk}']['body']['data']
+        self.assertEqual((len(data['items']), data['quote'][0]['extras']), (2, []))
+        self.assertEqual(ru.check_order_reads(reads.done, plan['orders'])['status'], 'PASS')
 
     def test_the_intent_selector_must_agree(self):
         reads, plan = self.plan()
@@ -1215,6 +1529,49 @@ class MediaReferenceTests(TestCase):
         self.assertEqual(self.media()['I.media_references']['status'], 'FAIL')
         path.unlink()
         self.assertEqual(self.media()['I.media_references']['status'], 'FAIL')
+
+    def test_REGRESSION_a_path_beyond_the_sampling_cap_is_not_called_unreferenced(self):
+        # Codex P2 on #357: only the references inside the cap were compared, so a valid
+        # image referenced after it read as "not a database reference" and FAILED.
+        from restaurants_app.models import MenuItem
+        for n in range(3):
+            _png(Path(settings.MEDIA_ROOT) / 'menu_items' / f'more{n}.png')
+            item = MenuItem.objects.create(name=f'Dish {n}', section=self.v.section, primary_price=Decimal('1000'),
+                                           approved=True, enabled=True, available=True, in_stock=True)
+            MenuItem.objects.filter(pk=item.pk).update(image=f'menu_items/more{n}.png')
+        reads = ru.Reads(None)
+        reads.get(f'menu.public.{self.v.rid}', reads.public, '/api/v1/orders/journey/show-menu/',
+                  {'restaurant': self.v.rid})
+        capped = ru.media_references([self.v.rid], 1)
+        self.assertEqual((len(capped['refs']), capped['truncated']), (1, True))
+        res = ru.check_media(capped, reads.done)
+        self.assertEqual(res['I.media_references']['status'], 'INCOMPLETE', 'the objects were sampled')
+        self.assertEqual(res['I.app_media_paths_are_db_references']['status'], 'PASS', res)
+        self.assertEqual(res['I.app_media_paths_are_db_references']['paths'], 4)
+
+        def elsewhere(body):
+            body['data'][0]['items'][0]['image'] = settings.MEDIA_URL + 'menu_items/nowhere.png'
+
+        forged = PublicMenuContractTests.forged(reads.done, self.v.rid, elsewhere)
+        res = ru.check_media(capped, forged)
+        self.assertEqual(res['I.app_media_paths_are_db_references']['status'], 'FAIL',
+                         'CONTROL: a path no row references still fails beyond the cap')
+
+    def test_REGRESSION_a_menu_that_emits_no_media_path_compares_nothing(self):
+        reads = ru.Reads(None)
+        reads.get(f'menu.public.{self.v.rid}', reads.public, '/api/v1/orders/journey/show-menu/',
+                  {'restaurant': self.v.rid})
+        refs = ru.media_references([self.v.rid], 500)
+        self.assertEqual(ru.check_media(refs, reads.done)['I.app_media_paths_are_db_references']['status'], 'PASS')
+
+        def strip(body):
+            for section in body['data']:
+                section['section_banner_image'] = None
+                for item in section['items']:
+                    item['image'] = None
+
+        res = ru.check_media(refs, PublicMenuContractTests.forged(reads.done, self.v.rid, strip))
+        self.assertEqual(res['I.app_media_paths_are_db_references']['status'], 'INCOMPLETE', res)
 
     def test_a_sample_with_no_media_is_incomplete_and_a_truncated_one_never_passes(self):
         self.assertEqual(ru.check_media({'refs': [], 'truncated': False}, {})['I.media_references']['status'],
@@ -1358,6 +1715,7 @@ class ReaderRoleTests(TransactionTestCase):
     def setUp(self):
         if connection.vendor != 'postgresql':
             self.skipTest('PostgreSQL only')
+        _settle_readiness()
         self.roles = _Roles(self)
         self.original = dict(connection.settings_dict)
         self.addCleanup(self.roles.drop)

@@ -96,7 +96,13 @@ SUPPLIED evidence; an OMITTED optional section is simply unavailable::
      "require":  ["usable"]}                                optional (default shown)
 
 ``wall_clock_seconds`` is the operator's bound for THIS run. It is not an RTO and this
-module invents no production time limit. ``max_restaurants`` and
+module invents no production time limit. It cannot start before the inputs are read, so
+reading them has a FIXED bound of its own: the inputs phase is interrupted after
+``INPUTS_PHASE_SECONDS``, and both documents must be REGULAR files no larger than
+``MAX_INPUTS_BYTES`` and ``MAX_MANIFEST_BYTES`` — opened without blocking (a FIFO with no
+writer would otherwise wait for one indefinitely) and refused unread otherwise. A run's
+whole bound is therefore ``INPUTS_PHASE_SECONDS`` plus ``wall_clock_seconds``, plus
+cleanup. ``max_restaurants`` and
 ``max_orders_per_restaurant`` bound the SAMPLE: every ``I.`` check describes the sampled
 restaurants and orders, never the whole restore, and ``result.sample.not_sampled`` says
 how much was left out. Where a bound cuts a check's OWN coverage
@@ -141,6 +147,13 @@ WHAT THE READS PROVE, AND WHAT THEY DO NOT
   table's current generation. That proves a signature ROUND TRIP and authorises the
   read; it proves nothing about any printed sticker. Only ``H.printed_qr``, which scans
   the ORIGINAL credentials and compares the table and restaurant they resolve to, does.
+* ``I.public_menu`` holds a served menu to EXACTLY the sections and items the canonical
+  publication policy (``menu_publication``) makes visible, evaluated at both ends of the
+  read; content whose visibility changed inside the read may be present or absent, and
+  nothing else is tolerated. A restaurant with nothing visible compares nothing.
+* ``I.order_reads`` holds the published lines to the SAVED lines by identity, quantity
+  and saved name: ``items`` lists every row with all its children, ``quote`` the live
+  dishes with their live children (``group_live_children``, the endpoint's own split).
 * Staff reads are authorised in process (``force_authenticate``) for ONE named, existing,
   active, established restaurant user; the refusals the customer JWT path applies are
   restated, and JWT verification is NOT exercised. Only an ORIGINAL, unexpired bearer
@@ -165,6 +178,7 @@ import secrets
 import signal
 import socket
 import subprocess
+from stat import S_ISREG
 import sys
 import time
 import uuid
@@ -211,6 +225,12 @@ DECLARED_TRANSFORMATIONS = [
 
 DEFAULT_LIMITS = {'max_restaurants': 10, 'max_orders_per_restaurant': 20,
                   'max_sections_per_restaurant': 50, 'max_media_objects': 500}
+
+#: Fixed bounds on reading the two documents, in force BEFORE either is opened. The
+#: operator's ``wall_clock_seconds`` is inside the inputs, so it cannot bound this phase.
+INPUTS_PHASE_SECONDS = 60
+MAX_INPUTS_BYTES = 1 << 20
+MAX_MANIFEST_BYTES = 64 << 20
 
 IMAGE_FIELDS = (('restaurants', 'logo'), ('restaurants', 'cover_photo'),
                 ('menu_sections', 'section_banner_image'), ('menu_items', 'image'))
@@ -1054,12 +1074,15 @@ def main(argv=None):
         return EXIT_USAGE
 
     result = new_result(args.nonce)
+    result['bounds'] = {'inputs_phase_seconds': INPUTS_PHASE_SECONDS, 'max_inputs_bytes': MAX_INPUTS_BYTES,
+                        'max_manifest_bytes': MAX_MANIFEST_BYTES}
     state = {}
-    supervise(result, None, lambda: _load_inputs(args.inputs, result, state))
+    supervise(result, INPUTS_PHASE_SECONDS, lambda: _load_inputs(args.inputs, result, state))
     if result['run']['status'] == 'COMPLETED':
         result['run']['status'] = None
         inputs = state['inputs']
         deadline_at = time.monotonic() + inputs['limits']['wall_clock_seconds']
+        result['bounds']['wall_clock_seconds'] = inputs['limits']['wall_clock_seconds']
         supervise(result, inputs['limits']['wall_clock_seconds'],
                   lambda: _bootstrap(inputs, state.get('manifest'), result, entry_modules, deadline_at))
     publish(result_path, result)
@@ -1067,29 +1090,64 @@ def main(argv=None):
     return result['exit']
 
 
+def read_bounded(path, limit):
+    """The bytes of a REGULAR file, opened without blocking and never read past ``limit``.
+
+    Returns ``(data, None)`` or ``(None, problem)``. A FIFO, a device or a directory is
+    refused unread — opening a FIFO with no writer would otherwise block before any bound
+    applied. Anything larger than ``limit`` is refused too: at most ``limit + 1`` bytes are
+    ever read, whatever size the file reports or grows to while it is read.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, 'O_CLOEXEC', 0))
+    except (OSError, ValueError, TypeError) as exc:
+        return None, f'unreadable ({type(exc).__name__})'
+    try:
+        if not S_ISREG(os.fstat(fd).st_mode):
+            return None, 'not a regular file'
+        chunks, total = [], 0
+        while total <= limit:
+            chunk = os.read(fd, min(1 << 16, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > limit:
+            return None, f'larger than {limit} bytes'
+        return b''.join(chunks), None
+    except OSError as exc:
+        return None, f'unreadable ({type(exc).__name__})'
+    finally:
+        os.close(fd)
+
+
 def _load_inputs(path, result, state):
     result['run']['phase'] = 'inputs'
     problems = []
-    try:
-        raw = json.loads(Path(path).read_bytes())
-    except (OSError, ValueError) as exc:
-        raw, problems = None, [f'the inputs document could not be read as JSON ({type(exc).__name__})']
+    raw = None
+    data, problem = read_bounded(path, MAX_INPUTS_BYTES)
+    if problem is not None:
+        problems = [f'the inputs document: {problem}']
+    else:
+        try:
+            raw = json.loads(data)
+        except (ValueError, RecursionError) as exc:
+            problems = [f'the inputs document could not be read as JSON ({type(exc).__name__})']
     inputs = None
     if raw is not None:
         inputs, problems = validate_inputs(raw)
     manifest = None
     if inputs is not None and 'manifest' in inputs:
-        try:
-            data = Path(inputs['manifest']['path']).read_bytes()
-        except OSError as exc:
-            problems.append(f'manifest: unreadable ({type(exc).__name__})')
+        data, problem = read_bounded(inputs['manifest']['path'], MAX_MANIFEST_BYTES)
+        if problem is not None:
+            problems.append(f'manifest: {problem}')
         else:
             if sha256(data) != inputs['manifest']['sha256']:
                 problems.append('manifest: its bytes do not match inputs.manifest.sha256')
             else:
                 try:
                     manifest = json.loads(data)
-                except ValueError:
+                except (ValueError, RecursionError):
                     problems.append('manifest: not JSON')
                 else:
                     problems += validate_manifest(manifest, inputs['limits'])
@@ -1432,12 +1490,18 @@ class Reads:
         self.done = {}
 
     def get(self, key, client, path, params=None, **headers):
+        # The local instants either side of the read: a clock-dependent answer (the public
+        # menu's schedules) is held to what the policy allows at both ends.
+        from django.utils import timezone as dj_timezone
+        before = dj_timezone.localtime()
         resp = client.get(path, params or {}, **headers)
+        after = dj_timezone.localtime()
         try:
             body = json.loads(resp.content.decode())
         except ValueError:
             body = {'_not_json': True}
-        self.done[key] = {'status': resp.status_code, 'body': body, 'request_id': resp.headers.get('X-Request-ID')}
+        self.done[key] = {'status': resp.status_code, 'body': body, 'request_id': resp.headers.get('X-Request-ID'),
+                          'window': (before, after)}
         exc = getattr(resp, 'exc_info', None)
         if exc and exc[0] is not None:
             self.done[key]['exception'] = f'{exc[0].__module__}.{exc[0].__name__}'
@@ -1563,7 +1627,10 @@ def media_references(restaurant_ids, cap):
                 if name:
                     refs.append({'table': table, 'column': column, 'row': str(rid), 'row_deleted': deleted,
                                  'name': name})
-    return {'refs': refs[:cap], 'truncated': len(refs) > cap, 'total': len(refs)}
+    # ``refs`` is the SAMPLE whose objects are read; ``all_names`` is every reference, so
+    # a path the application emits can be classified exactly however many were sampled.
+    return {'refs': refs[:cap], 'truncated': len(refs) > cap, 'total': len(refs),
+            'all_names': sorted({r['name'] for r in refs})}
 
 
 # ---------------------------------------------------------------------------- intrinsic
@@ -1634,38 +1701,87 @@ def expected_menu_answer(restaurant):
     return None, None
 
 
-def menu_structure_problems(restaurant_id, body):
-    """A served menu must be STRUCTURALLY MEANINGFUL, not merely a 200."""
+def expected_menu_content(restaurant_id, instant):
+    """``{section id: {item id}}`` the public menu serves at ``instant``.
+
+    Decided ONLY by the canonical publication policy (``menu_publication``) — the same
+    predicates the endpoint applies — over the stored rows, never by a local restatement
+    of what "published" means.
+    """
+    from restaurants_app.controllers.menu_publication import (
+        item_visible_in_menu, section_operationally_visible,
+    )
     from restaurants_app.models import MenuItem, MenuSection
+    content = {}
+    for section in MenuSection.objects.filter(restaurant_id=restaurant_id):
+        if section_operationally_visible(section, instant):
+            content[str(section.pk)] = set()
+    items = (MenuItem.objects.filter(section_id__in=list(content))
+             .select_related('section', 'section_group__section'))
+    for item in items:
+        if item_visible_in_menu(item, instant):
+            content[str(item.section_id)].add(str(item.pk))
+    return content
+
+
+def menu_structure_problems(restaurant_id, body, window):
+    """A served menu must be EXACTLY the visible menu, not merely a 200 of known ids.
+
+    Returns ``(problems, incomplete, compared)``: ``compared`` counts the sections that
+    were visible at BOTH ends of the read and so had to be served.
+    """
     if not isinstance(body, dict) or body.get('status') != 200 or not isinstance(body.get('data'), list):
-        return ['the body is not a menu envelope']
+        return ['the body is not a menu envelope'], None, 0
     problems = []
     if 'upsell' not in body or not isinstance(body.get('item_sort_mode'), str):
         problems.append('the envelope is missing upsell/item_sort_mode')
-    published = {str(s) for s in MenuSection.objects.filter(restaurant_id=restaurant_id, approved=True,
-                                                             enabled=True, deleted=False).values_list('id', flat=True)}
+    served = {}
     for i, section in enumerate(body['data']):
         if not isinstance(section, dict) or not isinstance(section.get('items'), list):
             problems.append(f'section[{i}] is malformed')
             continue
         sid = section.get('id')
-        if sid not in published:
-            problems.append(f'section[{i}] is not a published section of this restaurant')
+        if sid in served:
+            problems.append(f'section[{i}] is served twice')
             continue
         if section.get('item_count') != len(section['items']):
             problems.append(f'section[{i}] item_count disagrees with its items')
-        live = {str(x) for x in MenuItem.objects.filter(section_id=sid, deleted=False).values_list('id', flat=True)}
+        ids = []
         for j, item in enumerate(section['items']):
-            if not isinstance(item, dict) or item.get('id') not in live or item.get('section') != sid:
-                problems.append(f'section[{i}].items[{j}] is not a live item of that section')
-    return problems
+            if not isinstance(item, dict) or item.get('section') != sid:
+                problems.append(f'section[{i}].items[{j}] does not belong to that section')
+                continue
+            ids.append(item.get('id'))
+        if len(ids) != len(set(ids)):
+            problems.append(f'section[{i}] serves an item twice')
+        served[sid] = set(ids)
+    if not (isinstance(window, (tuple, list)) and len(window) == 2):
+        return problems, 'the read carries no observation window, so the visible menu is not established', 0
+    early, late = (expected_menu_content(restaurant_id, instant) for instant in window)
+    must = {sid: early[sid] & late[sid] for sid in early.keys() & late.keys()}
+    may = {sid: early.get(sid, set()) | late.get(sid, set()) for sid in early.keys() | late.keys()}
+    not_served = set(must) - set(served)
+    not_visible = set(served) - set(may)
+    if not_served:
+        problems.append(f'{len(not_served)} visible section(s) are not served')
+    if not_visible:
+        problems.append(f'{len(not_visible)} served section(s) are not visible')
+    for sid, ids in served.items():
+        if sid not in may:
+            continue
+        missing, hidden = must.get(sid, set()) - ids, ids - may[sid]
+        if missing:
+            problems.append(f'{len(missing)} visible item(s) of a served section are not served')
+        if hidden:
+            problems.append(f'{len(hidden)} served item(s) are not visible in that section')
+    return problems, None, len(must)
 
 
 def check_public_menu(done, restaurant_ids):
     from restaurants_app.models import Restaurant
     if not restaurant_ids:
         return check('INCOMPLETE', reason='no restaurant in the sample')
-    rows = {}
+    rows, compared = {}, 0
     for rid in restaurant_ids:
         read = done[f'menu.public.{rid}']
         restaurant = Restaurant.objects.filter(pk=rid).first()
@@ -1679,11 +1795,23 @@ def check_public_menu(done, restaurant_ids):
             rows[rid] = f'FAIL: answered {read["status"]}, the contract for {restaurant.status!r} is {status}'
         elif body is not None:
             rows[rid] = 'PASS' if read['body'] == body else 'FAIL: the refusal body differs from the contract'
+            compared += 1
         else:
-            problems = menu_structure_problems(rid, read['body'])
-            rows[rid] = 'PASS' if not problems else 'FAIL: ' + '; '.join(problems[:5])
-    ok = all(v == 'PASS' for v in rows.values())
-    return check('PASS' if ok else 'FAIL', restaurants=rows)
+            problems, incomplete, sections = menu_structure_problems(rid, read['body'], read.get('window'))
+            compared += sections
+            if problems:
+                rows[rid] = 'FAIL: ' + '; '.join(problems[:5])
+            elif incomplete:
+                rows[rid] = f'INCOMPLETE: {incomplete}'
+            else:
+                rows[rid] = 'PASS'
+    if any(v.startswith('FAIL') for v in rows.values()):
+        return check('FAIL', restaurants=rows, compared=compared)
+    if any(v.startswith('INCOMPLETE') for v in rows.values()) or not compared:
+        return check('INCOMPLETE', restaurants=rows, compared=compared,
+                     reason='no visible section or exact refusal was compared' if not compared else
+                     'a menu could not be compared')
+    return check('PASS', restaurants=rows, compared=compared)
 
 
 def _media_paths(obj, prefix, out):
@@ -1744,36 +1872,92 @@ def check_media(media, done):
                                         truncated=media['truncated'], failing=bad[:50],
                                         evidence='storage interface + Django static view under MEDIA_ROOT; '
                                                  'NOT the deployed /media/ alias')
-    names = {r['name'] for r in refs}
+    # Every path the application emits is classified against the COMPLETE reference set
+    # of the sampled restaurants, not only the sampled objects. If that set is absent and
+    # the objects were sampled, a path outside the sample cannot be classified.
+    known = set(media.get('all_names') or ()) | {r['name'] for r in refs}
+    classifiable = 'all_names' in media or not media['truncated']
     seen = set()
     for key, read in done.items():
         if key.startswith('menu.'):
             _media_paths(read.get('body'), settings.MEDIA_URL, seen)
-    unknown = sorted(seen - names)
+    unknown = sorted(seen - known)
+    if not seen:
+        status, reason = 'INCOMPLETE', 'the application emitted no media path; nothing was compared'
+    elif unknown and not classifiable:
+        status, reason = 'INCOMPLETE', 'a path outside the sampled references cannot be classified'
+    else:
+        status, reason = ('FAIL' if unknown else 'PASS'), None
     C['I.app_media_paths_are_db_references'] = check(
-        'FAIL' if unknown else ('INCOMPLETE' if media['truncated'] else 'PASS'),
-        paths=len(seen), not_referenced=unknown[:50])
+        status, paths=len(seen), references=len(known), not_referenced=unknown[:50],
+        **({'reason': reason} if reason else {}))
     return C
 
 
-def _snapshot_names(order):
+def _line_key(line_id, quantity, name, deleted, with_deleted):
+    return json.dumps([str(line_id), quantity, name] + ([deleted] if with_deleted else []), default=str)
+
+
+def saved_lines(order):
+    """What the order read must publish, from the SAVED rows, by the endpoint's own rules.
+
+    ``items`` lists EVERY row, soft-deleted included, each with ALL its children;
+    ``quote`` lists the live dishes, each with its live children — split by
+    ``group_live_children``, the endpoint's own definition, never a local copy. Names are
+    ``historical_name``: the name the line was bought under.
+    Returns ``(items, quote, live_rows)``, each keyed by line id.
+    """
+    from orders_app.controllers.orders.serializers import historical_name
+    from orders_app.controllers.services.order_quote import group_live_children
     from orders_app.models import OrderItem
-    live = list(OrderItem.objects.filter(order=order, deleted=False))
-    return live, {x.item_name_snapshot for x in live}
+    rows = list(OrderItem.objects.filter(order=order))
+    live = [row for row in rows if not row.deleted]
+    by_parent, _orphaned = group_live_children(live)
+    children = {}
+    for row in rows:
+        if row.parent_item_id is not None:
+            children.setdefault(row.parent_item_id, []).append(row)
+
+    def key(row, with_deleted):
+        return _line_key(row.pk, row.quantity, historical_name(row)[0], bool(row.deleted), with_deleted)
+
+    items = {str(r.pk): (key(r, True), tuple(sorted(key(c, True) for c in children.get(r.pk, ()))))
+             for r in rows}
+    quote = {str(r.pk): (key(r, False), tuple(sorted(key(c, False) for c in by_parent.get(r.pk, ()))))
+             for r in live if r.parent_item_id is None}
+    return items, quote, live
 
 
-def _returned_names(data):
-    names = set()
-    for it in data.get('items') or []:
-        names.add((it.get('item') or {}).get('name'))
-        for ex in it.get('extra_items') or []:
-            names.add(ex.get('name'))
-    for q in data.get('quote') or []:
-        names.add(q.get('item_name'))
-        for ex in q.get('extras') or []:
-            names.add(ex.get('item_name'))
-    names.discard(None)
-    return names
+def published_lines(entries, name_of, children_key, child_name_key, with_deleted):
+    """The lines a read published, keyed by id: ``(lines, repeated)``, or ``(None, 0)``."""
+    if not isinstance(entries, list):
+        return None, 0
+    lines, repeated = {}, 0
+    for entry in entries:
+        children = entry.get(children_key) if isinstance(entry, dict) else None
+        if not isinstance(children, list) or not all(isinstance(c, dict) for c in children):
+            return None, 0
+        line_id = str(entry.get('id'))
+        if line_id in lines:
+            repeated += 1
+            continue
+        lines[line_id] = (
+            _line_key(entry.get('id'), entry.get('quantity'), name_of(entry), entry.get('deleted'), with_deleted),
+            tuple(sorted(_line_key(c.get('id'), c.get('quantity'), c.get(child_name_key), c.get('deleted'),
+                                   with_deleted) for c in children)))
+    return lines, repeated
+
+
+def line_problems(label, saved, published, repeated):
+    if published is None:
+        return [f'{label}: not a list of lines']
+    missing = saved.keys() - published.keys()
+    unsaved = published.keys() - saved.keys()
+    differing = [k for k in saved.keys() & published.keys() if saved[k] != published[k]]
+    if missing or unsaved or differing or repeated:
+        return [f'{label}: {len(missing)} saved line(s) missing, {len(unsaved)} not saved, '
+                f'{len(differing)} differing, {repeated} repeated']
+    return []
 
 
 def order_read_problems(order, read, intent_read):
@@ -1806,11 +1990,15 @@ def order_read_problems(order, read, intent_read):
         problems.append(f'the read says {acceptance.get("state")!r}, the stored evidence says {expected!r}')
     if acceptance.get('quote_ref') != (evidence.quote_ref if evidence is not None else None):
         problems.append('acceptance.quote_ref is not the stored reference')
-    live, snapshots = _snapshot_names(order)
+    items, quote, live = saved_lines(order)
     if evidence is not None and not live:
         problems.append('an accepted order has no live line')
-    if not _returned_names(data) <= snapshots:
-        problems.append('a returned historical name is not a saved snapshot')
+    item_name = (lambda e: e.get('item').get('name') if isinstance(e.get('item'), dict) else None)
+    problems += line_problems('items', items,
+                              *published_lines(data.get('items'), item_name, 'extra_items', 'name', True))
+    problems += line_problems('quote', quote,
+                              *published_lines(data.get('quote'), lambda e: e.get('item_name'), 'extras',
+                                               'item_name', False))
     if intent_read is not None and (intent_read['status'] != 200 or intent_read['body'] != read['body']):
         problems.append('the intent selector disagrees with the order selector')
     return problems
