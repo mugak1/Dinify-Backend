@@ -113,7 +113,10 @@ carries ``source_revision`` (full 40 hex), ``declared_transformations`` (exactly
 ``DECLARED_TRANSFORMATIONS``), ``sample`` (``restaurant_ids`` non-empty, ``order_ids``),
 ``tables`` (non-empty: name -> {rows, sha256}), ``media_listing`` (relative path ->
 {size, sha256}) and ``golden_reads`` (non-empty: key -> {status, body}) whose keys are
-only of ``IDENTITY_READ_KINDS``.
+only of ``IDENTITY_READ_KINDS``, plus ``BEARER_READ_KEY`` (the one read an original bearer
+token authorises). That read runs only while the token is unexpired, so a golden record of
+it can be compared only when the token is unexpired at BOTH ends; otherwise ``R.reads``
+is INCOMPLETE, never PASS.
 
 RESULT — schema ``dinify.restore-usability.result/1``. THERE IS NO GLOBAL PASS.
 ==============================================================================
@@ -194,6 +197,8 @@ VERDICTS = ('usable', 'independent', 'identity')
 #: are clock-dependent: their intrinsic checks still run, but comparing them across time
 #: would report a correct restore as different.
 IDENTITY_READ_KINDS = ('order.details', 'order.details_by_intent', 'kitchen.state', 'qr.scan')
+#: The restaurant list read with an ORIGINAL bearer token. Also compared with a golden read
+#: when one was recorded; it is executed only while that token is unexpired.
 BEARER_READ_KEY = 'bearer.restaurants'
 
 #: EXACTLY these, and nothing else, are removed before a golden read is compared.
