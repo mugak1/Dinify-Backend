@@ -1508,10 +1508,10 @@ class IntrinsicReadTests(TestCase):
 NOTE = 'in-process principal (JWT verification NOT exercised)'
 
 
-def _own(v, name, location):
+def _own(v, name, location, status=RestaurantStatus_Live):
     """Another restaurant the venue's owner owns: one more row on the settings read."""
     from restaurants_app.models import Restaurant, RestaurantEmployee
-    r = Restaurant.objects.create(name=name, location=location, owner=v.owner, status=RestaurantStatus_Live)
+    r = Restaurant.objects.create(name=name, location=location, owner=v.owner, status=status)
     RestaurantEmployee.objects.create(user=v.owner, restaurant=r, roles=[RESTAURANT_OWNER], active=True)
     return r
 
@@ -1563,6 +1563,12 @@ class StaffPageCompletenessTests(TestCase):
         self.drinks = PublicMenuContractTests.section(self.v, 'Drinks')      # no items: a zero-total page
         PublicMenuContractTests.item(self.v.section, 'Chapati')               # Mains holds two
         _own(self.v, 'Second', 'l2')                                          # the owner holds two
+        # Stored, and listed by none of the three reads: each population must leave them out,
+        # so a comparison that kept any of them would fail the controls.
+        PublicMenuContractTests.section(self.v, 'Gone', deleted=True)
+        PublicMenuContractTests.item(self.v.section, 'Gone dish', deleted=True)
+        _own(self.v, 'Paused', 'l3', status=RestaurantStatus_Suspended)
+        type(self.v.restaurant).objects.filter(pk=_own(self.v, 'Closed down', 'l4').pk).update(deleted=True)
 
     def readers(self):
         from restaurants_app.models import MenuItem, MenuSection, Restaurant
@@ -1618,6 +1624,13 @@ class StaffPageCompletenessTests(TestCase):
             for name, fault in (('foreign', foreign), ('duplicate', duplicate)):
                 with self.subTest(read=key, fault=name), _page_fault(model, fault):
                     self.assertFailsWith(self.staff()[1], 'not one of the stored rows')
+        # An id that is not a string (unhashable, even) fails the check rather than the run.
+        reads, plan = _run_reads(self.v)
+        for key in (k for _, k in self.readers()):
+            done = copy.deepcopy(reads.done)
+            done[key]['body']['data']['records'][0]['id'] = [self.v.rid]
+            with self.subTest(read=key, fault='a list id'):
+                self.assertFailsWith(ru.check_staff_reads(done, plan, NOTE), 'not one of the stored rows')
 
     def test_inconsistent_or_missing_pagination_metadata_fails(self):
         from restaurants_app.models import MenuSection
@@ -1670,6 +1683,19 @@ class StaffPageBeyondOnePageTests(TestCase):
                 (MenuItem, f'staff.items.{self.v.section.pk}'),
                 (Restaurant, 'staff.restaurants'))
 
+    def test_CONTROL_tied_rows_may_come_in_either_order(self):
+        # Every restaurant but the first is tied on ``name``: reversing the 24 tied rows on the
+        # page is still page 1 in the endpoint's order.
+        from restaurants_app.models import Restaurant
+
+        def reverse_the_ties(out, rows):
+            page = list(out['records'])
+            out['records'] = page[:1] + page[1:][::-1]
+
+        with _page_fault(Restaurant, reverse_the_ties):
+            reads, plan = _run_reads(self.v)
+        self.assertEqual(ru.check_staff_reads(reads.done, plan, NOTE)['status'], 'PASS')
+
     def test_CONTROL_a_full_first_page_with_more_pages_passes(self):
         reads, plan = _run_reads(self.v)
         res = ru.check_staff_reads(reads.done, plan, NOTE)
@@ -1686,6 +1712,9 @@ class StaffPageBeyondOnePageTests(TestCase):
             # 25 stored rows, none foreign, none repeated, the right total — but not page 1.
             'a later window': (lambda out, rows: out.update(records=list(rows)[2:27]),
                                "not page 1 in the endpoint's order"),
+            # Codex on #358: the right 25 rows, served in reverse.
+            'the first page reversed': (lambda out, rows: out.update(records=list(out['records'])[::-1]),
+                                        "not page 1 in the endpoint's order"),
         }
         for model, key in self.readers():
             for name, (fault, phrase) in faults.items():
@@ -1756,6 +1785,12 @@ class KitchenFeedCompletenessTests(TestCase):
         self.cancelled = _stored_order(self.v, t1, order_status='cancelled')
         self.deleted = _stored_order(self.v, t2, deleted=True)
         self.draft = _stored_order(self.v, t2, order_status='initiated')
+        self.served_cancelled = _stored_order(self.v, t1, order_status='cancelled', fulfilment_status='served',
+                                              served_at=now - timedelta(hours=1))
+        self.served_deleted = _stored_order(self.v, t2, order_status='served', fulfilment_status='served',
+                                            served_at=now - timedelta(hours=1), deleted=True)
+        other = _venue(phone='256700000974', name='Elsewhere')
+        self.elsewhere = _stored_order(other, other.tables[0])          # eligible, at ANOTHER restaurant
 
     def kitchen(self, order_ids=()):
         reads, plan = _run_reads(self.v, order_ids)
@@ -1778,8 +1813,9 @@ class KitchenFeedCompletenessTests(TestCase):
                 self.assertFailsWith(res, f'1 {feed} ticket(s) are missing')
 
     def test_REGRESSION_a_ticket_on_the_wrong_feed_fails(self):
-        cases = (('completed', self.new), ('completed', self.aged), ('active', self.served),
-                 ('active', self.cancelled), ('active', self.deleted), ('active', self.draft))
+        cases = (('completed', self.new), ('completed', self.aged), ('completed', self.served_cancelled),
+                 ('completed', self.served_deleted), ('active', self.served), ('active', self.cancelled),
+                 ('active', self.deleted), ('active', self.draft), ('active', self.elsewhere))
         for feed, order in cases:
             with self.subTest(feed=feed, order=order.order_status), \
                     _feed_fault(feed, lambda data, order=order: data + [_ticket(order)]):
@@ -1794,7 +1830,13 @@ class KitchenFeedCompletenessTests(TestCase):
         def bump(data):
             data[0] = dict(data[0], fulfilment_revision=data[0]['fulfilment_revision'] + 1)
             return data
+        def boolean(data):
+            # ``False == 0``: a boolean where the stored revision is the integer 0 is not that revision.
+            data[0] = dict(data[0], fulfilment_revision=bool(data[0]['fulfilment_revision']))
+            return data
+        self.assertEqual(self.new.fulfilment_revision, 0)
         for name, fault, phrase in (('disagrees', bump, 'disagree with the stored order'),
+                                    ('a boolean revision', boolean, 'disagree with the stored order'),
                                     ('unreadable', lambda data: data + [None], 'carry no order id'),
                                     ('foreign id', lambda data: data + [dict(data[0], id=U1)],
                                      'are not orders the active feed serves')):
@@ -1881,6 +1923,19 @@ class KitchenFeedWindowTests(TestCase):
         # The endpoint kept the one still inside at ``mid`` and dropped the one past it.
         self.assertEqual(served, {str(orders['inside'].pk), str(orders['crossed_kept'].pk)})
         self.assertEqual(res['status'], 'PASS', res)
+
+    def test_the_window_is_instant_arithmetic_across_a_clock_change(self):
+        # Review of #358: a bound computed on a local wall clock moves by an hour across a
+        # daylight-saving change. The endpoint subtracts from ``timezone.now()``, an instant.
+        from zoneinfo import ZoneInfo
+        from datetime import datetime as dt, timezone as tz
+        london = dt(2026, 3, 29, 12, 0, tzinfo=ZoneInfo('Europe/London'))        # BST, the morning after
+        served = dt(2026, 3, 28, 11, 30, tzinfo=tz.utc)                            # 23.5 h earlier, as instants
+        order = _stored_order(self.v, self.v.tables[0], order_status='served', fulfilment_status='served',
+                              served_at=served)
+        must, may = ru.kitchen_feed_orders(self.v.rid, 'completed', (london, london))
+        self.assertIn(str(order.pk), must)
+        self.assertIn(str(order.pk), may)
 
     def test_REGRESSION_an_order_inside_the_window_throughout_must_be_served(self):
         res, _, _ = self.read({'inside': 3.0},

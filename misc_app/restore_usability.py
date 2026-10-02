@@ -2067,8 +2067,9 @@ def endpoint_ranks(queryset):
     """Each stored row's place in the endpoint's order; rows with equal sort keys share one.
 
     The database ranks the rows by the endpoint's own ordering (its collation, its NULL
-    placement), so when tied rows straddle the end of the page, whichever of them the
-    database put there is still page 1.
+    placement). Equal ranks are what tolerate ties: tied rows may come in either order, and
+    when they straddle the end of the page, whichever of them the database put there is
+    still page 1.
     """
     from django.db.models import Window
     from django.db.models.functions import DenseRank
@@ -2087,7 +2088,7 @@ def page_problems(read, queryset):
 
     ``queryset`` is the population the endpoint lists. The page must hold exactly
     ``min(total, STAFF_PAGE_SIZE)`` distinct stored rows, the first ones in the endpoint's
-    order, and its metadata must state page 1 of exactly that population. A record that is
+    order and in that order, and its metadata must state page 1 of exactly that population. A record that is
     not a stored row, or appears twice, still fails as before. Missing or malformed
     metadata is a problem, never a default, and a further page is never read.
     """
@@ -2099,14 +2100,14 @@ def page_problems(read, queryset):
         return [f'answered {read["status"]} without a record page']
     ranks = endpoint_ranks(queryset)
     total = len(ranks)
-    ids = [r.get('id') if isinstance(r, dict) else None for r in data['records']]
+    ids = [r.get('id') if isinstance(r, dict) and isinstance(r.get('id'), str) else None for r in data['records']]
     problems = []
     if any(i not in ranks for i in ids) or len(set(ids)) != len(ids):
         problems.append('a record is not one of the stored rows it should be drawn from')
     size = min(total, STAFF_PAGE_SIZE)
     if len(ids) != size:
         problems.append(f'page {STAFF_PAGE} holds {len(ids)} record(s); of the {total} stored it must hold {size}')
-    elif not problems and sorted(ranks[i] for i in ids) != sorted(ranks.values())[:size]:
+    elif not problems and [ranks[i] for i in ids] != sorted(ranks.values())[:size]:
         problems.append(f"the records are not page {STAFF_PAGE} in the endpoint's order")
     pagination = data.get('pagination')
     if not isinstance(pagination, dict):
@@ -2172,7 +2173,9 @@ def kitchen_feed_orders(rid, feed, window):
             .exclude(order_status=OrderStatus_Cancelled).exclude(order_status=OrderStatus_Initiated)
         ids = {str(i) for i in rows.values_list('id', flat=True)}
         return ids, ids
-    before, after = window
+    # As instants (UTC), as the endpoint's ``timezone.now()`` is: wall-clock arithmetic on a
+    # local time would move the bound by an hour across a daylight-saving change.
+    before, after = (t.astimezone(timezone.utc) for t in window)
     rows = Order.objects.filter(fulfilment_status='served', deleted=False, restaurant=rid) \
         .exclude(order_status=OrderStatus_Cancelled)
     must = {str(i) for i in rows.filter(served_at__gte=after - COMPLETED_WINDOW).values_list('id', flat=True)}
@@ -2219,8 +2222,9 @@ def feed_problems(read, rid, feed):
     fields = ('fulfilment_revision', 'fulfilment_status', 'order_status')
     stored = {str(row['id']): row for row in Order.objects.filter(pk__in=[t for t, v in tickets.items() if v])
               .values('id', *fields)}
-    disagree = sum(1 for tid, ticket in tickets.items()
-                   if ticket is not None and any(ticket.get(f) != stored[tid][f] for f in fields))
+    disagree = sum(1 for tid, ticket in tickets.items() if ticket is not None
+                   and any(type(ticket.get(f)) is not type(stored[tid][f]) or ticket.get(f) != stored[tid][f]
+                           for f in fields))
     missing = len(must - set(tickets))
     problems = [f'{n} {feed} ticket(s) {what}' for n, what in (
         (counts['unreadable'], 'carry no order id'),
