@@ -39,6 +39,7 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -1502,6 +1503,396 @@ class IntrinsicReadTests(TestCase):
         self.assertNotIn('session_token', executed[scan]['body']['data'])
         self.assertIn(f'{scan}:data.session_token', applied)
         self.assertEqual(sorted(k.split('.')[0] for k in executed), ['order', 'order', 'qr'])
+
+
+NOTE = 'in-process principal (JWT verification NOT exercised)'
+
+
+def _own(v, name, location):
+    """Another restaurant the venue's owner owns: one more row on the settings read."""
+    from restaurants_app.models import Restaurant, RestaurantEmployee
+    r = Restaurant.objects.create(name=name, location=location, owner=v.owner, status=RestaurantStatus_Live)
+    RestaurantEmployee.objects.create(user=v.owner, restaurant=r, roles=[RESTAURANT_OWNER], active=True)
+    return r
+
+
+def _run_reads(v, order_ids=()):
+    """The ACTUAL reader: ``read_plan`` through the real URLs, as a run issues them."""
+    inputs, _ = ru.validate_inputs(_inputs())
+    reads = ru.Reads(v.owner)
+    plan = ru.read_plan(reads, inputs, {'restaurant_ids': [v.rid], 'order_ids': [str(o) for o in order_ids]},
+                        v.owner)
+    return reads, plan
+
+
+@contextlib.contextmanager
+def _page_fault(model, fault):
+    """The REAL paginator serves a defective page for one model's staff read.
+
+    The fault runs on what ``DinifyPaginator`` returned — the page's rows and its own
+    metadata — before Secretary serialises it, so the reader receives the defect exactly
+    as the application would send it.
+    """
+    from misc_app.controllers.paginator import DinifyPaginator
+    real = DinifyPaginator.paginate
+
+    def paginate(self):
+        out = real(self)
+        rows = self.args.get('records')
+        if getattr(rows, 'model', None) is model:
+            fault(out, rows)
+        return out
+
+    with mock.patch.object(DinifyPaginator, 'paginate', paginate):
+        yield
+
+
+class StaffPageCompletenessTests(TestCase):
+    """Review of #357: a staff page held to membership and its total, never its length.
+
+    ``page_problems`` asked whether each RETURNED record was a stored row and whether
+    ``total_records`` matched, so ``records: []`` — or one record of two — beside a
+    correct total passed, for menu sections, menu items and restaurants alike. The reads
+    ask for no page, so the application answers page 1 at its paginator's default size;
+    that page must hold exactly the first ``min(total, 25)`` rows in the endpoint's order.
+    """
+
+    def setUp(self):
+        _settle_readiness()
+        self.v = _venue()
+        self.drinks = PublicMenuContractTests.section(self.v, 'Drinks')      # no items: a zero-total page
+        PublicMenuContractTests.item(self.v.section, 'Chapati')               # Mains holds two
+        _own(self.v, 'Second', 'l2')                                          # the owner holds two
+
+    def readers(self):
+        from restaurants_app.models import MenuItem, MenuSection, Restaurant
+        return ((MenuSection, f'staff.sections.{self.v.rid}'),
+                (MenuItem, f'staff.items.{self.v.section.pk}'),
+                (Restaurant, 'staff.restaurants'))
+
+    def staff(self):
+        reads, plan = _run_reads(self.v)
+        return reads, ru.check_staff_reads(reads.done, plan, NOTE)
+
+    def test_CONTROL_complete_small_pages_and_a_zero_total_page_pass(self):
+        reads, res = self.staff()
+        self.assertEqual(res['status'], 'PASS', res)
+        for _, key in self.readers():
+            self.assertEqual(len(reads.done[key]['body']['data']['records']), 2, key)
+        empty = reads.done[f'staff.items.{self.drinks.pk}']['body']['data']
+        self.assertEqual((empty['records'], empty['pagination']['total_records']), ([], 0))
+
+    def test_REGRESSION_an_empty_first_page_with_a_correct_total_fails(self):
+        for model, key in self.readers():
+            with self.subTest(read=key), _page_fault(model, lambda out, rows: out.update(records=[])):
+                reads, res = self.staff()
+                self.assertEqual(reads.done[key]['body']['data']['pagination']['total_records'], 2)
+                self.assertFailsWith(res, 'holds 0 record(s); of the 2 stored it must hold 2')
+
+    def test_REGRESSION_a_partial_first_page_with_a_correct_total_fails(self):
+        for model, key in self.readers():
+            with self.subTest(read=key), \
+                    _page_fault(model, lambda out, rows: out.update(records=list(out['records'])[:1])):
+                reads, res = self.staff()
+                self.assertEqual(len(reads.done[key]['body']['data']['records']), 1)
+                self.assertFailsWith(res, 'holds 1 record(s); of the 2 stored it must hold 2')
+
+    def test_foreign_or_duplicate_records_still_fail(self):
+        other = _venue(phone='256700000972', name='Other')
+
+        def foreign(out, rows):
+            page = list(out['records'])
+            if not page:
+                return
+            page[-1] = type(page[-1]).objects.get(pk={'Restaurant': other.restaurant.pk,
+                                                      'MenuSection': other.section.pk,
+                                                      'MenuItem': other.item.pk}[type(page[-1]).__name__])
+            out['records'] = page
+
+        def duplicate(out, rows):
+            page = list(out['records'])
+            if page:
+                out['records'] = [page[0], page[0]]
+
+        for model, key in self.readers():
+            for name, fault in (('foreign', foreign), ('duplicate', duplicate)):
+                with self.subTest(read=key, fault=name), _page_fault(model, fault):
+                    self.assertFailsWith(self.staff()[1], 'not one of the stored rows')
+
+    def test_inconsistent_or_missing_pagination_metadata_fails(self):
+        from restaurants_app.models import MenuSection
+        faults = {
+            'a later page': {'current_page': 2},
+            'another page size': {'page_size': 10},
+            'a page count that does not follow from the total': {'number_of_pages': 3},
+            'a next page that cannot exist': {'has_next': True},
+            'a previous page before page 1': {'has_previous': True},
+            'an unpaginated answer': {'paginated': False},
+            'a total that is not an integer': {'total_records': '2'},
+            'a boolean total': {'total_records': True},
+            'a boolean page': {'current_page': True},
+        }
+        for name, change in faults.items():
+            with self.subTest(fault=name), \
+                    _page_fault(MenuSection, lambda out, rows, change=change: out['pagination'].update(change)):
+                self.assertFailsWith(self.staff()[1], f'pagination {next(iter(change))} is')
+        for key in ('total_records', 'has_next', 'has_previous', 'current_page', 'page_size', 'number_of_pages',
+                    'paginated'):
+            with self.subTest(missing=key), \
+                    _page_fault(MenuSection, lambda out, rows, key=key: out['pagination'].pop(key)):
+                self.assertFailsWith(self.staff()[1], f'pagination {key} is missing')
+        with self.subTest(missing='pagination'), \
+                _page_fault(MenuSection, lambda out, rows: out.update(pagination=None)):
+            self.assertFailsWith(self.staff()[1], 'no pagination metadata')
+
+    def assertFailsWith(self, res, phrase):
+        self.assertEqual(res['status'], 'FAIL', res)
+        self.assertIn(phrase, json.dumps(res), res)
+
+
+class StaffPageBeyondOnePageTests(TestCase):
+    """A population larger than the application's 25-row page: page 1, complete, in order."""
+
+    def setUp(self):
+        _settle_readiness()
+        self.v = _venue()
+        for n in range(30):
+            PublicMenuContractTests.section(self.v, f'S{n:02d}', listing_position=n)
+            PublicMenuContractTests.item(self.v.section, f'I{n:02d}', listing_position=n)
+        # 26 restaurants tied on the endpoint's only ordering key (``name``): which 24 of
+        # them fill the page is the database's choice, and every choice is a first page.
+        for n in range(26):
+            _own(self.v, 'Tie', f'l{n:02d}')
+
+    def readers(self):
+        from restaurants_app.models import MenuItem, MenuSection, Restaurant
+        return ((MenuSection, f'staff.sections.{self.v.rid}'),
+                (MenuItem, f'staff.items.{self.v.section.pk}'),
+                (Restaurant, 'staff.restaurants'))
+
+    def test_CONTROL_a_full_first_page_with_more_pages_passes(self):
+        reads, plan = _run_reads(self.v)
+        res = ru.check_staff_reads(reads.done, plan, NOTE)
+        self.assertEqual(res['status'], 'PASS', res)
+        for _, key in self.readers():
+            data = reads.done[key]['body']['data']
+            self.assertEqual((len(data['records']), data['pagination']['has_next']), (25, True), key)
+            self.assertGreater(data['pagination']['total_records'], 25)
+
+    def test_REGRESSION_a_short_empty_or_later_page_fails(self):
+        faults = {
+            'empty': (lambda out, rows: out.update(records=[]), 'holds 0 record(s)'),
+            'one short': (lambda out, rows: out.update(records=list(out['records'])[:24]), 'holds 24 record(s)'),
+            # 25 stored rows, none foreign, none repeated, the right total — but not page 1.
+            'a later window': (lambda out, rows: out.update(records=list(rows)[2:27]),
+                               "not page 1 in the endpoint's order"),
+        }
+        for model, key in self.readers():
+            for name, (fault, phrase) in faults.items():
+                with self.subTest(read=key, fault=name), _page_fault(model, fault):
+                    reads, plan = _run_reads(self.v)
+                    res = ru.check_staff_reads(reads.done, plan, NOTE)
+                    self.assertEqual(res['status'], 'FAIL', res)
+                    self.assertIn(phrase, json.dumps(res), res)
+
+
+def _stored_order(v, table, **fields):
+    """A stored order in a chosen kitchen state, written as rows, not through a command."""
+    from orders_app.models import Order
+    values = dict(restaurant=v.restaurant, table=table, total_cost=Decimal('10000'),
+                  discounted_cost=Decimal('10000'), savings=Decimal('0'), actual_cost=Decimal('10000'),
+                  order_status=OrderStatus_Pending, fulfilment_status='new')
+    values.update(fields)
+    return Order.objects.create(**values)
+
+
+@contextlib.contextmanager
+def _feed_fault(feed, fault):
+    """The REAL kitchen feed view answers, then its ticket list is altered before rendering."""
+    from orders_app import endpoints_kitchen as ek
+    view = {'active': ek.ActiveKitchenOrdersView, 'completed': ek.CompletedKitchenOrdersView}[feed]
+    real = view.get
+
+    def get(self, request, *args, **kwargs):
+        resp = real(self, request, *args, **kwargs)
+        if resp.status_code == 200:
+            resp.data['data'] = fault(list(resp.data['data']))
+        return resp
+
+    with mock.patch.object(view, 'get', get):
+        yield
+
+
+def _ticket(order):
+    """The identity/status projection a feed ticket carries, read from the stored row."""
+    order.refresh_from_db()
+    return {'id': str(order.pk), 'fulfilment_revision': order.fulfilment_revision,
+            'fulfilment_status': order.fulfilment_status, 'order_status': order.order_status}
+
+
+class KitchenFeedCompletenessTests(TestCase):
+    """Review of #357: the kitchen feeds were held only to the tickets they RETURNED.
+
+    An eligible active ticket could vanish while a correct per-order state read made the
+    check PASS; a pending order served on the completed feed, a cancelled, deleted or
+    draft one on the active feed, and a repeated ticket all passed too. Each feed is now
+    held to the stored orders its own endpoint predicate selects.
+    """
+
+    def setUp(self):
+        from django.utils import timezone
+        _settle_readiness()
+        self.v = _venue()
+        t1, t2 = self.v.tables
+        now = timezone.now()
+        self.new = _stored_order(self.v, t1)
+        self.preparing = _stored_order(self.v, t2, order_status='preparing', fulfilment_status='preparing')
+        self.ready = _stored_order(self.v, t1, fulfilment_status='ready')
+        self.served = _stored_order(self.v, t2, order_status='served', fulfilment_status='served',
+                                    served_at=now - timedelta(hours=1))
+        # Stored, and on neither feed: each is one of the endpoints' exclusions.
+        self.aged = _stored_order(self.v, t1, order_status='served', fulfilment_status='served',
+                                  served_at=now - timedelta(hours=25))
+        self.cancelled = _stored_order(self.v, t1, order_status='cancelled')
+        self.deleted = _stored_order(self.v, t2, deleted=True)
+        self.draft = _stored_order(self.v, t2, order_status='initiated')
+
+    def kitchen(self, order_ids=()):
+        reads, plan = _run_reads(self.v, order_ids)
+        return reads, ru.check_kitchen(reads.done, plan, NOTE)
+
+    def test_CONTROL_the_feeds_and_their_exclusions_pass(self):
+        reads, res = self.kitchen([self.new.pk, self.served.pk, self.draft.pk])
+        self.assertEqual(res['status'], 'PASS', res)
+        ids = {feed: {t['id'] for t in reads.done[f'kitchen.{feed}.{self.v.rid}']['body']['data']}
+               for feed in ('active', 'completed')}
+        self.assertEqual(ids, {'active': {str(o.pk) for o in (self.new, self.preparing, self.ready)},
+                               'completed': {str(self.served.pk)}})
+
+    def test_REGRESSION_an_omitted_eligible_ticket_fails_beside_a_correct_state_read(self):
+        for feed, order in (('active', self.new), ('completed', self.served)):
+            with self.subTest(feed=feed), \
+                    _feed_fault(feed, lambda data, oid=str(order.pk): [t for t in data if t['id'] != oid]):
+                reads, res = self.kitchen([order.pk])
+                self.assertEqual(res['rows'][f'state.{order.pk}'], 'PASS')   # the state read is right
+                self.assertFailsWith(res, f'1 {feed} ticket(s) are missing')
+
+    def test_REGRESSION_a_ticket_on_the_wrong_feed_fails(self):
+        cases = (('completed', self.new), ('completed', self.aged), ('active', self.served),
+                 ('active', self.cancelled), ('active', self.deleted), ('active', self.draft))
+        for feed, order in cases:
+            with self.subTest(feed=feed, order=order.order_status), \
+                    _feed_fault(feed, lambda data, order=order: data + [_ticket(order)]):
+                self.assertFailsWith(self.kitchen()[1], f'are not orders the {feed} feed serves')
+
+    def test_REGRESSION_a_repeated_ticket_fails(self):
+        for feed in ('active', 'completed'):
+            with self.subTest(feed=feed), _feed_fault(feed, lambda data: data + data[:1]):
+                self.assertFailsWith(self.kitchen()[1], f'1 {feed} ticket(s) are served twice')
+
+    def test_a_ticket_that_disagrees_or_is_unreadable_fails(self):
+        def bump(data):
+            data[0] = dict(data[0], fulfilment_revision=data[0]['fulfilment_revision'] + 1)
+            return data
+        for name, fault, phrase in (('disagrees', bump, 'disagree with the stored order'),
+                                    ('unreadable', lambda data: data + [None], 'carry no order id'),
+                                    ('foreign id', lambda data: data + [dict(data[0], id=U1)],
+                                     'are not orders the active feed serves')):
+            with self.subTest(fault=name), _feed_fault('active', fault):
+                self.assertFailsWith(self.kitchen()[1], phrase)
+
+    def test_legitimately_empty_feeds_are_never_a_failure_and_compare_nothing(self):
+        from orders_app.models import Order
+        Order.objects.filter(pk__in=[o.pk for o in (self.new, self.preparing, self.ready, self.served)]) \
+            .update(order_status='cancelled')
+        reads, res = self.kitchen()
+        self.assertEqual([reads.done[f'kitchen.{f}.{self.v.rid}']['body']['data'] for f in ('active', 'completed')],
+                         [[], []])
+        self.assertEqual((res['status'], res['rows'][f'feeds.{self.v.rid}']),
+                         ('INCOMPLETE', 'EMPTY: neither feed holds an order'), res)
+        # An ineligible sampled order is still compared through its state read.
+        self.assertEqual(self.kitchen([self.draft.pk])[1]['status'], 'PASS')
+
+    def assertFailsWith(self, res, phrase):
+        self.assertEqual(res['status'], 'FAIL', res)
+        self.assertIn(phrase, json.dumps(res), res)
+
+    def test_a_restaurant_with_no_orders_compares_nothing(self):
+        v = _venue(phone='256700000973', name='Quiet')
+        reads, plan = _run_reads(v)
+        self.assertEqual(ru.check_kitchen(reads.done, plan, NOTE)['status'], 'INCOMPLETE')
+
+
+class KitchenFeedWindowTests(TestCase):
+    """The completed feed's rolling window, held to the instants either side of the read.
+
+    The endpoint asks ``served_at >= now - COMPLETED_WINDOW`` at one instant inside the
+    read. An order inside the window at BOTH ends must be served; one outside it at both
+    ends must not; one that crossed the boundary during the read may go either way. The
+    endpoint's clock is pinned to a chosen instant inside the read, and the read is held
+    open after it, so all three bands are wide enough to place an order in.
+    """
+    HOLD = 0.5
+
+    def setUp(self):
+        _settle_readiness()
+        self.v = _venue()
+
+    def read(self, offsets, fault=None):
+        """Orders served at ``mid - WINDOW + offset``; then both feeds read with ``now = mid``."""
+        from django.utils import timezone as real_tz
+        from orders_app import endpoints_kitchen as ek
+        mid = real_tz.now() + timedelta(seconds=2.0)
+        orders = {name: _stored_order(self.v, self.v.tables[0], order_status='served', fulfilment_status='served',
+                                      served_at=mid - ek.COMPLETED_WINDOW + timedelta(seconds=off))
+                  for name, off in offsets.items()}
+
+        def now():
+            while real_tz.now() < mid:
+                time.sleep(0.01)
+            return mid
+
+        real_get = ek.CompletedKitchenOrdersView.get
+
+        def held(view, request, *args, **kwargs):
+            resp = real_get(view, request, *args, **kwargs)
+            time.sleep(self.HOLD)                           # the read is still open after ``now``
+            if fault is not None:
+                resp.data['data'] = fault(list(resp.data['data']), orders)
+            return resp
+
+        reads = ru.Reads(self.v.owner)
+        with mock.patch.object(ek, 'timezone', SimpleNamespace(now=now)), \
+                mock.patch.object(ek.CompletedKitchenOrdersView, 'get', held):
+            reads.get(f'kitchen.active.{self.v.rid}', reads.staff, '/api/v1/kitchen/orders/active/',
+                      {'restaurant': self.v.rid})
+            reads.get(f'kitchen.completed.{self.v.rid}', reads.staff, '/api/v1/kitchen/orders/completed/',
+                      {'restaurant': self.v.rid})
+        before, after = reads.done[f'kitchen.completed.{self.v.rid}']['window']
+        self.assertTrue(before <= mid - timedelta(seconds=0.3) and after >= mid + timedelta(seconds=self.HOLD),
+                        'the read did not bracket the pinned instant; the bands were not built')
+        served = {t['id'] for t in reads.done[f'kitchen.completed.{self.v.rid}']['body']['data']}
+        plan = {'kitchen_cover': {self.v.rid: True}, 'orders': {}}
+        return ru.check_kitchen(reads.done, plan, NOTE), orders, served
+
+    def test_CONTROL_a_boundary_inside_the_read_is_tolerated_either_way(self):
+        res, orders, served = self.read({'inside': 3.0, 'crossed_kept': 0.2, 'crossed_dropped': -0.2,
+                                         'outside': -5.0})
+        # The endpoint kept the one still inside at ``mid`` and dropped the one past it.
+        self.assertEqual(served, {str(orders['inside'].pk), str(orders['crossed_kept'].pk)})
+        self.assertEqual(res['status'], 'PASS', res)
+
+    def test_REGRESSION_an_order_inside_the_window_throughout_must_be_served(self):
+        res, _, _ = self.read({'inside': 3.0},
+                              fault=lambda data, orders: [t for t in data if t['id'] != str(orders['inside'].pk)])
+        self.assertEqual(res['status'], 'FAIL', res)
+        self.assertIn('1 completed ticket(s) are missing', json.dumps(res))
+
+    def test_an_order_outside_the_window_throughout_must_not_be_served(self):
+        res, _, _ = self.read({'inside': 3.0, 'outside': -5.0},
+                              fault=lambda data, orders: data + [_ticket(orders['outside'])])
+        self.assertEqual(res['status'], 'FAIL', res)
+        self.assertIn('are not orders the completed feed serves', json.dumps(res))
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(prefix='restore-usability-media-'))

@@ -154,6 +154,14 @@ WHAT THE READS PROVE, AND WHAT THEY DO NOT
 * ``I.order_reads`` holds the published lines to the SAVED lines by identity, quantity
   and saved name: ``items`` lists every row with all its children, ``quote`` the live
   dishes with their live children (``group_live_children``, the endpoint's own split).
+* ``I.staff_reads`` holds each list read to page 1 at the application's default size:
+  exactly the first ``min(total, 25)`` stored rows in the endpoint's order, with metadata
+  stating that page of that population. A full first page passes; no further page is read.
+* ``I.kitchen_state`` holds each kitchen feed to the stored orders its endpoint selects:
+  every ticket is an order that feed serves, once, agreeing with the stored row, and every
+  order it must serve is there. The completed feed's window is evaluated at both ends of
+  the read. A correct per-order state read never stands in for a feed, and feeds with
+  nothing to serve compare nothing.
 * Staff reads are authorised in process (``force_authenticate``) for ONE named, existing,
   active, established restaurant user; the refusals the customer JWT path applies are
   restated, and JWT verification is NOT exercised. Only an ORIGINAL, unexpired bearer
@@ -2026,21 +2034,92 @@ def check_order_reads(done, orders):
     return check('PASS' if covered == len(rows) else 'INCOMPLETE', orders=rows, covered=covered)
 
 
-def page_problems(read, expected_ids, total):
-    """A paginated staff read: the records are exactly drawn from the expected set."""
+#: The staff list reads name no page, so the application answers page 1 at its paginator's
+#: default size (``misc_app.controllers.paginator.DinifyPaginator``). That is the page
+#: contract each read is held to; if the default moves, the read fails rather than a
+#: different page being compared quietly.
+STAFF_PAGE = 1
+STAFF_PAGE_SIZE = 25
+_ABSENT = object()
+
+
+def endpoint_order_terms(model, prefix='', descending=False, depth=0):
+    """``model``'s ``Meta.ordering`` as the database applies it to a staff list read.
+
+    ``Secretary.read`` filters the model and keeps its default ordering. A relation term
+    sorts by the related model's own ordering, recursively and with its direction carried,
+    which is how Django expands it.
+    """
+    terms = []
+    for term in model._meta.ordering:
+        flip = term.startswith('-')
+        name = term.lstrip('-')
+        field = model._meta.pk if name == 'pk' else model._meta.get_field(name)
+        desc = flip != descending
+        if field.is_relation and field.related_model._meta.ordering and depth < 3:
+            terms += endpoint_order_terms(field.related_model, f'{prefix}{name}__', desc, depth + 1)
+        else:
+            terms.append(('-' if desc else '') + prefix + name)
+    return terms
+
+
+def endpoint_ranks(queryset):
+    """Each stored row's place in the endpoint's order; rows with equal sort keys share one.
+
+    The database ranks the rows by the endpoint's own ordering (its collation, its NULL
+    placement), so when tied rows straddle the end of the page, whichever of them the
+    database put there is still page 1.
+    """
+    from django.db.models import Window
+    from django.db.models.functions import DenseRank
+    order = endpoint_order_terms(queryset.model)
+    rows = queryset.annotate(restore_usability_rank=Window(DenseRank(), order_by=order)) \
+        .values_list('id', 'restore_usability_rank')
+    return {str(i): rank for i, rank in rows}
+
+
+def _stated(value):
+    return 'missing' if value is _ABSENT else repr(value)[:40]
+
+
+def page_problems(read, queryset):
+    """A staff list read is page 1 of the stored rows: complete for its size, in order.
+
+    ``queryset`` is the population the endpoint lists. The page must hold exactly
+    ``min(total, STAFF_PAGE_SIZE)`` distinct stored rows, the first ones in the endpoint's
+    order, and its metadata must state page 1 of exactly that population. A record that is
+    not a stored row, or appears twice, still fails as before. Missing or malformed
+    metadata is a problem, never a default, and a further page is never read.
+    """
     if read is None:
         return ['the read was not made']
     body = read['body'] or {}
     data = body.get('data') if isinstance(body, dict) else None
     if read['status'] != 200 or not isinstance(data, dict) or not isinstance(data.get('records'), list):
         return [f'answered {read["status"]} without a record page']
-    pagination = data.get('pagination') if isinstance(data.get('pagination'), dict) else {}
+    ranks = endpoint_ranks(queryset)
+    total = len(ranks)
     ids = [r.get('id') if isinstance(r, dict) else None for r in data['records']]
     problems = []
-    if any(i not in expected_ids for i in ids) or len(set(ids)) != len(ids):
+    if any(i not in ranks for i in ids) or len(set(ids)) != len(ids):
         problems.append('a record is not one of the stored rows it should be drawn from')
-    if pagination.get('total_records') != total:
-        problems.append(f'total_records is {pagination.get("total_records")!r}, the store holds {total}')
+    size = min(total, STAFF_PAGE_SIZE)
+    if len(ids) != size:
+        problems.append(f'page {STAFF_PAGE} holds {len(ids)} record(s); of the {total} stored it must hold {size}')
+    elif not problems and sorted(ranks[i] for i in ids) != sorted(ranks.values())[:size]:
+        problems.append(f"the records are not page {STAFF_PAGE} in the endpoint's order")
+    pagination = data.get('pagination')
+    if not isinstance(pagination, dict):
+        return problems + ['the page carries no pagination metadata']
+    stated = {'paginated': True, 'total_records': total, 'page_size': STAFF_PAGE_SIZE,
+              'current_page': STAFF_PAGE, 'number_of_pages': max(1, -(-total // STAFF_PAGE_SIZE)),
+              'has_next': total > STAFF_PAGE * STAFF_PAGE_SIZE, 'has_previous': STAFF_PAGE > 1}
+    for key, want in stated.items():
+        got = pagination.get(key, _ABSENT)
+        typed = isinstance(got, bool) if isinstance(want, bool) else \
+            isinstance(got, int) and not isinstance(got, bool)
+        if not typed or got != want:
+            problems.append(f'pagination {key} is {_stated(got)}; page {STAFF_PAGE} of {total} states {want!r}')
     return problems
 
 
@@ -2051,14 +2130,11 @@ def check_staff_reads(done, plan, principal_note):
         return check('UNAVAILABLE', reason=principal_note)
     rows = {}
     for rid, sections in plan['menu_cover'].items():
-        stored = {str(s) for s in MenuSection.objects.filter(restaurant_id=rid, deleted=False)
-                  .values_list('id', flat=True)}
-        problems = page_problems(done.get(f'staff.sections.{rid}'), stored, len(stored))
+        problems = page_problems(done.get(f'staff.sections.{rid}'),
+                                 MenuSection.objects.filter(restaurant_id=rid, deleted=False))
         for sid in sections:
-            items = {str(i) for i in MenuItem.objects.filter(section_id=sid, deleted=False)
-                     .values_list('id', flat=True)}
-            problems += [f'section {sid}: {p}' for p in page_problems(done.get(f'staff.items.{sid}'), items,
-                                                                       len(items))]
+            problems += [f'section {sid}: {p}' for p in page_problems(
+                done.get(f'staff.items.{sid}'), MenuItem.objects.filter(section_id=sid, deleted=False))]
         if plan['sections_skipped'].get(rid):
             problems.append(f'INCOMPLETE: {plan["sections_skipped"][rid]} section(s) past the limit were not read')
         rows[rid] = 'PASS' if not problems else '; '.join(problems[:5])
@@ -2066,9 +2142,8 @@ def check_staff_reads(done, plan, principal_note):
         from dinify_backend.configss.string_definitions import MODULE_SETTINGS
         from restaurants_app.models import Restaurant
         allowed = get_module_restaurant_ids(plan['principal'], MODULE_SETTINGS)
-        stored = {str(r) for r in Restaurant.objects.filter(id__in=allowed, deleted=False)
-                  .values_list('id', flat=True)}
-        problems = page_problems(done.get('staff.restaurants'), stored, len(stored))
+        problems = page_problems(done.get('staff.restaurants'),
+                                 Restaurant.objects.filter(id__in=allowed, deleted=False))
         rows['restaurants'] = 'PASS' if not problems else '; '.join(problems)
     if not rows:
         return check('INCOMPLETE', reason='the principal can read no sampled restaurant', authorisation=principal_note)
@@ -2078,28 +2153,100 @@ def check_staff_reads(done, plan, principal_note):
     return check(status, restaurants=rows, authorisation=principal_note)
 
 
+def kitchen_feed_orders(rid, feed, window):
+    """The stored orders a kitchen feed MUST and MAY serve, by its own endpoint predicate.
+
+    Restates the two querysets in ``orders_app.endpoints_kitchen`` (the views hold them
+    inline). The active feed is clock-free, so the two sets are one. The completed feed
+    keeps an order while ``served_at >= now - COMPLETED_WINDOW`` for the endpoint's
+    ``now``, an instant inside the read: an order inside the window at BOTH ends of the
+    read must be served, one outside it at both ends must not be, and one that crossed
+    the boundary during the read may be either.
+    """
+    from django.db.models import Q
+    from dinify_backend.configss.string_definitions import OrderStatus_Cancelled, OrderStatus_Initiated
+    from orders_app.endpoints_kitchen import COMPLETED_WINDOW
+    from orders_app.models import Order
+    if feed == 'active':
+        rows = Order.objects.filter(~Q(fulfilment_status='served'), deleted=False, restaurant=rid) \
+            .exclude(order_status=OrderStatus_Cancelled).exclude(order_status=OrderStatus_Initiated)
+        ids = {str(i) for i in rows.values_list('id', flat=True)}
+        return ids, ids
+    before, after = window
+    rows = Order.objects.filter(fulfilment_status='served', deleted=False, restaurant=rid) \
+        .exclude(order_status=OrderStatus_Cancelled)
+    must = {str(i) for i in rows.filter(served_at__gte=after - COMPLETED_WINDOW).values_list('id', flat=True)}
+    may = {str(i) for i in rows.filter(served_at__gte=before - COMPLETED_WINDOW).values_list('id', flat=True)}
+    return must, may
+
+
+def _read_window(read):
+    window = read.get('window')
+    if isinstance(window, tuple) and len(window) == 2 and all(isinstance(t, datetime) and t.tzinfo
+                                                                for t in window) and window[0] <= window[1]:
+        return window
+    return None
+
+
+def feed_problems(read, rid, feed):
+    """One kitchen feed held to the stored orders its endpoint selects.
+
+    Every ticket must be an order this feed serves, served once, and agree with the stored
+    row on the identity/status projection; every order the feed must serve must be there.
+    Returns the problems and how many tickets were compared.
+    """
+    from orders_app.models import Order
+    body = (read or {}).get('body')
+    data = body.get('data') if isinstance(body, dict) else None
+    if read is None or read['status'] != 200 or not isinstance(data, list):
+        return [f'{feed} feed answered {(read or {}).get("status")}'], 0
+    window = _read_window(read)
+    if feed == 'completed' and window is None:
+        return ['the completed feed was read with no recorded window'], 0
+    must, may = kitchen_feed_orders(rid, feed, window)
+    tickets, counts = {}, {'unreadable': 0, 'repeated': 0, 'not_this_feed': 0}
+    for ticket in data:
+        tid = ticket.get('id') if isinstance(ticket, dict) else None
+        if not _is_uuid(tid):
+            counts['unreadable'] += 1
+        elif tid in tickets:
+            counts['repeated'] += 1
+        elif tid not in may:
+            tickets[tid] = None
+            counts['not_this_feed'] += 1
+        else:
+            tickets[tid] = ticket
+    fields = ('fulfilment_revision', 'fulfilment_status', 'order_status')
+    stored = {str(row['id']): row for row in Order.objects.filter(pk__in=[t for t, v in tickets.items() if v])
+              .values('id', *fields)}
+    disagree = sum(1 for tid, ticket in tickets.items()
+                   if ticket is not None and any(ticket.get(f) != stored[tid][f] for f in fields))
+    missing = len(must - set(tickets))
+    problems = [f'{n} {feed} ticket(s) {what}' for n, what in (
+        (counts['unreadable'], 'carry no order id'),
+        (counts['repeated'], 'are served twice'),
+        (counts['not_this_feed'], f'are not orders the {feed} feed serves'),
+        (disagree, 'disagree with the stored order'),
+        (missing, f'are missing: stored orders the {feed} feed must serve')) if n]
+    compared = sum(1 for ticket in tickets.values() if ticket is not None)
+    return problems, (0 if problems else compared)
+
+
 def check_kitchen(done, plan, principal_note):
     from orders_app.models import Order
     if not principal_note.startswith('in-process'):
         return check('UNAVAILABLE', reason=principal_note)
-    rows, covered = {}, 0
+    rows, covered, tickets = {}, 0, 0
     for rid in plan['kitchen_cover']:
-        problems = []
+        problems, compared = [], 0
         for feed in ('active', 'completed'):
-            read = done.get(f'kitchen.{feed}.{rid}')
-            data = (read or {}).get('body', {}).get('data') if isinstance((read or {}).get('body'), dict) else None
-            if read is None or read['status'] != 200 or not isinstance(data, list):
-                problems.append(f'{feed} feed answered {(read or {}).get("status")}')
-                continue
-            for ticket in data:
-                order = Order.objects.filter(pk=(ticket or {}).get('id'), restaurant_id=rid).first() \
-                    if isinstance(ticket, dict) and _is_uuid(ticket.get('id')) else None
-                if order is None or ticket.get('fulfilment_revision') != order.fulfilment_revision \
-                        or ticket.get('fulfilment_status') != order.fulfilment_status \
-                        or ticket.get('order_status') != order.order_status:
-                    problems.append(f'a {feed} ticket disagrees with the stored order')
-                    break
-        rows[f'feeds.{rid}'] = 'PASS' if not problems else 'FAIL: ' + '; '.join(problems)
+            found, n = feed_problems(done.get(f'kitchen.{feed}.{rid}'), rid, feed)
+            problems += found
+            compared += n
+        tickets += compared
+        # A feed with nothing to serve that serves nothing is right, and compares nothing.
+        rows[f'feeds.{rid}'] = 'FAIL: ' + '; '.join(problems) if problems else \
+            (f'PASS: {compared} ticket(s)' if compared else 'EMPTY: neither feed holds an order')
     for oid, entry in plan['orders'].items():
         read = done.get(f'kitchen.state.{oid}')
         if read is None:
@@ -2117,9 +2264,11 @@ def check_kitchen(done, plan, principal_note):
         return check('INCOMPLETE', reason='the principal can read no sampled kitchen', authorisation=principal_note)
     if any(v.startswith('FAIL') for v in rows.values()):
         return check('FAIL', rows=rows)
+    if not tickets and not covered:
+        return check('INCOMPLETE', rows=rows, reason='no feed ticket and no order state was compared')
     if not covered and plan['orders']:
         return check('INCOMPLETE', rows=rows, reason='no sampled order was read from the kitchen')
-    return check('PASS', rows=rows, orders_compared=covered)
+    return check('PASS', rows=rows, tickets_compared=tickets, orders_compared=covered)
 
 
 def order_observations(sample):
