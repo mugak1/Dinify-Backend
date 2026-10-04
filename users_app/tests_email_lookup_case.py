@@ -20,6 +20,13 @@ pinned as CONTROLS, because the obvious fixes get them wrong:
   casing every lookup would send the first account's owner to the second account.
 - ``User.email`` is not unique. An address several accounts share is refused exactly as
   it was before — this change does not fix that, and must not make it worse.
+
+D11 E-R1 then changed the RESET half of that last point, and only that half. Reset
+initiation no longer returns ``user_id`` (it answers every identity it acknowledges
+alike), so these tests establish which account a reset started for by the challenge
+issued to it. And reset treats an address several accounts share as ineligible —
+acknowledged, nothing issued — where it used to raise. Login is unchanged and its
+control below still pins the raise.
 """
 from unittest.mock import patch
 
@@ -30,9 +37,20 @@ from rest_framework.test import APIClient
 from dinify_backend.configss.messages import MESSAGES
 from users_app.controllers.login import login
 from users_app.controllers.otp_manager import OtpManager
-from users_app.controllers.reset_password import initiate_password_reset, reset_password
+from users_app.controllers.reset_password import (
+    RESET_ACKNOWLEDGEMENT,
+    initiate_password_reset,
+    reset_password,
+)
 from users_app.controllers.update_user_profile import self_update_user_profile
-from users_app.models import User
+from users_app.models import User, UserOtp
+
+ACKNOWLEDGED = {'status': 200, 'message': RESET_ACKNOWLEDGEMENT}
+
+
+def _reset_issued_for(user):
+    """Whether a reset challenge exists for ``user`` (the acknowledgement names no one)."""
+    return UserOtp.objects.filter(user=user, purpose='reset-password').exists()
 
 
 PASSWORD = 'correct-horse'
@@ -158,8 +176,8 @@ class PasswordResetEmailCaseTests(TestCase):
 
     def test_a_mixed_case_email_can_reset_the_password(self, *mocks):
         started = initiate_password_reset('Diner@Example.com')
-        self.assertEqual(started['status'], 200, started)
-        self.assertEqual(started['data']['user_id'], str(self.diner.id))
+        self.assertEqual(started, ACKNOWLEDGED)
+        self.assertTrue(_reset_issued_for(self.diner))
 
         OtpManager().make_otp(user=self.diner, purpose='reset-password')
         finished = reset_password('Diner@Example.com', '1234')  # ENV=dev fixes the code
@@ -168,34 +186,35 @@ class PasswordResetEmailCaseTests(TestCase):
     def test_a_phone_number_reset_is_unchanged(self, *mocks):
         """CONTROL."""
         started = initiate_password_reset('256772000101')
-        self.assertEqual(started['status'], 200, started)
-        self.assertEqual(started['data']['user_id'], str(self.diner.id))
+        self.assertEqual(started, ACKNOWLEDGED)
+        self.assertTrue(_reset_issued_for(self.diner))
 
     def test_an_address_typed_exactly_still_resets_its_own_account(self, *mocks):
         """CONTROL: lower-casing every lookup would reset the twin's password instead."""
         User.objects.filter(pk=self.diner.pk).delete()
         lower, mixed = _twin_accounts(self)
 
-        self.assertEqual(
-            initiate_password_reset('Diner@Example.com')['data']['user_id'], str(mixed.id),
-        )
-        self.assertEqual(
-            initiate_password_reset('diner@example.com')['data']['user_id'], str(lower.id),
-        )
+        self.assertEqual(initiate_password_reset('Diner@Example.com'), ACKNOWLEDGED)
+        self.assertTrue(_reset_issued_for(mixed))
+        self.assertFalse(_reset_issued_for(lower))
 
-    def test_a_shared_address_is_refused_exactly_as_before(self, *mocks):
+        self.assertEqual(initiate_password_reset('diner@example.com'), ACKNOWLEDGED)
+        self.assertTrue(_reset_issued_for(lower))
+
+    def test_a_shared_address_selects_no_account(self, *mocks):
         """
-        CONTROL, RECORDED NOT ENDORSED: an address two accounts share.
+        An address two accounts share (D11 E-R1).
 
-        Typed exactly it raises ``MultipleObjectsReturned``, as it always has. Typed in
-        other capitals it is still the clean "no such account" 400 — a fallback that
-        simply fetched the lower-cased address would have turned it into a 500.
+        Typed exactly it used to raise ``MultipleObjectsReturned`` out of reset, a 500.
+        Reset now treats it as ineligible: the same acknowledgement every other identity
+        gets, and no challenge for EITHER account — choosing one would send a code to a
+        phone the requester may not own. Typed in other capitals it was already "no such
+        account" and is acknowledged the same way. Login still raises; its own control
+        above pins that, because the shared resolver is unchanged.
         """
-        _account('256772000102', 'diner@example.com')
+        twin = _account('256772000102', 'diner@example.com')
 
-        with self.assertRaises(User.MultipleObjectsReturned):
-            initiate_password_reset('diner@example.com')
-
-        refused = initiate_password_reset('Diner@Example.com')
-        self.assertEqual(refused['status'], 400)
-        self.assertEqual(refused['message'], MESSAGES.get('NO_PHONE_NUMBER'))
+        self.assertEqual(initiate_password_reset('diner@example.com'), ACKNOWLEDGED)
+        self.assertEqual(initiate_password_reset('Diner@Example.com'), ACKNOWLEDGED)
+        self.assertFalse(_reset_issued_for(self.diner))
+        self.assertFalse(_reset_issued_for(twin))

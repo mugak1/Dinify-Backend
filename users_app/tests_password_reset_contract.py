@@ -14,9 +14,12 @@ it, so every reset from the web app answered 500, by email and by phone alike.
 The view now reads ``identifier``, falling back to ``phone_number`` so an older client
 keeps working, and answers a request that names no one with a 400. ``identification``
 stays advisory: ``_resolve_user`` already tells an email from a phone by the ``@``.
-Every refusal ``_resolve_user`` makes (no such account, a platform-staff account, an
-identity not yet claimed) still reaches the caller as the same ``NO_PHONE_NUMBER`` 400,
-so the new field discloses nothing the old one did not.
+
+D11 E-R1 changed what initiation ANSWERS, not what it reads. An eligible account and
+every identity ``_resolve_user`` refuses (no such account, a platform-staff account, an
+identity not yet claimed) now receive the same 200 acknowledgement with no ``user_id``,
+so these tests establish WHICH account was started by the reset challenge issued for
+it, never by a field in the response.
 
 Every request goes through the real URL, throttle and view, because the defect lived
 between the request body and the controller, where a controller-level test cannot see.
@@ -32,7 +35,8 @@ from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
 )
-from users_app.models import User
+from users_app.controllers.reset_password import RESET_ACKNOWLEDGEMENT
+from users_app.models import User, UserOtp
 
 
 INITIATE = '/api/v1/users/auth/initiate-reset-password/'
@@ -65,8 +69,13 @@ class PasswordResetRequestShapeTests(TestCase):
         return self.client.post(url, body, format='json')
 
     def _assert_started(self, response):
+        # The acknowledgement names no account; the challenge issued for it does.
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(response.json()['data']['user_id'], str(self.account.id))
+        self.assertEqual(response.json(), {'status': 200, 'message': RESET_ACKNOWLEDGEMENT})
+        self.assertEqual(
+            list(UserOtp.objects.values_list('user_id', 'purpose')),
+            [(self.account.id, 'reset-password')],
+        )
 
     def _assert_completed(self, response):
         self.assertEqual(response.status_code, 200, response.content)
@@ -116,8 +125,12 @@ class PasswordResetRequestShapeTests(TestCase):
                         response.json()['message'], MESSAGES.get('NO_RESET_IDENTIFIER'),
                     )
 
-    def test_every_refusal_is_still_the_same_generic_400(self, *mocks):
-        """No such account, a platform-staff account and an unclaimed one look alike."""
+    def test_every_refusal_is_the_same_acknowledgement_and_issues_nothing(self, *mocks):
+        """
+        No such account, a platform-staff account and an unclaimed one look alike — and,
+        since D11 E-R1, alike with an eligible account: the uniform 200 acknowledgement,
+        with nothing issued for any of them.
+        """
         User.objects.create_user(
             username='ops', email='staff@example.com', password='password',
             account_type=ACCOUNT_TYPE_PLATFORM_STAFF,
@@ -136,11 +149,12 @@ class PasswordResetRequestShapeTests(TestCase):
         answers = []
         for body in bodies:
             response = self._post(INITIATE, body)
-            self.assertEqual(response.status_code, 400, (body, response.content))
+            self.assertEqual(response.status_code, 200, (body, response.content))
             answers.append(response.json())
-        self.assertEqual(answers[0], {'status': 400, 'message': MESSAGES.get('NO_PHONE_NUMBER')})
+        self.assertEqual(answers[0], {'status': 200, 'message': RESET_ACKNOWLEDGEMENT})
         self.assertEqual(answers[1], answers[0])
         self.assertEqual(answers[2], answers[0])
+        self.assertFalse(UserOtp.objects.exists())
 
     def test_the_reset_is_still_throttled(self, *mocks):
         """CONTROL: five requests a minute per client, shared by both actions."""
