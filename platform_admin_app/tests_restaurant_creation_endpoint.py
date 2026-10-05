@@ -263,7 +263,10 @@ class CreateWithNewOwnerTests(_CreationEndpointTestCase):
         from rest_framework_simplejwt.tokens import RefreshToken
 
         from users_app.controllers.login import login
-        from users_app.controllers.reset_password import initiate_password_reset
+        from users_app.controllers.reset_password import (
+            RESET_ACKNOWLEDGEMENT, initiate_password_reset,
+        )
+        from users_app.models import UserOtp
 
         # Login: refused even after a password is forced onto the account.
         self.owner.set_password('forced-password')
@@ -273,9 +276,14 @@ class CreateWithNewOwnerTests(_CreationEndpointTestCase):
         )
 
         # Generic password reset: refused at the resolver, indistinguishably from an
-        # account that does not exist.
+        # account that does not exist — and, since D11 E-R1, from an eligible one too:
+        # the same acknowledgement, with no reset challenge issued for this owner.
         self.assertEqual(
-            initiate_password_reset(self.owner.username)['status'], 400,
+            initiate_password_reset(self.owner.username),
+            {'status': 200, 'message': RESET_ACKNOWLEDGEMENT},
+        )
+        self.assertFalse(
+            UserOtp.objects.filter(user=self.owner, purpose='reset-password').exists(),
         )
 
         # A fabricated access token: refused at presentation.

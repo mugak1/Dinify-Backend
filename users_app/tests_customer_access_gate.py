@@ -44,7 +44,7 @@ from users_app import customer_access
 from users_app.controllers.login import login
 from users_app.controllers.otp_manager import OtpManager
 from users_app.controllers.reset_password import (
-    _resolve_user, initiate_password_reset, reset_password,
+    RESET_ACKNOWLEDGEMENT, _resolve_user, initiate_password_reset, reset_password,
 )
 from users_app.models import User, UserOtp
 
@@ -391,9 +391,13 @@ class PendingPasswordResetRefusedTests(TestCase):
         self.assertIsNone(_resolve_user(self.user.username))
 
     def test_initiate_reset_is_refused_and_sends_no_otp(self, *mocks):
+        """
+        Refused, and since D11 E-R1 refused SILENTLY: the same acknowledgement an
+        eligible account gets, so the answer no longer tells a caller this identity is
+        pending. What it refuses is unchanged — no challenge, no code sent.
+        """
         response = initiate_password_reset(self.user.username)
-        self.assertEqual(response['status'], 400)
-        self.assertEqual(response['message'], MESSAGES.get('NO_PHONE_NUMBER'))
+        self.assertEqual(response, {'status': 200, 'message': RESET_ACKNOWLEDGEMENT})
         self.assertFalse(UserOtp.objects.filter(user=self.user).exists())
 
     def test_completing_the_reset_directly_is_refused(self, *mocks):
@@ -402,8 +406,7 @@ class PendingPasswordResetRefusedTests(TestCase):
         enough — which is why the gate lives in the shared resolver.
         """
         response = reset_password(self.user.username, DEV_OTP)
-        self.assertEqual(response['status'], 400)
-        self.assertEqual(response['message'], MESSAGES.get('NO_PHONE_NUMBER'))
+        self.assertEqual(response, {'status': 400, 'message': 'Invalid OTP.'})
 
     def test_even_a_valid_pre_existing_reset_otp_cannot_claim_the_account(self, *mocks):
         """

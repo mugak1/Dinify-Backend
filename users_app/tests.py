@@ -12,7 +12,9 @@ from dinify_backend.configss.string_definitions import (
 from users_app.controllers.self_register import self_register
 from users_app.controllers.login import login
 from users_app.controllers.change_password import change_password
-from users_app.controllers.reset_password import reset_password, initiate_password_reset
+from users_app.controllers.reset_password import (
+    RESET_ACKNOWLEDGEMENT, reset_password, initiate_password_reset,
+)
 from users_app.models import User, UserOtp
 from users_app.controllers.otp_manager import OtpManager, OTP_MAX_ATTEMPTS
 from users_app.throttles import OtpIdentifierThrottle
@@ -238,13 +240,18 @@ class PasswordResetSecurityTests(TestCase):
         seed_user()
 
     def test_initiate_sends_otp(self, *mocks):
+        # D11 E-R1: the answer is the uniform acknowledgement and names no account;
+        # the reset challenge issued for this user is what shows it was started.
         response = initiate_password_reset(TEST_PHONE)
-        self.assertEqual(response.get('status'), 200)
-        self.assertIn('OTP has been sent', response.get('message'))
+        self.assertEqual(response, {'status': 200, 'message': RESET_ACKNOWLEDGEMENT})
+        self.assertTrue(UserOtp.objects.filter(
+            user__phone_number=TEST_PHONE, purpose='reset-password').exists())
 
     def test_initiate_unknown_user(self, *mocks):
+        # D11 E-R1: acknowledged exactly like a known user, and nothing is issued.
         response = initiate_password_reset('0000000000')
-        self.assertEqual(response.get('status'), 400)
+        self.assertEqual(response, {'status': 200, 'message': RESET_ACKNOWLEDGEMENT})
+        self.assertFalse(UserOtp.objects.exists())
 
     def test_reset_with_valid_otp(self, *mocks):
         """Reset with valid OTP returns a token and sets prompt_password_change."""

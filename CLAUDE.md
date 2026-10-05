@@ -1370,6 +1370,39 @@ so keep it current when conventions change.
   - **Rollback** keeps the tables and rows; old code stops collection AND automatic
     cleanup. No reverse migration or deletion is authorized.
   - Notes: `docs/engineering/d11-b2-collection.md`; contract: `BREAKING_CHANGES.md` §20
+- Password-reset acknowledgement and purpose binding (D11 E-R1): ✅ PARTIAL — D11
+  itself stays open. Reset INITIATION (`initiate-reset-password`, and legacy
+  `reset-password` with no `otp`) answers ONE body for every identity it acknowledges —
+  an eligible account whose challenge was issued, an unknown identifier, platform staff,
+  a `pending_initial_claim` owner and an email several accounts share exactly:
+  `200 {"status":200,"message":"If these details match an eligible account, check its
+  registered phone or email for a reset code."}`, with **no `user_id`**. Refused
+  identities get no challenge, no accounting row, no SMS/email and no session.
+  **FAILURES ARE NOT ACKNOWLEDGED**: a `make_otp` `False` (pre-send ledger/DB failure,
+  sender failure) keeps its existing 500 and a sender exception still propagates.
+  `NO_RESET_IDENTIFIER` and the identifier-over-`phone_number` precedence are
+  unchanged. COMPLETION answers `400 "Invalid OTP."` for every failure — unknown,
+  refused or ambiguous identity, wrong code, or no live reset challenge — and calls
+  `verify_otp(..., expected_purpose='reset-password')` with **no destination binding**,
+  because initiation issues reset codes with a NULL msisdn and the generic resend with
+  the phone. A newer `login` or `owner-claim` challenge for the same account is
+  therefore never selected, charged, observed as a failure or spent by a reset; before
+  this its code could complete one. An exactly shared email is caught as
+  `MultipleObjectsReturned` IN `reset_password._resolve_user` ONLY (bounded,
+  address-free log); `get_user_by_email` and login are unchanged and login still raises.
+  Each duplicate still resets by its own phone. `ENV=dev`'s `1234`, single use, expiry,
+  the attempt cap, both `save_action` contracts and `make_otp`'s `(user, msisdn)`
+  replacement are unchanged. **STILL OPEN, stated rather than implied:** the 500 and
+  response timing still distinguish an eligible identity — the 500 PERMANENTLY for an
+  account with no destination the environment can send to; the generic `resend-otp`
+  route still answers `purpose='reset-password'` differently for an absent account
+  (400), a pending one (500) and an eligible one (200), so the same question can still
+  be asked there; an anonymous initiation can
+  still replace an in-flight LOGIN challenge (both live in the NULL bucket); generic
+  resend, registration and every rate/abuse limit are unchanged. No migration, so a
+  rollback restores the old disclosures. Pinned by `users_app/tests_reset_acknowledgement.py`.
+  The Frontend wording (Dinify-Frontend `forgot-password`) merges FIRST — see
+  `BREAKING_CHANGES.md` §21
 - MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
   `+`) is the canonical stored/compared form for `User.phone_number` /
   `User.username`, enforced at every write site (registration, profile update,
@@ -3276,8 +3309,10 @@ and locked, so there is nothing about it to undo.
   select an owner — but `users_app.controllers.login` and
   `reset_password._resolve_user` both resolve an address through
   `users_app.controllers.email_lookup.get_user_by_email`, which asks
-  `User.objects.get(email=...)` first, so a duplicate would break email login AND
-  password reset with a **500 for both users**. `update_user_profile` already refuses
+  `User.objects.get(email=...)` first, so a duplicate would break email login with a
+  **500 for both users** (password reset has treated an exactly shared address as
+  ineligible since D11 E-R1 — acknowledged, nothing issued — but that is a reset-only
+  catch, not a fix to the duplicate). `update_user_profile` already refuses
   an email change for exactly this reason. Do not let this policy mutate into "email
   identifies the owner".
   **THAT HELPER TAKES AN ADDRESS IN ANY CAPITALS AND CHANGES NOTHING ELSE**: it tries
@@ -3616,7 +3651,7 @@ consumed by the CURRENT owner) and nothing else.
 | door | where | refusal |
 |---|---|---|
 | login | `login.py`, beside the `platform_staff` check | generic `WRONG_PASSWORD` |
-| password reset | `reset_password._resolve_user` — guards BOTH stages at once | generic `NO_PHONE_NUMBER` |
+| password reset | `reset_password._resolve_user` — guards BOTH stages at once | the uniform E-R1 acknowledgement (initiation) / `Invalid OTP.` (completion) |
 | customer-auth OTP issuance | `OtpManager.make_otp` | `False` (delivery failure) |
 | login-OTP mint sink | `OtpManager.verify_otp` | the shared `invalid` dict |
 | token presentation | `CustomerJWTAuthentication.get_user` | SimpleJWT `user_inactive` |
@@ -4720,10 +4755,11 @@ does fails the build rather than silently bypassing it.
 the locked query** rather than filtering after it — so a challenge issued for something
 else is never selected and is left completely untouched (not consumed, attempt counter
 unmoved). Redemption passes `expected_purpose='owner-claim'` and the LOCKED owner's
-canonical phone. Both default to `None` and change nothing for the four pre-existing
-callers (`self_register`, `reset_password`, the `verify-otp` endpoint,
-`create_employee`), which is pinned by exercising the primitive rather than by reading
-its signature.
+canonical phone. Both default to `None` and change nothing for the three callers that
+pass neither (`self_register`, the `verify-otp` endpoint, `create_employee`), which is
+pinned by exercising the primitive rather than by reading its signature. Password reset
+was the fourth, and since D11 E-R1 binds `expected_purpose='reset-password'` with no
+destination — pinned by its own structural test in `tests_otp_binding.py`.
 
 Purpose binding is load-bearing under `ENV=dev`, where every code is `1234`: the digits
 cannot distinguish a login code from a claim code, so the row must.
@@ -4900,7 +4936,8 @@ coexist, and a purpose-BLIND `verify_otp` still picks the most recent, so a newe
 owner-claim challenge shadows an older login code at the generic verify endpoint. That
 is the same user-visible outcome as before (the row used to be deleted outright), and
 coexistence already occurred on `origin/main` via `resend_otp`, which has always passed
-`msisdn=user.phone_number`. Redemption is immune — it binds purpose AND destination.
+`msisdn=user.phone_number`. Redemption is immune — it binds purpose AND destination —
+and since D11 E-R1 so is password-reset completion, which binds its purpose.
 
 ### NOT BUILT BY THIS STEP
 Invitation delivery of any kind, the Admin creation UI, the restaurant-portal claim UI,

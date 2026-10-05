@@ -9,6 +9,30 @@ Flow:
    client can immediately call change-password.
 
 The plaintext/generated password is never sent over SMS or email.
+
+D11 E-R1 — WHAT THE TWO STAGES SAY, AND WHAT THEY NO LONGER SAY:
+
+* INITIATION ANSWERS ONE ENVELOPE FOR EVERY IDENTITY IT ACKNOWLEDGES. An eligible
+  account whose challenge was issued, an unknown identifier, platform staff, an
+  identity still pending its first owner claim, and an email several accounts share
+  all receive the same 200 ``RESET_ACKNOWLEDGEMENT`` body, with no ``user_id``. It
+  used to answer the first with ``data.user_id`` and the rest with a 400, which made
+  the route an account-existence oracle for anyone holding a phone number or email.
+  FAILURES ARE NOT ACKNOWLEDGED: when ``make_otp`` reports that it could not record
+  or send the challenge, the existing 500 is returned unchanged, so a diner is never
+  told to wait for a code that is not coming. That 500 is reachable only for an
+  eligible identity — for as long as its issuance fails, which for an account with no
+  destination the environment can send to is permanently — so failure and timing still
+  disclose. The generic ``resend-otp`` route is unchanged and still answers an absent
+  account differently. These are stated limits, not claims this module closes them.
+
+* COMPLETION IS BOUND TO A RESET CHALLENGE. ``verify_otp`` is asked for
+  ``purpose='reset-password'`` only, so a newer login or owner-claim challenge for the
+  same account is never selected, charged or consumed here, and its code cannot be
+  spent to reset a password. No origin is required: a reset challenge issued by
+  initiation and one issued by the generic resend route both complete. Every way a
+  completion can fail — no such identity, a refused one, an ambiguous email, a wrong
+  code, or no live reset challenge — answers the same 400 ``Invalid OTP.``.
 """
 import logging
 import secrets
@@ -25,6 +49,26 @@ from users_app import customer_access
 logger = logging.getLogger(__name__)
 
 
+RESET_PURPOSE = 'reset-password'
+
+RESET_ACKNOWLEDGEMENT = (
+    'If these details match an eligible account, check its registered '
+    'phone or email for a reset code.'
+)
+
+INVALID_RESET_CODE = 'Invalid OTP.'
+
+
+def _acknowledgement():
+    """THE one initiation answer for every identity this flow acknowledges."""
+    return {'status': 200, 'message': RESET_ACKNOWLEDGEMENT}
+
+
+def _invalid_code():
+    """THE one completion refusal, whatever the reason."""
+    return {'status': 400, 'message': INVALID_RESET_CODE}
+
+
 def _make_random_password(length=20):
     alphabet = string.ascii_letters + string.digits + string.punctuation
     return ''.join(secrets.choice(alphabet) for _ in range(length))
@@ -32,24 +76,19 @@ def _make_random_password(length=20):
 
 def initiate_password_reset(username):
     """
-    Step 1: verify the user exists, send an OTP for purpose='reset-password'.
+    Step 1: issue an OTP for purpose='reset-password' to an ELIGIBLE identity.
+
+    An identity ``_resolve_user`` does not resolve gets the same acknowledgement and
+    nothing else: no challenge, no accounting row, no SMS or email. A ``make_otp``
+    failure keeps its own 500 — it is never turned into an acknowledgement.
     """
     user = _resolve_user(username)
     if user is None:
-        return {
-            'status': 400,
-            'message': MESSAGES.get('NO_PHONE_NUMBER')
-        }
+        return _acknowledgement()
 
-    otp_sent = OtpManager().make_otp(user=user, purpose='reset-password', origin='reset_initiation')
+    otp_sent = OtpManager().make_otp(user=user, purpose=RESET_PURPOSE, origin='reset_initiation')
     if otp_sent:
-        return {
-            'status': 200,
-            'message': 'An OTP has been sent. Please verify to continue password reset.',
-            'data': {
-                'user_id': str(user.id),
-            }
-        }
+        return _acknowledgement()
 
     return {
         'status': 500,
@@ -77,21 +116,20 @@ def reset_password(username, otp):
             changes=None,
             filter_information=None
         )
-        return {
-            'status': 400,
-            'message': MESSAGES.get('NO_PHONE_NUMBER')
-        }
+        # The legacy call without an OTP is an initiation, and is answered as one.
+        return _acknowledgement() if otp is None else _invalid_code()
 
     if otp is None:
         return initiate_password_reset(username)
 
-    # verify the otp
-    verified_otp = OtpManager().verify_otp(user_id=str(user.id), otp=otp)
+    # Verify against a RESET challenge only. Without the purpose, verify_otp takes
+    # the newest live challenge of any purpose, so a login or owner-claim challenge
+    # issued after the reset one would be charged, and its code would reset the
+    # password. No origin is required: initiation and resend both issue reset codes.
+    verified_otp = OtpManager().verify_otp(
+        user_id=str(user.id), otp=otp, expected_purpose=RESET_PURPOSE)
     if not verified_otp['data']['valid']:
-        return {
-            'status': 400,
-            'message': 'Invalid OTP.'
-        }
+        return _invalid_code()
 
     # Set a random internal password the user will never see.
     # prompt_password_change forces them to set their own.
@@ -141,9 +179,9 @@ def _resolve_user(username):
     """
     Resolve a user ELIGIBLE FOR GENERIC PASSWORD RESET, by email or phone number.
 
-    Two kinds of account resolve to ``None`` — the same result as "no such user", so
-    nothing is disclosed either way, and both refusals therefore reach the caller as
-    the identical ``NO_PHONE_NUMBER`` 400.
+    Three kinds of identity resolve to ``None`` — the same result as "no such user",
+    so nothing is disclosed either way. Initiation answers every one of them with the
+    E-R1 acknowledgement and completion with ``Invalid OTP.``.
 
     PLATFORM STAFF. This flow ends in a customer token mint and, before that,
     overwrites the account password; leaving it open would let anyone who knows an
@@ -165,6 +203,13 @@ def _resolve_user(username):
     written — neither matters if the identity cannot be resolved into this flow at
     all.
 
+    AN EMAIL SEVERAL ACCOUNTS SHARE EXACTLY (D11 E-R1). ``get_user_by_email`` raises
+    ``MultipleObjectsReturned`` for it, which reached the caller as a 500. Reset now
+    treats it as ineligible: choosing one of the accounts would send a code to a
+    phone the requester may not own, and merging them is not this flow's decision.
+    The catch is HERE and nowhere else — the shared resolver and login keep their own
+    behaviour — and each account still resets by its own phone number.
+
     AND RESET IS NOT CLAIM. This must never be "fixed" by consuming the
     ``OwnerInvitation`` from here: password reset never sees the claim credential, so
     it cannot know the right person is on the other end — which is the whole thing the
@@ -176,6 +221,13 @@ def _resolve_user(username):
         else:
             user = User.objects.get(phone_number=username)
     except User.DoesNotExist:
+        return None
+    except User.MultipleObjectsReturned:
+        # This line is bounded and address-free: the identifier is personal data. (The
+        # legacy completion route's existing save_action still records the username, as
+        # it does for every unresolved identity; that contract is unchanged.)
+        logger.info(
+            'password reset: refused (identifier matches more than one account)')
         return None
 
     if user.account_type == ACCOUNT_TYPE_PLATFORM_STAFF:
