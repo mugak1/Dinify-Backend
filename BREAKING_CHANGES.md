@@ -1714,6 +1714,46 @@ opportunistic batch or the command runs.
 ---
 
 
+## 21. Password-reset initiation answers one acknowledgement, and completion is bound to a reset challenge (D11 E-R1)
+
+**Response contract changes (both reset routes).**
+
+- `POST users/auth/initiate-reset-password/`, and `POST users/auth/reset-password/`
+  with no `otp`: every acknowledged identity — eligible and issued, unknown, platform
+  staff, `pending_initial_claim`, and an email several accounts share exactly — answers
+  `200 {"status": 200, "message": "If these details match an eligible account, check its
+  registered phone or email for a reset code."}`. **`data.user_id` is REMOVED.** The
+  refusals used to be `400 NO_PHONE_NUMBER`; the eligible answer used to carry
+  `user_id` and "An OTP has been sent…". An exactly shared email used to be a 500.
+- **Unchanged:** the `NO_RESET_IDENTIFIER` 400 for a request naming no one; the
+  identifier-over-`phone_number` precedence; the throttle; and the issuance FAILURE
+  responses — a `make_otp` that cannot record or send answers the same 500 as before,
+  and is never acknowledged.
+- `POST users/auth/reset-password/` with an `otp`: every failure — unknown, refused or
+  ambiguous identity, wrong code, no live reset challenge — answers
+  `400 {"status": 400, "message": "Invalid OTP."}` (an unknown or refused identity used
+  to answer `NO_PHONE_NUMBER`). The success body is unchanged.
+
+**Behaviour change.** Completion verifies with `expected_purpose='reset-password'` and
+no destination binding. A login or owner-claim challenge for the same account is no
+longer selected, charged or consumed by a reset, and its code no longer completes one.
+
+**Consumer.** The deployed Frontend ignores the initiation body, so the removed
+`user_id` breaks nothing there; its screens said "We sent a one-time code…", which is
+false for a request that matched no one. **CUTOVER: FRONTEND FIRST** (the conditional
+wording PR), confirm its deployment, then this Backend change. Backend first is not
+unsafe — every request still works — it only leaves the old wording claiming a send
+that may not have happened, for the width of the window.
+
+**No migration.** A rollback restores the previous answers, and with them the
+disclosures this removed.
+
+**Not closed.** The 500 and response timing still distinguish an eligible identity (the
+500 permanently, for an account with no sendable destination); `resend-otp` with
+`purpose='reset-password'` still answers absent, pending and eligible accounts
+differently; an anonymous initiation can still replace an in-flight login challenge;
+registration and abuse limits are unchanged. D11 remains open.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
