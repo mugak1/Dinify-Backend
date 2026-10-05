@@ -307,11 +307,12 @@ class OtpManager:
 
         ━━ BACKWARD COMPATIBILITY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        Both default to ``None`` and add NOTHING to the query when omitted, so the four
-        existing callers (``self_register``, ``reset_password``, the ``verify-otp``
-        endpoint and ``create_employee``) behave exactly as before. That is pinned by
-        tests rather than assumed — this is an authentication primitive, and a silent
-        change to what it selects would be felt in three shipped flows.
+        Both default to ``None`` and add NOTHING to the query when omitted, so the
+        callers that pass neither (``self_register``, the ``verify-otp`` endpoint and
+        ``create_employee``) behave exactly as before. That is pinned by tests rather than
+        assumed — this is an authentication primitive, and a silent change to what it
+        selects would be felt in shipped flows. ``reset_password`` binds
+        ``expected_purpose='reset-password'`` and no destination (D11 E-R1).
         """
         # Canonicalise the msisdn so lookups match canonically-stored OTPs.
         # Defensive: on a bad msisdn, leave it raw — the lookup simply finds

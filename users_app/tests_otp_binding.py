@@ -327,16 +327,19 @@ class ExpiryAndConsumptionAreUnchangedTests(TestCase):
 
 class ExistingCallersPassNoBindingsTests(TestCase):
     """
-    The four pre-existing callers must keep calling it the way they always did.
+    The pre-existing callers must keep calling it the way they always did.
 
     Structural, so a future edit that quietly bound one of them — changing what a login
     or a registration accepts — is a deliberate change to this list rather than a silent
     one.
+
+    ``reset_password`` LEFT THIS LIST DELIBERATELY in D11 E-R1, and is pinned by its own
+    test below: it binds the PURPOSE only, so a newer login or owner-claim challenge for
+    the same account is never selected, charged or spent by a reset.
     """
 
     CALLERS = (
         'users_app/controllers/self_register.py',
-        'users_app/controllers/reset_password.py',
         'users_app/endpoints/auth.py',
         'restaurants_app/controllers/create_employee.py',
     )
@@ -360,8 +363,45 @@ class ExistingCallersPassNoBindingsTests(TestCase):
                     self.assertNotIn('expected_purpose', passed)
                     self.assertNotIn('expected_msisdn', passed)
 
+    def test_reset_binds_its_purpose_and_nothing_else(self):
+        """
+        D11 E-R1. Every ``verify_otp`` call in reset passes ``expected_purpose=
+        'reset-password'`` and no destination: a reset code is issued by initiation (no
+        msisdn) AND by the generic resend (the account's phone), and both must complete.
+        """
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        tree = ast.parse(
+            (root / 'users_app/controllers/reset_password.py').read_text(encoding='utf-8'),
+        )
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'verify_otp'
+        ]
+        self.assertEqual(len(calls), 1)
+        keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+        self.assertNotIn('expected_msisdn', keywords)
+        purpose = keywords.get('expected_purpose')
+        self.assertIsNotNone(purpose, 'reset must bind the reset-password purpose')
+        from users_app.controllers.reset_password import RESET_PURPOSE
+        self.assertEqual(RESET_PURPOSE, 'reset-password')
+        self.assertTrue(
+            (isinstance(purpose, ast.Name) and purpose.id == 'RESET_PURPOSE')
+            or (isinstance(purpose, ast.Constant) and purpose.value == 'reset-password'),
+            ast.dump(purpose),
+        )
+
     def test_redemption_is_the_only_bound_caller(self):
-        """Guards the list above from passing because nothing binds at all."""
+        """
+        Guards the list above from passing because nothing binds at all.
+
+        "Bound" here means BOTH purpose and destination. Reset binds its purpose only
+        (D11 E-R1) and is pinned by its own test above, so it is not counted here.
+        """
         import ast
         import pathlib
 
