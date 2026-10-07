@@ -336,11 +336,15 @@ class ExistingCallersPassNoBindingsTests(TestCase):
     ``reset_password`` LEFT THIS LIST DELIBERATELY in D11 E-R1, and is pinned by its own
     test below: it binds the PURPOSE only, so a newer login or owner-claim challenge for
     the same account is never selected, charged or spent by a reset.
+
+    The generic ``verify-otp`` endpoint (``users_app/endpoints/auth.py``) LEFT IT in D11
+    E-R2 for the same reason, and is pinned by its own test below: it binds
+    ``expected_purpose='login'`` only, so a reset, owner-claim or null-purpose challenge
+    is never selected, charged or consumed by the login route.
     """
 
     CALLERS = (
         'users_app/controllers/self_register.py',
-        'users_app/endpoints/auth.py',
         'restaurants_app/controllers/create_employee.py',
     )
 
@@ -395,12 +399,42 @@ class ExistingCallersPassNoBindingsTests(TestCase):
             ast.dump(purpose),
         )
 
+    def test_the_generic_verify_endpoint_binds_login_and_nothing_else(self):
+        """
+        D11 E-R2. The ``verify-otp`` route is the LOGIN route: its single ``verify_otp``
+        call passes ``expected_purpose='login'`` as a literal and no destination. A
+        login challenge is issued with a NULL msisdn by password login and with the
+        account's phone by the login resend, and both must still verify here, so a
+        destination binding would refuse a genuine login.
+        """
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        tree = ast.parse(
+            (root / 'users_app/endpoints/auth.py').read_text(encoding='utf-8'),
+        )
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'verify_otp'
+        ]
+        self.assertEqual(len(calls), 1)
+        keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+        self.assertNotIn('expected_msisdn', keywords)
+        purpose = keywords.get('expected_purpose')
+        self.assertIsNotNone(purpose, 'the verify-otp route must bind the login purpose')
+        self.assertIsInstance(purpose, ast.Constant, ast.dump(purpose))
+        self.assertEqual(purpose.value, 'login')
+
     def test_redemption_is_the_only_bound_caller(self):
         """
         Guards the list above from passing because nothing binds at all.
 
-        "Bound" here means BOTH purpose and destination. Reset binds its purpose only
-        (D11 E-R1) and is pinned by its own test above, so it is not counted here.
+        "Bound" here means BOTH purpose and destination. Reset (D11 E-R1) and the
+        generic ``verify-otp`` endpoint (D11 E-R2) bind their purpose only and are
+        pinned by their own tests above, so neither is counted here.
         """
         import ast
         import pathlib
@@ -428,9 +462,10 @@ class MakeOtpCallersTests(TestCase):
     Which callers record a delivery destination, stated as an inventory.
 
     ``login`` and ``reset_password`` pass NO ``msisdn`` and store ``NULL``; ``resend_otp``
-    and the owner-claim challenge pass one. That difference decides which rows
-    ``make_otp``'s purpose-blind replacement DELETE collides with, so it should be visible
-    rather than rediscovered.
+    and the owner-claim challenge pass one. That difference, together with the purpose,
+    decides which rows ``make_otp``'s replacement DELETE collides with (it has been scoped
+    to ``(user, msisdn, purpose)`` since D11 E-R2), so it should be visible rather than
+    rediscovered.
     """
 
     def test_the_generic_auth_callers_still_store_no_destination(self):
