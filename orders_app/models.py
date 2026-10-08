@@ -245,7 +245,12 @@ class OrderItem(BaseModel):
     the order items
     """
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='order')
-    item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, related_name='item')
+    # PROTECT (D12 B2): an ORM delete of a menu item that any order line names,
+    # directly or through a section/group cascade, raises ProtectedError before
+    # anything is deleted, so catalogue changes cannot destroy purchase history.
+    # It does not cover deleting the order or the line itself, raw SQL, or code
+    # rolled back to CASCADE. The database constraint is unchanged (NO ACTION).
+    item = models.ForeignKey(MenuItem, on_delete=models.PROTECT, related_name='item')
     available = models.BooleanField(default=True)
 
     # tracking options and choices

@@ -1,5 +1,14 @@
 {
   "schema": "dinify.backend.migration-decisions/1",
   "_note": "Reviewed compatibility decisions for migrations the B3 transition may apply automatically. A pending migration with no entry here stops the automated path. Each entry names the migration file's sha256 and its exact operation types (as release/hostprobe.py reports them), a class (expand = an older release still runs against the result; contract or data = it does not, so a maintenance window or forward fix is required) and the reviewing pull request. The evidence may refuse a decision; it never widens one.",
-  "decisions": {}
+  "decisions": {
+    "orders_app.0042_alter_orderitem_item": {
+      "sha256": "4f1d509dad89e606645329b3cc02e620c0dc1435bcfe1305fd6ccf238e0b8b82",
+      "operations": [
+        "AlterField"
+      ],
+      "class": "expand",
+      "reviewedIn": "mugak1/Dinify-Backend#360"
+    }
+  }
 }

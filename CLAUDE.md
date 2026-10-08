@@ -1183,7 +1183,10 @@ so keep it current when conventions change.
   of `snapshot` / `missing`. Before this, a catalogue rename or a soft delete's inline
   vacuum (`<name>_autodelN`) rewrote what a past order said was bought. No migration
   and no backfill. The rule and what it still does not close are under "Key
-  Serializer Notes"; the wire contract is `BREAKING_CHANGES.md` §18
+  Serializer Notes"; the wire contract is `BREAKING_CHANGES.md` §18.
+  **B2 (#360) added retention**: `OrderItem.item` is PROTECT, so an ORM delete of
+  an ordered catalogue row is refused instead of taking the order's lines with it.
+  See "Deletion & Referential Integrity" and `BREAKING_CHANGES.md` §23
 - Request correlation and order-command trace (D15 R2): ✅ `dinify_backend/request_context.py`,
   installed ONCE and OUTERMOST on both planes (`settings_admin.py` re-adds it first, then
   ClientIP; `RequestIDMiddleware` is now an alias). Every HTTP request gets one fresh server
@@ -5562,6 +5565,22 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   referenced as an extra cannot be soft-deleted or demoted (`is_extra` True→False)
   while an active same-restaurant parent still lists it in `extras_applicable`;
   `MenuSection` / `SectionGroup` expose `deletion_blockers()` too
+- ORDER-HISTORY LEG (D12 B2, migration `orders_app/0042`): `OrderItem.item` is
+  `on_delete=PROTECT`. An ORM delete of a `MenuItem` that any order line names,
+  directly or through `SectionGroup`/`MenuSection` CASCADE, raises
+  `ProtectedError` while the collector is still collecting, so nothing is written.
+  Lines flagged `deleted=True` still protect (the collector reads the base
+  manager), and a mixed `QuerySet.delete()` is all-or-nothing. It is enforced by
+  Django, not the database: the constraint stays `NO ACTION DEFERRABLE INITIALLY
+  DEFERRED`. Under CASCADE such a delete removed the lines while the order and its
+  `OrderAcceptance` survived, moved a draft's `quote_ref` (its submit then answered
+  `quote_ref_stale`) and orphaned extras into main dishes. OUT OF SCOPE AND
+  UNCHANGED: deleting an `Order` (its lines go with it, `order` is CASCADE) or a
+  line directly (`parent_item` is SET_NULL), raw SQL, and code rolled back to
+  CASCADE, which brings the old behaviour back and restores nothing it deleted.
+  The supported HTTP delete is a soft delete and never reaches the collector, so
+  no response changed. Do not "fix" a `ProtectedError` by reverting to CASCADE or
+  by deleting the lines. Pinned by `orders_app/tests_order_line_retention.py`
 
 ## Monetary Fields — CRITICAL
 - ALL monetary/financial fields must use `DecimalField`, never `FloatField`
@@ -5839,9 +5858,9 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   empty row name instead of the plain prompt. Nothing in the Frontend displays the
   provenance yet.
   **D12 STAYS OPEN, and these remain unfixed:**
-  - `OrderItem.item` is still `on_delete=CASCADE`, so a hard delete of a purchased
-    `MenuItem` destroys its order lines, and an orphaned extra (`parent_item` is
-    SET_NULL) then reads as a main dish. PROTECT is a proposal only.
+  - Hard deletion of a purchased `MenuItem` is now refused by the ORM
+    (`OrderItem.item` is PROTECT since B2, #360). Deleting an order or a line
+    directly, raw SQL, and a code rollback to CASCADE are still outside it.
   - The kitchen shows `""` and `allergen_tags: []` for a blank legacy row. An unknown
     allergen list is NOT "no allergens".
   - There is no description snapshot.
@@ -6091,7 +6110,7 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
   "Restaurant Lifecycle"; 0057 adds the platform-owned `Restaurant.is_test` flag,
   additive with NO backfill — see "Canonical Data Shapes"),
-  `orders_app/migrations/0041_order_quote_closure.py` (0034 removed the
+  `orders_app/migrations/0042_alter_orderitem_item.py` (0034 removed the
   inline review fields; 0035 adds the launch-boundary `Order.is_test` flag; 0036
   adds the D01 `quantity >= 0` CHECK constraint, additive and reversible with NO
   `RunPython`; 0037 adds `Order.pricing_version`, one `AddField` carrying BOTH
@@ -6127,7 +6146,11 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   BEHAVIOURAL direction needs an operational decision rather than a revert**:
   old code does not consult closures, so while it runs, a draft this build has
   permanently closed could be accepted by it. Prefer a forward fix; hold a
-  rollback across this change),
+  rollback across this change; 0042 (D12 B2) is one generated `AlterField` making
+  `OrderItem.item` PROTECT. It changes Django's model state only: `sqlmigrate`
+  prints a no-op both ways, the constraint stays NO ACTION DEFERRABLE INITIALLY
+  DEFERRED, and no row is touched. A code rollback past it is schema-compatible
+  but brings CASCADE back),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
   `users_app/migrations/0015_otp_accounting.py` (0010 adds

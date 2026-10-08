@@ -1520,10 +1520,10 @@ as the CURRENT catalogue name will now see the purchase name.
 
 ### What this does NOT close (D12 stays open)
 
-- **Hard deletion.** `OrderItem.item` is still `on_delete=CASCADE`, so a hard
-  delete of a purchased `MenuItem` destroys the order's lines, and an orphaned
-  extra (`parent_item` is SET_NULL) then reads as a main dish. PROTECT is a
-  proposal only. A rollback could restore CASCADE, and a waiver is not a repair.
+- **Hard deletion.** When this section was written, `OrderItem.item` was
+  `on_delete=CASCADE`. **Superseded by §23**: it is PROTECT now, so the ORM
+  refuses to delete a purchased `MenuItem`. A rollback could still restore
+  CASCADE, and a waiver is not a repair.
 - **The kitchen gap.** A blank legacy row shows `""` and `allergen_tags: []` on
   the kitchen board. An unknown allergen list is NOT "no allergens", and the
   kitchen serializer is unchanged here.
@@ -1829,6 +1829,37 @@ requests for the same purpose can still leave two live challenges (an existing r
 uniqueness constraint was added, by scope). Allowed resend purposes still answer per
 account (the §21 residual). Requester-bound resend, numerical abuse budgets and their
 enforcement are undecided. D11 remains open.
+
+## 23. Deleting an ordered catalogue row is refused, not cascaded into order lines (D12 B2)
+
+**What changed.** `OrderItem.item` is `on_delete=PROTECT` (was CASCADE). An ORM
+delete of a `MenuItem` that an order line names, or of a `SectionGroup` or
+`MenuSection` that cascades to one, raises `ProtectedError` before anything is
+written. Under CASCADE it deleted those lines while the order and its
+`OrderAcceptance` survived, so the order still stated what was paid without the
+lines that made it up. A draft's recomputed `quote_ref` also moved, so its submit
+answered `quote_ref_stale`, and a parent line's extras became main dishes.
+
+**No API change.** No route hard-deletes catalogue rows. The `restaurant-setup`
+DELETE is a soft delete with an inline rename, so its responses are unchanged,
+including the D06 `purchase_needs_review` refusal of a draft whose dish was
+withdrawn. Shell work, scripts and future code that hard-delete a catalogue row
+an order line still names now get `ProtectedError`; an unordered row deletes as
+before.
+
+**Migration.** `orders_app/0042_alter_orderitem_item` is one generated
+`AlterField`. It changes Django's model state only: `sqlmigrate` prints a no-op
+in both directions, the database constraint stays `NO ACTION DEFERRABLE
+INITIALLY DEFERRED`, and no row is touched. The legacy deploy applies it on
+merge. `release/migration-decisions.json` records it as `expand` for the staged
+B3 path.
+
+**Rollback.** Rolling the code back past this is schema-compatible and brings
+CASCADE back. Nothing deleted under CASCADE comes back.
+
+**Not covered.** Deleting an order (its lines go with it) or a line directly,
+and raw SQL. D12 stays open for descriptions, the kitchen's legacy-row allergen
+display and missing-evidence handling (§18).
 
 ## Summary of frontend changes needed before merge
 
