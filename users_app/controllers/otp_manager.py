@@ -34,6 +34,20 @@ OTP_MAX_ATTEMPTS = 5
 # names the two customer-auth purposes rather than the user.
 CUSTOMER_AUTH_OTP_PURPOSES = frozenset({'login', 'reset-password'})
 
+# The ONLY purposes the generic ``resend-otp`` route issues (D11 E-R2), matched EXACTLY:
+# no case-folding, trimming or other coercion. ``None`` is the purpose an omitted or
+# JSON-null value already meant, and stays accepted. ``owner-claim`` is deliberately
+# absent: its challenge is issued only by the dedicated owner-claim route, which binds
+# it to the invitation and the CURRENT canonical phone, and a generic resend under that
+# purpose replaced that challenge outright.
+#
+# A TUPLE, NOT A SET, ON PURPOSE. Membership in a set hashes the candidate, and a JSON
+# array or object arrives as an unhashable list or dict and would RAISE; a tuple compares
+# by equality, so every JSON value (string, number, boolean, null, array, object) gets
+# an answer.
+GENERIC_RESEND_PURPOSES = ('login', 'reset-password', 'register', None)
+INVALID_RESEND_PURPOSE = {'status': 400, 'message': 'Invalid purpose'}
+
 
 def _otp_pepper() -> bytes:
     """
@@ -158,8 +172,15 @@ class OtpManager:
             with transaction.atomic(durable=True):
                 if user is not None:
                     otp_accounting.hold_subject(user.pk)
-                # delete any old otps associated with the user
-                UserOtp.objects.filter(user=user, msisdn=msisdn).delete()
+                # Replace only this PURPOSE's earlier challenge to the same identity and
+                # destination (D11 E-R2). A challenge issued for another purpose belongs
+                # to another flow, and deleting it interrupted that flow: an anonymous
+                # reset request deleted a login in progress (both store msisdn NULL), and
+                # an account-resolving resend deleted a live owner-claim challenge (both
+                # store the phone), whose correct code was then charged to the
+                # invitation's claim budget. `purpose=None` matches `purpose IS NULL`, so
+                # a null-purpose request still replaces only an earlier null-purpose one.
+                UserOtp.objects.filter(user=user, msisdn=msisdn, purpose=purpose).delete()
                 user_otp.save()
                 otp_accounting.record_issuance(
                     otp_id=user_otp.pk, subject_key=subject_key,
@@ -285,11 +306,16 @@ class OtpManager:
 
         Without it this method picks the most recent live challenge for the identity and
         reads ``purpose`` OFF THE ROW, so "the code was correct" does not mean "the code
-        was issued for what I am about to authorise". For login that is harmless — there
-        is one flow and it checks the purpose after the fact. For owner-claim redemption,
-        which converts a bearer credential into restaurant authority, it is not: a valid
-        login or password-reset code would satisfy it, and under ``ENV=dev`` every code
-        is ``1234``, so the numbers would match by construction.
+        was issued for what I am about to authorise". For owner-claim redemption, which
+        converts a bearer credential into restaurant authority, a valid login or
+        password-reset code would satisfy it, and under ``ENV=dev`` every code is
+        ``1234``, so the numbers would match by construction.
+
+        It was not harmless for login either (D11 E-R2). Unbound, the ``verify-otp`` route
+        took the newest live row of ANY purpose: a newer reset, claim or null-purpose row
+        hid the login code, a wrong guess was charged to that row, and a correct reset or
+        claim code was CONSUMED there, where it mints nothing, so its own flow then failed.
+        That route now binds ``expected_purpose='login'``.
 
         ━━ AND WHY EXPECTED DESTINATION EXISTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -308,11 +334,13 @@ class OtpManager:
         ━━ BACKWARD COMPATIBILITY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
         Both default to ``None`` and add NOTHING to the query when omitted, so the
-        callers that pass neither (``self_register``, the ``verify-otp`` endpoint and
-        ``create_employee``) behave exactly as before. That is pinned by tests rather than
-        assumed — this is an authentication primitive, and a silent change to what it
-        selects would be felt in shipped flows. ``reset_password`` binds
-        ``expected_purpose='reset-password'`` and no destination (D11 E-R1).
+        callers that pass neither (``self_register`` and ``create_employee``) behave
+        exactly as before. That is pinned by tests rather than assumed — this is an
+        authentication primitive, and a silent change to what it selects would be felt in
+        shipped flows. ``reset_password`` binds ``expected_purpose='reset-password'`` and
+        no destination (D11 E-R1); the ``verify-otp`` endpoint binds
+        ``expected_purpose='login'`` and no destination (D11 E-R2). Neither caller's
+        binding changes the default for anybody else.
         """
         # Canonicalise the msisdn so lookups match canonically-stored OTPs.
         # Defensive: on a bad msisdn, leave it raw — the lookup simply finds
@@ -479,6 +507,14 @@ class OtpManager:
         identifier: Optional[str] = None,
         purpose: Optional[str] = None
     ) -> dict:
+        # The purpose is a fact about the REQUEST, so it is decided FIRST — before any
+        # account is resolved, and before the presence check below — and the refusal is
+        # identical whatever the identifier names. Nothing is looked up, issued, deleted,
+        # recorded or sent (D11 E-R2). Every other value used to be accepted: an unknown
+        # word occupied a row of its own, and `owner-claim` replaced the live claim
+        # challenge, which purpose-scoped replacement alone cannot prevent.
+        if purpose not in GENERIC_RESEND_PURPOSES:
+            return dict(INVALID_RESEND_PURPOSE)
         user = None
         msisdn = None
         if identification is None or identifier is None:
@@ -523,15 +559,16 @@ class OtpManager:
         # ever to anyone holding the user id.
         #
         # The anchor's time is `time_created`, which nothing rewrites, so a resend never
-        # refreshes it; a new genuine login replaces it (make_otp's `(user, None)`
-        # replacement) and so restores eligibility. Deliberately NOT considered: whether
-        # the anchor was consumed or how many attempts it holds, and nothing about how a
-        # later verify selects its challenge — those are unchanged.
+        # refreshes it; a new genuine login replaces it (make_otp's
+        # `(user, None, 'login')` replacement) and so restores eligibility. Deliberately
+        # NOT considered: whether the anchor was consumed or how many attempts it holds,
+        # and nothing about how a later verify selects its challenge — those are
+        # unchanged.
         #
         # An account with NO phone is refused outright: its resend row would also store
-        # `msisdn IS NULL`, replace the anchor through that same `(user, None)` key and
-        # so renew it — the exact loop this closes — and there is nowhere to send an
-        # SMS anyway.
+        # `msisdn IS NULL`, replace the anchor through that same `(user, None, 'login')`
+        # key and so renew it — the exact loop this closes — and there is nowhere to
+        # send an SMS anyway.
         if purpose == 'login':
             five_minutes_ago = timezone.now() - timedelta(minutes=5)
             anchored = user is not None and bool(user.phone_number) and UserOtp.objects.filter(

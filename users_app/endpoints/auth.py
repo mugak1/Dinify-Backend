@@ -112,9 +112,14 @@ class UsersAuthenticationEndpoint(APIView):
             if request.user is not None and request.user.is_authenticated:
                 user = str(request.user.id)
 
+            # This is the LOGIN route, so it selects login challenges only (D11 E-R2).
+            # The binding narrows the locked query: a reset, claim or null-purpose
+            # challenge is never selected, charged or consumed here, and stays usable
+            # in its own flow. A non-login code is therefore refused on this route.
             response = OtpManager().verify_otp(
                 user_id=user,
-                otp=request.data.get('otp')
+                otp=request.data.get('otp'),
+                expected_purpose='login',
             )
         elif action == 'logout':
             # Logout requires JWT auth even though the class permits AllowAny.

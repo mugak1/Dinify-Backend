@@ -1391,18 +1391,72 @@ so keep it current when conventions change.
   `MultipleObjectsReturned` IN `reset_password._resolve_user` ONLY (bounded,
   address-free log); `get_user_by_email` and login are unchanged and login still raises.
   Each duplicate still resets by its own phone. `ENV=dev`'s `1234`, single use, expiry,
-  the attempt cap, both `save_action` contracts and `make_otp`'s `(user, msisdn)`
-  replacement are unchanged. **STILL OPEN, stated rather than implied:** the 500 and
+  the attempt cap and both `save_action` contracts are unchanged; E-R1 also left
+  `make_otp`'s replacement alone, which D11 E-R2 (next bullet) scoped to the purpose.
+  **STILL OPEN, stated rather than implied:** the 500 and
   response timing still distinguish an eligible identity — the 500 PERMANENTLY for an
   account with no destination the environment can send to; the generic `resend-otp`
   route still answers `purpose='reset-password'` differently for an absent account
   (400), a pending one (500) and an eligible one (200), so the same question can still
-  be asked there; an anonymous initiation can
-  still replace an in-flight LOGIN challenge (both live in the NULL bucket); generic
-  resend, registration and every rate/abuse limit are unchanged. No migration, so a
-  rollback restores the old disclosures. Pinned by `users_app/tests_reset_acknowledgement.py`.
+  be asked there; registration and every rate/abuse limit are unchanged. (An anonymous
+  initiation replacing an in-flight LOGIN challenge in the shared NULL bucket, and the
+  generic resend's open purpose list, were left by E-R1 and closed by E-R2.) No
+  migration, so a rollback restores the old disclosures. Pinned by
+  `users_app/tests_reset_acknowledgement.py`.
   The Frontend wording (Dinify-Frontend `forgot-password`) merges FIRST — see
   `BREAKING_CHANGES.md` §21
+- Purpose-safe challenge replacement (D11 E-R2): ✅ PARTIAL — D11 itself stays open.
+  THREE CHANGES THAT SHIP AS ONE DEPLOYABLE UNIT; none is safe on its own.
+  **P1 — REPLACEMENT IS PER PURPOSE.** `make_otp`'s replacement DELETE is
+  `filter(user=user, msisdn=msisdn, purpose=purpose)`, inside the existing durable
+  transaction (`purpose=None` matches `IS NULL`). A password login and an anonymous reset
+  initiation (both `msisdn IS NULL`) no longer delete each other's live challenge, and an
+  account-resolving resend no longer deletes the owner-claim challenge — whose loss used
+  to charge the INVITATION's claim budget, five times over, into `verification_locked`.
+  Same-purpose replacement, the `User`-first lock, accounting, the five-minute expiry,
+  the five-attempt cap, single use and sender ordering are unchanged; no lock, migration
+  or cleanup was added.
+  **P2 — `verify-otp` IS THE LOGIN ROUTE.** `users_app/endpoints/auth.py` passes
+  `expected_purpose='login'`, so the locked query never selects, charges, observes or
+  consumes a reset, claim, `register` or null-purpose challenge, and a code of one of
+  those purposes answers `Invalid OTP` there. CLIENT-VISIBLE: before, a correct reset or
+  claim code answered `valid: true` with no token and was spent. The `verify_otp`
+  default is unchanged; `self_register` and `create_employee` still pass no binding.
+  **P1 NEEDS P2**: with P1 alone, a newer reset row coexisting in the NULL bucket would
+  shadow the login code at an unbound route (the mutation removing P2 fails S1 that way).
+  **P3 — GENERIC RESEND TAKES FOUR PURPOSES.** `resend_otp` accepts exactly `login`,
+  `reset-password`, `register` and `None` (omitted or JSON null) —
+  `GENERIC_RESEND_PURPOSES`, a TUPLE so a JSON array or object gets an answer rather than
+  an unhashable-type error. Anything else (`owner-claim`, `first-time-payment`, unknown,
+  empty or differently cased) is `400 {"status":400,"message":"Invalid purpose"}`,
+  decided FIRST — before any account lookup and before the presence check — identically
+  for a known, unknown or authenticated caller, with no issuance, deletion, ledger row
+  or delivery. P1 cannot do this alone: a resend naming `owner-claim` lands in the claim
+  challenge's own bucket. `owner-claim/challenge/` is the only issuer of that purpose.
+  `ENV=dev`'s `1234`, the five-minute password anchor for a login resend and the E-R1
+  reset contract are unchanged.
+  **THE ISSUER/REDEEMER MAP** (a bucket is `(user, msisdn, purpose)`): password login
+  `(user, NULL, login)`; reset initiation `(user, NULL, reset-password)`; the claim
+  challenge `(user, canonical phone, owner-claim)`; an account-resolving resend
+  `(user, phone, purpose)`; an msisdn-only resend `(NULL, msisdn, purpose)`. `verify-otp`
+  binds `login`, reset completion `reset-password` (E-R1), redemption `owner-claim` plus
+  the destination; registration and `create_employee` are unbound.
+  **STILL OPEN, stated rather than implied:** registration verification is
+  purpose-unbound and its `msisdn` selector does not require `user IS NULL` (the route
+  refuses a phone an account already holds before it verifies); a reset, initiated or
+  completed, revokes no outstanding login challenge (the resend path already let one
+  survive, P1 extends that to ordinary initiation, and coordinated invalidation is an
+  unmade policy); two concurrent same-purpose issuances can still leave two live rows (an
+  existing race, not a guarantee; no uniqueness DDL was added, by scope rather than SQL
+  impossibility); allowed resend purposes still answer per account (the E-R1
+  `reset-password` residual above). Requester-bound resend, registration's future,
+  purpose-binding policy, numerical abuse budgets, enforcement and any scheduler are
+  undecided. **ROLLBACK** needs no schema step and restores nothing: rows written under
+  this change stay as written, `claim_failed_attempts` and ledger rows are not rewound,
+  and the old build's cross-purpose replacement and selection apply again, live rows
+  included. Pinned by `users_app/tests_challenge_replacement.py` (54 tests: route-level,
+  plus four PostgreSQL schedules on independent connections). See
+  `BREAKING_CHANGES.md` §22
 - MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
   `+`) is the canonical stored/compared form for `User.phone_number` /
   `User.username`, enforced at every write site (registration, profile update,
@@ -4617,8 +4671,12 @@ REACH a pending identity: that is the one identity it exists for, as
 unchanged, and a verified owner-claim code mints nothing — `verify_otp` mints only
 for `purpose == 'login'`. It is EVIDENCE Step 2F.2 will consume.
 
-### CURRENT CROSS-PURPOSE OTP SEMANTICS — RECORDED, NOT CHANGED
-`make_otp` deletes prior challenges with
+### CROSS-PURPOSE OTP SEMANTICS AS RECORDED AT 2F.1 — SUPERSEDED BY D11 E-R2
+**Historical.** Since D11 E-R2 the replacement DELETE is scoped to
+`(user, msisdn, purpose)`, `verify-otp` binds `login`, and generic resend refuses
+`owner-claim`; see that bullet under Current Implementation Status. The record below is
+kept because it explains why. At 2F.1:
+`make_otp` deleted prior challenges with
 `UserOtp.objects.filter(user=user, msisdn=msisdn).delete()` — **purpose-blind**. Both
 generic callers (`login.py:202`, `reset_password.py:43`) pass NO `msisdn`, so their
 rows store `msisdn=NULL` and that filter matches them.
@@ -4755,11 +4813,12 @@ does fails the build rather than silently bypassing it.
 the locked query** rather than filtering after it — so a challenge issued for something
 else is never selected and is left completely untouched (not consumed, attempt counter
 unmoved). Redemption passes `expected_purpose='owner-claim'` and the LOCKED owner's
-canonical phone. Both default to `None` and change nothing for the three callers that
-pass neither (`self_register`, the `verify-otp` endpoint, `create_employee`), which is
-pinned by exercising the primitive rather than by reading its signature. Password reset
-was the fourth, and since D11 E-R1 binds `expected_purpose='reset-password'` with no
-destination — pinned by its own structural test in `tests_otp_binding.py`.
+canonical phone. Both default to `None` and change nothing for a caller that passes
+neither — `self_register` and `create_employee` today — which is pinned by exercising
+the primitive rather than by reading its signature. Password reset binds
+`expected_purpose='reset-password'` with no destination (D11 E-R1), and the generic
+`verify-otp` endpoint binds `expected_purpose='login'` with no destination (D11 E-R2);
+each is pinned by its own structural test in `tests_otp_binding.py`.
 
 Purpose binding is load-bearing under `ENV=dev`, where every code is `1234`: the digits
 cannot distinguish a login code from a claim code, so the row must.
@@ -4776,8 +4835,9 @@ change with a 400 and every other site is a CREATE — so the race is pinned wit
 (`otp_destination_stale`), decided before verification: the claimant did not cause the
 phone change and five such attempts must not lock a good credential. The condition is
 narrow — *something is outstanding for this identity, and none of it went where it
-should go now* — because `make_otp` deletes by `(user, msisdn)`, so a fresh challenge to
-a new number leaves the old row live beside it. It is not an oracle (the response is
+should go now* — because `make_otp` deletes by `(user, msisdn, purpose)` (by
+`(user, msisdn)` before D11 E-R2), so a fresh challenge to a new number leaves the old
+row live beside it. It is not an oracle (the response is
 identical either way) and not probeable (issuing a challenge always binds to the CURRENT
 canonical phone).
 
@@ -4921,23 +4981,25 @@ exactly one entry point.
 (writes `established`) — as an inventory rather than a count, so a third writer is a
 deliberate edit. There is still no public `establish_customer_access(user)` helper.
 
-### CURRENT OTP REPLACEMENT SEMANTICS — CHANGED, AND STATED HONESTLY
+### OTP REPLACEMENT SEMANTICS — CHANGED AT 2F.2, SCOPED TO THE PURPOSE BY D11 E-R2
 Passing an explicit `msisdn` moves the owner-claim row out of the `msisdn IS NULL`
 bucket that `login` and `reset-password` share, so the cross-purpose collision recorded
 under Step 2F.1 changed in BOTH directions and improved in both: an owner-claim
 challenge no longer destroys a live login or reset code, and a login or reset attempt no
 longer destroys a live owner-claim challenge (the load-bearing direction — otherwise
-requesting a login code would kill the claim challenge mid-flow). **The purpose-blind
-delete itself is UNCHANGED**: `login` and `reset-password` still share the NULL bucket
-and still replace one another. This is not the broad purpose-scoped migration.
+requesting a login code would kill the claim challenge mid-flow). **The delete itself
+stayed purpose-blind at 2F.2**: `login` and `reset-password` shared the NULL bucket and
+replaced one another until D11 E-R2 scoped the delete to `(user, msisdn, purpose)` —
+see that bullet under Current Implementation Status.
 
-One interaction survives and is not a regression: two live rows for one identity can now
-coexist, and a purpose-BLIND `verify_otp` still picks the most recent, so a newer
-owner-claim challenge shadows an older login code at the generic verify endpoint. That
-is the same user-visible outcome as before (the row used to be deleted outright), and
-coexistence already occurred on `origin/main` via `resend_otp`, which has always passed
-`msisdn=user.phone_number`. Redemption is immune — it binds purpose AND destination —
-and since D11 E-R1 so is password-reset completion, which binds its purpose.
+One interaction survived 2F.2: two live rows for one identity could coexist, and the
+purpose-BLIND generic verify endpoint picked the most recent, so a newer owner-claim
+challenge shadowed an older login code there. (Coexistence already occurred on
+`origin/main` via `resend_otp`, which has always passed `msisdn=user.phone_number`.)
+Since D11 E-R2 that endpoint binds `login`, so it no longer selects, charges or spends a
+claim, reset or null-purpose row. Redemption is immune — it binds purpose AND
+destination — and since D11 E-R1 so is password-reset completion, which binds its
+purpose.
 
 ### NOT BUILT BY THIS STEP
 Invitation delivery of any kind, the Admin creation UI, the restaurant-portal claim UI,

@@ -1754,6 +1754,82 @@ disclosures this removed.
 differently; an anonymous initiation can still replace an in-flight login challenge;
 registration and abuse limits are unchanged. D11 remains open.
 
+---
+
+## 22. OTP challenges are replaced only within their purpose, `verify-otp` is login-only, and generic resend takes four purposes (D11 E-R2)
+
+**Three changes, one deployable unit.** None is safe alone: with only the purpose-scoped
+replacement, a reset challenge now coexisting with a login challenge would hide the
+login code at an unbound `verify-otp`; and the replacement cannot stop a resend that
+names `owner-claim`, which lands in the claim challenge's own bucket.
+
+**Internal behaviour change, no request or response shape (P1).**
+`OtpManager.make_otp` replaces only an earlier challenge with the same
+`(user, msisdn, purpose)` (`purpose=None` matches only null). A password login and an
+anonymous reset initiation, which both store `msisdn IS NULL`, no longer delete each
+other's live challenge, and an account-resolving resend no longer deletes the owner's
+claim challenge. That deletion used to make the owner's correct code fail and charge
+the invitation's `claim_failed_attempts`; five such cycles reached
+`verification_locked`. A second request for the same purpose still replaces the first.
+Lock order, accounting, the 5-minute expiry, the 5-attempt cap, single use, sender
+ordering and the dev OTP `1234` are unchanged.
+
+**Response contract change: `POST users/auth/verify-otp/` (P2).** It verifies LOGIN
+challenges only (`expected_purpose='login'`, no destination binding). A reset,
+owner-claim, `register` or null-purpose code submitted there now answers
+`200 {"status": 200, "message": "Invalid OTP", "data": {"valid": false}}`, and that
+challenge is not selected, charged, observed or consumed. The submission is compared
+against the user's newest live login challenge, if there is one, and counts as a wrong
+code against it. Before, the route took the newest live challenge of ANY purpose: a
+correct reset or claim code answered `{"valid": true}` with no tokens and was used up,
+so its own flow then failed, and a wrong guess was charged to it. A login code still
+verifies, whether it came from password login or a login resend, and the existing
+pending and platform-staff gates on minting are unchanged.
+
+**Response contract change: `POST users/auth/resend-otp/` (P3).** `purpose` must be
+exactly `"login"`, `"reset-password"`, `"register"`, `null`, or omitted. Any other
+value — `"owner-claim"`, `"first-time-payment"`, an unknown, empty, differently cased or
+padded string, a number, a boolean, an array or an object — answers
+`400 {"status": 400, "message": "Invalid purpose"}`. This is decided before any
+account lookup and before the identification/identifier presence check, so the answer
+is the same for a known, unknown or missing identifier and for a signed-in caller.
+Nothing is issued, deleted, recorded or sent. Previously every value issued a challenge
+(or got its account-specific answer). An owner-claim code now comes only from
+`users/owner-claim/challenge/`. The allowed purposes keep their existing gates: the
+5-minute password anchor for `login`, and the customer-access and reset answers for
+`reset-password`.
+
+**Consumers.** Traced in Dinify-Frontend `0cdffe2`: its login screen calls `verify-otp`
+with `{user, otp}` and resends with `purpose: "login"`; its register and profile screens
+resend with `purpose: null`; forgot-password uses its own two routes; owner claim uses
+its own routes. None of them sends a refused purpose or verifies a non-login code at
+`verify-otp`, so no Frontend change is needed and there is no cutover order. This covers
+the traced supported clients only: an external caller that verified a non-login code at
+`verify-otp`, or resent under another purpose, now gets `valid: false` or the 400.
+Registration verifies through its own route and stays purpose-unbound. The profile
+screen's code is never verified, and the Backend refuses a phone change anyway.
+
+**Concurrency, as observed.** On PostgreSQL, a correct login verification and a reset
+initiation no longer wait for each other (before, the initiation's DELETE locked the
+login row). An owner's claim redemption and a reset resend to the same phone still
+serialize on the owner's `users` row, in both arrival orders, and then both succeed with
+the claim challenge intact. These are the schedules that were run, not a proof that no
+interleaving can deadlock.
+
+**No migration. Rollback** is a code rollback that restores nothing. Challenges, ledger
+rows and `claim_failed_attempts` written under this change stay as written, and the old
+build's cross-purpose replacement and any-purpose selection apply again, including to
+challenges still live at the time.
+
+**Not closed.** Registration verification is purpose-unbound and its msisdn lookup does
+not require `user IS NULL`. A password reset, initiated or completed, does not revoke an
+outstanding login challenge: the resend path already let one survive, this extends that
+to ordinary initiation, and coordinated invalidation is an open policy. Two concurrent
+requests for the same purpose can still leave two live challenges (an existing race; no
+uniqueness constraint was added, by scope). Allowed resend purposes still answer per
+account (the §21 residual). Requester-bound resend, numerical abuse budgets and their
+enforcement are undecided. D11 remains open.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

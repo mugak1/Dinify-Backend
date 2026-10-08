@@ -405,11 +405,18 @@ class OtpHardeningTests(TestCase):
         )
 
     def test_resend_otp_msisdn_no_user_does_not_crash(self, *mocks):
-        """The resend msisdn path no longer dereferences a None user (was a 500)."""
+        """
+        The resend msisdn path no longer dereferences a None user (was a 500).
+
+        The purpose is ``register`` because generic resend accepts only ``login``,
+        ``reset-password``, ``register`` and null since D11 E-R2; this used to send
+        ``first-time-payment``, which is now refused before any lookup and so could no
+        longer reach the no-user path this pins.
+        """
         result = OtpManager().resend_otp(
             identification='msisdn',
             identifier='256700000000',
-            purpose='first-time-payment',
+            purpose='register',
         )
         self.assertEqual(result.get('status'), 200)
 
