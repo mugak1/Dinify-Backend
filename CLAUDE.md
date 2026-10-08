@@ -915,7 +915,10 @@ so keep it current when conventions change.
     `Restaurant` row lock would have stalled every order behind a remote call
     (the PR #306 lesson). That query is gone (MENU-APPROVAL-SUBMITTER-00,
     below), and the narrow write stands on its own: a writer that writes only
-    what it decided cannot revert anything. `table_actions._update_status` did a
+    what it decided cannot revert anything. The decision does now take the row
+    (`FOR NO KEY UPDATE`, Codex P1 on PR #363), but to serialize decisions
+    against each other, not to protect these columns.
+    `table_actions._update_status` did a
     full-row `table.save()` from an unlocked read, so a concurrent QR
     regeneration was reverted — **un-revoking every diner credential the owner
     had just revoked** — and it now re-reads under `select_for_update` and writes
@@ -1607,8 +1610,21 @@ so keep it current when conventions change.
   so a manager can approve a never-submitted menu directly, and the rule is avoided
   by not submitting. A reject leaves the decision at `'submit'`, so a rejected menu
   cannot be resubmitted. Every approval re-enables every section, group and item.
-  And the restaurant row is read before the transaction, without a lock, so a submit
-  and an approval racing on one restaurant are not serialized.
+  **TWO DECISIONS ON ONE RESTAURANT ARE SERIALIZED** (Codex P1 on PR #363, valid).
+  The row used to be read before the transaction, without a lock, so two members
+  submitting at once were both told the menu was submitted, the later save named
+  only one of them, and the other could then approve a menu they had submitted. A
+  submission and an approval raced the same way: an approval landing inside a
+  submission decided from `'pending'` (so even the submitter's own went through)
+  and was then overwritten back to `'submit'`, and a submission landing inside an
+  approval was reported successful. `_lock_for_decision` now re-reads the row
+  inside the transaction under `select_for_update(no_key=True, of=('self',))`,
+  before anything is checked, so the second decision waits and then reads what the
+  first committed. **`FOR NO KEY UPDATE`, NEVER PLAIN `FOR UPDATE`**: it is the
+  lock the decision's own UPDATE of the row already takes, while `FOR UPDATE` also
+  conflicts with the `FOR KEY SHARE` every foreign-key check on the row takes, so
+  an order placed during an approval would wait for it. A reject neither reads nor
+  locks the restaurant row. A lock-order participant: see "Restaurant Lifecycle".
   **`send_messages` GOT THE SAME GUARD**: its `list(...)` now sits inside the try;
   see `BACKGROUND_TASKS.md`. Pinned by
   `restaurants_app/tests_menu_approval_submitter.py` (20) and
@@ -1617,7 +1633,14 @@ so keep it current when conventions change.
   `888eedc` 15 of the 29 fail (6 failures, 9 errors). The 14 that pass there are
   the controls, the scope test, the premise and stand-in checks, and two absence
   guards that cannot fail before the field exists. Nine source mutations each fail
-  a named subset. See `BREAKING_CHANGES.md` §24
+  a named subset. The lock is pinned by
+  `restaurants_app/tests_menu_approval_concurrency.py` (6): two real connections
+  through the real endpoint, the first decision parked just before its write and
+  the wait observed from a third connection. On `980a1f8` its 4 regressions fail
+  and its 2 controls pass. Three mutations fail exactly the expected tests: plain
+  `FOR UPDATE` fails the order control, removing the lock fails all 4 regressions,
+  and deciding from a read taken before the lock fails 3. See `BREAKING_CHANGES.md`
+  §24
 - Anonymous diner capability — capability-only, header-only entry + fail-closed
   key: ✅ The QR scan → table-session flow
   (`restaurants_app/controllers/diner_capability.py`; `django.core.signing`,
@@ -3081,7 +3104,16 @@ the catch-all `<str:config_detail>/` route.
   `Restaurant → RestaurantEmployee` (membership mutation,
   `restaurants_app/controllers/employee_membership_lock.py`). Same reasoning, same
   conclusion — it takes the `Restaurant` row and never afterwards reaches for the
-  advisory lock, so it can block the transition but cannot cycle against it
+  advisory lock, so it can block the transition but cannot cycle against it.
+  A THIRD joined with the Codex P1 on PR #363: `Restaurant (FOR NO KEY UPDATE) →
+  MenuSection → SectionGroup → MenuItem` (the first-time menu decision,
+  `first_time_batch_approval._lock_for_decision`). Same conclusion: no advisory
+  lock, so it can block the transition but cannot cycle against it. Its lock does
+  not conflict with the `FOR KEY SHARE` an order's foreign-key check takes, so it
+  does not hold up orders by itself. As with every participant here, a transition
+  or a `restaurants` PUT waiting on it holds the exclusive admission lock while it
+  waits, so orders at that restaurant queue for the length of the decision's
+  transaction (a few UPDATEs, no I/O)
 - The service enforces the matrix against the row read under `select_for_update`
   (so concurrent transitions serialize), requires a reason (≥10 chars, mirroring
   `platform_admin_app.delegation.MIN_REASON_LENGTH`), and writes an

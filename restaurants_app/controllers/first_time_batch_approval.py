@@ -67,6 +67,41 @@ def _submitter_refusal(
     return refusal
 
 
+def _lock_for_decision(restaurant_id: str) -> Restaurant:
+    """
+    Read the restaurant under a row lock, inside the decision's transaction.
+
+    A submit or an approval decides from this row: is the menu still `pending`,
+    and who submitted it. The row used to be read before the transaction, without
+    a lock, so two decisions could read the same state and both act on it (Codex
+    P1 on PR #363). Two members submitting at once were both told the menu was
+    submitted, and the later save named only one of them, so the other could
+    approve a menu they had submitted. A submission and an approval could race
+    the same way, leaving an approved menu reading `submit`. Under this lock the
+    second decision waits for the first to commit, then reads what it wrote.
+
+    FOR NO KEY UPDATE, not FOR UPDATE. The decision's own UPDATE of this row
+    takes FOR NO KEY UPDATE, because it changes no key column, so taking it here
+    changes when the lock is taken and not what it conflicts with. FOR UPDATE
+    would also conflict with FOR KEY SHARE, which PostgreSQL takes on this row
+    to check the foreign key of every row inserted with a reference to it, so an
+    order placed at the restaurant would wait for the whole approval.
+    `of=('self',)` keeps a future `select_related` from widening the lock (the
+    PR-E lesson).
+
+    Lock order: `Restaurant -> MenuSection -> SectionGroup -> MenuItem`. Every
+    other writer that locks this row takes it before any menu row, so this adds
+    no cycle. It takes no admission advisory lock: the approval is outside the
+    catalogue barrier by design (`tests_catalogue_admission.EXEMPT`), and a
+    transaction must take that lock before its first row lock or not at all.
+    """
+    return (
+        Restaurant.objects
+        .select_for_update(no_key=True, of=('self',))
+        .get(id=restaurant_id)
+    )
+
+
 def first_time_batch_approval(
     restaurant_id: str,
     approval_decision: str,
@@ -102,9 +137,6 @@ def first_time_batch_approval(
             'message': 'Sorry, the restaurant does not have any menu sections.'
         }
 
-    # get the restaurant
-    restaurant = Restaurant.objects.get(id=restaurant_id)
-
     if approval_decision not in ['approve', 'reject', 'submit']:
         return {
             'status': 400,
@@ -119,6 +151,10 @@ def first_time_batch_approval(
     with transaction.atomic():
         message = 'The restaurant menu has been submitted.'
         if approval_decision in ['approve', 'submit']:
+            # Read the row this decision is made from under a lock, before
+            # anything is checked, so a concurrent decision waits for this one.
+            restaurant = _lock_for_decision(restaurant_id)
+
             # flag the restaurant detail to indicate that a first time memenu approval has been done
             if approval_decision == 'submit':
                 # print(f"the current approval decision is {restaurant.first_time_menu_approval_decision}")
@@ -190,15 +226,20 @@ def first_time_batch_approval(
             #     full-row save walked straight past both walls, restoring a
             #     state an administrator had deliberately left.
             #
-            # NARROWING THE WRITE IS THE FIX HERE, NOT A LOCK. A writer that only
-            # writes what it decided cannot revert anything, whether or not it is
-            # serialized against the writer it used to trample. (A lock was first
-            # ruled out because this block held its transaction across a MongoDB
-            # query, the submitter lookup, which would have stalled every order at
-            # the restaurant behind a remote call: the PR #306 lesson. That query
-            # is gone. The submitter is read off this row, which is loaded before
-            # the transaction and without a lock, so two decisions on one
-            # restaurant are still not serialized against each other.)
+            # NARROWING THE WRITE WAS THE FIX FOR THOSE REVERTS, NOT A LOCK. A
+            # writer that only writes what it decided cannot revert anything,
+            # whether or not it is serialized against the writer it used to
+            # trample. (A lock was first ruled out because this block held its
+            # transaction across a MongoDB query, the submitter lookup, which
+            # would have stalled every order at the restaurant behind a remote
+            # call: the PR #306 lesson. That query is gone.)
+            #
+            # The row IS now locked, from the read at the top of this block to
+            # this write, for a different reason: two decisions must not act on
+            # the same state (`_lock_for_decision`). That also keeps the row from
+            # changing between the read and the write, so a full-row save would
+            # no longer revert anything either. The narrow write stays anyway: it
+            # states what this decision owns, and it does not rely on the lock.
             restaurant.save(update_fields=approval_columns)
 
             save_action(

@@ -1883,8 +1883,35 @@ attribution would let the real submitter approve.
 **Unchanged.** The owner may approve any submission, their own included.
 Approving a menu that was never submitted (decision `pending`) is not governed by
 this rule. A re-approval by anyone other than the recorded submitter succeeds.
-Submit and reject answer as before. The shipped portal offers Approve Menu to the
-owner only, so no shipped screen reaches either refusal.
+Submit and reject answer as before, except when two decisions race (below). The
+shipped portal offers Approve Menu to the owner only, so no shipped screen reaches
+either refusal.
+
+**Concurrent decisions are serialized.** The submit and approve decisions now
+re-read the restaurant inside their transaction under `FOR NO KEY UPDATE`, so a
+second decision on the same restaurant waits for the first to commit and then
+decides from what it wrote. Before, the row was read without a lock before the
+transaction. Answers change only when decisions overlap:
+
+- Two members submitting at once: the second now gets `400 {"status": 400,
+  "message": "Sorry, the restaurant menu has already been submitted."}`. Before,
+  both got 200 and the record named only the later one, so the other could approve
+  the menu they had submitted.
+- A submission arriving while an approval is in progress: it waits, then gets the
+  same 400. Before, it was reported successful and recorded a submitter for a menu
+  being approved.
+- An approval arriving while a submission is in progress: it waits, then decides
+  against the committed submission, so the submitter is refused unless they own the
+  restaurant. Before, it decided from `pending`, and the submission could then
+  overwrite it and leave an approved menu reading `submit`.
+
+The wait lasts as long as the other decision's transaction: a few UPDATEs, no I/O.
+Orders are not held up: the lock does not conflict with the `FOR KEY SHARE` an
+order's foreign-key check takes. A writer that takes the restaurant row with
+`FOR UPDATE`, such as a lifecycle transition, a `restaurants` PUT, table creation
+or a membership change, waits for a decision in progress, and a decision waits for
+it. A reject neither reads nor locks the row. There is no schema change: rolling
+the code back restores the unlocked read.
 
 **MongoDB no longer decides it.** The old check iterated its query outside its
 `try`, for every approval. When the MongoDB client could not be built, the
@@ -1924,9 +1951,9 @@ pending for the next run. Nothing schedules the command today
 
 **Not covered.** Whether the rule should exist at all, approval without a
 submission, a reject leaving the decision at `submit`, the "created it yourself"
-check (it compares a user with a string id and never fires), approval re-enabling
-every section, group and item, and the unlocked read that lets a submit and an
-approval race. `CLAUDE.md` (MENU-APPROVAL-SUBMITTER-00) records each.
+check (it compares a user with a string id and never fires), and approval
+re-enabling every section, group and item. `CLAUDE.md` (MENU-APPROVAL-SUBMITTER-00)
+records each.
 
 ## Summary of frontend changes needed before merge
 

@@ -101,6 +101,14 @@ class MenuApprovalDoesNotRevertRestaurantPolicyTests(WriterFixture):
         (The seam used to be the MongoDB action-log lookup that sat in the same
         place. That lookup is gone: the submitter is read off the restaurant
         row now. See `tests_menu_approval_submitter`.)
+
+        Since the decision re-reads the row under a lock (Codex P1 on PR #363),
+        a write from another connection waits for the decision instead of
+        landing here. The competing write runs on the test's own connection,
+        inside the same transaction, which is how it still puts a value under
+        the loaded instance. What these tests pin is that the narrow write
+        leaves that value alone. The lock is pinned on its own, with two real
+        connections, in `tests_menu_approval_concurrency`.
         """
         module = 'restaurants_app.controllers.first_time_batch_approval'
         real_check = import_module(module)._submitter_refusal
