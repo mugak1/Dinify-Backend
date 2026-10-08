@@ -20,6 +20,7 @@ single-connection test cannot observe, and asserting "it blocked" without a
 negative control is exactly the trap `tests_table_allocation_lock` records.
 """
 from decimal import Decimal
+from importlib import import_module
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -89,37 +90,48 @@ class MenuApprovalDoesNotRevertRestaurantPolicyTests(WriterFixture):
         """Approve the menu, optionally committing a competing write AT A REAL
         SEAM between the stale read and the save.
 
-        The seam is the action-log lookup: the restaurant instance has been
-        loaded, the approval has not been written, and the code is about to
-        reach `restaurant.save()`. It is chosen because it is UNCONDITIONALLY
-        reached on the approve branch — the two `is_restaurant_owner` calls
-        beside it are guarded by a comparison of a `User` FK against a string
-        id, so they never run and a side effect hung on them would have proved
-        nothing while appearing to pass.
+        The seam is the submitter check, `_submitter_refusal`: the restaurant
+        instance has been loaded, the approval has not been written, and the
+        code is about to reach `restaurant.save()`. It is chosen because it is
+        UNCONDITIONALLY reached on the approve branch. The created-it-yourself
+        check beside it compares a `User` FK against a string id, so its
+        `is_restaurant_owner` call never runs, and a side effect hung on it
+        would have proved nothing while appearing to pass.
+
+        (The seam used to be the MongoDB action-log lookup that sat in the same
+        place. That lookup is gone: the submitter is read off the restaurant
+        row now. See `tests_menu_approval_submitter`.)
+
+        Since the decision re-reads the row under a lock (Codex P1 on PR #363),
+        a write from another connection waits for the decision instead of
+        landing here. The competing write runs on the test's own connection,
+        inside the same transaction, which is how it still puts a value under
+        the loaded instance. What these tests pin is that the narrow write
+        leaves that value alone. The lock is pinned on its own, with two real
+        connections, in `tests_menu_approval_concurrency`.
         """
-        target = (
-            'restaurants_app.controllers.first_time_batch_approval.MONGO_DB'
-        )
+        module = 'restaurants_app.controllers.first_time_batch_approval'
+        real_check = import_module(module)._submitter_refusal
+        reached = []
 
-        class _Collection:
-            @staticmethod
-            def find(*args, **kwargs):
-                if on_check is not None:
-                    on_check()
-                return []
+        def _seam(*args, **kwargs):
+            reached.append(True)
+            if on_check is not None:
+                on_check()
+            return real_check(*args, **kwargs)
 
-        class _Db:
-            @staticmethod
-            def __getitem__(name):
-                return _Collection
-
-        with patch(target, _Db()):
-            return first_time_batch_approval(
+        with patch(f'{module}._submitter_refusal', _seam):
+            result = first_time_batch_approval(
                 restaurant_id=str(self.restaurant.id),
                 approval_decision='approve',
                 auth=self._auth(),
                 user=self.owner,
             )
+        self.assertEqual(
+            len(reached), 1,
+            'the seam was not reached, so the competing write never ran',
+        )
+        return result
 
     def test_a_pause_committed_mid_approval_survives(self):
         def pause():

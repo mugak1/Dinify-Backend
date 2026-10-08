@@ -75,8 +75,7 @@ EXEMPT = {
         'every diner order waits on',
     'first_time_batch_approval':
         'its only catalogue write widens publication (approve/enable); a stale '
-        'read can refuse and be retried, never accept something it should not — '
-        'and it holds a transaction across a synchronous MongoDB query',
+        'read can refuse and be retried, never accept something it should not',
     'ConVacuumDeletedRecords.vacuum':
         'a multi-tenant sweep whose every catalogue write lands on a row already '
         'under a non-live parent, so no acceptance verdict can move',

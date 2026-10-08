@@ -1861,6 +1861,103 @@ CASCADE back. Nothing deleted under CASCADE comes back.
 and raw SQL. D12 stays open for descriptions, the kitchen's legacy-row allergen
 display and missing-evidence handling (§18).
 
+## 24. A menu's submitter cannot approve it, and an unrecorded submitter leaves approval to the owner (MENU-APPROVAL-SUBMITTER-00)
+
+**What changed.** `POST restaurant-setup/manager-actions/first-time-menu-review/`
+with `decision: approve` now refuses the member who submitted the menu, unless
+that member is the restaurant owner: `400 {"status": 400, "message": "Sorry, you
+cannot approve a menu that you submitted."}`. The rule dates from 2024 and never
+took effect, because the check looked the submitter up in the MongoDB action log
+under keys the log does not use. The submit decision now records the submitter in
+PostgreSQL (`Restaurant.first_time_menu_submitted_by`), and the approval reads it
+from there.
+
+**A new refusal for submissions made before this deploy.** A menu already at
+decision `submit` has no recorded submitter, and nothing reliable records who made
+those submissions. Only the owner can approve such a menu; anyone else gets `400
+{"status": 400, "message": "Sorry, only the restaurant owner can approve this
+menu, because the person who submitted it is not on record."}`. The same applies
+once a submitter's account is deleted. Do not backfill the column: a wrong
+attribution would let the real submitter approve.
+
+**Unchanged.** The owner may approve any submission, their own included.
+Approving a menu that was never submitted (decision `pending`) is not governed by
+this rule. A re-approval by anyone other than the recorded submitter succeeds.
+Submit and reject answer as before, except when two decisions race (below). The
+shipped portal offers Approve Menu to the owner only, so no shipped screen reaches
+either refusal.
+
+**Concurrent decisions are serialized.** The submit and approve decisions now
+re-read the restaurant inside their transaction under `FOR NO KEY UPDATE`, so a
+second decision on the same restaurant waits for the first to commit and then
+decides from what it wrote. Before, the row was read without a lock before the
+transaction. Answers change only when decisions overlap:
+
+- Two members submitting at once: the second now gets `400 {"status": 400,
+  "message": "Sorry, the restaurant menu has already been submitted."}`. Before,
+  both got 200.
+- A submission arriving while an approval is in progress: it waits, then gets the
+  same 400. Before, it was reported successful.
+- An approval arriving while a submission is in progress: it waits, then decides
+  against the committed submission, so the submitter is refused unless they own the
+  restaurant. Before, it decided from `pending`, and the submission could then
+  overwrite it and leave an approved menu reading `submit`.
+
+Without the lock, the first two would also corrupt the submitter this change
+records. The record could name only the later of two submitters, so the other could
+approve the menu they had submitted, or it could name a submitter for a menu being
+approved.
+
+The wait lasts as long as the other decision's transaction: a few UPDATEs, no I/O.
+Orders are not held up: the lock does not conflict with the `FOR KEY SHARE` an
+order's foreign-key check takes. A writer that takes the restaurant row with
+`FOR UPDATE`, such as a lifecycle transition, a `restaurants` PUT, table creation
+or a membership change, waits for a decision in progress, and a decision waits for
+it. A reject neither reads nor locks the row. There is no schema change: rolling
+the code back restores the unlocked read.
+
+**MongoDB no longer decides it.** The old check iterated its query outside its
+`try`, for every approval. When the MongoDB client could not be built, the
+submitter's approval went through; when the server could not be reached, every
+approval failed with a 500, the owner's included.
+The decision now reads no MongoDB at all, and neither outage changes its answer.
+
+**Wire.** The single-record `restaurant-setup/details/` read of a restaurant gains
+a read-only `first_time_menu_submitted_by` key, a user UUID or `null`, and so do
+the restaurant records archived to MongoDB. No restaurant-setup route can write
+it.
+
+**Migration.** `restaurants_app/0059_restaurant_first_time_menu_submitted_by` is
+one generated `AddField`: a nullable FK to `users` with its index, no data change
+and no backfill. It runs in one transaction that holds `ACCESS EXCLUSIVE` on
+`restaurants` and `SHARE ROW EXCLUSIVE` on `users` until it commits. Each lock
+waits behind open transactions on its table, and requests on those tables queue
+behind it while it waits. The legacy deploy applies it on merge.
+`release/migration-decisions.json` records it as `expand` for the staged B3 path.
+
+**Rollback.** Rolling the code back past this is schema-compatible, because old
+code ignores the column. While old code runs, approval goes back to the old check,
+which never matched: approvals either go through for anyone or fail with a 500,
+depending on how MongoDB fails on the host. Its submissions record no submitter,
+so after the next forward deploy those menus are owner-only to approve. Old code's
+model does not know the FK, so an ORM delete of a user that a restaurant names as
+its submitter fails at commit instead of clearing the column. The only production
+code that hard-deletes a user removes one it created earlier in the same request,
+which cannot have submitted a menu, so only shell or script deletes reach this.
+
+**`send_messages`.** The notification drain now reads its pending set inside its
+guard. When MongoDB is configured but unreachable, it logs `Failed to query
+pending notifications from MongoDB`, sends nothing, marks nothing and exits 0,
+where it used to raise `ServerSelectionTimeoutError`. Pending notifications stay
+pending for the next run. Nothing schedules the command today
+(`BACKGROUND_TASKS.md`).
+
+**Not covered.** Whether the rule should exist at all, approval without a
+submission, a reject leaving the decision at `submit`, the "created it yourself"
+check (it compares a user with a string id and never fires), and approval
+re-enabling every section, group and item. `CLAUDE.md` (MENU-APPROVAL-SUBMITTER-00)
+records each.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.

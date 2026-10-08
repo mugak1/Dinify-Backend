@@ -9,6 +9,14 @@
       ],
       "class": "expand",
       "reviewedIn": "mugak1/Dinify-Backend#360"
+    },
+    "restaurants_app.0059_restaurant_first_time_menu_submitted_by": {
+      "sha256": "40e1ff2dc39f63534936791ce208f9c13605fddf57ac0f63800ef9342a397b70",
+      "operations": [
+        "AddField"
+      ],
+      "class": "expand",
+      "reviewedIn": "mugak1/Dinify-Backend#363"
     }
   }
 }

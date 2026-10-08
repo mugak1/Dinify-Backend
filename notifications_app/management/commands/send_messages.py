@@ -15,16 +15,24 @@ class Command(BaseCommand):
     """
 
     def handle(self, *args, **options):
-        # find notifications where the sent attribute is missing
+        # find notifications where the sent attribute is missing.
+        #
+        # The iteration belongs inside the guard, not just `find()`. pymongo's
+        # find() returns a lazy cursor and performs no I/O; the query runs when
+        # the cursor is first iterated. With only find() guarded, a server the
+        # client could name but not reach raised ServerSelectionTimeoutError one
+        # statement later, out of handle(). Wherever the query fails, the
+        # outcome is the same: log, send nothing, mark nothing, return. Every
+        # pending notification stays pending for the next run.
         try:
-            notifications = MONGO_DB[COL_NOTIFICATIONS].find({"sent": {"$exists": False}})
+            notifications = list(
+                MONGO_DB[COL_NOTIFICATIONS].find({"sent": {"$exists": False}})
+            )
         except Exception as e:
             logger.error("Failed to query pending notifications from MongoDB: %s", e)
             return
         print('\n=== Sending emails ===\n')
-        # print(list(notifications))
 
-        notifications = list(notifications)
         for x in notifications:
             # if the subject is user credentials, check if the user has aany restaurant
             # if the user is attached to a restaurant, check if it is active

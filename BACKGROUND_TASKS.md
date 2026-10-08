@@ -45,7 +45,7 @@ One exception: `vacuum_deleted_records` is also called inline (not scheduled) fr
 | **What it does** | Reads unsent notifications from MongoDB (`notifications` collection where `sent` field does not exist). For each: sends an HTML email via Django's SMTP backend. If the notification is a "Dinify Credentials!" message and has SMS content, also sends an SMS via the Yo Uganda SMS gateway (`smgw1.yo.co.ug` HTTP GET). Marks the MongoDB document as `sent: True` after sending. Checks that the owner's restaurant is active before sending credential notifications. |
 | **External services** | MongoDB, SMTP email, Yo Uganda SMS gateway (HTTP GET), PostgreSQL (Restaurant status check) |
 | **Idempotency** | Partial. Filters by `{"sent": {"$exists": False}}`. However, the `sent` flag is set **after** sending. If the command crashes after sending an email but before updating MongoDB, the message will be re-sent on the next run. No deduplication at the email/SMS level. |
-| **Error handling** | **None.** No try/except in the loop. Email uses `fail_silently=False`, so a single SMTP failure crashes the command and all subsequent notifications are skipped. The SMS helper has its own try/except for HTTP errors, but the email path does not. |
+| **Error handling** | Partial. A failure to read the pending set, whether at `find()` or when the cursor is iterated (pymongo runs the query lazily, at the first iteration), logs `Failed to query pending notifications from MongoDB`, sends nothing, marks nothing and returns normally (exit 0). Every pending notification stays pending for the next run. Until `notifications_app/tests_send_messages.py` was added, only `find()` was guarded, so a server the client could name but not reach raised `ServerSelectionTimeoutError` out of the command. Inside the loop, an email failure is caught by `Messenger.send_email`, logged, and the notification is **still marked sent**, so it is not retried. An SMS failure is logged the same way. A failed `update_one` is logged and the loop moves on, so that notification is sent again on the next run. A document missing a key the loop reads (`subject`, `tos`, `ccs`, `email`, `sms`, and `msisdn` for credentials) raises `KeyError` out of the command and ends the run there. |
 
 ---
 
@@ -203,7 +203,7 @@ Refusals are deliberately **not** audited, for the same reason as `mark_restaura
 | Command | App | External Services | Idempotent | Error Handling | Likely Bugs |
 |---|---|---|---|---|---|
 | `determine-customers` | orders | PG | Good | Partial | Atomic rollback risk |
-| `send_messages` | notifications | MongoDB, SMTP, Yo SMS | Partial | None | Re-send risk on crash |
+| `send_messages` | notifications | MongoDB, SMTP, Yo SMS | Partial | Partial | Re-send risk on crash; a failed email is still marked sent |
 | `vacuum_deleted_records` | misc | PG | Good | Minimal | — |
 | `create_platform_admin` | platform_admin | PG | N/A (refuses duplicates) | Fail-closed | — |
 | `reset_platform_admin_totp` | platform_admin | PG | Good (re-runnable) | Fail-closed | — |

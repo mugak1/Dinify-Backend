@@ -1,8 +1,6 @@
-import logging
 from typing import Optional
 from django.db import transaction
 
-logger = logging.getLogger(__name__)
 from restaurants_app.models import (
     Restaurant,
     MenuSection,
@@ -11,12 +9,97 @@ from restaurants_app.models import (
 )
 from misc_app.controllers.save_action_log import save_action
 from dinify_backend.configss.string_definitions import MODULE_MENU
-from dinify_backend.mongo_db import MONGO_DB, ACTION_LOGS
 from users_app.models import User
 from users_app.controllers.permissions_check import (
     can_user_access_module,
     is_restaurant_owner
 )
+
+SUBMITTED_IT_YOURSELF = 'Sorry, you cannot approve a menu that you submitted.'
+SUBMITTER_NOT_ON_RECORD = (
+    'Sorry, only the restaurant owner can approve this menu, '
+    'because the person who submitted it is not on record.'
+)
+
+
+def _submitter_refusal(
+    restaurant: Restaurant,
+    user: User,
+    restaurant_id: str,
+) -> Optional[str]:
+    """
+    Whoever submitted the menu for approval may not approve it, unless they are
+    the restaurant owner. Returns the refusal message, or None to proceed.
+
+    The submitter is read from `Restaurant.first_time_menu_submitted_by`, which
+    the submit decision writes. It used to be looked up in the MongoDB action
+    log, and that lookup never found anything: it asked for `affected_model`,
+    `affected_record` and `user_id` where `save_action` stores `model`, `record`
+    and `user.id`, and it pinned `action` to the approval's own decision while
+    looking for `'submit'`. The log is also the wrong record to decide on.
+    `save_action` writes it from a daemon thread and swallows a failure, so an
+    entry can be missing for good. And a check that reads it depends on MongoDB
+    at decision time: the old one proceeded with no submitter when the client
+    could not be built, and raised out of the approval when the server could not
+    be reached.
+
+    A menu awaiting approval with no recorded submitter fails CLOSED: only the
+    owner may approve it. That is every submission made before the column
+    existed, and any whose submitter's account was since deleted. With no record
+    of who submitted it, no other member can be shown not to be the submitter.
+
+    A menu that was never submitted is not governed here. Approval has never
+    required a submission, and this does not add that requirement.
+    """
+    submitter_id = restaurant.first_time_menu_submitted_by_id
+    if submitter_id is not None:
+        refusal = SUBMITTED_IT_YOURSELF if submitter_id == user.pk else None
+    elif restaurant.first_time_menu_approval_decision == 'submit':
+        refusal = SUBMITTER_NOT_ON_RECORD
+    else:
+        refusal = None
+
+    # The owner is the one principal allowed to self-approve: it is their
+    # restaurant, and separation of duties within a tenant cannot bind the
+    # tenant's own principal.
+    if refusal is not None and is_restaurant_owner(user, restaurant_id):
+        return None
+    return refusal
+
+
+def _lock_for_decision(restaurant_id: str) -> Restaurant:
+    """
+    Read the restaurant under a row lock, inside the decision's transaction.
+
+    A submit or an approval decides from this row: is the menu still `pending`,
+    and who submitted it. The row used to be read before the transaction, without
+    a lock, so two decisions could read the same state and both act on it (Codex
+    P1 on PR #363). Two members submitting at once were both told the menu was
+    submitted, and the later save named only one of them, so the other could
+    approve a menu they had submitted. A submission and an approval could race
+    the same way, leaving an approved menu reading `submit`. Under this lock the
+    second decision waits for the first to commit, then reads what it wrote.
+
+    FOR NO KEY UPDATE, not FOR UPDATE. The decision's own UPDATE of this row
+    takes FOR NO KEY UPDATE, because it changes no key column, so taking it here
+    changes when the lock is taken and not what it conflicts with. FOR UPDATE
+    would also conflict with FOR KEY SHARE, which PostgreSQL takes on this row
+    to check the foreign key of every row inserted with a reference to it, so an
+    order placed at the restaurant would wait for the whole approval.
+    `of=('self',)` keeps a future `select_related` from widening the lock (the
+    PR-E lesson).
+
+    Lock order: `Restaurant -> MenuSection -> SectionGroup -> MenuItem`. Every
+    other writer that locks this row takes it before any menu row, so this adds
+    no cycle. It takes no admission advisory lock: the approval is outside the
+    catalogue barrier by design (`tests_catalogue_admission.EXEMPT`), and a
+    transaction must take that lock before its first row lock or not at all.
+    """
+    return (
+        Restaurant.objects
+        .select_for_update(no_key=True, of=('self',))
+        .get(id=restaurant_id)
+    )
 
 
 def first_time_batch_approval(
@@ -54,9 +137,6 @@ def first_time_batch_approval(
             'message': 'Sorry, the restaurant does not have any menu sections.'
         }
 
-    # get the restaurant
-    restaurant = Restaurant.objects.get(id=restaurant_id)
-
     if approval_decision not in ['approve', 'reject', 'submit']:
         return {
             'status': 400,
@@ -71,6 +151,10 @@ def first_time_batch_approval(
     with transaction.atomic():
         message = 'The restaurant menu has been submitted.'
         if approval_decision in ['approve', 'submit']:
+            # Read the row this decision is made from under a lock, before
+            # anything is checked, so a concurrent decision waits for this one.
+            restaurant = _lock_for_decision(restaurant_id)
+
             # flag the restaurant detail to indicate that a first time memenu approval has been done
             if approval_decision == 'submit':
                 # print(f"the current approval decision is {restaurant.first_time_menu_approval_decision}")
@@ -79,6 +163,10 @@ def first_time_batch_approval(
                         'status': 400,
                         'message': 'Sorry, the restaurant menu has already been submitted.'
                     }
+                # Record who submitted, in the same narrow save as the decision.
+                # The approval reads it back from this row (_submitter_refusal).
+                restaurant.first_time_menu_submitted_by = user
+                approval_columns.append('first_time_menu_submitted_by')
 
             if approval_decision == 'approve':
                 message = 'The restaurant menu has been approved.'
@@ -99,30 +187,12 @@ def first_time_batch_approval(
 
                 # user who submitted menu for approval should not approve,
                 # except for the restaurant owner
-                filter = {
-                    'affected_model': 'restaurant-menu-approval',
-                    'affected_record': restaurant_id,
-                    'action': approval_decision,
-                    'result': 'success'
-                }
-                try:
-                    action_logs = MONGO_DB[ACTION_LOGS].find(filter)
-                except Exception as e:
-                    logger.error("Failed to query action logs from MongoDB: %s", e)
-                    action_logs = []
-
-                submitter_id = None
-                for log in action_logs:
-                    if log.get('action') == 'submit':
-                        submitter_id = log.get('user_id')
-                        break
-
-                if submitter_id == auth.get('user_id'):
-                    if not is_restaurant_owner(user, restaurant_id):
-                        return {
-                            'status': 400,
-                            'message': 'Sorry, you cannot approve a menu that you submitted.'
-                        }
+                refusal = _submitter_refusal(restaurant, user, restaurant_id)
+                if refusal is not None:
+                    return {
+                        'status': 400,
+                        'message': refusal
+                    }
 
                 restaurant.first_time_menu_approval = True
                 approval_columns.append('first_time_menu_approval')
@@ -156,12 +226,20 @@ def first_time_batch_approval(
             #     full-row save walked straight past both walls, restoring a
             #     state an administrator had deliberately left.
             #
-            # NARROWING THE WRITE IS THE FIX HERE, NOT A LOCK. This block holds a
-            # transaction across a MongoDB query (the submitter lookup above), and
-            # a `Restaurant` row lock taken around that would stall every order at
-            # the restaurant behind a remote call — the PR #306 lesson. A writer
-            # that only writes what it decided cannot revert anything, whether or
-            # not it is serialized against the writer it used to trample.
+            # NARROWING THE WRITE WAS THE FIX FOR THOSE REVERTS, NOT A LOCK. A
+            # writer that only writes what it decided cannot revert anything,
+            # whether or not it is serialized against the writer it used to
+            # trample. (A lock was first ruled out because this block held its
+            # transaction across a MongoDB query, the submitter lookup, which
+            # would have stalled every order at the restaurant behind a remote
+            # call: the PR #306 lesson. That query is gone.)
+            #
+            # The row IS now locked, from the read at the top of this block to
+            # this write, for a different reason: two decisions must not act on
+            # the same state (`_lock_for_decision`). That also keeps the row from
+            # changing between the read and the write, so a full-row save would
+            # no longer revert anything either. The narrow write stays anyway: it
+            # states what this decision owns, and it does not rely on the lock.
             restaurant.save(update_fields=approval_columns)
 
             save_action(
