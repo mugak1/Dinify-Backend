@@ -155,6 +155,23 @@ class Restaurant(BaseModel):
         default='approve',
     )
     first_time_menu_approval = models.BooleanField(default=True)
+    # Who submitted the menu for its first-time approval. Written only by the
+    # submit decision in `first_time_batch_approval`, in the same narrow save as
+    # the decision, and read by the approval, which refuses a submitter who is
+    # not the owner. Server-owned: absent from EDIT_INFORMATION and from
+    # SerializerPutRestaurant, and `editable=False` keeps the `__all__` read
+    # serializers from exposing it as writable. SET_NULL like `created_by`, so a
+    # deleted account leaves the submission unattributed, never attributed to
+    # somebody else. NULL is also every submission made before this column
+    # existed: nothing records who made those.
+    first_time_menu_submitted_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        editable=False,
+        related_name='+',
+    )
 
     # eod processing
     eod_restaurant_last_date = models.DateField(null=True, db_index=True)

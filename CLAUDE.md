@@ -909,10 +909,13 @@ so keep it current when conventions change.
     an instance loaded before its transaction, so a menu approval silently
     reverted `accepting_orders` AND `status` — walking straight past the two
     walls (`EDIT_INFORMATION` + `read_only`) that make lifecycle single-writer.
-    It now writes only the two columns it decides; **narrowing the write is the
-    fix, not a lock**, because that block holds a transaction across a MongoDB
-    query and a `Restaurant` row lock there would stall every order behind a
-    remote call (the PR #306 lesson). `table_actions._update_status` did a
+    It now writes only the columns it decides; **narrowing the write is the
+    fix, not a lock**. A lock was first ruled out because that block held a
+    transaction across a MongoDB query (the submitter lookup), where a
+    `Restaurant` row lock would have stalled every order behind a remote call
+    (the PR #306 lesson). That query is gone (MENU-APPROVAL-SUBMITTER-00,
+    below), and the narrow write stands on its own: a writer that writes only
+    what it decided cannot revert anything. `table_actions._update_status` did a
     full-row `table.save()` from an unlocked read, so a concurrent QR
     regeneration was reverted — **un-revoking every diner credential the owner
     had just revoked** — and it now re-reads under `select_for_update` and writes
@@ -1555,6 +1558,66 @@ so keep it current when conventions change.
   `0055_sanitize_menu_item_extras` deterministically repaired the persisted corpus
   (data-only, idempotent, LOSSY → irreversible). Do NOT re-scatter these
   write-time predicates
+- First-time menu approval records who submitted it (MENU-APPROVAL-SUBMITTER-00): ✅
+  the rule is the one 8b69a45 (2024-11-14) meant to enforce: **whoever submitted the
+  menu for first-time approval may not approve it, unless they are the restaurant
+  owner** (`POST restaurant-setup/manager-actions/first-time-menu-review/`,
+  `restaurants_app/controllers/first_time_batch_approval.py`). **THE OLD CHECK NEVER
+  FIRED.** It looked the submitter up in the MongoDB action log with
+  `affected_model` / `affected_record` / `user_id`, where `save_action` stores
+  `model` / `record` / `user.id`, and it pinned `action` to the approval's own
+  decision while looking for `'submit'`. So it matched nothing, and every submitter
+  could approve. It also iterated the lazy cursor OUTSIDE its try, for every
+  approval: a client that could not be built made it proceed, and an unreachable
+  server raised `ServerSelectionTimeoutError` out of EVERY approval, the owner's
+  included, as a 500.
+  **THE FIX IS A COLUMN, NOT A CORRECTED QUERY.** The action log is the wrong record
+  to decide on: `save_action` writes it from a daemon thread and swallows a failure,
+  so an entry can be missing for good, and MongoDB is unreachable from the live box.
+  `Restaurant.first_time_menu_submitted_by` (migration `restaurants_app/0059`,
+  nullable FK to `User`, `SET_NULL`, `editable=False`, `related_name='+'`, NO
+  backfill) is written by the submit decision in the same narrow
+  `save(update_fields=...)` as the decision, and the approval reads it off the row
+  it already loaded. `_submitter_refusal` is the ONE rule, and the decision reads no
+  MongoDB at all (an AST test pins the import).
+  **AN UNRECORDED SUBMITTER FAILS CLOSED.** A menu at decision `'submit'` with no
+  recorded submitter can be approved by the owner only (`SUBMITTER_NOT_ON_RECORD`),
+  because nobody else can be shown not to be the submitter. That is every
+  submission made before 0059, and any whose submitter's account was since
+  hard-deleted. **DO NOT BACKFILL IT** from the action log or from `created_by`: a
+  wrong attribution would let the real submitter approve and block the person
+  named. **NOT GOVERNED, deliberately**: a menu that was never submitted (approval
+  from `'pending'` has never required a submission, and still does not), and
+  approval by anyone other than the recorded submitter. The recorded submitter stays
+  refused on a later re-approval. **THE OWNER EXEMPTION IS UNCHANGED**
+  (`is_restaurant_owner`: an active owner-role membership, never a delegation, and
+  `manager-actions` is off the delegated allowlist anyway). The shipped portal
+  offers **Approve Menu** to the owner only, so no shipped screen reaches either
+  refusal; a non-owner reaches them through the API.
+  **SERVER-OWNED BY ABSENCE**: not in `EDIT_INFORMATION['restaurants']`, not in
+  `SerializerPutRestaurant`'s explicit fields, and `editable=False` makes the
+  `__all__` read serializers (`SerializerGetRestaurantDetail` on the single-record
+  `restaurant-setup/details/` read, and the archival `SerArcRestaurant`) build it
+  read-only. There it appears as an additive key holding a user UUID. Removing
+  `editable=False` fails the tenancy meta-test, because the relation becomes
+  writable and unclassified.
+  **REPORTED, NOT DECIDED HERE**: whether the rule should exist at all is the
+  owner's product question. The "created it yourself" check beside it compares a
+  `User` FK with a string id and never fires. Approval has no state precondition,
+  so a manager can approve a never-submitted menu directly, and the rule is avoided
+  by not submitting. A reject leaves the decision at `'submit'`, so a rejected menu
+  cannot be resubmitted. Every approval re-enables every section, group and item.
+  And the restaurant row is read before the transaction, without a lock, so a submit
+  and an approval racing on one restaurant are not serialized.
+  **`send_messages` GOT THE SAME GUARD**: its `list(...)` now sits inside the try;
+  see `BACKGROUND_TASKS.md`. Pinned by
+  `restaurants_app/tests_menu_approval_submitter.py` (20) and
+  `notifications_app/tests_send_messages.py` (4), with the stand-ins in
+  `dinify_backend/tests_mongo_unavailability.py` (5; see "MongoDB — Rules"). On
+  `888eedc` 15 of the 29 fail (6 failures, 9 errors). The 14 that pass there are
+  the controls, the scope test, the premise and stand-in checks, and two absence
+  guards that cannot fail before the field exists. Nine source mutations each fail
+  a named subset. See `BREAKING_CHANGES.md` §24
 - Anonymous diner capability — capability-only, header-only entry + fail-closed
   key: ✅ The QR scan → table-session flow
   (`restaurants_app/controllers/diner_capability.py`; `django.core.signing`,
@@ -5606,6 +5669,25 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
 - Do not add any new hard dependencies on MongoDB
 - Exception: `mark_as_read` on notifications MUST remain synchronous
   because the endpoint needs its return value
+- A DECISION MUST NOT READ MONGODB. `save_action` writes action logs from a daemon
+  thread and swallows a failure, so a missing entry is ordinary, and the store is
+  unreachable from the live box. The first-time menu approval decided on an
+  action-log lookup that never matched anything; it now reads a PostgreSQL column
+  (MENU-APPROVAL-SUBMITTER-00)
+- `find()` IS LAZY. pymongo runs the query on the cursor's first iteration, so an
+  unreachable server raises `ServerSelectionTimeoutError` at the ITERATION, after the
+  client's 2 s `serverSelectionTimeoutMS`, never at `find()`. A guard must cover the
+  iteration (`list(...)` inside the `try`). A client that cannot be built fails
+  earlier, with `RuntimeError` at `MONGO_DB[...]`. `test_settings.py` replaces
+  `dinify_backend.mongo_db` with a `MagicMock`, which answers everything, iterates
+  as empty and never raises, so a test that leaves it in place proves nothing about
+  failure. Use the stand-ins in `dinify_backend/tests_mongo_unavailability.py`
+  (`UnreachableMongo`, `UnconfiguredMongo`, `InMemoryMongo`, `action_log_store`).
+  Its `PremiseTests` pin the premise against the real module and the real driver on
+  a closed loopback port, so a driver that made `find()` eager would fail there. A
+  function-local `from dinify_backend.mongo_db import MONGO_DB` resolves to the mock
+  module's attribute at call time, so patch `dinify_backend.mongo_db.MONGO_DB` as
+  well as the importing module's name
 
 ## SMS / Yo Uganda
 - VERIFIED 2026-07-20 from the EC2 box: `smgw1.yo.co.ug` resolves and connects —
@@ -5667,6 +5749,10 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
 - `first_time_menu_approval_decision` defaults to `'approve'`
 - `first_time_menu_approval` defaults to `True`
 - Do not revert these
+- `first_time_menu_submitted_by` is NULL by default, and NULL beside decision
+  `'submit'` means the submitter is NOT ON RECORD, which makes the approval
+  owner-only. That is deliberate and is not to be backfilled: see
+  MENU-APPROVAL-SUBMITTER-00
 
 ## Canonical Data Shapes — CRITICAL
 - `MenuItem.tags` is the dietary-tag field. The `allergens`→`tags` rewire is
@@ -6099,8 +6185,18 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   only into packages), requires every one that drives `MigrationExecutor` to be listed,
   checks each listed tearDown restores the whole graph, and runs each listed class to
   prove nothing is left unapplied
-- Latest migration: `restaurants_app/migrations/0058_table_qr_mode_order_only_default.py`
-  (0058 is MODEL-STATE ONLY — one `AlterField` moving `Table.qr_mode`'s default
+- Latest migration: `restaurants_app/migrations/0059_restaurant_first_time_menu_submitted_by.py`
+  (0059 adds `Restaurant.first_time_menu_submitted_by`: one generated `AddField`, a
+  nullable FK to `users` with its index, NO `RunPython` and NO backfill. The FK is
+  added `DEFERRABLE INITIALLY DEFERRED` like every Django FK. It runs in ONE
+  transaction: the `ADD COLUMN` takes `ACCESS EXCLUSIVE` on `restaurants` and the
+  constraint takes `SHARE ROW EXCLUSIVE` on `users`, and both are held until it
+  commits, through the index build. Each waits behind open transactions on its
+  table, which this repository cannot observe, and requests on those tables queue
+  behind it while it waits. Old code ignores the column, and its inserts leave it
+  NULL. See
+  MENU-APPROVAL-SUBMITTER-00 and `BREAKING_CHANGES.md` §24 for the rollback note;
+  0058 is MODEL-STATE ONLY — one `AlterField` moving `Table.qr_mode`'s default
   `order_pay` → `order_only`, with NO `RunPython`, no row rewrite and no backfill:
   every existing table keeps its stored value, `order_pay` stays a legal choice and
   stays orderable, so a rollback is a TRUE INVERSE that restores the old default for
