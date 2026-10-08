@@ -1895,15 +1895,18 @@ transaction. Answers change only when decisions overlap:
 
 - Two members submitting at once: the second now gets `400 {"status": 400,
   "message": "Sorry, the restaurant menu has already been submitted."}`. Before,
-  both got 200 and the record named only the later one, so the other could approve
-  the menu they had submitted.
+  both got 200.
 - A submission arriving while an approval is in progress: it waits, then gets the
-  same 400. Before, it was reported successful and recorded a submitter for a menu
-  being approved.
+  same 400. Before, it was reported successful.
 - An approval arriving while a submission is in progress: it waits, then decides
   against the committed submission, so the submitter is refused unless they own the
   restaurant. Before, it decided from `pending`, and the submission could then
   overwrite it and leave an approved menu reading `submit`.
+
+Without the lock, the first two would also corrupt the submitter this change
+records. The record could name only the later of two submitters, so the other could
+approve the menu they had submitted, or it could name a submitter for a menu being
+approved.
 
 The wait lasts as long as the other decision's transaction: a few UPDATEs, no I/O.
 Orders are not held up: the lock does not conflict with the `FOR KEY SHARE` an

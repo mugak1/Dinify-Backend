@@ -1610,6 +1610,14 @@ so keep it current when conventions change.
   so a manager can approve a never-submitted menu directly, and the rule is avoided
   by not submitting. A reject leaves the decision at `'submit'`, so a rejected menu
   cannot be resubmitted. Every approval re-enables every section, group and item.
+  An approval can deadlock with a menu-item edit (`PUT restaurant-setup/menuitems/`)
+  that lands after the approval has updated the sections and before it updates the
+  items: the edit's row lock goes through a join with no `of=`, so it takes the item
+  and then its section, and each transaction waits for the other. PostgreSQL aborts
+  one of them. In the measured case it aborted the edit, which answered 500 and was
+  rolled back, and the approval succeeded. A section-group edit locks the same way
+  and was not measured. This predates the lock described next: it reproduces with
+  and without it.
   **TWO DECISIONS ON ONE RESTAURANT ARE SERIALIZED** (Codex P1 on PR #363, valid).
   The row used to be read before the transaction, without a lock, so two members
   submitting at once were both told the menu was submitted, the later save named
