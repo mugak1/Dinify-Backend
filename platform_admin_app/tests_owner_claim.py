@@ -770,21 +770,20 @@ class CrossPurposeOtpReplacementTests(_ClaimTestCase):
         is load-bearing: otherwise requesting a login code would silently kill the claim
         challenge the owner is in the middle of using.
 
-    THE PURPOSE-BLIND DELETE ITSELF IS UNCHANGED. This is not the broad purpose-scoped
-    migration; ``login`` and ``reset-password`` still share the NULL bucket and still
-    replace one another exactly as they always have. Only owner-claim moved.
+    Step 2F.2 left the delete itself purpose-blind, so ``login`` and ``reset-password``
+    went on sharing the NULL bucket and replacing one another, and a newer owner-claim
+    challenge still shadowed an older login code at the purpose-blind generic verify
+    endpoint.
 
-    ━━ THE ONE INTERACTION THAT SURVIVES, AND IT IS NOT A REGRESSION ━━━━━━━━━━━━━━
+    ━━ D11 E-R2: THE DELETE IS PURPOSE-SCOPED, AND THE LOGIN ROUTE IS BOUND ━━━━━━━━
 
-    Two live rows for one identity can now coexist, and a PURPOSE-BLIND
-    ``verify_otp(user_id=…)`` still picks the most recent. So a newer owner-claim
-    challenge shadows an older login code for the generic verify endpoint.
-
-    That is the SAME user-visible outcome as before — previously the login row was
-    deleted outright, so the login code did not work either — and coexistence for one
-    user already occurs on ``origin/main`` via ``resend_otp``, which has always passed
-    ``msisdn=user.phone_number``. Redemption itself is immune: it binds purpose AND
-    destination, so it selects its own row or none.
+    ``make_otp`` now replaces within ``(user, msisdn, purpose)`` only, so ``login`` and
+    ``reset-password`` coexist in the NULL bucket instead of deleting each other, and an
+    account-resolving resend to the owner's phone no longer deletes a live owner-claim
+    challenge (whose correct code used to be refused and charged to the invitation). The
+    ``verify-otp`` endpoint now passes ``expected_purpose='login'``, so a coexisting
+    owner-claim challenge is never selected, charged or consumed there. Redemption is
+    unchanged: it binds purpose AND destination, so it selects its own row or none.
     """
 
     def _established_owner(self):
@@ -841,16 +840,19 @@ class CrossPurposeOtpReplacementTests(_ClaimTestCase):
             {'reset-password', OWNER_CLAIM_OTP_PURPOSE},
         )
 
-    def test_login_and_reset_still_replace_each_other(self):
+    def test_login_and_reset_no_longer_replace_each_other(self):
         """
-        UNCHANGED, and pinned so it stays that way. Both still pass no `msisdn`, so both
-        still occupy the NULL bucket. This PR did NOT purpose-scope the delete.
+        CHANGED BY D11 E-R2. Both still pass no `msisdn`, so both still occupy the NULL
+        bucket, but replacement is now scoped by purpose too: an anonymous reset request
+        no longer deletes a login in progress, nor a login a reset in progress.
         """
         self._established_owner()
         self._make('login')
         self._make('reset-password')
-        self.assertEqual(self.otps().count(), 1)
-        self.assertEqual(self.otps().get().purpose, 'reset-password')
+        self.assertEqual(
+            sorted(self.otps().values_list('purpose', 'msisdn', 'attempts', 'consumed_at')),
+            [('login', None, 0, None), ('reset-password', None, 0, None)],
+        )
 
     def test_a_second_challenge_still_replaces_the_first(self):
         """
@@ -864,17 +866,19 @@ class CrossPurposeOtpReplacementTests(_ClaimTestCase):
         self.assertEqual(self.otps().count(), 1)
         self.assertNotEqual(self.otps().get().pk, first)
 
-    def test_the_delete_is_still_purpose_blind(self):
+    def test_the_delete_is_purpose_scoped(self):
         """
-        Stated structurally, so a future purpose-scoped migration is a DELIBERATE change
-        that updates this test rather than a quiet one that slips past the tests above.
+        Stated structurally, so a future change to the replacement key is a DELIBERATE
+        change that updates this test rather than a quiet one that slips past the tests
+        above. D11 E-R2 made it purpose-scoped.
         """
         import inspect
         from users_app.controllers import otp_manager
 
         source = inspect.getsource(otp_manager.OtpManager.make_otp)
         self.assertIn(
-            'UserOtp.objects.filter(user=user, msisdn=msisdn).delete()', source,
+            'UserOtp.objects.filter(user=user, msisdn=msisdn, purpose=purpose).delete()',
+            source,
             'the replacement delete changed shape — re-derive which rows each caller '
             'now collides with before updating these expectations',
         )
