@@ -21,7 +21,7 @@
   },
   "directInputs": {
     "path": "requirements.txt",
-    "sha256": "b23c57ca577b5bfa40c8cc2b041c9d62d3c8166961ff355fe20ceb1fe87b6b28"
+    "sha256": "053d9d7ed8929550cdea6e4ea18d849f3dfea93a6eb3e2871fe73289813ec16b"
   },
   "generator": {
     "tool": "pip",
@@ -45,8 +45,8 @@
       "-r",
       "requirements.txt"
     ],
-    "resolvedAt": "2026-09-30T16:12:43Z",
-    "reportSha256": "e6fed7816905fe26709dc470657872217904afba58da355ed513e8ba49e8b565"
+    "resolvedAt": "2026-10-08T10:25:24Z",
+    "reportSha256": "ddc427586f6aa3d7f7f3bb882f7d9008298350f9af700c791aa3c3c8ec269cd3"
   },
   "bootstrap": [
     {
@@ -166,11 +166,11 @@
     },
     {
       "name": "dnspython",
-      "version": "2.6.1",
-      "filename": "dnspython-2.6.1-py3-none-any.whl",
-      "url": "https://files.pythonhosted.org/packages/87/a1/8c5287991ddb8d3e4662f71356d9656d91ab3a36618c3dd11b280df0d255/dnspython-2.6.1-py3-none-any.whl",
-      "sha256": "5ef3b9680161f6fa89daf8ad451b5f1a33b18ae8a1c6778cdf4b43f08c0a6e50",
-      "size": 307696,
+      "version": "2.8.0",
+      "filename": "dnspython-2.8.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/ba/5a/18ad964b0086c6e62e2e7500f7edc89e3faa45033c71c1893d34eed2b2de/dnspython-2.8.0-py3-none-any.whl",
+      "sha256": "01d9bbc4a2d76bf0db7c1f729812ded6d912bd318d3b1cf81d30c0f845dbf3af",
+      "size": 331094,
       "direct": true,
       "requiredBy": [
         "pymongo"
@@ -244,11 +244,11 @@
     },
     {
       "name": "pymongo",
-      "version": "4.6.3",
-      "filename": "pymongo-4.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
-      "url": "https://files.pythonhosted.org/packages/e2/35/4b18e02232a86e7cb4ac478af78d33e3528182965e39c6d4dcac55284802/pymongo-4.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
-      "sha256": "01277a7e183c59081368e4efbde2b8f577014431b257959ca98d3a4e8682dd51",
-      "size": 691985,
+      "version": "4.18.2",
+      "filename": "pymongo-4.18.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/a9/92/a02a4108ca4faf05bca394d65dcebc7b84b0248cff23aa89927c81a0d5dd/pymongo-4.18.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "ecde9e735e1f86559e0a71a5bbec671e59a35549bfd8c60968d9f032b05013de",
+      "size": 1049896,
       "direct": true,
       "requiredBy": []
     },
