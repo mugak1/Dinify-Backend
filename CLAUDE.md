@@ -1610,14 +1610,48 @@ so keep it current when conventions change.
   so a manager can approve a never-submitted menu directly, and the rule is avoided
   by not submitting. A reject leaves the decision at `'submit'`, so a rejected menu
   cannot be resubmitted. Every approval re-enables every section, group and item.
-  An approval can deadlock with a menu-item edit (`PUT restaurant-setup/menuitems/`)
-  that lands after the approval has updated the sections and before it updates the
-  items: the edit's row lock goes through a join with no `of=`, so it takes the item
-  and then its section, and each transaction waits for the other. PostgreSQL aborts
-  one of them. In the measured case it aborted the edit, which answered 500 and was
-  rolled back, and the approval succeeded. A section-group edit locks the same way
-  and was not measured. This predates the lock described next: it reproduces with
-  and without it.
+  **AN APPROVAL NO LONGER DEADLOCKS WITH A MENU-ITEM OR SECTION-GROUP EDIT**
+  (MENU-APPROVAL-EDIT-LOCK-00). Secretary resolves a menu item or a section group
+  through a scoped queryset that joins `menu_sections`, and its
+  `select_for_update()` has no `of=`, so one statement locked the record and then
+  its section. The approval updates sections, then groups, then items. A `PUT` or
+  `DELETE` on `restaurant-setup/menuitems/` or `sectiongroups/` landing between the
+  approval's section UPDATE and its group or item UPDATE held the record and waited
+  for the section while the approval waited for the record. PostgreSQL aborted one
+  of them; in every measured case the edit, which answered 500. It predated #363's
+  lock and reproduced with and without it. Measured on `bfa393e`: an item PUT, a
+  group PUT, an item DELETE and a group DELETE each answered 500. A section PUT
+  waited and succeeded, because it locks the section alone. NOW those four writes
+  lock the record's SECTION first, right after the catalogue barrier
+  (`restaurant_setup._lock_parent_section`): the same lock Secretary took, on the
+  same row, in the same mode, through the same scoped queryset, taken earlier. That
+  is the approval's own order, parent before child, so an edit that arrives second
+  waits for the section while holding no menu row, and an approval that arrives
+  second waits in its section UPDATE before it holds any group or item. The
+  permission gate still refuses a foreign or unknown id with a 403 before anything
+  is locked; a record the scoped queryset no longer matches (the caller's scope
+  changed after the gate) locks nothing, and Secretary's lookup answers its 404.
+  **NARROWING SECRETARY'S LOCK TO `of=('self',)` WAS REJECTED**: it removes the
+  section from the cycle, but an item PUT that assigns extras locks them after its
+  own row, and an approval that has already updated those extras then waits for
+  that row. It is the same cycle on a different pair of rows, and it was measured
+  (`OppositeArrivalOrderTests.test_CONTROL_an_extras_edit_in_flight`). The
+  approval reaches items in an order PostgreSQL derives from a hash of their ids,
+  different on every run, so that test measures the order first and edits the item
+  the approval reaches last; under a record-only lock it deadlocks every time. **THE
+  APPROVAL'S STATEMENT ORDER IS NOW LOAD-BEARING**: updating items before sections
+  would reopen the cycle against the pre-lock, and the opposite-order controls
+  would fail. Pinned by `restaurants_app/tests_menu_approval_edit_concurrency.py`
+  (29): on `bfa393e` its 11 regressions answer 500 (`deadlock detected`), its 4
+  endpoint pins fail and its 5 helper pins error, and its 9 controls pass.
+  **NOT EVERY MENU WRITE IS DEADLOCK-FREE WITH AN APPROVAL**, and this does not
+  claim it: the section and item reorders take no barrier and lock rows in the
+  order the caller sends; a menu-item create that assigns extras and an item
+  reorder can still deadlock with an item PUT that assigns extras; and a delete's
+  inline vacuum updates soft-deleted rows across every restaurant. The lock sets of
+  all of those are unchanged. An edit waiting for an approval holds the catalogue
+  barrier while it waits, so an order at that restaurant waits for both; before the
+  fix it waited the same way until the deadlock was detected.
   **TWO DECISIONS ON ONE RESTAURANT ARE SERIALIZED** (Codex P1 on PR #363, valid).
   The row used to be read before the transaction, without a lock, so two members
   submitting at once were both told the menu was submitted, the later save named
@@ -3121,7 +3155,11 @@ the catch-all `<str:config_detail>/` route.
   does not hold up orders by itself. As with every participant here, a transition
   or a `restaurants` PUT waiting on it holds the exclusive admission lock while it
   waits, so orders at that restaurant queue for the length of the decision's
-  transaction (a few UPDATEs, no I/O)
+  transaction (a few UPDATEs, no I/O). A menu-item or section-group `PUT` or
+  `DELETE` on `restaurant-setup` follows the same parent-before-child order:
+  `advisory EXCLUSIVE (the catalogue barrier) → MenuSection → its own row →`
+  (an item that assigns extras) `→ the extras`. It takes the section before the
+  record so it cannot cycle against the decision (MENU-APPROVAL-EDIT-LOCK-00)
 - The service enforces the matrix against the row read under `select_for_update`
   (so concurrent transitions serialize), requires a reason (≥10 chars, mirroring
   `platform_admin_app.delegation.MIN_REASON_LENGTH`), and writes an
