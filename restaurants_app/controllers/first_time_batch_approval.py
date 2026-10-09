@@ -196,6 +196,12 @@ def first_time_batch_approval(
 
                 restaurant.first_time_menu_approval = True
                 approval_columns.append('first_time_menu_approval')
+                # Sections, then groups, then items: parent before child. A
+                # menu-item or section-group PUT or DELETE locks its section
+                # before its own row (`restaurant_setup._lock_parent_section`),
+                # so this order is what keeps the two from deadlocking. Updating
+                # the children first would reopen the cycle
+                # (`tests_menu_approval_edit_concurrency`).
                 # bulk update the menu sections
                 sections = MenuSection.objects.filter(restaurant=restaurant)
                 sections.update(approved=True, enabled=True)
