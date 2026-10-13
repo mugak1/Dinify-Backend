@@ -899,8 +899,11 @@ class NoLockSpansDeliveryTests(TransactionTestCase):
     WHAT CHANGED WITH D11 B2-C, AND WHAT DID NOT. Issuing the challenge now writes the
     replacement delete, the new challenge and its accounting row in ONE short
     transaction, which takes the owner's ``users`` row ``FOR KEY SHARE`` first (the
-    order that keeps it from deadlocking a redemption). That is the ONLY locking read on
-    this path, and it is confined to that transaction, which commits before delivery.
+    order that keeps it from deadlocking a redemption). That is the ONLY locking READ on
+    this path. Since D11 E-R3 the same transaction also takes one transaction-scoped
+    advisory lock on the challenge's replacement bucket, straight after the key share
+    (``otp_manager._hold_bucket``). Both are confined to that transaction and released
+    by its commit, before delivery.
     The claim PREFLIGHT still takes no lock and opens no transaction, and nothing is
     held when a sender is entered — which is the property these tests exist for, now
     asserted at the sender itself rather than at ``make_otp``'s door.
