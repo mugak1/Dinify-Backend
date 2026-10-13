@@ -67,9 +67,10 @@ Two steps, and only the second is a transaction.
    holding nothing.
 2. **`make_otp` then opens one short `transaction.atomic(durable=True)`** that:
    1. takes the user's row `FOR KEY SHARE` (user-backed challenges only);
-   2. deletes the challenge being replaced;
-   3. inserts the new challenge;
-   4. inserts its `pending` issuance row.
+   2. takes the replacement bucket's advisory lock (every challenge, since D11 E-R3);
+   3. deletes the challenge being replaced;
+   4. inserts the new challenge;
+   5. inserts its `pending` issuance row.
 
    It commits before any SMS or e-mail sender is entered.
 
@@ -79,8 +80,16 @@ Rules:
   so without it the `users` row would be reached only at COMMIT, after the old challenge
   was already locked. That is the reverse of redemption's `users` then `user_otps`
   order, and the two would deadlock.
+- **Why the bucket lock comes before the delete (D11 E-R3).** Under READ COMMITTED the
+  delete cannot see another issuer's uncommitted challenge, so two issuers of one
+  `(user, msisdn, purpose)` bucket could both insert. `pg_advisory_xact_lock(0x4F545049,
+  key)` makes the second wait for the first to commit; its delete then removes the
+  first one's row. It is taken on the issuance transaction's connection and released by
+  its COMMIT or ROLLBACK. It does not order requests by arrival or SMS delivery. See
+  `BREAKING_CHANGES.md` §25.
 - **Nothing is held across transport.** No `Restaurant` row or ownership barrier, no
-  `User` or `UserOtp` lock and no open transaction exists while a sender runs.
+  `User` or `UserOtp` lock, no advisory lock and no open transaction exists while a
+  sender runs.
 - **A caller's transaction is refused.** `durable=True` raises before any write or send.
 - **A ledger write failure sends nothing.** The whole transaction rolls back, and
   `make_otp` returns `False`, which callers already handle as a delivery failure.

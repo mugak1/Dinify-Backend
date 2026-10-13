@@ -3,6 +3,7 @@ import logging
 import secrets
 import hmac
 import hashlib
+import json
 import threading
 from decouple import config
 from datetime import timedelta
@@ -18,6 +19,83 @@ from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STA
 from users_app import customer_access, otp_accounting
 
 logger = logging.getLogger(__name__)
+
+
+# ━━ ONE ISSUER PER REPLACEMENT BUCKET AT A TIME (D11 E-R3) ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# A replacement bucket is ``(user, msisdn, purpose)``: the rows ``make_otp`` deletes
+# before it writes a new challenge. The DELETE locks only the rows it can SEE, and under
+# READ COMMITTED it cannot see a row another issuer has written and not yet committed.
+# So two issuers of one bucket used to each delete the older row, each insert, and leave
+# TWO live challenges, both of which a login or a reset would accept.
+#
+# Every issuer of a bucket now takes a transaction-scoped advisory lock on that bucket
+# before its DELETE. The second issuer waits until the first COMMITS, and its DELETE then
+# reads a fresh snapshot that includes the first issuer's row, so it replaces that row.
+#
+# THE NAMESPACE. ``0x4F545049`` ("OTPI") is the first key of PostgreSQL's two-integer
+# advisory form, which keeps a key space of its own (``objsubid = 2`` in ``pg_locks``),
+# apart from the single-bigint form the restaurant admission lock uses. Nothing else in
+# this repository takes a two-integer advisory lock.
+ISSUANCE_BUCKET_LOCK_CLASS = 0x4F545049
+
+# VERSIONED, and changing it is a rollout event: two workers that derive different keys
+# for one bucket do not wait for each other, which is exactly the race this closes.
+_ISSUANCE_BUCKET_DOMAIN = b'dinify.otp-issuance-bucket.v1\x00'
+
+
+def issuance_bucket_key(user, msisdn, purpose) -> int:
+    """
+    The second advisory key for one replacement bucket: a signed 32-bit integer.
+
+    The input is the bucket as the replacement DELETE filters it, so equal keys can only
+    come from one bucket or a hash collision. The user is its primary key. The msisdn
+    (already canonicalised by ``make_otp`` where it can be) and the purpose go through
+    the coercion the DELETE's lookups apply, ``CharField.get_prep_value``, so a caller's
+    non-string value names the same bucket here as it does there. A JSON array keeps the
+    three values apart: ``null`` (no user, no destination, no purpose) is a different
+    value from ``""`` or ``"null"``, and no separator can be forged inside a string.
+
+    Secret-free, like the admission key: it is a coordination address, not a
+    credential. A collision between two buckets only makes their issuers take turns.
+    """
+    msisdn = UserOtp._meta.get_field('msisdn').get_prep_value(msisdn)
+    purpose = UserOtp._meta.get_field('purpose').get_prep_value(purpose)
+    material = json.dumps(
+        [None if user is None else str(user.pk), msisdn, purpose],
+        separators=(',', ':'),
+    )
+    digest = hashlib.sha256(_ISSUANCE_BUCKET_DOMAIN + material.encode('utf-8')).digest()
+    return int.from_bytes(digest[:4], 'big', signed=True)
+
+
+def _hold_bucket(user, msisdn, purpose) -> None:
+    """
+    Take the bucket's advisory lock for the rest of the issuance transaction.
+
+    Called on the connection the transaction is open on (``transaction.get_connection()``,
+    the same default alias as the ``atomic`` block in ``make_otp``), AFTER the user's
+    KEY SHARE and BEFORE the replacement DELETE. A transaction-scoped lock is released by
+    the COMMIT or ROLLBACK that ends the issuance, so nothing is held when the code is
+    sent and nothing can leak onto a reused connection.
+
+    REFUSED outside a transaction: there an ``_xact_`` lock is released by the statement
+    that takes it and protects nothing. Not PostgreSQL: a no-op, so the unit suite still
+    runs on another backend, which therefore proves nothing about concurrency.
+    """
+    conn = transaction.get_connection()
+    if not conn.in_atomic_block:
+        raise RuntimeError(
+            'the issuance bucket lock is taken inside the issuance transaction, never alone'
+        )
+    if conn.vendor != 'postgresql':
+        return
+    with conn.cursor() as cursor:
+        cursor.execute(
+            'SELECT pg_advisory_xact_lock(%s, %s)',
+            [ISSUANCE_BUCKET_LOCK_CLASS, issuance_bucket_key(user, msisdn, purpose)],
+        )
+
 
 # Lock an OTP challenge after this many failed verification attempts. A module
 # constant (not a per-row column) so it can't be tampered with per challenge.
@@ -89,7 +167,13 @@ class OtpManager:
         written in ONE durable transaction that COMMITS BEFORE ANY SENDER IS ENTERED,
         so no lock and no transaction is held across SMS or e-mail I/O. For a
         user-backed challenge it takes the user's row ``FOR KEY SHARE`` first; see
-        ``otp_accounting.hold_subject`` for the deadlock that ordering prevents.
+        ``otp_accounting.hold_subject`` for the deadlock that ordering prevents. Every
+        challenge, user-backed or not, then takes the advisory lock on its replacement
+        bucket (``_hold_bucket``, D11 E-R3), so a second issuer of the same bucket waits
+        for this one to commit and then replaces its row. The order is: KEY SHARE, bucket
+        lock, replacement DELETE, challenge INSERT, ledger INSERT, COMMIT, then delivery.
+        That serializes the issuers that take the lock. It does not order requests by
+        arrival or by SMS delivery.
 
         ``durable=True`` REFUSES to run inside a caller's transaction, before any write
         or send: an enclosing transaction would hold the new challenge's locks across
@@ -172,6 +256,10 @@ class OtpManager:
             with transaction.atomic(durable=True):
                 if user is not None:
                     otp_accounting.hold_subject(user.pk)
+                # One issuer per bucket at a time (D11 E-R3). Taken before the DELETE, so
+                # a second issuer's DELETE runs after this transaction commits and sees
+                # the row it wrote.
+                _hold_bucket(user, msisdn, purpose)
                 # Replace only this PURPOSE's earlier challenge to the same identity and
                 # destination (D11 E-R2). A challenge issued for another purpose belongs
                 # to another flow, and deleting it interrupted that flow: an anonymous

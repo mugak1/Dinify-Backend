@@ -1674,7 +1674,8 @@ reconciles them. See `docs/engineering/d11-b2-collection.md`.
   name theirs; any other caller is recorded as `unattributed`.
 - `make_otp` now writes the replacement delete, the new challenge and its ledger row in
   one `transaction.atomic(durable=True)`, taking the user's row `FOR KEY SHARE` first
-  (user-backed challenges only). **Calling it inside a caller's transaction raises
+  (user-backed challenges only). Since §25 it also takes the bucket's advisory lock
+  before the delete. **Calling it inside a caller's transaction raises
   `RuntimeError`** before any write or send; no production caller does. A test wrapped
   in `TestCase` is unaffected (Django exempts its own wrappers). The transaction
   commits before any sender runs, and nothing is held across transport.
@@ -1825,8 +1826,9 @@ challenges still live at the time.
 not require `user IS NULL`. A password reset, initiated or completed, does not revoke an
 outstanding login challenge: the resend path already let one survive, this extends that
 to ordinary initiation, and coordinated invalidation is an open policy. Two concurrent
-requests for the same purpose can still leave two live challenges (an existing race; no
-uniqueness constraint was added, by scope). Allowed resend purposes still answer per
+requests for the same purpose could still leave two live challenges (an existing race;
+no uniqueness constraint was added, by scope); §25 closes that for issuers running its
+code. Allowed resend purposes still answer per
 account (the §21 residual). Requester-bound resend, numerical abuse budgets and their
 enforcement are undecided. D11 remains open.
 
@@ -1957,6 +1959,48 @@ submission, a reject leaving the decision at `submit`, the "created it yourself"
 check (it compares a user with a string id and never fires), and approval
 re-enabling every section, group and item. `CLAUDE.md` (MENU-APPROVAL-SUBMITTER-00)
 records each.
+
+## 25. Concurrent issuers of one OTP challenge bucket take turns (D11 E-R3)
+
+**What changed.** A challenge bucket is the `(user, msisdn, purpose)` that `make_otp`'s
+replacement delete filters on. Two requests issuing into the same bucket at the same
+time could leave two live challenges, because neither delete could see the other's
+uncommitted row. For login and reset-password, the earlier code then worked once the
+later one had been used. `make_otp` now takes a transaction-scoped PostgreSQL advisory
+lock on the bucket, `pg_advisory_xact_lock(0x4F545049, key)`, after the user's
+`FOR KEY SHARE` and before the delete. A second issuer waits for the first to commit
+and then replaces its challenge, so the bucket keeps one live code: the one from the
+issuance that took the lock last.
+
+**What a client can notice.**
+
+- Overlapping requests for one bucket (a double tap, two tabs, a retry) leave one code
+  that works. It is the code from whichever issuance took the lock last, which need not
+  be the last request sent; SMS delivery order is not guaranteed either.
+- A request can wait for another issuance of the same bucket to commit. That
+  transaction is short and does no I/O, and nothing new bounds the wait. If a
+  server-side timeout ends it, the request rolls back, sends nothing and answers the
+  existing 500 "We couldn't send your verification code".
+- Requests for different buckets do not wait for each other unless their 32-bit keys
+  collide. Colliding buckets take turns, which can add latency and, under a timeout,
+  change the result; neither ever replaces the other's challenge.
+- No request shape, response shape, status code, message or cookie changes. The dev
+  OTP `1234`, expiry, attempt caps, the five-minute login anchor and §20–§22 are
+  unchanged.
+- In `pg_locks` the lock shows as `locktype = 'advisory'`, `classid = 1330925641`,
+  `objsubid = 2`, held only inside the issuance transaction, never during delivery.
+
+**Rollout and rollback.** No migration. While older workers are still serving, they
+take no lock, so an old and a new worker can still race. Challenges duplicated before
+the deploy stay until they are spent or expire; nothing cleans them up. Rolling back
+restores the race.
+
+**Not covered.** No new deadlock was found in the paths examined (login, reset, resend,
+the owner-claim challenge and redemption, verification); that is not a proof for every
+path. The tests do not show whether the race was exploitable and make no general claim
+about code guessing. Registration still answers 500, not a refusal, when its
+phone-already-exists branch is reached (it puts a `User` object in the response); that
+is recorded, not fixed. D11 remains open.
 
 ## Summary of frontend changes needed before merge
 
