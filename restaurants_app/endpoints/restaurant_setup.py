@@ -4,6 +4,7 @@ Refactoring needed to make it more maintainable.
 """
 import ast
 import logging
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from restaurants_app.controllers.catalogue_admission import (
     lock_catalogue_for_write,
@@ -259,6 +260,53 @@ _ADMISSION_BARRIER_RECORDS = frozenset({
 _CATALOGUE_DELETE_BLOCKERS = frozenset({
     'menusections', 'sectiongroups', 'menuitems',
 })
+
+#: The catalogue records that belong to a menu section. Their PUT and DELETE lock
+#: the section before the record itself (``_lock_parent_section``).
+_SECTION_CHILD_RECORDS = frozenset({'sectiongroups', 'menuitems'})
+
+
+def _lock_parent_section(config_detail, instance_queryset, record_id):
+    """Lock the target's menu section FOR UPDATE, before the target itself.
+
+    A first-time menu approval (``first_time_batch_approval``) updates every
+    section of the restaurant, then every section group, then every menu item.
+    Secretary resolves a menu item or a section group through
+    ``instance_queryset``, whose ``section__restaurant_id`` filter joins
+    ``menu_sections``, and its ``select_for_update()`` has no ``of=``, so that
+    one statement locks the child row and then its section. An edit or delete
+    arriving after the approval had updated the sections, and before it updated
+    the children, therefore held the child and waited for the section, while the
+    approval waited for the child. PostgreSQL aborted one of the two, and in
+    every measured case it was the edit, which answered 500.
+
+    Taking the section first gives these writes the approval's order: parent
+    before child. While the edit holds the section, the approval cannot finish
+    its section update, so it holds no group or item the edit needs later. If the
+    approval holds the section first, the edit waits here, before it holds any
+    menu row.
+
+    This is the lock Secretary takes anyway, on the same row, in the same mode
+    and through the same scoped queryset, taken earlier. The permission gate has
+    already refused a foreign or unknown id with a 403, before any of this runs.
+    If the scoped queryset still does not match the record (the caller's scope
+    changed after the gate), nothing is locked here and Secretary's own lookup
+    answers its 404. The gate resolved the same id, so the parsing errors
+    caught here cannot occur in practice; they are caught only so this lookup
+    can never answer differently from Secretary's, which turns them into that
+    404. A database error is not caught.
+    """
+    if config_detail not in _SECTION_CHILD_RECORDS:
+        return
+    try:
+        list(
+            instance_queryset.filter(id=record_id)
+            .select_related('section')
+            .select_for_update(of=('section',))
+            .order_by()
+        )
+    except (ValidationError, ValueError, TypeError):
+        return
 
 
 def check_permission(user, record: str, action: str, request_data) -> bool:
@@ -1358,6 +1406,11 @@ class RestaurantSetupEndpoint(APIView):
                 # skipped rather than guessed at, and Secretary's scoped queryset
                 # is what answers.
                 lock_catalogue_for_write(admission_target)
+                # A menu item or section group: its section next, then the row
+                # itself, which is the first-time approval's order.
+                _lock_parent_section(
+                    config_detail, secretary_args['instance_queryset'],
+                    put_data.get('id'))
                 response = Secretary(secretary_args).update()
         else:
             response = Secretary(secretary_args).update()
@@ -1497,6 +1550,12 @@ class RestaurantSetupEndpoint(APIView):
         with transaction.atomic():
             lock_catalogue_for_write(
                 _resolve_target_restaurant_id(config_detail, 'delete', data))
+            instance_queryset = build_scoped_instance_queryset(
+                request.user, config_detail, write_serializer.Meta.model,
+            )
+            # A menu item or section group: its section next, then the row
+            # itself, which is the first-time approval's order.
+            _lock_parent_section(config_detail, instance_queryset, data.get('id'))
 
             record = model.objects.filter(id=data.get('id')).first()
             blocker = record.deletion_blockers() if record else None
@@ -1509,9 +1568,7 @@ class RestaurantSetupEndpoint(APIView):
                 'user_id': auth['id'],
                 'username': auth['username'],
                 'user': request.user,
-                'instance_queryset': build_scoped_instance_queryset(
-                    request.user, config_detail, write_serializer.Meta.model,
-                ),
+                'instance_queryset': instance_queryset,
             }
             response = Secretary(secretary_args).delete()
 
