@@ -48,15 +48,19 @@ def issuance_bucket_key(user, msisdn, purpose) -> int:
     """
     The second advisory key for one replacement bucket: a signed 32-bit integer.
 
-    The input is the bucket EXACTLY as the replacement DELETE filters it, so equal keys
-    can only come from one bucket or a hash collision. A JSON array keeps the three
-    values apart: ``null`` (no user, no destination, no purpose) is a different value
-    from ``""`` or ``"null"``, and no separator can be forged inside a string. The user
-    is its primary key; the msisdn is the value ``make_otp`` has already canonicalised.
+    The input is the bucket as the replacement DELETE filters it, so equal keys can only
+    come from one bucket or a hash collision. The user is its primary key. The msisdn
+    (already canonicalised by ``make_otp`` where it can be) and the purpose go through
+    the coercion the DELETE's lookups apply, ``CharField.get_prep_value``, so a caller's
+    non-string value names the same bucket here as it does there. A JSON array keeps the
+    three values apart: ``null`` (no user, no destination, no purpose) is a different
+    value from ``""`` or ``"null"``, and no separator can be forged inside a string.
 
     Secret-free, like the admission key: it is a coordination address, not a
     credential. A collision between two buckets only makes their issuers take turns.
     """
+    msisdn = UserOtp._meta.get_field('msisdn').get_prep_value(msisdn)
+    purpose = UserOtp._meta.get_field('purpose').get_prep_value(purpose)
     material = json.dumps(
         [None if user is None else str(user.pk), msisdn, purpose],
         separators=(',', ':'),

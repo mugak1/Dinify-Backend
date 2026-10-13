@@ -1483,6 +1483,8 @@ so keep it current when conventions change.
   two-integer advisory lock, and no registry is kept. The key is the first 32 bits of
   SHA-256 over a versioned domain plus the JSON array `[user pk or null, msisdn,
   purpose]` (`issuance_bucket_key`), so null, `""` and `"null"` are different buckets.
+  The msisdn and purpose are first coerced the way the DELETE's lookups coerce them, so a
+  non-string value names the same bucket in both places.
   The lock is taken on the connection the transaction runs on. Null-user (msisdn-only)
   issuances take it too, one lock per issuer, released by COMMIT or ROLLBACK and never
   held across delivery. A second issuer waits, and its DELETE then removes the first
@@ -1504,7 +1506,7 @@ so keep it current when conventions change.
   migration. **Incidental, recorded and NOT fixed**: `self_register`'s
   phone-already-exists branch puts a `User` instance in its response and answers 500
   instead of a refusal. Pinned by `users_app/tests_challenge_issuance_serialization.py`
-  (34 tests; 28 fail on `9b9c38c` and the 6 controls pass). See `BREAKING_CHANGES.md`
+  (35 tests; 29 fail on `9b9c38c` and the 6 controls pass). See `BREAKING_CHANGES.md`
   §25
 - MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
   `+`) is the canonical stored/compared form for `User.phone_number` /

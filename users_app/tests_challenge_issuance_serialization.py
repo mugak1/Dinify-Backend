@@ -28,13 +28,18 @@ HOW THESE TESTS DISCRIMINATE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 The ordered schedules park the first issuer (A) inside its issuance transaction, either
-straight after its INSERT or at its last statement before COMMIT (the ledger write), and
-then start the second (B). A monitor connection must see B WAITING ON THE BUCKET LOCK:
-an ungranted advisory lock whose keys are the namespace and this bucket's key, held by A.
-A generic delay is not accepted as evidence. A is then released and B finishes, and the
-oracle is ROW IDENTITY, not code strings. The row B wrote (RB) must be the only live one,
-and A's row (RA) and any earlier seed row (R0) must be gone. The real redeeming route then
-refuses A's code, accepts B's, and refuses A's code again once B's is spent.
+straight after its INSERT or at its last statement before COMMIT (straight after the
+ledger write), and then start the second (B). A monitor connection must see B WAITING ON
+THE BUCKET LOCK: an ungranted advisory lock whose keys are the namespace and this
+bucket's key, held by A. A generic delay is not accepted as evidence. A is then released
+and B finishes, and the oracle is ROW IDENTITY, not code strings. The row B wrote (RB)
+must be the only live one, and A's row (RA) and any earlier seed row (R0) must be gone.
+The real redeeming route then refuses A's code, accepts B's, and refuses A's code again
+once B's is spent. The first refusal holds with or without the lock, because the consumer
+compares only the newest live row, which is B's. What discriminates is row identity and
+the refusal after B's code is spent. Where a route refuses everything once it has
+succeeded (owner claim, registration), the replaced code is checked through the primitive
+it verifies with.
 
 Codes are distinct under ``ENV=test``, so a code identifies the row it was issued for.
 Under ``ENV=dev`` every code is ``1234``. That case asserts WHICH ROW the consumer spent
@@ -45,8 +50,9 @@ each other, a rolled-back issuance leaves the bucket to the next issuer, and a r
 overlapping two issuances completes. Nothing in a control assumes which of two unordered
 issuers came first.
 
-Only delivery is replaced (SMS, e-mail, notification, and the dispatch thread runs inline).
-Selection, locking, accounting and the consumers are the real code, reached over HTTP.
+Delivery is replaced (SMS, e-mail, notification, and the dispatch thread runs inline), and
+the code draw and ``ENV`` are fixed so each issuer's code is known in advance. Selection,
+locking, accounting and the consumers are the real code, reached over HTTP.
 
 WHAT THIS DOES NOT ESTABLISH
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -177,6 +183,22 @@ class BucketKeyContractTests(SimpleTestCase):
         }
         self.assertEqual(len(keys), 4)
 
+    def test_a_non_string_value_names_the_bucket_the_delete_names(self):
+        """
+        The DELETE's lookups coerce a non-string msisdn or purpose to a string
+        (``CharField.get_prep_value``). The key coerces the same way, so a direct caller
+        passing ``0`` or ``False`` waits with the other issuers of the bucket it deletes
+        from, and nothing raises out of the key.
+        """
+        field = UserOtp._meta.get_field('msisdn')
+        for value, as_stored in ((256700000001, '256700000001'), (0, '0'), (False, 'False')):
+            with self.subTest(value=value):
+                self.assertEqual(field.get_prep_value(value), as_stored)
+                self.assertEqual(self.key(None, value, 'register'),
+                                 self.key(None, as_stored, 'register'))
+                self.assertEqual(self.key(None, '256700000001', value),
+                                 self.key(None, '256700000001', as_stored))
+
     def test_a_separator_inside_a_value_cannot_forge_another_bucket(self):
         self.assertNotEqual(
             self.key(None, '256700000001","login', None),
@@ -243,21 +265,27 @@ class _Bucket(_Schedule):
         with self.monitor() as m:
             return m.execute(
                 "SELECT pid, granted FROM pg_locks WHERE locktype = 'advisory' "
-                "AND classid::bigint = %s", [BUCKET_LOCK_CLASS]).fetchall()
+                "AND classid::bigint = %s AND database = "
+                "(SELECT oid FROM pg_database WHERE datname = current_database())",
+                [BUCKET_LOCK_CLASS]).fetchall()
 
     # --- seams ---
 
     @contextlib.contextmanager
     def park_issuer_before_commit(self, parked, resume):
-        """Inside the issuance transaction, at its ledger write: the last statement before COMMIT."""
+        """
+        Inside the issuance transaction, straight after its ledger write: the last statement
+        before COMMIT.
+        """
         real = otp_accounting.record_issuance
 
         def parked_record(**kwargs):
+            result = real(**kwargs)
             if threading.current_thread().name == 'issuer' and not parked.is_set():
                 parked.set()
                 if not resume.wait(timeout=WAIT):
                     raise RuntimeError('the issuer seam was never released')
-            return real(**kwargs)
+            return result
 
         with mock.patch.object(otp_accounting, 'record_issuance', parked_record):
             yield
@@ -281,7 +309,8 @@ class _Bucket(_Schedule):
                     return {'state': 'finished'}
                 row = m.execute(
                     'SELECT pid, wait_event_type, wait_event, query FROM pg_stat_activity '
-                    'WHERE application_name = %s', [f'er2-{name}'],
+                    'WHERE application_name = %s AND datname = current_database()',
+                    [f'er2-{name}'],
                 ).fetchone()
                 if row and row[1] == 'Lock':
                     pid = row[0]
@@ -289,8 +318,8 @@ class _Bucket(_Schedule):
                         'SELECT locktype, classid::bigint, objid::bigint, objsubid '
                         'FROM pg_locks WHERE pid = %s AND NOT granted', [pid]).fetchall()
                     holder_pid = m.execute(
-                        'SELECT pid FROM pg_stat_activity WHERE application_name = %s',
-                        [f'er2-{holder}']).fetchone()
+                        'SELECT pid FROM pg_stat_activity WHERE application_name = %s '
+                        'AND datname = current_database()', [f'er2-{holder}']).fetchone()
                     blockers = m.execute('SELECT pg_blocking_pids(%s)', [pid]).fetchone()[0]
                     holder_holds = [] if holder_pid is None else m.execute(
                         "SELECT locktype, classid::bigint, objid::bigint, objsubid "
@@ -591,6 +620,13 @@ class OwnerClaimChallengeBucketTests(_Bucket):
         invitation = OwnerInvitation.objects.get(pk=self.invitation)
         self.assertEqual((invitation.claim_failed_attempts, invitation.consumed_at is not None),
                          (1, True))
+        # The consumed invitation refuses any code, so the route cannot tell whether A's
+        # challenge survived. Ask the primitive redemption verifies with.
+        self.assertFalse(self.exists(ra))
+        self.assertEqual(
+            OtpManager().verify_otp(otp=CA, user_id=self.owner.pk, expected_purpose='owner-claim',
+                                    expected_msisdn=self.owner.phone_number),
+            INVALID_OTP)
         self.assertLedger(otp_accounting.ORIGIN_OWNER_CLAIM_CHALLENGE)
         self.assertNothingHeldWhenSent(['MainThread', 'issuer', 'second'],
                                        self.owner.phone_number)
@@ -798,7 +834,7 @@ class FailedLockWaitTests(_LoginBucket):
     def test_a_timed_out_wait_rolls_back_and_sends_nothing(self):
         def second():
             with connection.cursor() as cursor:
-                cursor.execute("SET lock_timeout = '1500ms'")
+                cursor.execute("SET lock_timeout = '5s'")
             return self.login()
 
         parked, resume = threading.Event(), threading.Event()
