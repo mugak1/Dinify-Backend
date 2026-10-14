@@ -39,8 +39,10 @@ def self_register(
     # Refuse a phone number that already has an account. Two routes return this dict
     # as their response body (register, and create-employee through create_employee),
     # so it must hold only what may be rendered and shown. It used to carry the
-    # existing User instance, which JSON cannot render, so both routes answered 500;
-    # and its id, which named the account to whoever asked.
+    # existing User instance, which JSON cannot render, so both routes answered 500.
+    # It also carried the account's id, which nothing read and which, once the
+    # refusal rendered, would have told an anonymous caller which account holds the
+    # number.
     if User.objects.filter(phone_number=data.get('phone_number')).exists():
         return {
             'status': 400,

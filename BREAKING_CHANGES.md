@@ -2017,12 +2017,15 @@ Both now answer `400 {"status": 400, "message": "Sorry, a user with this phone n
 already exists!"}`, with no other keys. Every spelling that canonicalises to the stored
 number (`2567…`, `+256 7…`, `07…`) gets the same answer.
 
-**What a client can notice.** The 500 becomes that 400, so the restaurant portal's
-error toast now shows the message instead of a server error. Neither the sign-up page
-nor the staff form reads `user_id` or `user_profile` on an error, and before this
-change neither key ever reached a client, because the response could not be rendered.
-Removing `user_id` also stops the anonymous route from naming the account that holds a
-number.
+**What a client can notice.** The 500 becomes that 400. The public sign-up page
+(`/register`) calls this route only after `users/msisdn-lookup/` has found the number,
+so until now every such attempt got a server error; its error toast now shows the
+message. The staff form (`staff-form-dialog`) replaces any error with its own
+"Something went wrong. Please try again.", so staff see no difference. Neither page
+reads `user_id` or `user_profile` on an error. Neither key reached a client before
+this change, because the response could not be rendered. Dropping `user_id` keeps it
+that way now that the refusal renders, so the anonymous route does not start telling
+callers which account holds a number.
 
 **Unchanged.** The message itself, which still tells an anonymous caller that a number
 has an account; the email-exists refusal; the order of checks (the staff route still

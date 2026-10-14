@@ -12,14 +12,19 @@ test of the branch (``users_app/tests.py``) calls the controller in process and 
 renders the dict, which is why the suite stayed green.
 
 The refusal now carries exactly ``status`` and ``message``. The account id is gone
-too. The register route is anonymous, so the id told any caller which account holds a
-number, and nothing read it: ``create_employee`` passes the dict through unchanged,
-and neither the sign-up page nor the staff form reads either key on an error.
+too. Nothing read it: ``create_employee`` passes the dict through unchanged, and
+neither the sign-up page nor the staff form reads either key on an error. It never
+reached a client before, because the response could not be rendered; left in place,
+it would have told any caller of the anonymous register route which account holds a
+number.
 
 Every route test here goes through the test client, so the response is RENDERED, and
 asserts on the decoded body. The client is built with
 ``raise_request_exception=False`` so that, on the unfixed code, the failure is an
-assertion about a 500 rather than an exception escaping the test.
+assertion about a 500 rather than an exception escaping the test. In the two
+``nothing_is_…`` regressions only the status assertion fails on the unfixed code: the
+side-effect assertions pass before and after, and pin that the refusal goes on
+writing and sending nothing.
 
 What is deliberately unchanged, and pinned as a control: the message itself, which
 still tells an anonymous caller that a number has an account (that is how sign-up
@@ -64,7 +69,9 @@ EMAIL_EXISTS = {'status': 400, 'message': MESSAGES['EMAIL_EXISTS']}
 REGISTERED = {'status': 200, 'message': MESSAGES['OK_SELF_REGISTER']}
 NO_OTP = {'status': 400, 'message': 'Please provide the OTP.'}
 
-# Synthetic numbers only, in a block no other test module draws from.
+# Synthetic numbers only. Other modules use some of the same numbers (for example
+# users_app/tests_public_discovery.py), which is harmless: each test runs in its own
+# transaction.
 _PHONES = (f'2567012{n:05d}' for n in itertools.count(30001))
 
 
