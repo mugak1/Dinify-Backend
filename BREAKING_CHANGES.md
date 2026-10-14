@@ -1998,9 +1998,43 @@ restores the race.
 **Not covered.** No new deadlock was found in the paths examined (login, reset, resend,
 the owner-claim challenge and redemption, verification); that is not a proof for every
 path. The tests do not show whether the race was exploitable and make no general claim
-about code guessing. Registration still answers 500, not a refusal, when its
-phone-already-exists branch is reached (it puts a `User` object in the response); that
-is recorded, not fixed. D11 remains open.
+about code guessing. Registration answered 500, not a refusal, when its
+phone-already-exists branch was reached (it put a `User` object in the response); §26
+fixed that. D11 remains open.
+
+## 26. A phone number that already has an account gets a refusal, not a 500 (REGISTER-EXISTING-PHONE-00)
+
+**What changed.** `self_register`'s phone-already-exists branch returned the existing
+`User` instance under `user_profile`, beside its id under `user_id`. Two routes return
+that dict as their body, and JSON cannot render a model instance, so both answered
+**500** where a refusal was meant:
+
+- `POST users/auth/register/` (anonymous sign-up);
+- `POST restaurant-setup/create-employee/` (an owner adding staff), which passes the
+  dict through `create_employee` unchanged.
+
+Both now answer `400 {"status": 400, "message": "Sorry, a user with this phone number
+already exists!"}`, with no other keys. Every spelling that canonicalises to the stored
+number (`2567…`, `+256 7…`, `07…`) gets the same answer.
+
+**What a client can notice.** The 500 becomes that 400. The public sign-up page
+(`/register`) calls this route only after `users/msisdn-lookup/` has found the number,
+so until now every such attempt got a server error; its error toast now shows the
+message. The staff form (`staff-form-dialog`) replaces any error with its own
+"Something went wrong. Please try again.", so staff see no difference. Neither page
+reads `user_id` or `user_profile` on an error. Neither key reached a client before
+this change, because the response could not be rendered. Dropping `user_id` keeps it
+that way now that the refusal renders, so the anonymous route does not start telling
+callers which account holds a number.
+
+**Unchanged.** The message itself, which still tells an anonymous caller that a number
+has an account; the email-exists refusal; the order of checks (the staff route still
+asks for permission first, and a new number still reaches the OTP check); a successful
+registration or staff creation; and the `user_id` / `user_profile` that a SUCCESSFUL
+`self_register(return_user_id=True)` hands to `create_employee` in process. No
+migration and no new route.
+
+**Rollback.** Reverting the code brings the 500 back. Nothing is stored.
 
 ## Summary of frontend changes needed before merge
 
