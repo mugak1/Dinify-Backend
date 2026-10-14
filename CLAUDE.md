@@ -1503,11 +1503,29 @@ so keep it current when conventions change.
   restores the race. The tests do not establish whether the race was exploitable, and
   make no general claim about guessing. `ENV=dev`'s `1234`, expiry, attempt caps, the
   five-minute login anchor, accounting and every E-R1/E-R2 rule are unchanged. No
-  migration. **Incidental, recorded and NOT fixed**: `self_register`'s
-  phone-already-exists branch puts a `User` instance in its response and answers 500
-  instead of a refusal. Pinned by `users_app/tests_challenge_issuance_serialization.py`
-  (35 tests; 29 fail on `9b9c38c` and the 6 controls pass). See `BREAKING_CHANGES.md`
-  §25
+  migration. The incidental finding it recorded, that `self_register`'s
+  phone-already-exists branch answered 500 instead of a refusal, has since been fixed
+  by REGISTER-EXISTING-PHONE-00 (next bullet). Pinned by
+  `users_app/tests_challenge_issuance_serialization.py` (35 tests; 29 fail on
+  `9b9c38c` and the 6 controls pass). See `BREAKING_CHANGES.md` §25
+- A phone number that already has an account gets a REFUSAL, not a 500
+  (REGISTER-EXISTING-PHONE-00): ✅ `self_register`'s phone-already-exists branch
+  returned the existing `User` INSTANCE under `user_profile`, beside its id. Two routes
+  return that dict as their body — `POST users/auth/register/` (anonymous) and
+  `POST restaurant-setup/create-employee/` (through `create_employee`, unchanged) — and
+  JSON cannot render a model instance, so both answered 500. The refusal is now exactly
+  `{status: 400, message: PHONE_NUMBER_EXISTS}`. **The id went too**: on the anonymous
+  route it named the account holding a number, and no caller read it (neither client
+  reads either key on an error). **WHY THE SUITE MISSED IT**: the only earlier test
+  (`users_app/tests.py`) calls the controller in process and never RENDERS the dict, so
+  a route test must assert on the decoded response, not on what the controller
+  returned. Unchanged, and pinned as controls: the message itself (it still tells an
+  anonymous caller a number has an account), the email-exists refusal, permission
+  before the number on the staff route, and successful registration and staff
+  creation. A SUCCESSFUL `self_register(return_user_id=True)` still hands `user_id` /
+  `user_profile` to `create_employee` in process, which never returns that dict. No
+  migration. Pinned by `users_app/tests_register_existing_phone.py` (13 tests; the 8
+  regressions fail on `3149481` and the 5 controls pass). See `BREAKING_CHANGES.md` §26
 - MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
   `+`) is the canonical stored/compared form for `User.phone_number` /
   `User.username`, enforced at every write site (registration, profile update,

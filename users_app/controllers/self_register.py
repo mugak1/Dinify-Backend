@@ -36,14 +36,15 @@ def self_register(
             'message': 'Please provide a valid Ugandan phone number.',
         }
 
-    # check that that the phone number is not repeated
-    existing_phone = User.objects.filter(phone_number=data.get('phone_number'))
-    if existing_phone.exists():
+    # Refuse a phone number that already has an account. Two routes return this dict
+    # as their response body (register, and create-employee through create_employee),
+    # so it must hold only what may be rendered and shown. It used to carry the
+    # existing User instance, which JSON cannot render, so both routes answered 500;
+    # and its id, which named the account to whoever asked.
+    if User.objects.filter(phone_number=data.get('phone_number')).exists():
         return {
             'status': 400,
             'message': MESSAGES.get('PHONE_NUMBER_EXISTS'),
-            'user_id': existing_phone.first().id,
-            'user_profile': existing_phone.first()
         }
 
     # check that the email is not repeated
