@@ -6,6 +6,9 @@ and the per-item snapshots — never the report/archive serializers.
 """
 from rest_framework import serializers
 
+from orders_app.controllers.orders.serializers import (
+    historical_name, list_snapshot_provenance,
+)
 from orders_app.models import Order
 from restaurants_app.models import MenuItem
 
@@ -56,11 +59,21 @@ class ActiveKitchenOrderSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _line(row):
+        # The stored values are projected exactly as before, empty string and
+        # empty lists included. The three *_provenance keys are additive: each
+        # says whether the value beside it is the order-time snapshot. The
+        # name's comes from historical_name and the lists' from
+        # list_snapshot_provenance, which documents what it rests on (D12 B3).
+        _, name_provenance = historical_name(row)
+        list_provenance = list_snapshot_provenance(row)
         return {
             'item_name_snapshot': row.item_name_snapshot,
             'quantity': row.quantity,
             'modifiers': row.modifiers_snapshot,
             'allergen_tags': row.allergen_tags_snapshot,
+            'item_name_provenance': name_provenance,
+            'modifiers_provenance': list_provenance,
+            'allergen_tags_provenance': list_provenance,
         }
 
     def get_items(self, obj):
