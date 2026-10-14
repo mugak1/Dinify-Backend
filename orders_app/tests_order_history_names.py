@@ -665,8 +665,13 @@ class ConsumerContractControlTests(_HistoryFixture):
                       if t['id'] == str(order.pk))
         burger = next(i for i in ticket['items']
                       if i['item_name_snapshot'] == 'Beef Burger')
+        # D12 B3 added three provenance markers to every kitchen line; the
+        # values beside them are unchanged.
         self.assertEqual(set(burger), {'item_name_snapshot', 'quantity',
-                                       'modifiers', 'allergen_tags', 'extras'})
+                                       'modifiers', 'allergen_tags', 'extras',
+                                       'item_name_provenance',
+                                       'modifiers_provenance',
+                                       'allergen_tags_provenance'})
         self.assertEqual(burger['modifiers'], ['Size: Large'])
         self.assertEqual(burger['allergen_tags'][0]['name'], 'Peanuts')
         self.assertEqual([e['item_name_snapshot'] for e in burger['extras']],
@@ -681,7 +686,7 @@ class ConsumerContractControlTests(_HistoryFixture):
         for item in ticket['items']:
             self.assertEqual(item['item_name_snapshot'], '')
             self.assertNotIn('name_provenance', item)
-            self.assertNotIn('item_name_provenance', item)
+            self.assertEqual(item['item_name_provenance'], 'missing')
 
     def test_menu_performance_still_follows_the_current_menu(self):
         """A CURRENT-menu report by documented contract (reports menu.py)."""
