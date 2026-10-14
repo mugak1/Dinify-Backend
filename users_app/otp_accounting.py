@@ -168,6 +168,8 @@ def hold_subject(user_id) -> None:
     challenge by deleting it. An owner-claim redemption takes the same two rows in the
     opposite order (``users`` FOR UPDATE, then the challenge FOR UPDATE), and the two
     would deadlock. Taken first, the issuance waits for the redemption holding nothing.
+    The bucket's advisory lock (``otp_manager._hold_bucket``, D11 E-R3) is taken
+    straight after this, still before the delete; a redemption never takes it.
 
     Django has no spelling for KEY SHARE, hence the one raw statement.
     """

@@ -1356,12 +1356,13 @@ so keep it current when conventions change.
     `owner_claim_challenge`, `login_resend`, `resend_request`, `unattributed`; a
     failure on a pre-ledger challenge records `unrecorded`).
   - **`make_otp` is now one short `atomic(durable=True)`**: `User` `FOR KEY SHARE`
-    first (user-backed only), then the replacement delete, the challenge and the
-    `pending` row, committed BEFORE any sender runs. The key share first is what keeps
-    a replacement from deadlocking an owner-claim redemption. A caller's transaction is
-    refused before any write or send; a ledger failure sends nothing and returns
-    `False`. Nothing — no `Restaurant`/ownership barrier, no `User`/`UserOtp` lock, no
-    transaction — is held across transport.
+    first (user-backed only), then the bucket's advisory lock (every issuance, since
+    D11 E-R3), then the replacement delete, the challenge and the `pending` row,
+    committed BEFORE any sender runs. The key share first is what keeps a replacement
+    from deadlocking an owner-claim redemption. A caller's transaction is refused
+    before any write or send; a ledger failure sends nothing and returns `False`.
+    Nothing — no `Restaurant`/ownership barrier, no `User`/`UserOtp` lock, no advisory
+    lock, no transaction — is held across transport.
   - **Finalization is one conditional update after the send**, never changing the
     return value: dev `not_dispatched` (no e-mail recipient) or `unknown`; test/prod
     `accepted` when the existing sender REPORTED acceptance (not handset delivery),
@@ -1455,9 +1456,9 @@ so keep it current when conventions change.
   refuses a phone an account already holds before it verifies); a reset, initiated or
   completed, revokes no outstanding login challenge (the resend path already let one
   survive, P1 extends that to ordinary initiation, and coordinated invalidation is an
-  unmade policy); two concurrent same-purpose issuances can still leave two live rows (an
-  existing race, not a guarantee; no uniqueness DDL was added, by scope rather than SQL
-  impossibility); allowed resend purposes still answer per account (the E-R1
+  unmade policy); two concurrent same-purpose issuances could still leave two live rows
+  (an existing race, not a guarantee; closed since by D11 E-R3, next bullet, for issuers
+  running that code; no uniqueness DDL was added); allowed resend purposes still answer per account (the E-R1
   `reset-password` residual above). Requester-bound resend, registration's future,
   purpose-binding policy, numerical abuse budgets, enforcement and any scheduler are
   undecided. **ROLLBACK** needs no schema step and restores nothing: rows written under
@@ -1466,6 +1467,70 @@ so keep it current when conventions change.
   included. Pinned by `users_app/tests_challenge_replacement.py` (54 tests: route-level,
   plus four PostgreSQL schedules on independent connections). See
   `BREAKING_CHANGES.md` §22
+- One issuer per challenge bucket at a time (D11 E-R3): ✅ PARTIAL — D11 itself stays
+  open, at its existing priority. **WHAT WAS WRONG**: `make_otp`'s replacement `DELETE …
+  WHERE (user, msisdn, purpose)` runs under READ COMMITTED and cannot see a concurrent
+  issuer's uncommitted INSERT. So two issuers of ONE bucket each deleted at most the
+  older row and both inserted: two live challenges. A row lock could not fix it, since
+  the row to lock does not exist yet. For login and reset-password the earlier code
+  became spendable once the later one was used, so one bucket could yield two sessions
+  or two password resets.
+  **THE FIX**: inside the existing issuance transaction, after the `users`
+  `FOR KEY SHARE` and before the DELETE, `otp_manager._hold_bucket` takes
+  `pg_advisory_xact_lock(0x4F545049, key)`. The namespace is `"OTPI"`, in the
+  TWO-INTEGER form (`pg_locks.objsubid = 2`), which keeps it apart from the admission
+  locks' single-`bigint` keys (`objsubid = 1`). Nothing else in the tree takes a
+  two-integer advisory lock, and no registry is kept. The key is the first 32 bits of
+  SHA-256 over a versioned domain plus the JSON array `[user pk or null, msisdn,
+  purpose]` (`issuance_bucket_key`), so null, `""` and `"null"` are different buckets.
+  The msisdn and purpose are first coerced the way the DELETE's lookups coerce them, so a
+  non-string value names the same bucket in both places.
+  The lock is taken on the connection the transaction runs on. Null-user (msisdn-only)
+  issuances take it too, one lock per issuer, released by COMMIT or ROLLBACK and never
+  held across delivery. A second issuer waits, and its DELETE then removes the first
+  issuer's committed row. A failed lock statement is a database error like any other:
+  rolled back, `False`, nothing sent. Order: `users` key share, bucket lock, DELETE,
+  challenge, ledger row, COMMIT, delivery.
+  **WHAT IT DOES NOT PROMISE**: it serializes the issuers that take the lock; it does
+  not order requests by network arrival or SMS delivery, so whichever issuer gets the
+  lock second wins. Two different buckets can share a 32-bit key; they then take turns
+  (false contention), which can affect latency and, under a server timeout, the result,
+  but never which rows are replaced. The transaction's scope is not a wait deadline:
+  nothing new bounds a wait. No new deadlock was found in the paths examined (login,
+  reset, resend, claim challenge and redemption, verification), which is not a proof
+  for every path. It does not cover old workers during a rollout (they take no lock),
+  rows duplicated before it, or anything on a host; nothing is cleaned up. Reverting it
+  restores the race. The tests do not establish whether the race was exploitable, and
+  make no general claim about guessing. `ENV=dev`'s `1234`, expiry, attempt caps, the
+  five-minute login anchor, accounting and every E-R1/E-R2 rule are unchanged. No
+  migration. Pinned by `users_app/tests_challenge_issuance_serialization.py` (35
+  tests; 29 fail on `9b9c38c` and the 6 controls pass). See `BREAKING_CHANGES.md` §25.
+  The incidental finding it recorded, that `self_register`'s phone-already-exists
+  branch answered 500 instead of a refusal, has since been fixed by
+  REGISTER-EXISTING-PHONE-00 (next bullet)
+- A phone number that already has an account gets a REFUSAL, not a 500
+  (REGISTER-EXISTING-PHONE-00): ✅ `self_register`'s phone-already-exists branch
+  returned the existing `User` INSTANCE under `user_profile`, beside its id. Two routes
+  return that dict as their body — `POST users/auth/register/` (anonymous) and
+  `POST restaurant-setup/create-employee/` (through `create_employee`, unchanged) — and
+  JSON cannot render a model instance, so both answered 500. The refusal is now exactly
+  `{status: 400, message: PHONE_NUMBER_EXISTS}`. **The id went too**: no caller read
+  it (neither client reads either key on an error), and once the refusal rendered it
+  would have told an anonymous caller which account holds a number. Before the fix
+  neither key reached a client, because nothing rendered. **Who sees the difference**:
+  the public `/register` page, which calls the route only after `users/msisdn-lookup/`
+  has found the number, now shows the message in its error toast instead of a server
+  error; the staff form replaces any error with its own generic toast, so staff see
+  no change. **WHY THE SUITE MISSED IT**: the only earlier test
+  (`users_app/tests.py`) calls the controller in process and never RENDERS the dict, so
+  a route test must assert on the decoded response, not on what the controller
+  returned. Unchanged, and pinned as controls: the message itself (it still tells an
+  anonymous caller a number has an account), the email-exists refusal, permission
+  before the number on the staff route, and successful registration and staff
+  creation. A SUCCESSFUL `self_register(return_user_id=True)` still hands `user_id` /
+  `user_profile` to `create_employee` in process, which never returns that dict. No
+  migration. Pinned by `users_app/tests_register_existing_phone.py` (13 tests; the 8
+  regressions fail on `3149481` and the 5 controls pass). See `BREAKING_CHANGES.md` §26
 - MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
   `+`) is the canonical stored/compared form for `User.phone_number` /
   `User.username`, enforced at every write site (registration, profile update,
@@ -2163,8 +2228,9 @@ so keep it current when conventions change.
   else. **Its eligibility check is a PREFLIGHT: no lock, no transaction** — the
   invitation, the access state and the password are all untouched, and `owner_control`
   stays `not_established`. Since D11 B2-C the OTP it then issues is written in
-  `make_otp`'s own short durable transaction (`User` `FOR KEY SHARE`, the replacement
-  delete, the challenge and its ledger row), which commits before the SMS is sent; see
+  `make_otp`'s own short durable transaction (`User` `FOR KEY SHARE`, the bucket's
+  advisory lock since D11 E-R3, the replacement delete, the challenge and its ledger
+  row), which commits before the SMS is sent; see
   "THIS IS A PREFLIGHT" below. Step 2F.2 (the atomic consume) HAS SINCE LANDED — see the
   next bullet — so two things this bullet used to describe as future work are now
   facts: `verify_otp` purpose-binds, and the challenge passes the canonical
@@ -4791,8 +4857,9 @@ lock.**
 
 **THE ISSUANCE THAT FOLLOWS IS ONE SHORT TRANSACTION (D11 B2-C), AND IT ENDS BEFORE
 TRANSPORT.** `make_otp` opens `atomic(durable=True)`, takes the owner's `users` row
-`FOR KEY SHARE` FIRST, then deletes the challenge it replaces, inserts the new one and
-its `pending` ledger row, and COMMITS — only then is the sender entered. The key share
+`FOR KEY SHARE` FIRST, then the bucket's advisory lock (D11 E-R3), then deletes the
+challenge it replaces, inserts the new one and its `pending` ledger row, and COMMITS —
+only then is the sender entered. The key share
 comes first because the challenge's foreign key to `users` is deferred: without it the
 `users` row would be reached only at COMMIT, after the old challenge was locked, which
 is the reverse of redemption's `users` then `user_otps` order and deadlocks. It takes
@@ -4801,7 +4868,8 @@ no `Restaurant` row and never the ownership/membership barrier.
 Pinned structurally, not by timing (`platform_admin_app/tests_owner_claim.py`):
 AT THE SENDER no transaction is open and no transaction id is held (`pg_locks`); the
 ONLY locking read in the whole call is that single `FOR KEY SHARE` on `users`, inside
-the issuance transaction; the claim preflight before it runs in autocommit with no
+the issuance transaction (the D11 E-R3 bucket lock is an advisory lock, not a locking
+read, and is released by the same commit); the claim preflight before it runs in autocommit with no
 lock; finalization runs after COMMIT; and the membership barrier is never acquired.
 This replaced the older oracle "no `FOR UPDATE` in any query", which asserted the
 absence of a lock the issuance now correctly takes.
@@ -5017,7 +5085,8 @@ where a join could otherwise widen the lock. `Restaurant -> RestaurantOnboarding
 OwnerInvitation` is what `onboarding_invitations` already takes; `UserOtp` is otherwise
 locked only by `make_otp`'s replacement delete, inside its short issuance transaction,
 which takes `User` `FOR KEY SHARE` BEFORE that delete so the two cannot deadlock (D11
-B2-C); `User` is taken AFTER `Restaurant`, the same direction as
+B2-C; the bucket advisory lock D11 E-R3 adds comes after the key share and is never
+taken by a redemption); `User` is taken AFTER `Restaurant`, the same direction as
 the lifecycle transition. The one service that locks `User` FIRST — `onboarding_creation`
 — goes on to INSERT a `Restaurant` and never waits on an existing one, so it cannot close
 a cycle. **NO ADMISSION ADVISORY LOCK**: the order path reads no invitation, OTP or

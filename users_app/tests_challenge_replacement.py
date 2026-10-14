@@ -64,7 +64,9 @@ enshrines them:
 
 * whether a completed reset should invalidate a login challenge issued before it;
 * registration's purpose-unbound msisdn verification;
-* two concurrent same-purpose issuances leaving two live rows;
+* two concurrent same-purpose issuances leaving two live rows — D11 E-R3 now
+  serializes the issuers of one bucket, and that is pinned in
+  ``users_app/tests_challenge_issuance_serialization.py``, not here;
 * requester-bound resend and discovery;
 * numeric abuse limits.
 
