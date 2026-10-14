@@ -61,9 +61,10 @@ class ActiveKitchenOrderSerializer(serializers.ModelSerializer):
     def _line(row):
         # The stored values are projected exactly as before, empty string and
         # empty lists included. The three *_provenance keys are additive: each
-        # says whether the value beside it is the order-time snapshot. The
-        # name's comes from historical_name and the lists' from
-        # list_snapshot_provenance, which documents what it rests on (D12 B3).
+        # says whether the value beside it can be read as the order-time
+        # snapshot. The name's comes from historical_name. The lists' come from
+        # list_snapshot_provenance, which rests on a write convention rather
+        # than a stored marker and documents its limits (D12 B3).
         _, name_provenance = historical_name(row)
         list_provenance = list_snapshot_provenance(row)
         return {

@@ -28,8 +28,9 @@ name means the lists beside it are what was captured at order time. The
 path. Nothing in the schema stores a capture marker or enforces it, so a write
 outside those paths can defeat it: filling only the name of a legacy row makes its
 default lists read as captured, and clearing a captured list leaves it reading as
-captured. Neither is asserted to have happened; ``LIMIT`` tests below pin both so
-nobody mistakes the classification for a guarantee.
+captured. Neither is asserted to have happened; ``LIMIT`` tests below pin both,
+and a whitespace-only name as a case of the first, so nobody mistakes the
+classification for a guarantee.
 
 ``"missing"`` means the reader cannot establish the order-time snapshot. It does
 not mean no historical information exists (a pre-0028 row can still carry
@@ -67,6 +68,7 @@ from orders_app.controllers.services.order_pricing import (
 )
 from orders_app.controllers.services.order_quote import quote_ref
 from orders_app.models import Order, OrderItem
+from orders_app.serializers import SerializerPutOrderItem
 from orders_app.tests_order_history_names import (
     KITCHEN_COMPLETED_URL, _HistoryFixture, decode_wire,
 )
@@ -621,3 +623,21 @@ class DocumentedLimitTests(_ProvenanceFixture):
         line = self.by_name(self.items(order), 'Beef Burger')
         self.assertEqual(line['allergen_tags'], [])
         self.assertEqual(line['allergen_tags_provenance'], 'snapshot')
+
+    def test_LIMIT_a_whitespace_only_name_counts_as_a_name(self):
+        """The creators pass the name through ``SerializerPutOrderItem``, whose
+        field trims it, so a stored name that is only whitespace was written
+        outside them. The reader keeps it verbatim and counts it as a name, as
+        ``historical_name`` does, so the default lists beside it read as
+        captured: a case of the name-only fill above, pinned so the list markers
+        stay keyed on exactly the test the name marker uses."""
+        field = SerializerPutOrderItem().fields['item_name_snapshot']
+        self.assertEqual(field.run_validation('  '), '')
+        order, _, _ = self.place(serve=False)
+        pasta = self.row(order, 'Pasta_autodel7 Classic')
+        self.make_legacy(OrderItem.objects.filter(pk=pasta.pk))
+        OrderItem.objects.filter(pk=pasta.pk).update(item_name_snapshot='  ')
+        line = self.by_name(self.items(order), '  ')
+        self.assertEqual(line['modifiers'], [])
+        self.assertEqual(line['allergen_tags'], [])
+        self.assertEqual(self.provenance(line), self.all_snapshot())
