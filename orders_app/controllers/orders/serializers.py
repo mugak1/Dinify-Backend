@@ -81,6 +81,44 @@ def historical_name(row: OrderItem):
     return name, (NAME_PROVENANCE_SNAPSHOT if name else NAME_PROVENANCE_MISSING)
 
 
+def list_snapshot_provenance(row: OrderItem):
+    """Whether this row's ``modifiers_snapshot`` and ``allergen_tags_snapshot``
+    can be read as what was captured when the line was ordered (D12 B3).
+
+    It answers ``snapshot`` or ``missing``, the same two words
+    ``historical_name`` uses, and it is SEPARATE from that function on
+    purpose: ``historical_name`` describes the name field only, and stays that
+    way.
+
+    THE BASIS IS A WRITE CONVENTION, NOT A STORED MARKER. Migration
+    ``orders_app/0028`` added the three snapshot columns with defaults (``""``,
+    ``[]``, ``[]``) and no backfill, so a row created before it holds two empty
+    lists that nobody recorded. The creators in ``ConOrder`` (the parent line
+    and each extra) write the name and both lists in the same save, and the
+    later writers inspected leave them as they were. So on a row only those
+    writers have touched, a non-empty stored name means the lists beside it are
+    the ones written at creation. Nothing in the schema records that capture
+    happened and nothing enforces the convention, so a write outside those
+    paths can defeat it. Filling in only the name of an old row makes its
+    default lists read as captured, and clearing a captured list out of band
+    leaves it reading as captured. Neither is known to have happened; this is
+    a classification of unmodified rows, not a guarantee about any row.
+
+    ``missing`` means the reader cannot establish the order-time snapshot. It
+    does not mean no historical information exists: an old row can still carry
+    ``options`` and ``selected_modifiers``. A row with a blank name and
+    non-empty lists keeps its lists as stored and answers ``missing``.
+    ``snapshot`` on an empty allergen list means no allergen-category tag was
+    attached at order time. It never means the dish is free of allergens.
+
+    Each row is classified on its own, an extra included, and only from the
+    row: never from its parent, the order's age, its intent key, its pricing
+    version, acceptance evidence or the current catalogue.
+    """
+    return (NAME_PROVENANCE_SNAPSHOT if row.item_name_snapshot
+            else NAME_PROVENANCE_MISSING)
+
+
 def _legacy_view(item, corrected):
     """``(unit_price, total_cost, savings)`` as the established wire contract.
 
