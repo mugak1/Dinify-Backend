@@ -15,15 +15,23 @@ this suite writes to a temporary directory, never a system command.
 """
 
 import ast
+import builtins
 import contextlib
 import copy
 import errno
 import fnmatch
+import glob
+import grp
 import hashlib
+import importlib
 import io
 import json
 import os
+import platform
+import pwd
+import re
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -56,7 +64,7 @@ C = {name: "canary-%s-%s" % (name, hashlib.sha256(name.encode()).hexdigest()[:10
     "unterminated", "servername", "stderr-v", "stderr-s", "stderr-m", "stderr-t", "stderr-dpkg", "stderr-aws",
     "stderr-python", "stderr-readelf", "stdout-v", "stdout-s", "define-dump", "proc-bash", "proc-vim", "proc-spoof",
     "proc-exporter", "apache-arg", "title", "maps", "secret-key", "db-password", "diner-key", "unlisted", "env-word",
-    "git", "os-release")}
+    "git", "os-release", "capability", "section-form", "define-vhost", "symlink-env")}
 
 
 class FakeStat:
@@ -74,7 +82,7 @@ class FakeHost:
     unknown command, or any path naming a process environment, is recorded as a violation."""
 
     def __init__(self):
-        self.files, self.dirs, self.links, self.meta = {}, {"/"}, {}, {}
+        self.files, self.dirs, self.links, self.meta, self.specials = {}, {"/"}, {}, {}, {}
         self.executables, self.commands = set(), {}
         self.users_, self.groups_, self.vfs = [], [], {}
         self.euid_, self.kernel_, self.machine_, self.now_ = 0, "6.8.0-1009-aws", "x86_64", "2026-10-15T09:00:00Z"
@@ -127,6 +135,9 @@ class FakeHost:
     def read(self, path, limit):
         real = self._resolve(path)
         self.reads.append(real)
+        if real in self.specials:
+            self.violations.append(("opened a non-regular file", real))
+            raise AssertionError("a device or pipe was opened")
         if real in self.dirs:
             raise IsADirectoryError(errno.EISDIR, "dir")
         if real not in self.files:
@@ -145,6 +156,8 @@ class FakeHost:
             return FakeStat(stat.S_IFDIR | (mode if path in self.meta else 0o755), uid, gid)
         if path in self.files:
             return FakeStat(stat.S_IFREG | mode, uid, gid)
+        if path in self.specials:
+            return FakeStat(self.specials[path] | 0o666)
         raise FileNotFoundError(errno.ENOENT, "missing")
 
     def stat(self, path):
@@ -167,7 +180,7 @@ class FakeHost:
 
     def exists(self, path):
         real = self.realpath(path)
-        return real in self.files or real in self.dirs
+        return real in self.files or real in self.dirs or real in self.specials
 
     def lexists(self, path):
         path = self._guard(path)
@@ -273,6 +286,10 @@ CUSTOMER_SITE = """<IfModule mod_ssl.c>
     Alias /uat/media/ {media}/
     Alias /broken/ "/srv/odd dir {quoted-alias}/"
     Alias /unterminated/ "/srv/{unterminated}
+    <Location /hooks/{capability}>
+        ProxyPass http://127.0.0.1:9000/
+    </Location>
+    Alias /drop/{capability}/ /srv/drop/
     <Directory {app}/static>
         Require all granted
     </Directory>
@@ -298,6 +315,7 @@ ADMIN_SITE = """<VirtualHost *:443>
     WSGIPassAuthorization On
     Alias /api/static/ {app}/static/
     ServerName bad$name{servername}
+    <ServerName {section-form}>
 </VirtualHost>
 """
 APACHE_CONF = """# global
@@ -324,6 +342,7 @@ Mutex default: dir="/var/run/apache2/" mechanism=default
 PidFile: "/var/run/apache2/apache2.pid"
 Define: DUMP_VHOSTS
 Define: SECRET_DEFINE={define-dump}
+Define: {define-vhost} (/etc/apache2/a.conf:1)
 note {stdout-s}
 User: name="www-data" id=33
 Group: name="www-data" id=33
@@ -331,6 +350,7 @@ Group: name="www-data" id=33
 INCLUDES_DUMP = """Included configuration files:
   (*) /etc/apache2/apache2.conf
     (146) /etc/apache2/mods-enabled/wsgi.load
+    (146) /etc/apache2/mods-enabled/wsgi.conf
     (147) /etc/apache2/ports.conf
     (225) /etc/apache2/sites-enabled/000-default.conf
     (225) /etc/apache2/sites-enabled/admin-le-ssl.conf
@@ -382,6 +402,7 @@ def uat_like_host():
     h.file("/etc/apache2/sites-enabled/000-default.conf",
            "<VirtualHost *:80>\n    ServerName api-test.dinifyapp.com\n"
            "    RewriteRule ^ https://%{SERVER_NAME}%{REQUEST_URI} [END,NE,R=permanent]\n</VirtualHost>\n")
+    h.file("/etc/apache2/sites-enabled/README", "ServerName stale.example.test\n")   # matched by the glob, not included
     h.dir("/etc/apache2/conf-enabled")
     h.file("/etc/apache2/mods-enabled/wsgi.load", "LoadModule wsgi_module %s\n" % MOD)
     h.file("/etc/apache2/mods-enabled/wsgi.conf", "<IfModule mod_wsgi.c>\n    WSGIRestrictEmbedded On\n</IfModule>\n")
@@ -427,7 +448,7 @@ def uat_like_host():
         1: ("/usr/lib/systemd/systemd", b"/sbin/init\0", 0, 0, 0),
         100: ("/usr/sbin/apache2", ("/usr/sbin/apache2\0-k\0start\0-D\0%s\0" % C["apache-arg"]).encode(), 0, 0, 1),
         101: ("/usr/sbin/apache2", b"(wsgi:dinify-uat)" + b" " * 20 + b"\0", 33, 33, 100),
-        102: ("/usr/sbin/apache2 (deleted)", b"(wsgi:dinify-ad\0", 33, 33, 100),
+        102: ("/usr/sbin/apache2 (deleted)", b"/usr/sbin/apache2\0-k\0start\0", 33, 33, 100),   # no display-name
         103: ("/usr/sbin/apache2", b"/usr/sbin/apache2\0-k\0start\0", 33, 33, 100),
         104: ("/usr/sbin/apache2", ("(wsgi:bad group %s)" % C["title"]).encode(), 33, 33, 100),
         200: ("/usr/bin/bash", ("bash\0-c\0curl -H 'Authorization: Bearer %s' https://x.test/apache2\0" % C["proc-bash"]).encode(),
@@ -445,7 +466,10 @@ def uat_like_host():
     h.link("/proc/101/cwd", APP)
     h.file("/proc/101/maps", fill(MAPS))
     h.link("/proc/102/cwd", APP)
-    h.file("/proc/102/maps", "")
+    h.file("/proc/102/maps", "1-2 r-xp 0 08:01 1 %s-3.12\n2-3 r--p 0 08:01 2 %s/lib/python3.12/site-packages/django/__init__.py\n"
+           "3-4 r-xp 0 08:01 3 %s (deleted)\n" % (MOD, VENV, LIBPY))
+    h.link("/proc/103/cwd", "/")
+    h.file("/proc/103/maps", "1-2 r-xp 0 08:01 1 %s-3.12\n3-4 r-xp 0 08:01 3 %s\n" % (MOD, LIBPY))
     h.link("/proc/104/cwd", "/")
     h.file("/proc/104/maps", "")
     return h
@@ -485,23 +509,82 @@ class Synthetic(unittest.TestCase):
         return [d for d in report["apache"]["directives"] if d.get("directive") == name]
 
 
+ALLOWED_IMPORTS = ["builtins", "configparser", "errno", "glob", "grp", "hashlib", "json", "os", "platform", "pwd", "re", "stat",
+                   "subprocess", "sys"]
+FORBIDDEN_NAMES = {"os", "subprocess", "glob", "pwd", "grp", "platform", "open", "__import__", "__builtins__", "eval", "exec",
+                   "compile", "importlib", "pathlib", "io", "shutil", "socket", "globals", "vars", "breakpoint", "input"}
+
+
+def boundary_offenders(text):
+    """What lets code outside RealHost (and the collector hashing ITSELF) reach the machine:
+    an import other than the exact top-level set, any alias or from-import, a nested import,
+    a forbidden name, ``builtins`` outside ``_error_type``, or ``sys`` beyond stderr and exit."""
+    offenders, imports = [], []
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.Import):
+            imports += [a.name for a in node.names]
+            offenders += ["aliased import %s" % a.name for a in node.names if a.asname]
+            continue
+        if isinstance(node, ast.ImportFrom):
+            offenders.append("from-import line %d" % node.lineno)
+            continue
+        if isinstance(node, ast.ClassDef) and node.name == "RealHost" or \
+                isinstance(node, ast.FunctionDef) and node.name == "collector_sha256":
+            continue
+        builtins_ok = isinstance(node, ast.FunctionDef) and node.name == "_error_type"
+        for sub in ast.walk(node):
+            if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                offenders.append("nested import line %d" % sub.lineno)
+            elif isinstance(sub, ast.Name) and (sub.id in FORBIDDEN_NAMES or sub.id == "builtins" and not builtins_ok):
+                offenders.append("%s line %d" % (sub.id, sub.lineno))
+            elif isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name) and sub.value.id == "sys" \
+                    and sub.attr not in ("stderr", "exit"):
+                offenders.append("sys.%s line %d" % (sub.attr, sub.lineno))
+    if sorted(imports) != ALLOWED_IMPORTS:
+        offenders.append("imports %s" % sorted(set(imports) ^ set(ALLOWED_IMPORTS)))
+    return offenders
+
+
 class TheBoundary(Synthetic):
     def test_CONTRACT_only_RealHost_reaches_the_machine(self):
-        """Outside RealHost (and the collector hashing ITSELF), nothing may name os, subprocess,
-        glob, pwd, grp or platform, or call open: so FakeHost replaces every input."""
-        tree = ast.parse(source())
-        offenders = []
-        for node in tree.body:
-            if isinstance(node, ast.ClassDef) and node.name == "RealHost":
-                continue
-            if isinstance(node, ast.FunctionDef) and node.name == "collector_sha256":
-                continue
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                continue
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Name) and sub.id in ("os", "subprocess", "glob", "pwd", "grp", "platform", "open"):
-                    offenders.append("%s line %d" % (sub.id, sub.lineno))
-        self.assertEqual(offenders, [])
+        self.assertEqual(boundary_offenders(source()), [])
+
+    def test_CONTRACT_the_boundary_rule_sees_each_way_around_it(self):
+        base = source()
+        for evasion in ("def f():\n    builtins.open('/etc/x')\n", "import subprocess as sp\n", "from os import listdir\n",
+                        "def f():\n    sys.modules['os']\n", "def f():\n    __import__('os')\n", "import pathlib\n",
+                        "def f():\n    import shutil\n", "def f():\n    open('/etc/x')\n", "def f():\n    io.open('/etc/x')\n"):
+            self.assertTrue(boundary_offenders(base + "\n" + evasion), evasion)
+
+    def test_CONTRACT_a_synthetic_run_makes_no_real_system_call(self):
+        """With FakeHost injected, every real primitive the collector could reach is a trap: a
+        call is recorded (a raise alone would be swallowed into collector_error)."""
+        calls, real_open = [], builtins.open
+
+        def guarded_open(file, *args, **kwargs):
+            if os.path.abspath(str(file)) == COLLECTOR:          # the collector hashing itself
+                return real_open(file, *args, **kwargs)
+            calls.append(("open", str(file)))
+            raise AssertionError("open")
+
+        def trap(name):
+            def call(*args, **kwargs):
+                calls.append((name, args[:1]))
+                raise AssertionError(name)
+            return call
+
+        targets = ((os, "listdir"), (os, "scandir"), (os, "stat"), (os, "lstat"), (os, "readlink"), (os, "statvfs"),
+                   (os, "access"), (subprocess, "Popen"), (glob, "glob"), (pwd, "getpwall"), (pwd, "getpwuid"),
+                   (grp, "getgrall"), (grp, "getgrgid"), (platform, "release"), (platform, "machine"))
+        host = uat_like_host()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("builtins.open", guarded_open))
+            for module, attr in targets:
+                stack.enter_context(mock.patch.object(module, attr, trap("%s.%s" % (module.__name__, attr))))
+            code, stdout, stderr = run_main(host)
+        self.assertEqual(calls, [])
+        self.assertEqual(code, 0)
+        self.assertNotIn("collector_error", stdout)
 
     def test_CONTRACT_the_tripwire_is_armed(self):
         out = io.StringIO()
@@ -532,7 +615,7 @@ class TheDemonstratedLeaks(Synthetic):
         headers = self.directives(report, "Header")
         self.assertTrue(headers, "the Header line was seen")
         for record in headers:
-            self.assertEqual(set(record), {"file", "line", "directive", "vhost", "state"})
+            self.assertLessEqual(set(record), {"file", "line", "directive", "vhost", "state", "conditional"})
             self.assertEqual(record["state"], "withheld")
 
     def test_REGRESSION_command_stderr_never_reaches_the_report(self):
@@ -567,6 +650,10 @@ class ArgumentBearingDirectives(Synthetic):
         report, stdout, _ = collect(uat_like_host())
         for name in ("AuthLDAPBindPassword", "MyPasswordToken", "SSLCertificateFile", "RewriteEngine", "ServerRoot"):
             self.assertNotIn(name, stdout)
+        named = {d["directive"] for d in report["apache"]["directives"]}
+        self.assertLessEqual(named, set(dh.PARSERS) | set(dh.REDACTED_DIRECTIVES))
+        self.assertFalse(named & {"Location", "Directory", "DocumentRoot", "Include", "IncludeOptional", "LoadModule"},
+                         "a directive the profile does not need is counted, not parsed")
         files = {f["path"]: f for f in report["apache"]["files"]}
         self.assertGreater(files["/etc/apache2/apache2.conf"]["otherDirectives"], 0)
 
@@ -580,7 +667,7 @@ class ArgumentBearingDirectives(Synthetic):
         aliases = {d.get("url"): d for d in self.directives(report, "Alias")}
         self.assertEqual(aliases["/broken/"]["unsupported"], ["path"])
         self.assertNotIn("path", aliases["/broken/"])
-        unterminated = [d for d in self.directives(report, "Alias") if d["state"] == "unsupported" and "url" not in d]
+        unterminated = [d for d in self.directives(report, "Alias") if d["state"] == "unsupported" and not {"url", "path"} & set(d)]
         self.assertEqual([d["unsupported"] for d in unterminated], [["arguments"]])
         names = [d for d in self.directives(report, "ServerName") if d.get("vhost") == 1]      # admin-le-ssl.conf
         self.assertTrue(any(d.get("unsupported") == ["name"] for d in names))
@@ -603,6 +690,26 @@ class ArgumentBearingDirectives(Synthetic):
         parsed = dh.parse_dpkg("libapache2-mod-wsgi-py3 4.9.0+dfsg-1 install ok installed\n", "")
         self.assertEqual(parsed["packages"][0]["unsupported"], ["upstreamVersion"])
         self.assertNotIn("upstreamVersion", parsed["packages"][0])
+
+    def test_REGRESSION_a_capability_url_is_not_a_mount(self):
+        report, stdout, stderr = collect(uat_like_host())
+        self.assertNoCanary(stdout, stderr, names=["capability"])
+        drop = next(d for d in self.directives(report, "Alias") if d.get("path") == "/srv/drop/")
+        self.assertEqual((drop["state"], drop["unsupported"]), ("unsupported", ["url"]))
+        self.assertFalse(dh._URL_PATH.fullmatch("/hooks/9f8e7d6c5b4a39281706f5e4d3c2b1a0"))
+        for mount in ("/uat", "/api", "/uat/static/", "/uat/media/", "/"):
+            self.assertTrue(dh._URL_PATH.fullmatch(mount), mount)
+
+    def test_REGRESSION_only_a_virtualhost_is_read_in_section_form(self):
+        parsed = dh.parse_config_text("<ServerName leaked-value-123>\n<Alias /a /b>\n", "/etc/apache2/x.conf")
+        self.assertEqual((parsed["directives"], parsed["otherDirectives"]), ([], 2))
+        self.assertNoCanary(collect(uat_like_host())[1], names=["section-form"])
+
+    def test_REGRESSION_a_directive_inside_a_conditional_section_says_so(self):
+        parsed = dh.parse_config_text("<IfModule !mod_x.c>\n  <VirtualHost *:80>\n    ServerName a.test\n  </VirtualHost>\n"
+                                      "</IfModule>\nServerName b.test\n", "/etc/apache2/x.conf")
+        self.assertEqual([(d["name"], d.get("conditional")) for d in parsed["directives"]], [("a.test", True), ("b.test", None)])
+        self.assertTrue(parsed["vhosts"][0]["conditional"])
 
     def test_CONTROL_a_repeated_option_is_ambiguous_never_resolved(self):
         parsed = dh.parse_config_text("WSGIDaemonProcess g processes=2 processes=8 threads=4\n", "/etc/apache2/x.conf")
@@ -629,6 +736,13 @@ class CommandOutcomes(Synthetic):
             for key, value in expected.items():
                 self.assertEqual(fact[key], value, (response, key))
             self.assertNoCanary(json.dumps(fact))
+
+    def test_REGRESSION_a_define_shaped_like_a_vhost_is_not_a_vhost(self):
+        doc = dh.parse_apache_vhosts(fill(VHOSTS_DUMP), "")
+        self.assertNotIn(C["define-vhost"], json.dumps(doc))
+        self.assertEqual(len(doc["vhosts"]), 4)
+        before = dh.parse_apache_vhosts("Define: secret-token-9f8e (/etc/a.conf:1)\n", "")
+        self.assertEqual((before["vhosts"], before["unparsedLines"]), ([], 1))       # no header: no vhost table
 
     def test_REGRESSION_a_command_that_is_not_installed_is_unavailable_and_not_run(self):
         host = FakeHost()
@@ -696,18 +810,30 @@ class Processes(Synthetic):
         procs = {p["pid"]: p for p in report["processes"]["apache"]}
         self.assertEqual(procs[100], {"pid": 100, "executable": "/usr/sbin/apache2", "exeDeleted": False, "ppid": 1,
                                       "user": "root", "group": "root", "role": "server"})
-        self.assertEqual(procs[103]["role"], "server")
+        worker = procs[103]
+        self.assertEqual((worker["role"], worker["cwd"], worker["mappedDirs"]), ("child", "/", ["/usr/lib/apache2/modules",
+                                                                                              "/usr/lib/x86_64-linux-gnu"]))
         uat = procs[101]
         self.assertEqual((uat["role"], uat["wsgiGroup"], uat["titleTruncated"], uat["user"], uat["group"], uat["cwd"]),
                          ("wsgi-daemon", "dinify-uat", False, "www-data", "www-data", APP))
         self.assertIn("/usr/lib/x86_64-linux-gnu", uat["mappedDirs"])
         self.assertIn(VENV + "/lib/python3.12/site-packages/psycopg_binary", uat["mappedDirs"])
         self.assertEqual(uat["mappedUnsupported"], 1)
-        admin = procs[102]
-        self.assertEqual((admin["wsgiGroup"], admin["titleTruncated"], admin["exeDeleted"]), ("dinify-ad", True, True))
+        admin = procs[102]                     # a daemon without display-name keeps Apache's title
+        self.assertEqual((admin["role"], admin["exeDeleted"], admin["cwd"], admin["mappedDeleted"]), ("child", True, APP, 1))
+        self.assertNotIn("wsgiGroup", admin)
+        self.assertIn(VENV + "/lib/python3.12/site-packages/django", admin["mappedDirs"])     # the evidence it is one
+        self.assertIn("/usr/lib/apache2/modules", admin["mappedDirs"])                        # Debian's mod_wsgi.so-3.12
         self.assertEqual(procs[104]["unsupported"], ["wsgiGroup"])
         self.assertNotIn("wsgiGroup", procs[104])
         self.assertEqual((report["processes"]["scanned"], report["processes"]["exeUnreadable"]), (11, 1))
+
+    def test_CONTROL_a_truncated_title_names_a_prefix_of_its_group(self):
+        host = uat_like_host()
+        host.files["/proc/101/cmdline"] = b"(wsgi:dinify-cus\0"
+        report, _, _ = collect(host)
+        uat = next(p for p in report["processes"]["apache"] if p["pid"] == 101)
+        self.assertEqual((uat["role"], uat["wsgiGroup"], uat["titleTruncated"]), ("wsgi-daemon", "dinify-cus", True))
 
     def test_CONTROL_a_title_alone_never_makes_a_process_apache(self):
         self.assertEqual(dh.parse_wsgi_title("(wsgi:dinify-uat)"), ("dinify-uat", False))
@@ -733,7 +859,8 @@ class PositiveControls(Synthetic):
         self.assertEqual(uat["options"], {"user": "www-data", "group": "www-data", "processes": 2, "threads": 8,
                                           "display-name": "%{GROUP}", "python-home": VENV, "python-path": [APP], "home": APP,
                                           "shutdown-timeout": 20, "lang": "C.UTF-8", "locale": "C.UTF-8"})
-        self.assertEqual((uat["state"], uat["vhost"]), ("parsed", 2))     # files sorted: 000-default, admin, api-test
+        self.assertEqual((uat["state"], uat["vhost"], uat["conditional"]), ("parsed", 2, True))   # inside <IfModule mod_ssl.c>
+        self.assertNotIn("conditional", admin)
         self.assertEqual((admin["options"]["processes"], admin["options"]["threads"], admin["options"]["shutdown-timeout"]), (1, 4, 15))
         mounts = {d["mount"]: d for d in self.report["apache"]["directives"] if d.get("directive") == "WSGIScriptAlias"}
         self.assertEqual(mounts["/uat"]["script"], APP + "/dinify_backend/wsgi.py")
@@ -760,11 +887,12 @@ class PositiveControls(Synthetic):
                           ("namevhost", "admin.dinifyapp.com", 443), ("only", "api-test.dinifyapp.com", None)])
         self.assertEqual(dump["vhosts"][1]["aliases"], ["www.api-test.dinifyapp.com"])
         self.assertEqual((dump["runUser"], dump["serverRoot"]), ({"id": 33, "name": "www-data"}, "/etc/apache2"))
-        self.assertEqual(dump["unparsedLines"], 6)
+        self.assertEqual(dump["unparsedLines"], 7)
         includes = self.report["commands"]["apache_includes"]
         self.assertTrue(includes["syntaxOk"])
         self.assertEqual(self.report["apache"]["includesNotScanned"], ["/etc/letsencrypt/options-ssl-apache.conf"])
         files = {f["path"]: f for f in self.report["apache"]["files"]}
+        self.assertEqual({p for p, f in files.items() if not f["included"]}, {"/etc/apache2/sites-enabled/README"})
         linked = files["/etc/apache2/sites-enabled/api-test-le-ssl.conf"]
         self.assertEqual((linked["type"], linked["target"], linked["realpath"]),
                          ("link", "../sites-available/api-test-le-ssl.conf", "/etc/apache2/sites-available/api-test-le-ssl.conf"))
@@ -800,9 +928,11 @@ class PositiveControls(Synthetic):
         self.assertEqual((app["gitCommit"], app["gitDetached"], app["owner"], app["mode"]), (COMMIT, True, "ubuntu", "755"))
         env = app["decoupleWouldFind"][0]
         self.assertEqual((env["path"], env["owner"], env["group"], env["mode"], env["type"]), (APP + "/.env", "ubuntu", "www-data", "640", "file"))
-        self.assertEqual(env["keysPresent"], ["DATABASE_PASSWORD", "DINER_CAP_KEY", "ENV", "MEDIA_ROOT", "SECRET_KEY"])
-        self.assertEqual(env["envWord"], "dev")
-        self.assertEqual(set(env), {"path", "exists", "type", "mode", "owner", "group", "keysPresent", "keysAbsent", "envWord"})
+        self.assertEqual(env["keysPresent"], ["DATABASE_PASSWORD", "ENV", "MEDIA_ROOT", "SECRET_KEY"])
+        self.assertEqual(env["exportOnly"], ["DINER_CAP_KEY"])        # decouple reads that key as "export DINER_CAP_KEY"
+        self.assertEqual((env["envWord"], env["decoupleSelects"]), ("dev", True))
+        self.assertEqual(set(env), {"path", "exists", "type", "mode", "owner", "group", "keysPresent", "keysAbsent", "envWord",
+                                    "exportOnly", "decoupleSelects"})
         self.assertEqual(self.report["accounts"]["www-data"], {"uid": 33, "gid": 33, "groups": [], "home": "/var/www",
                                                                "shell": "/usr/sbin/nologin"})
         self.assertEqual(self.report["accounts"]["ubuntu"]["groups"], ["adm", "www-data"])
@@ -817,9 +947,10 @@ class PositiveControls(Synthetic):
 class EnvWord(Synthetic):
     def test_REGRESSION_ENV_is_one_of_four_words_and_nothing_else_is_printed(self):
         for line, word in (("ENV=dev", "dev"), ("ENV=test", "test"), ("ENV=prod", "prod"), ("ENV='prod'", "prod"),
-                           ('export ENV="dev"', "dev"), ("ENV=staging", "other"), ("ENV=Prod", "other"),
+                           ('export ENV="dev"', None), ("ENV=staging", "other"), ("ENV=Prod", "other"),
                            ("ENV=dev # local", "other"), ("ENV=%s" % C["env-word"], "other"), ("# ENV=prod", None),
-                           ("ENV=dev\nENV=prod", "prod")):
+                           ("ENV=dev\nENV=prod", "prod"), ("ENV=\"'dev'\"", "other"), (" ENV = prod ", "prod"),
+                           ("SECRET_KEY=x\x0cENV=prod", None), ("ENV=test\rDEBUG=1", "test"), ("ENV", None)):
             doc = dh.parse_env_text(line + "\n")
             self.assertEqual(doc["envWord"], word, line)
             self.assertNoCanary(json.dumps(doc))
@@ -833,6 +964,90 @@ class EnvWord(Synthetic):
         doc = dh.env_file(host, APP + "/.env")
         self.assertEqual(doc["state"], "tooLarge")
         self.assertNotIn("keysPresent", doc)
+
+
+class DecoupleSearch(Synthetic):
+    def test_REGRESSION_the_file_decouple_would_read_is_marked_and_root_is_never_searched(self):
+        host = uat_like_host()
+        host.file("/home/ubuntu/.env", "ENV=prod\n")
+        host.file("/.env", "ENV=prod\n")
+        host.file(APP + "/dinify_backend/settings.ini", "[settings]\nENV = test\n")
+        report, _, _ = collect(host)
+        trees = {t["path"]: t for t in report["projectTrees"]}
+        inner = [(e["path"], e.get("decoupleSelects"), e["envWord"]) for e in trees[APP + "/dinify_backend"]["decoupleWouldFind"]]
+        self.assertEqual(inner, [(APP + "/dinify_backend/settings.ini", True, "test"), (APP + "/.env", None, "dev"),
+                                 ("/home/ubuntu/.env", None, "prod")])
+        self.assertNotIn("/.env", host.reads)
+
+    def test_REGRESSION_a_linked_environment_file_is_read_through_its_link(self):
+        host = uat_like_host()
+        host.file("/etc/dinify/uat.env", "ENV=prod\nSECRET_KEY=%s\n" % C["symlink-env"], uid=0, gid=33, mode=0o640)
+        del host.files[APP + "/.env"]
+        host.link(APP + "/.env", "/etc/dinify/uat.env")
+        report, stdout, _ = collect(host)
+        env = next(t for t in report["projectTrees"] if t["path"] == APP)["decoupleWouldFind"][0]
+        self.assertEqual((env["type"], env["envWord"], env["keysPresent"], env["decoupleSelects"]),
+                         ("link", "prod", ["ENV", "SECRET_KEY"], True))
+        self.assertEqual((env["resolvesTo"]["path"], env["resolvesTo"]["mode"], env["resolvesTo"]["group"]),
+                         ("/etc/dinify/uat.env", "640", "www-data"))
+        self.assertNoCanary(stdout, names=["symlink-env"])
+
+    def test_REGRESSION_a_device_or_pipe_is_never_opened(self):
+        host = uat_like_host()
+        host.specials["/dev/zero"] = stat.S_IFCHR
+        host.link("/etc/apache2/sites-enabled/zero.conf", "/dev/zero")
+        host.specials[APP + "/.git/HEAD"] = stat.S_IFIFO
+        del host.files[APP + "/.git/HEAD"]
+        report, _, _ = collect(host)
+        zero = next(f for f in report["apache"]["files"] if f["path"].endswith("zero.conf"))
+        self.assertEqual((zero["state"], zero["sha256State"]), ("notRegular", "notRegular"))
+        self.assertEqual(next(t for t in report["projectTrees"] if t["path"] == APP)["gitState"], "notRegular")
+        self.assertEqual(host.violations, [])
+
+
+class AgreesWithPythonDecouple(unittest.TestCase):
+    """The collector's reading of an environment file against python-decouple 3.8 itself
+    (a pinned requirement), on synthetic files written to a temporary directory."""
+
+    ENV_CASES = ("ENV=dev\n", "ENV='prod'\nSECRET_KEY=x\n", 'ENV="\'dev\'"\n', "export ENV=dev\nDEBUG=1\n", "ENV=dev\r\nENV=test\r\n",
+                 "ENV=test\rDEBUG=1\r", "SECRET_KEY=x\x0cENV=prod\n", "ENV=dev\x85DEBUG=1\n", "#ENV=prod\n  ENV = prod  \n",
+                 "ENV=\n", "=dev\nENV\n", "ENV=dev # c\n", "\ufeffENV=dev\n", "ENV=prod\nENV=dev\n", "ENV='dev\n")
+    INI_CASES = ("[settings]\nENV=prod\n", "[settings]\nenv: dev\nSECRET_KEY = x\n", "[other]\nENV=prod\n",
+                 "[settings]\nENV=%(missing)s\n", "ENV=dev\n", "[settings]\nENV=a\nENV=b\n", "[settings]\nENV = 'dev'\n")
+
+    def test_CONTRACT_a_dotenv_is_read_exactly_as_RepositoryEnv_reads_it(self):
+        decouple = importlib.import_module("decouple")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            for text in self.ENV_CASES:
+                with open(path, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(text)
+                data = decouple.RepositoryEnv(path).data
+                want = (sorted(k for k in dh.ENV_KEYS if k in data),
+                        None if "ENV" not in data else data["ENV"] if data["ENV"] in dh.ENV_WORDS else "other")
+                got = dh.parse_env_text(text)
+                self.assertEqual((got["keysPresent"], got["envWord"]), want, repr(text))
+
+    def test_CONTRACT_a_settings_ini_is_read_exactly_as_RepositoryIni_reads_it(self):
+        decouple = importlib.import_module("decouple")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.ini")
+            for text in self.INI_CASES:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                got = dh.parse_settings_ini_text(text)
+                try:
+                    repo = decouple.RepositoryIni(path)
+                except Exception:
+                    self.assertEqual(got, {"state": "unparseable"}, repr(text))
+                    continue
+                keys = sorted(k for k in dh.ENV_KEYS if repo.parser.has_option(repo.SECTION, k))
+                try:
+                    env = repo["ENV"] if "ENV" in keys else None
+                except Exception:
+                    env = "unreadable"
+                want_env = None if env is None else env if env in dh.ENV_WORDS else "other"
+                self.assertEqual((got["keysPresent"], got["envWord"]), (keys, want_env), repr(text))
 
 
 class ProfileFactMap(Synthetic):
@@ -851,14 +1066,21 @@ class ProfileFactMap(Synthetic):
 
     @staticmethod
     def resolve(doc, location):
+        """``a.b[].c``: every value at that path; ``b[k=v]`` keeps the list items whose k is v."""
         nodes = [doc]
-        for part in location.split("."):
-            many = part.endswith("[]")
-            key = part[:-2] if many else part
+        for part in re.findall(r"[^.\[]+(?:\[[^\]]*\])?", location):
+            m = re.fullmatch(r"([^\[]+)(?:\[([^\]=]*)(?:=([^\]]*))?\])?", part)
+            key, field, value = m.group(1), m.group(2), m.group(3)
             nodes = [n.get(key) for n in nodes if isinstance(n, dict)]
-            if many:
-                nodes = [item for n in nodes if isinstance(n, list) for item in n]
+            if field is not None:
+                nodes = [item for n in nodes if isinstance(n, list) for item in n
+                         if not field or isinstance(item, dict) and str(item.get(field)) == value]
         return [n for n in nodes if n is not None]
+
+    def test_CONTROL_a_qualified_location_keeps_only_that_directive(self):
+        report, _, _ = collect(uat_like_host())
+        self.assertEqual(self.resolve(report, "apache.directives[directive=WSGIScriptAlias].mount"), ["/api", "/uat"])
+        self.assertEqual(self.resolve(report, "apache.directives[directive=WSGIPassAuthorization].enabled"), [True, True])
 
     def test_CONTRACT_every_profile_field_is_mapped(self):
         with open(PROFILE, encoding="utf-8") as fh:

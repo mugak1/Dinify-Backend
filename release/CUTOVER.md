@@ -30,18 +30,21 @@ The approval names the exact collector (its sha256, at a revision that carries t
 the report. Merging a collector change is none of that.
 
 - [ ] Run `release/staged/discover_host.py` on the instance as root through SSM, writing the
-      report to a root-only file on the instance (`umask 077; python3 -I -B discover_host.py >
-      <file>`), never to the SSM output. The SSM output then carries only the two sha256 lines
-      on stderr.
+      report to a NEW root-only file on the instance (`umask 077; set -C;
+      /usr/bin/python3 -I -B discover_host.py > <new file>`), never to the SSM output. The SSM
+      output then carries only the two sha256 lines on stderr.
 - [ ] What it does, exactly (its docstring is the authority). It READS configuration in memory,
-      including whole lines of each `.env`, to decide what to keep. It RETAINS key presence,
-      ENV as `dev`/`test`/`prod`/`other`, reviewed directive fields, command status and parsed
-      facts, and Apache's own processes. It never retains a configuration value, a header,
-      rewrite or proxy target, a command's stderr, or another process's command line. It does
-      not change the application: it opens nothing for writing, sends nothing, and starts,
-      stops or reloads nothing. The host still changes: the redirection writes the report
-      file, and SSM keeps its normal bookkeeping (the command record, its output, the agent's
-      logs).
+      including whole lines of each `.env`, to decide what to keep. It RETAINS the reviewed
+      directive fields the profile needs (paths, mounts, host names, daemon options), the
+      presence of environment keys and ENV as `dev`/`test`/`prod`/`other`, command status and
+      parsed facts, and facts about Apache's own processes. It never retains an
+      environment-file value other than that word, the arguments of a withheld or unreviewed
+      directive, a command's stderr text, or any process's command line. It does not change
+      the application: it opens nothing for writing, sends nothing, and starts, stops or
+      reloads nothing. The host still changes: the redirection writes the report file, and
+      SSM keeps its normal bookkeeping (the command record, its output, the agent's logs).
+      Discovery cannot see the process environment (Apache's envvars, its service unit),
+      which python-decouple reads before any file; establish ENV there on the host.
 - [ ] The report stays PRIVATE, in the custody the approval names, and is reviewed there. The
       PR that sets `release/profiles/uat-backend.json` to `status: verified` carries the
       values taken from it, not the report, with `observation` naming the collector sha256,

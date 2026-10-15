@@ -1,38 +1,42 @@
 """READ-ONLY HOST DISCOVERY for the D08 B3 installation profile. NOT RUN AGAINST THE REAL HOST.
 
 For a LATER, owner-approved operator run on the UAT instance (release/CUTOVER.md step 1), as
-root, with the report written to a root-only file on the instance and never to the SSM output:
+root, with the report written to a NEW root-only file on the instance, never to the SSM output:
 
-    umask 077; /usr/bin/python3 -I -B discover_host.py > <private report file>
+    umask 077; set -C; /usr/bin/python3 -I -B discover_host.py > <new private report file>
 
 It prints ONE JSON document (schema ``dinify.backend.host-discovery/2``) describing what
 release/profiles/uat-backend.json needs, and on stderr exactly two lines: the sha256 of this
 collector and of the report, the two values a verified profile's ``observation`` names.
 
-READING IS NOT RETAINING. To decide what it may keep, it reads configuration IN MEMORY:
-whole lines of every ``.env``/``settings.ini`` that python-decouple's upward search would find
-from a WSGI directory (values included: a line cannot be classified without reading it),
-every Apache file under CONFIG_GLOBS, the output of fixed read-only queries, and, for
-Apache's own processes only, their /proc status, first argument, working directory and
-mapped files. It never opens any process's environment. What it RETAINS AND EXPORTS is fixed
-by this file, field by field:
-  * environment files: ownership, mode and the PRESENCE of the keys in ENV_KEYS. No value is
-    kept except ENV, mapped onto dev/test/prod or "other"; any other word is never printed;
-  * Apache: only the directives in PARSERS, each through its own grammar (paths, URL mounts,
-    host names, daemon groups and their reviewed options). A directive in
-    REDACTED_DIRECTIVES (headers, rewrite and proxy rules, SetEnv, Define ...) is reported
-    by name and line only. Every other directive is counted, never named;
+READING IS NOT RETAINING. To decide what it may keep, it reads IN MEMORY: each ``.env`` and
+``settings.ini`` in every directory a WSGI or Alias directive names and in its ancestors below
+``/`` (values included: a line cannot be classified without reading it); every Apache file
+under CONFIG_GLOBS; the output of fixed read-only queries; every process's /proc exe link;
+and, for Apache's own processes only, their /proc status, up to 4 KiB of their command line
+(only argv[0] is examined), their working directory and their mapped files. It never opens
+any process's environment. What it RETAINS AND EXPORTS is fixed by this file, field by field:
+  * environment files: ownership, mode and the PRESENCE of the keys in ENV_KEYS, read the way
+    python-decouple 3.8 reads them. No value is kept except ENV, mapped onto dev/test/prod or
+    "other"; any other word is never printed;
+  * Apache: only the directives in PARSERS, the ones the profile needs, each through its own
+    grammar (paths, URL mounts, host names, daemon groups and their reviewed options); a URL
+    segment shaped like a credential is refused. A directive in REDACTED_DIRECTIVES (headers,
+    rewrite and proxy rules, SetEnv, Define ...) is reported by name and line only. Every other
+    directive, and every section but VirtualHost, is counted, never named;
   * commands: a fixed status (state, exit code, whether stderr was empty) and the facts that
     command's own parser accepts. Never raw output, never stderr text;
   * processes: only those whose executable IS Apache's binary (the /proc exe link, never a
-    substring of a command line), as pid, ppid, user, group and role, plus a mod_wsgi
-    daemon's group, working directory and mapped library directories. Never a command line;
-  * anything it cannot read or parse becomes a fixed state (missing, denied, unsupported,
-    unavailable, timeout, collector_error ...), never an echo and never a guess. No exception
-    message is printed anywhere.
+    substring of a command line), as pid, ppid, user, group and role, with the working
+    directory and mapped library directories of every non-root one, and a mod_wsgi daemon's
+    group when its title carries one. Never a command line;
+  * anything it cannot read or parse becomes a fixed state (missing, denied, notRegular,
+    unsupported, unavailable, timeout, collector_error ...), never an echo and never a guess.
+    No exception message is printed anywhere.
 
 THE APPLICATION IS NOT CHANGED; THE HOST IS NOT UNTOUCHED. The collector opens nothing for
-writing, sends nothing over the network, and starts, stops or reloads nothing. Its external
+writing, sends nothing over the network, and starts, stops or reloads nothing. It reads and
+hashes only regular files, so a link to a device or a pipe cannot stall it. Its external
 commands are the fixed queries in READ_ONLY_COMMANDS, READELF on the module wsgi.load names,
 and INTERPRETER_CODE in each of INTERPRETERS. Running it still leaves traces it does not
 control: the operator's redirection writes the report file, and SSM keeps its normal
@@ -41,13 +45,18 @@ report holds host paths, account names and file digests: it is a private record,
 custody the owner's approval names, and is not committed or published.
 
 WHAT IT CANNOT SEE, each a gap for the reviewer to close on the host, never a value to infer:
-directives in files outside CONFIG_GLOBS (``apache.includesNotScanned`` lists the ones
-Apache includes), mod_macro expansions, ``${VAR}`` references (unsupported), AliasMatch and
-other withheld targets, refs packed into ``.git/packed-refs``, ``settings.ini`` keys written
-``KEY: value``, MEDIA_ROOT's value (release/hostprobe.py compares it at deploy), a module's
-NEEDED libraries when ``readelf`` is not installed, and the version of the mod_wsgi Apache has
-LOADED: the package's upstream version is reported, and the release identity route reports the
-loaded one once B3 serves.
+  * the PROCESS ENVIRONMENT: python-decouple prefers os.environ to its files, and whatever
+    /etc/apache2/envvars or Apache's service unit exports reaches the daemons unseen here;
+  * directives in files outside CONFIG_GLOBS (``apache.includesNotScanned`` lists the ones
+    Apache includes), mod_macro expansions, ``${VAR}`` references (unsupported), and the
+    arguments of withheld directives; a directive inside a conditional section is marked
+    ``conditional``, and whether the condition holds is not evaluated;
+  * refs packed into ``.git/packed-refs``; MEDIA_ROOT's value (release/hostprobe.py compares it
+    at deploy); a module's NEEDED libraries when ``readelf`` is not installed;
+  * the version of the mod_wsgi Apache has LOADED: the package's upstream version is reported,
+    and the release identity route reports the loaded one once B3 serves;
+  * which Apache child is a mod_wsgi daemon, unless its ``display-name`` is set: an untitled
+    daemon and a worker are both ``child``, and their mapped directories are the evidence.
 
 Only RealHost touches the machine. Every other function receives what it reads through a
 host object, which is how release/tests_discovery.py replaces the whole host with synthetic
@@ -57,6 +66,7 @@ profile field comes from).
 """
 
 import builtins
+import configparser
 import errno
 import glob
 import grp
@@ -114,8 +124,20 @@ MAX_PROCESSES, MAX_MAPPED_DIRS, MAX_TREES, MAX_ENV_FILES, MAX_LOCKS, MAX_ACCOUNT
 # --- grammars: a retained string is one of these, or it is not retained ---------------------
 _ABS_PATH = re.compile(r"/[A-Za-z0-9._+@~/-]{0,511}")
 _PATH = re.compile(r"[A-Za-z0-9._+@~/-]{1,512}")
-_GLOB_PATH = re.compile(r"[A-Za-z0-9._+@~/*?\[\]-]{1,512}")
-_URL_PATH = re.compile(r"/[A-Za-z0-9._~/-]{0,255}")
+_URL_PATH_CHARS = re.compile(r"/[A-Za-z0-9._~/-]{0,255}")
+_CREDENTIAL_SEGMENT = re.compile(r"(?=(?:[^0-9]*[0-9]){3})[A-Za-z0-9._~-]{16,}")
+
+
+class _UrlPath:
+    """A URL path in its grammar, refused whole when a segment is shaped like a credential
+    (16 or more characters, 3 or more of them digits): a capability URL is not a mount."""
+
+    @staticmethod
+    def fullmatch(value):
+        return bool(_URL_PATH_CHARS.fullmatch(value)) and not any(_CREDENTIAL_SEGMENT.fullmatch(s) for s in value.split("/"))
+
+
+_URL_PATH = _UrlPath()
 _HOSTNAME = re.compile(r"(https?://)?[A-Za-z0-9*_][A-Za-z0-9*_.-]{0,252}(:[0-9]{1,5})?")
 _ADDRESS = re.compile(r"(\*|_default_|[0-9]{1,3}(\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9][A-Za-z0-9.-]{0,252})"
                       r"(:([0-9]{1,5}|\*))?")
@@ -149,7 +171,8 @@ INTERPRETER_FACTS = {"python": re.compile(r"3\.[0-9]{1,2}\.[0-9]{1,3}"), "implem
                      "libc": re.compile(r"[a-z]{1,10} [0-9.]{1,10}"), "machine": _MACHINE}
 
 # Where each field of release/profiles/uat-backend.json comes from. "report": the part of this
-# report it is read from (the reviewer assigns each WSGI daemon and mount to its plane);
+# report it is read from, as a value the profile accepts unchanged (``[directive=X]`` keeps the
+# records of that directive; the reviewer assigns each WSGI daemon and mount to its plane);
 # "decision": set by the reviewed profile change, which the noted part of the report informs;
 # "gap": not observable here, and how it is established instead. release/tests_discovery.py
 # pins this against the committed profile and against a synthetic report.
@@ -166,26 +189,27 @@ PROFILE_FACTS = {
     "modWsgi.sha256": ("report", "modWsgi.sha256"),
     "modWsgi.version": ("report", "commands.mod_wsgi_package.packages[].upstreamVersion"),
     "identities.prepare": ("decision", "a new account (CUTOVER.md step 1); accounts shows which exist"),
-    "identities.runtime": ("report", "apache.directives[].options.user"),
-    "identities.runtimeGroup": ("report", "apache.directives[].options.group"),
+    "identities.runtime": ("report", "apache.directives[directive=WSGIDaemonProcess].options.user"),
+    "identities.runtimeGroup": ("report", "apache.directives[directive=WSGIDaemonProcess].options.group"),
     "identities.migrate": ("decision", "a new account (CUTOVER.md step 1); accounts shows which exist"),
     "apache.ctl": ("report", "commands.apache_version.resolved"),
     "apache.includeDir": ("decision", "the cutover's layout; paths[] shows whether it exists"),
     "apache.reload": ("decision", "transition policy"),
     "apache.drainSeconds": ("decision", "transition policy"),
-    "planes.*.daemon": ("report", "apache.directives[].name"),
-    "planes.*.mount": ("report", "apache.directives[].mount"),
+    "planes.*.daemon": ("report", "apache.directives[directive=WSGIDaemonProcess].name"),
+    "planes.*.mount": ("report", "apache.directives[directive=WSGIScriptAlias].mount"),
     "planes.*.config": ("decision", "the cutover moves configuration to /etc/dinify-backend (CUTOVER.md step 4)"),
-    "planes.*.processes": ("report", "apache.directives[].options.processes"),
-    "planes.*.threads": ("report", "apache.directives[].options.threads"),
-    "planes.*.shutdownTimeout": ("report", "apache.directives[].options.shutdown-timeout"),
-    "planes.*.passAuthorization": ("report", "apache.directives[].enabled"),
-    "planes.*.staticUrl": ("report", "apache.directives[].url"),
+    "planes.*.processes": ("report", "apache.directives[directive=WSGIDaemonProcess].options.processes"),
+    "planes.*.threads": ("report", "apache.directives[directive=WSGIDaemonProcess].options.threads"),
+    "planes.*.shutdownTimeout": ("report", "apache.directives[directive=WSGIDaemonProcess].options.shutdown-timeout"),
+    "planes.*.passAuthorization": ("report", "apache.directives[directive=WSGIPassAuthorization].enabled"),
+    "planes.*.staticUrl": ("report", "apache.directives[directive=Alias].url"),
     "planes.*.probe.base": ("decision", "https:// + the serverName of the vhost serving the mount (commands.apache_vhosts"
-                                        ".vhosts[].serverName, apache.directives[].mount): a composition, not one fact"),
-    "planes.*.probe.connectTo": ("decision", "a loopback address; apache.directives[].address (Listen) shows what Apache binds"),
-    "media.root": ("report", "apache.directives[].path"),
-    "media.url": ("report", "apache.directives[].url"),
+                                        ".vhosts[].serverName, apache.directives[directive=WSGIScriptAlias].mount): a composition, not one fact"),
+    "planes.*.probe.connectTo": ("decision", "a loopback address; apache.directives[directive=Listen].address shows what Apache binds"),
+    "media.root": ("decision", "where MEDIA_ROOT writes, which is not observed; the media apache.directives[directive=Alias].path shows where Apache "
+                                "serves it from (written with its trailing slash)"),
+    "media.url": ("report", "apache.directives[directive=Alias].url"),
     "otp.deterministicTestOtpAllowed": ("decision", "projectTrees[].decoupleWouldFind[].envWord shows dev/test/prod/other"),
     "otp.reason": ("decision", "the owner's stated reason"),
     "minFreeBytes": ("decision", "space policy; disks shows free space"),
@@ -334,15 +358,33 @@ def _section(fn, *args):
         return {"state": "collector_error", "errorType": _error_type(error)}
 
 
-def _read_text(host, path, limit=READ_LIMIT):
-    """``(text, None)`` or ``(None, state)``. A file over the limit is not partially parsed."""
+def _regular(host, path):
+    """None when ``path`` resolves to a regular file, else the state to report. A device, a
+    pipe or a directory is never opened: /dev/zero would never end, and a FIFO never opens."""
+    try:
+        mode = host.stat(path).st_mode
+    except OSError as error:
+        return _oserror(error)
+    return None if stat.S_ISREG(mode) else "notRegular"
+
+
+def _read_text(host, path, limit=READ_LIMIT, strict=False):
+    """``(text, None)`` or ``(None, state)``. A file over the limit is not partially parsed;
+    ``strict`` refuses what is not UTF-8 (python-decouple would fail on it) rather than
+    replacing it."""
+    state = _regular(host, path)
+    if state:
+        return None, state
     try:
         data = host.read(path, limit)
     except OSError as error:
         return None, _oserror(error)
     if len(data) > limit:
         return None, "tooLarge"
-    return data.decode("utf-8", "replace"), None
+    try:
+        return data.decode("utf-8", "strict" if strict else "replace"), None
+    except UnicodeDecodeError:
+        return None, "notUtf8"
 
 
 def _lines(text):
@@ -356,6 +398,10 @@ def _bounded(doc, key, items, limit):
 
 
 def _digest(host, doc, key, path):
+    state = _regular(host, path)
+    if state:
+        doc[key + "State"] = state
+        return
     try:
         value = host.sha256(path)
     except OSError as error:
@@ -388,30 +434,74 @@ def describe(host, path):
 
 # --- environment files ---------------------------------------------------------------------
 
+def _env_word(value):
+    return value if value in ENV_WORDS else "other"
+
+
 def parse_env_text(text):
-    """Which ENV_KEYS are present, and ENV's word as dev/test/prod/other. Every line is read
-    in memory to decide that; no value is kept but that word."""
-    present, env_word = [], None
-    for line in text.splitlines():
-        key, sep, value = line.strip().partition("=")
-        key = key.strip().removeprefix("export ").strip()
-        if sep and key in ENV_KEYS:
-            present.append(key)
+    """What python-decouple 3.8's RepositoryEnv reads from a ``.env``: which ENV_KEYS it defines
+    and ENV's word as dev/test/prod/other. Every line is read in memory to decide that; no value
+    is kept but that word. It mirrors decouple: lines split as a text file splits them,
+    stripped, ``#`` lines and lines without ``=`` skipped, split once on ``=``, one matched pair
+    of quotes removed, the last definition winning. ``export`` is NOT special there: ``export
+    ENV=dev`` defines the key ``export ENV``, so such a key is listed under exportOnly instead."""
+    present, export_only, env_word = set(), set(), None
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if key in ENV_KEYS:
+            present.add(key)
             if key == "ENV":
-                word = value.strip().strip("'\"")
-                env_word = word if word in ENV_WORDS else "other"
+                env_word = _env_word(value)
+        elif key.startswith("export ") and key[len("export "):].strip() in ENV_KEYS:
+            export_only.add(key[len("export "):].strip())
         del line, value
-    return {"keysPresent": sorted(set(present)), "keysAbsent": sorted(set(ENV_KEYS) - set(present)), "envWord": env_word}
+    doc = {"keysPresent": sorted(present), "keysAbsent": sorted(set(ENV_KEYS) - present), "envWord": env_word}
+    if export_only - present:
+        doc["exportOnly"] = sorted(export_only - present)
+    return doc
+
+
+def parse_settings_ini_text(text):
+    """What python-decouple 3.8's RepositoryIni reads: the ``[settings]`` section of a
+    ConfigParser (keys case-insensitive, ``=`` or ``:``, interpolation applied when ENV is
+    read). A file it cannot parse is unparseable here too, and no parser message is kept."""
+    parser = configparser.ConfigParser()
+    try:
+        parser.read_string(text)
+    except configparser.Error:
+        return {"state": "unparseable"}
+    present = {key for key in ENV_KEYS if parser.has_option("settings", key)}
+    env_word = None
+    if "ENV" in present:
+        try:
+            env_word = _env_word(parser.get("settings", "ENV"))
+        except configparser.Error:
+            env_word = "other"
+    return {"keysPresent": sorted(present), "keysAbsent": sorted(set(ENV_KEYS) - present), "envWord": env_word}
 
 
 def env_file(host, path):
+    """One file python-decouple would consider: the entry itself (a link reported as a link,
+    with what it resolves to), and, when it resolves to a regular file (decouple follows links),
+    what decouple would read from it."""
     doc = describe(host, path)
-    if not doc.get("exists") or doc.get("type") != "file":
+    if not doc.get("exists") or doc.get("type") not in ("file", "link"):
         return doc
-    text, state = _read_text(host, path)
+    if doc["type"] == "link":
+        real = host.realpath(path)
+        if _ok(_ABS_PATH, real):
+            doc["resolvesTo"] = describe(host, real)
+    text, state = _read_text(host, path, strict=True)
     if text is None:
         return dict(doc, state=state)
-    return dict(doc, **parse_env_text(text))
+    parse = parse_settings_ini_text if path.endswith("/settings.ini") else parse_env_text
+    return dict(doc, **parse(text))
 
 
 # --- Apache configuration ------------------------------------------------------------------
@@ -540,23 +630,18 @@ PARSERS = {
     "WSGIRestrictEmbedded": _single("enabled", _ONOFF),
     "WSGIPythonHome": _single("path", _ABS_PATH),
     "WSGIPythonPath": _single("paths", _PATHS),
-    "WSGISocketPrefix": _single("path", _PATH),
     "ServerName": _single("name", _HOSTNAME),
     "ServerAlias": _server_alias,
     "Alias": _pair("url", _URL_PATH, "path", _ABS_PATH),
-    "Include": _single("path", _GLOB_PATH),
-    "IncludeOptional": _single("path", _GLOB_PATH),
-    "DocumentRoot": _single("path", _ABS_PATH),
     "Listen": _listen,
-    "LoadModule": _pair("module", _MODULE, "path", _PATH),
-    "Directory": _single("path", _GLOB_PATH),
-    "Location": _single("url", _URL_PATH),
 }
 # Named by line, never shown: each can carry a credential, a token or an internal address.
 REDACTED_DIRECTIVES = ("SetEnv", "SetEnvIf", "SetEnvIfNoCase", "SetEnvIfExpr", "PassEnv", "UnsetEnv", "Define", "Header",
                        "RequestHeader", "RewriteRule", "RewriteCond", "RewriteMap", "ProxyPass", "ProxyPassMatch",
                        "ProxyPassReverse", "AliasMatch", "ScriptAlias", "Redirect", "RedirectMatch")
-_CANONICAL = {name.lower(): name for name in tuple(PARSERS) + REDACTED_DIRECTIVES + ("VirtualHost",)}
+_CANONICAL = {name.lower(): name for name in tuple(PARSERS) + REDACTED_DIRECTIVES}
+# A directive inside one of these is marked ``conditional``: whether it applies is not evaluated.
+CONDITIONAL_SECTIONS = ("ifmodule", "ifdefine", "if", "elseif", "else", "ifversion", "iffile", "ifdirective", "ifsection")
 
 
 def _logical_lines(text):
@@ -606,44 +691,55 @@ def _tokens(text):
 
 
 def parse_config_text(text, path, first_vhost=0):
-    """One Apache configuration file, as reviewed records only."""
-    directives, vhosts, other, current = [], [], 0, None
+    """One Apache configuration file, as reviewed records only. Sections are tracked so a
+    record says which VirtualHost holds it and whether a conditional section encloses it; no
+    section's arguments are kept but a VirtualHost's addresses."""
+    directives, vhosts, other, stack, current = [], [], 0, [], None
     for line_number, line in _logical_lines(text):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        closing = stripped.startswith("</")
-        inner = stripped
+        conditional = any(s in CONDITIONAL_SECTIONS for s in stack)
         if stripped.startswith("<"):
+            closing = stripped.startswith("</")
             inner = stripped[2:] if closing else stripped[1:]
-            if not inner.endswith(">"):
+            words = inner[:-1].split(None, 1) if inner.endswith(">") else []
+            if not words:
                 other += 1
                 continue
-            inner = inner[:-1]
-        words = inner.split(None, 1)
-        if not words:
-            other += 1
-            continue
-        raw_name, rest = words[0], (words[1] if len(words) > 1 else "")
-        name = _CANONICAL.get(raw_name.lower()) if _DIRECTIVE_NAME.fullmatch(raw_name) else None
-        if closing:
-            if name == "VirtualHost":
-                current = None
-            continue
-        if name is None:
-            other += 1
-            continue
-        args = _tokens(rest)
-        if name == "VirtualHost":
+            section = words[0].lower()
+            if closing:
+                if section in stack:
+                    while stack.pop() != section:
+                        pass
+                if section == "virtualhost":
+                    current = None
+                continue
+            stack.append(section)
+            if section != "virtualhost":
+                other += 1
+                continue
+            args = _tokens(words[1] if len(words) > 1 else "")
             index = first_vhost + len(vhosts)
             vhost = {"index": index, "file": path, "line": line_number,
                      "addresses": [a for a in (args or []) if _ok(_ADDRESS, a)]}
             if not args or len(vhost["addresses"]) != len(args):
                 vhost["unsupported"] = ["addresses"]
+            if conditional:
+                vhost["conditional"] = True
             vhosts.append(vhost)
             current = index
             continue
+        words = stripped.split(None, 1)
+        raw_name, rest = words[0], (words[1] if len(words) > 1 else "")
+        name = _CANONICAL.get(raw_name.lower()) if _DIRECTIVE_NAME.fullmatch(raw_name) else None
+        if name is None:
+            other += 1
+            continue
         record = {"file": path, "line": line_number, "directive": name, "vhost": current}
+        if conditional:
+            record["conditional"] = True
+        args = _tokens(rest)
         if name in REDACTED_DIRECTIVES:
             record["state"] = "withheld"
         elif args is None:
@@ -724,11 +820,22 @@ def _vhost_entry(role, address, name, file, line, port=None):
     return entry
 
 
+RUN_CONFIG = ("ServerRoot:", "Main DocumentRoot:", "Main ErrorLog:", "Mutex", "PidFile:", "Define:", "User:", "Group:")
+
+
 def parse_apache_vhosts(stdout, stderr):
-    vhosts, unparsed, address = [], 0, None
+    """The vhost table is read only between its header and the run configuration, so a
+    ``Define:`` line shaped like a vhost cannot become one."""
+    vhosts, unparsed, address, part = [], 0, None, None
     doc = {}
     for line in _lines(stdout):
         if line == "VirtualHost configuration:":
+            part = "vhosts"
+            continue
+        if line.startswith(RUN_CONFIG):
+            part = "run"
+        if part != "vhosts":
+            unparsed += _run_config(doc, line) if part == "run" else 1
             continue
         m = _VH_NAMEVHOST.fullmatch(line)
         if m:
@@ -755,20 +862,25 @@ def parse_apache_vhosts(stdout, stderr):
             address = None
             vhosts.append(_vhost_entry("only", *m.groups()))
             continue
-        m = re.fullmatch(r"(ServerRoot|Main DocumentRoot): \"([^\"]*)\"", line)
-        if m:
-            _put(doc, "serverRoot" if m.group(1) == "ServerRoot" else "documentRoot", m.group(2), _ABS_PATH)
-            continue
-        m = _RUN_AS.fullmatch(line)
-        if m:
-            run_as = {"id": int(m.group(3))}
-            _put(run_as, "name", m.group(2), _ACCOUNT)
-            doc["runUser" if m.group(1) == "User" else "runGroup"] = run_as
-            continue
         unparsed += 1
     _bounded(doc, "vhosts", vhosts, MAX_VHOSTS)
     doc["unparsedLines"] = unparsed
     return doc
+
+
+def _run_config(doc, line):
+    """One line of the run configuration: 0 when retained, 1 when not."""
+    m = re.fullmatch(r"(ServerRoot|Main DocumentRoot): \"([^\"]*)\"", line)
+    if m:
+        _put(doc, "serverRoot" if m.group(1) == "ServerRoot" else "documentRoot", m.group(2), _ABS_PATH)
+        return 0
+    m = _RUN_AS.fullmatch(line)
+    if m:
+        run_as = {"id": int(m.group(3))}
+        _put(run_as, "name", m.group(2), _ACCOUNT)
+        doc["runUser" if m.group(1) == "User" else "runGroup"] = run_as
+        return 0
+    return 1
 
 
 def parse_apache_modules(stdout, stderr):
@@ -983,24 +1095,33 @@ def _first_argument(host, pid):
     return data.split(b"\0")[0].decode("utf-8", "replace").strip()
 
 
+_MAPPED_LIBRARY = re.compile(r"\.so([.-][A-Za-z0-9._-]*)?$|\.pyc?$")      # also Debian's mod_wsgi.so-3.12
+
+
 def _mapped_dirs(host, pid):
     text, state = _read_text(host, "/proc/%s/maps" % pid, MAPS_LIMIT)
     if text is None:
         return {"mappedState": state}
-    dirs, unsupported = set(), 0
+    dirs, unsupported, deleted = set(), 0, 0
     for line in text.splitlines():
         parts = line.split(None, 5)
         path = parts[5].strip() if len(parts) == 6 else ""
-        if path.endswith((".so", ".py", ".pyc")) or ".so." in path:
-            directory = path.rsplit("/", 1)[0] or "/"
-            if _ok(_ABS_PATH, directory):
-                dirs.add(directory)
-            else:
-                unsupported += 1
+        gone = path.endswith(" (deleted)")
+        path = path[:-len(" (deleted)")] if gone else path
+        if not _MAPPED_LIBRARY.search(path):
+            continue
+        deleted += gone
+        directory = path.rsplit("/", 1)[0] or "/"
+        if _ok(_ABS_PATH, directory):
+            dirs.add(directory)
+        else:
+            unsupported += 1
     doc = {}
     _bounded(doc, "mappedDirs", sorted(dirs), MAX_MAPPED_DIRS)
     if unsupported:
         doc["mappedUnsupported"] = unsupported
+    if deleted:
+        doc["mappedDeleted"] = deleted      # a library replaced on disk while still loaded
     return doc
 
 
@@ -1037,14 +1158,17 @@ def processes(host):
             entry["role"] = "unknown"
             found.append(entry)
             continue
-        if title is None:
-            entry["role"] = "server"
-        else:
+        if title is not None:
             entry.update(role="wsgi-daemon", titleTruncated=title[1])
             if title[0]:
                 entry["wsgiGroup"] = title[0]
             else:
                 entry["unsupported"] = ["wsgiGroup"]
+        else:
+            # mod_wsgi retitles a daemon only when display-name is set: an untitled daemon and
+            # a worker are both a non-root "child", told apart by what they have mapped.
+            entry["role"] = "server" if status.get("uid") == 0 else "child" if "uid" in status else "unknown"
+        if entry["role"] != "server":
             try:
                 _put(entry, "cwd", host.readlink("/proc/%s/cwd" % pid), _ABS_PATH)
             except OSError as error:
@@ -1107,14 +1231,18 @@ def project_trees(host, directives):
     for path in sorted(paths)[:MAX_TREES]:
         doc = describe(host, path)
         doc.update(_git(host, path))
-        envs, current = [], host.realpath(path)
-        while _ok(_ABS_PATH, current):
-            for name in (".env", "settings.ini"):
-                candidate = current.rstrip("/") + "/" + name
+        # python-decouple's AutoConfig: settings.ini before .env in each directory, nearest
+        # directory first, following links to regular files, never / itself; the first one
+        # it would read is marked, the rest are shown because they are there.
+        envs, current, selected = [], host.realpath(path), False
+        while _ok(_ABS_PATH, current) and current != "/":
+            for name in ("settings.ini", ".env"):
+                candidate = current + "/" + name
                 if host.lexists(candidate):
-                    envs.append(env_file(host, candidate))
-            if current == "/":
-                break
+                    found = env_file(host, candidate)
+                    if not selected and _regular(host, candidate) is None:
+                        found["decoupleSelects"] = selected = True
+                    envs.append(found)
             current = current.rsplit("/", 1)[0] or "/"
         _bounded(doc, "decoupleWouldFind", envs, MAX_ENV_FILES)
         trees.append(doc)
@@ -1172,10 +1300,21 @@ def host_facts(host):
     return doc
 
 
-def _not_scanned(report):
-    apache, includes = report.get("apache") or {}, (report.get("commands") or {}).get("apache_includes") or {}
-    scanned = {f.get(k) for f in apache.get("files", []) for k in ("path", "realpath")}
-    return sorted(set(p for p in includes.get("files", []) if p not in scanned))[:MAX_ENTRIES]
+def _cross_check(report):
+    """Apache's own include list against the files read: each file read is marked
+    ``included`` or not (a file a glob matched but Apache does not load is inactive), and the
+    files Apache includes that were not read are returned. Nothing is marked when the list
+    could not be read."""
+    apache, includes = report["apache"], (report.get("commands") or {}).get("apache_includes") or {}
+    listed = set(includes.get("files") or [])
+    if not listed:
+        return None
+    scanned = set()
+    for entry in apache.get("files", []):
+        names = {entry.get("path"), entry.get("realpath")} - {None}
+        entry["included"] = bool(names & listed)
+        scanned |= names
+    return sorted(listed - scanned)[:MAX_ENTRIES]
 
 
 def main(host=None):
@@ -1189,7 +1328,7 @@ def main(host=None):
     report["modWsgi"] = _section(mod_wsgi, host)
     report["apache"] = _section(apache_config, host)
     if isinstance(report["apache"].get("directives"), list):
-        report["apache"]["includesNotScanned"] = _section(_not_scanned, report)
+        report["apache"]["includesNotScanned"] = _section(_cross_check, report)
     report["processes"] = _section(processes, host)
     report["projectTrees"] = _section(project_trees, host, report["apache"].get("directives") or [])
     report["accounts"] = _section(accounts, host)
