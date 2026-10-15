@@ -44,8 +44,10 @@ WHAT IT CANNOT SEE, each a gap for the reviewer to close on the host, never a va
 directives in files outside CONFIG_GLOBS (``apache.includesNotScanned`` lists the ones
 Apache includes), mod_macro expansions, ``${VAR}`` references (unsupported), AliasMatch and
 other withheld targets, refs packed into ``.git/packed-refs``, ``settings.ini`` keys written
-``KEY: value``, MEDIA_ROOT's value (release/hostprobe.py compares it at deploy), and a
-module's NEEDED libraries when ``readelf`` is not installed.
+``KEY: value``, MEDIA_ROOT's value (release/hostprobe.py compares it at deploy), a module's
+NEEDED libraries when ``readelf`` is not installed, and the version of the mod_wsgi Apache has
+LOADED: the package's upstream version is reported, and the release identity route reports the
+loaded one once B3 serves.
 
 Only RealHost touches the machine. Every other function receives what it reads through a
 host object, which is how release/tests_discovery.py replaces the whole host with synthetic
@@ -162,7 +164,7 @@ PROFILE_FACTS = {
     "interpreter.libpythonSha256": ("report", "interpreters[].libpythonSha256"),
     "modWsgi.module": ("report", "modWsgi.realpath"),
     "modWsgi.sha256": ("report", "modWsgi.sha256"),
-    "modWsgi.version": ("report", "commands.mod_wsgi_package.packages[].version"),
+    "modWsgi.version": ("report", "commands.mod_wsgi_package.packages[].upstreamVersion"),
     "identities.prepare": ("decision", "a new account (CUTOVER.md step 1); accounts shows which exist"),
     "identities.runtime": ("report", "apache.directives[].options.user"),
     "identities.runtimeGroup": ("report", "apache.directives[].options.group"),
@@ -179,7 +181,8 @@ PROFILE_FACTS = {
     "planes.*.shutdownTimeout": ("report", "apache.directives[].options.shutdown-timeout"),
     "planes.*.passAuthorization": ("report", "apache.directives[].enabled"),
     "planes.*.staticUrl": ("report", "apache.directives[].url"),
-    "planes.*.probe.base": ("report", "commands.apache_vhosts.vhosts[].serverName"),
+    "planes.*.probe.base": ("decision", "https:// + the serverName of the vhost serving the mount (commands.apache_vhosts"
+                                        ".vhosts[].serverName, apache.directives[].mount): a composition, not one fact"),
     "planes.*.probe.connectTo": ("decision", "a loopback address; apache.directives[].address (Listen) shows what Apache binds"),
     "media.root": ("report", "apache.directives[].path"),
     "media.url": ("report", "apache.directives[].url"),
@@ -795,6 +798,14 @@ def parse_apache_includes(stdout, stderr):
     return doc
 
 
+def debian_upstream(version):
+    """The upstream part of a Debian version ``[epoch:]upstream[-revision]`` (deb-version(7)),
+    only when it is exactly X.Y.Z: ``5.0.0-1build2`` is 5.0.0, ``4.9.0+dfsg-1`` is None."""
+    upstream = version.split(":", 1)[1] if ":" in version else version
+    upstream = upstream.rsplit("-", 1)[0]
+    return upstream if re.fullmatch(r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}", upstream) else None
+
+
 def parse_dpkg(stdout, stderr):
     packages, unparsed = [], 0
     for line in _lines(stdout):
@@ -805,6 +816,12 @@ def parse_dpkg(stdout, stderr):
         entry = {"package": m.group(1), "version": None}       # null: listed, nothing installed
         if m.group(2):
             _put(entry, "version", m.group(2), _DEB_VERSION)
+            if entry["version"]:
+                upstream = debian_upstream(entry["version"])
+                if upstream:
+                    entry["upstreamVersion"] = upstream
+                else:
+                    entry.setdefault("unsupported", []).append("upstreamVersion")
         if m.group(3):
             _put(entry, "status", m.group(3).strip(), _DPKG_STATUS)
         packages.append(entry)

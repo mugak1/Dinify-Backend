@@ -16,6 +16,7 @@ this suite writes to a temporary directory, never a system command.
 
 import ast
 import contextlib
+import copy
 import errno
 import fnmatch
 import hashlib
@@ -27,6 +28,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from release import hostprofile as hp
 from release.staged import discover_host as dh
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -594,6 +596,14 @@ class ArgumentBearingDirectives(Synthetic):
         self.assertEqual(next(t for t in report["projectTrees"] if t["path"] == APP)["gitState"], "unsupported")
         self.assertEqual(report["host"]["unsupported"], ["os"])
 
+    def test_REGRESSION_a_debian_version_yields_its_upstream_part_only_when_exact(self):
+        for version, upstream in (("5.0.0-1build2", "5.0.0"), ("1:5.0.0-1ubuntu0.1~24.04", "5.0.0"), ("5.0.0", "5.0.0"),
+                                  ("4.9.0+dfsg-1", None), ("5.0-2", None), ("5.0.0-rc1-1", None)):
+            self.assertEqual(dh.debian_upstream(version), upstream, version)
+        parsed = dh.parse_dpkg("libapache2-mod-wsgi-py3 4.9.0+dfsg-1 install ok installed\n", "")
+        self.assertEqual(parsed["packages"][0]["unsupported"], ["upstreamVersion"])
+        self.assertNotIn("upstreamVersion", parsed["packages"][0])
+
     def test_CONTROL_a_repeated_option_is_ambiguous_never_resolved(self):
         parsed = dh.parse_config_text("WSGIDaemonProcess g processes=2 processes=8 threads=4\n", "/etc/apache2/x.conf")
         record = parsed["directives"][0]
@@ -774,9 +784,11 @@ class PositiveControls(Synthetic):
         cmds = self.report["commands"]
         self.assertEqual((cmds["apache_version"]["version"], cmds["apache_version"]["resolved"]), ("2.4.58", CTL))
         self.assertEqual(cmds["mod_wsgi_package"]["packages"],
-                         [{"package": "libapache2-mod-wsgi-py3", "version": "5.0.0-1build2", "status": "install ok installed"}])
+                         [{"package": "libapache2-mod-wsgi-py3", "version": "5.0.0-1build2", "upstreamVersion": "5.0.0",
+                           "status": "install ok installed"}])
         self.assertEqual(cmds["python_packages"]["packages"],
-                         [{"package": "python3.12", "version": "3.12.3-1ubuntu0.8"}, {"package": "python3.12-venv", "version": None}])
+                         [{"package": "python3.12", "version": "3.12.3-1ubuntu0.8", "upstreamVersion": "3.12.3"},
+                          {"package": "python3.12-venv", "version": None}])
         self.assertEqual((cmds["python_packages"]["state"], cmds["python_packages"]["exit"]), ("nonzero", 1))
         self.assertEqual(cmds["aws_cli"]["version"], "2.15.0")
         self.assertEqual([m["name"] for m in cmds["apache_modules"]["modules"]], ["core_module", "so_module", "wsgi_module", "ssl_module"])
@@ -862,6 +874,30 @@ class ProfileFactMap(Synthetic):
         for field, (kind, where) in dh.PROFILE_FACTS.items():
             if kind == "report":
                 self.assertTrue(self.resolve(report, where), "%s: nothing at %s" % (field, where))
+
+
+    def test_CONTRACT_a_report_fact_is_acceptable_to_the_profile_as_observed(self):
+        """A "report" field must be copyable as is: at least one value at its location passes
+        release/hostprofile.py's own grammar for that field. A value that needs reshaping first
+        (a Debian revision, a URL composed from parts) is a decision, not an observation."""
+        report, _, _ = collect(uat_like_host())
+        with open(PROFILE, encoding="utf-8") as fh:
+            base = json.load(fh)
+        for field, (kind, where) in dh.PROFILE_FACTS.items():
+            if kind != "report":
+                continue
+            path = field.replace("planes.*.", "planes.customer.").split(".")
+            accepted = []
+            for value in self.resolve(report, where):
+                doc = copy.deepcopy(base)
+                node = doc
+                for key in path[:-1]:
+                    node = node[key]
+                node[path[-1]] = value
+                invalid = [p for p in hp.validate(doc) if p["code"] == "profile_invalid"
+                           and p["detail"].startswith(".".join(path) + " ")]
+                accepted.append(not invalid)
+            self.assertTrue(any(accepted), "%s: no value at %s is a valid profile value" % (field, where))
 
 
 class MainIntegration(Synthetic):
