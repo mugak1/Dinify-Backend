@@ -2036,6 +2036,45 @@ migration and no new route.
 
 **Rollback.** Reverting the code brings the 500 back. Nothing is stored.
 
+## 27. The msisdn lookup answers "no account" only when it found none, and compares the canonical number (MSISDN-LOOKUP-EXCEPT-00)
+
+**What changed.** `GET users/msisdn-lookup/` (anonymous) wrapped its lookup in
+`except Exception` and answered every exception with
+`404 {"status": 404, "message": "User not found", "data": {"found": false}}`, and it
+compared the `msisdn` as sent. Four answers change:
+
+- A missing, empty or whitespace-only `msisdn` is now
+  `400 {"status": 400, "message": "A msisdn query parameter is required."}`. It used
+  to query `phone_number IS NULL`, which matches the phone-less platform-staff
+  accounts: 404 with none, `200 "User found"` with exactly one, and 404 again
+  (through `MultipleObjectsReturned`) with more.
+- A database failure is now an ordinary 500, logged by Django as a server error. It
+  used to be the not-found envelope above.
+- The number is canonicalised with `normalise_msisdn()` before the comparison, as
+  `self_register` does before its duplicate check. Any spelling of a number that has
+  an account (`0701700001`, `+256 701 700 001`, `701700001`) is now `200 "User
+  found"`. It used to be the not-found envelope unless it was sent as `256…`.
+- A value that cannot be canonicalised (too short or too long, no digits, another
+  country's number) is now
+  `400 {"status": 400, "message": "Please provide a valid Ugandan phone number."}`,
+  the message registration gives for the same value. It used to be the not-found
+  envelope.
+
+**What a client can notice.** The public sign-up page sends the OTP only on this
+endpoint's own 404 envelope (Dinify-Frontend #742). During a database failure it used to
+send an OTP for a number that may already have an account. It now shows its generic
+error toast and sends nothing. It sends the canonical `256…` form and validates the
+number first, so the canonical comparison changes none of its answers. A value the
+backend refuses would get the 400 message as a toast, with no OTP. It never sends a
+blank `msisdn`.
+
+**Unchanged.** The 200 and 404 bodies, byte for byte (pinned); `AllowAny`; and
+`users/user-lookup/`, which still compares its `contact` as sent. No migration and no
+new route.
+
+**Rollback.** Reverting the code brings back the not-found answers above, the
+`IS NULL` query and the as-sent comparison. Nothing is stored.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
@@ -2064,6 +2103,9 @@ migration and no new route.
 10. **Historical line names (D12):** none required. Order-line names are the
     saved purchase name, and a missing one is `""` beside an additive
     `*_provenance: "missing"`. Optionally render that as "name unavailable" — see §18.
+11. **msisdn lookup:** none required. A database failure is now a 500 rather than
+    "User not found", a blank `msisdn` is a 400, any spelling of a registered number
+    is found, and a value that is not a Ugandan number is a 400 — see §27.
 
 ---
 
