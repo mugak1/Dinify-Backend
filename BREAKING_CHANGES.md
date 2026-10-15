@@ -2036,6 +2036,64 @@ migration and no new route.
 
 **Rollback.** Reverting the code brings the 500 back. Nothing is stored.
 
+## 27. The msisdn lookup answers "no account" only when it found none, and both account lookups compare the canonical number (MSISDN-LOOKUP-EXCEPT-00)
+
+**What changed.** `GET users/msisdn-lookup/` (anonymous) wrapped its lookup in
+`except Exception` and answered every exception with
+`404 {"status": 404, "message": "User not found", "data": {"found": false}}`, and it
+compared the `msisdn` as sent. Four answers change:
+
+- A missing, empty or whitespace-only `msisdn` is now
+  `400 {"status": 400, "message": "A msisdn query parameter is required."}`. It used
+  to query `phone_number IS NULL`, which matches the phone-less platform-staff
+  accounts: 404 with none, `200 "User found"` with exactly one, and 404 again
+  (through `MultipleObjectsReturned`) with more.
+- A database failure is now an ordinary 500, logged by Django as a server error. It
+  used to be the not-found envelope above.
+- The number is canonicalised with `normalise_msisdn()` before the comparison, as
+  `self_register` does before its duplicate check. Any spelling of a number that has
+  an account (`0701700001`, `+256 701 700 001`, `701700001`) is now `200 "User
+  found"`. It used to be the not-found envelope unless it was sent as `256…`.
+- A value that cannot be canonicalised (too short or too long, no digits, another
+  country's number) is now
+  `400 {"status": 400, "message": "Please provide a valid Ugandan phone number."}`,
+  the message registration gives for the same value. It used to be the not-found
+  envelope.
+
+**What a client can notice.** The public sign-up page sends the OTP only on this
+endpoint's own 404 envelope (Dinify-Frontend #742). During a database failure it used to
+send an OTP for a number that may already have an account. It now shows its generic
+error toast and sends nothing. It sends the canonical `256…` form and validates the
+number first, so the canonical comparison changes none of its answers. A value the
+backend refuses would get the 400 message as a toast, with no OTP. It never sends a
+blank `msisdn`.
+
+**And `users/user-lookup/`.** The owner-only staff-add lookup compared a phone
+`contact` as sent too. It now canonicalises it the same way, after the team-access
+gate, so a caller without access still gets 403 whatever the contact. Two answers
+change for a phone `contact`:
+
+- Any spelling of a number that has an account is now `200 "User found"` with that
+  account's id and name. It used to be `404 {"status": 404, "message": "User not
+  found"}`, and the staff form then offered to create an employee that
+  `create-employee` refused as a taken number.
+- A value that cannot be canonicalised is now the same 400 as above. It used to be
+  the 404.
+
+An email `contact` (any value containing `@`) is compared as sent, as before. The
+staff form sends the canonical `256…` form, so its answers for a valid number do not
+change. It checks only that a number is present, so an invalid one now fails at the
+lookup: the form clears the 400's toast and shows its own "Could not look up that
+number. Please try again." It used to fail one step later, after the new-employee
+form, with "Something went wrong. Please try again."
+
+**Unchanged.** Both lookups' 200 and 404 bodies, byte for byte (pinned); the msisdn
+lookup's `AllowAny`; the user lookup's team-access gate and minimal response. No
+migration and no new route.
+
+**Rollback.** Reverting the code brings back the not-found answers above, the
+`IS NULL` query and the as-sent comparison in both lookups. Nothing is stored.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
@@ -2064,6 +2122,10 @@ migration and no new route.
 10. **Historical line names (D12):** none required. Order-line names are the
     saved purchase name, and a missing one is `""` beside an additive
     `*_provenance: "missing"`. Optionally render that as "name unavailable" — see §18.
+11. **Account lookups:** none required. On `msisdn-lookup` a database failure is
+    now a 500 rather than "User not found" and a blank `msisdn` is a 400. On both
+    lookups any spelling of a registered number is found, and a value that is not a
+    Ugandan number is a 400 — see §27.
 
 ---
 

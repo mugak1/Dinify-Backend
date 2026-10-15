@@ -1,15 +1,12 @@
-import logging
-
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
+from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from users_app.models import User
 from users_app.controllers.permissions_check import (
     get_module_restaurant_ids,
     MODULE_TEAM,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class UserLookupEndpoint(APIView):
@@ -43,17 +40,27 @@ class UserLookupEndpoint(APIView):
                 status=400,
             )
 
+        # check if the identity includes @
+        if '@' in contact:
+            lookup = {'email': contact}
+        else:
+            # Compare in the stored, canonical form, as `self_register`'s
+            # duplicate check does (create-employee delegates to it), so "found"
+            # here means registration would refuse the number. A value that
+            # cannot be canonicalised gets the 400 registration gives it.
+            try:
+                lookup = {'phone_number': normalise_msisdn(contact)}
+            except MsisdnError:
+                return Response(
+                    {'status': 400,
+                     'message': 'Please provide a valid Ugandan phone number.'},
+                    status=400,
+                )
+
         try:
-            # check if the identity includes @
-            if '@' in contact:
-                found = User.objects.values(
-                    'id', 'first_name', 'last_name'
-                ).get(email=contact)
-            else:
-                # TODO internationalise the phone number
-                found = User.objects.values(
-                    'id', 'first_name', 'last_name'
-                ).get(phone_number=contact)
+            found = User.objects.values(
+                'id', 'first_name', 'last_name'
+            ).get(**lookup)
         except User.DoesNotExist:
             return Response(
                 {'status': 404, 'message': 'User not found'},
@@ -79,10 +86,33 @@ class MsisdnLookupEndpoint(APIView):
     permission_classes = (AllowAny,)
 
     def get(self, request):
-        try:
-            User.objects.values('id').get(
-                phone_number=request.GET.get('msisdn')
+        # The public sign-up page reads 404 as "no account" and sends an OTP, so
+        # that answer is given only when the lookup ran and found nobody
+        # (tests_msisdn_lookup.py). Nothing around the query is caught: a
+        # database failure propagates and is a 500, never "User not found".
+        msisdn = request.GET.get('msisdn')
+        if not msisdn or not msisdn.strip():
+            # Never query with a missing number. `phone_number=None` is
+            # `IS NULL`, which matches the phone-less platform-staff accounts.
+            return Response(
+                {'status': 400,
+                 'message': 'A msisdn query parameter is required.'},
+                status=400,
             )
+
+        # Compare in the stored, canonical form, as `self_register`'s duplicate
+        # check does, so "found" here means registration would refuse the number.
+        # A value that cannot be canonicalised gets the 400 registration gives it.
+        try:
+            msisdn = normalise_msisdn(msisdn)
+        except MsisdnError:
+            return Response(
+                {'status': 400,
+                 'message': 'Please provide a valid Ugandan phone number.'},
+                status=400,
+            )
+
+        if User.objects.filter(phone_number=msisdn).exists():
             response = {
                 'status': 200,
                 'message': 'User found',
@@ -90,8 +120,7 @@ class MsisdnLookupEndpoint(APIView):
                     'found': True
                 }
             }
-        except Exception as error:
-            logger.error("Error while looking up user: %s", error)
+        else:
             response = {
                 'status': 404,
                 'message': 'User not found',

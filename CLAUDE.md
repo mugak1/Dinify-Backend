@@ -1531,6 +1531,40 @@ so keep it current when conventions change.
   `user_profile` to `create_employee` in process, which never returns that dict. No
   migration. Pinned by `users_app/tests_register_existing_phone.py` (13 tests; the 8
   regressions fail on `3149481` and the 5 controls pass). See `BREAKING_CHANGES.md` §26
+- The msisdn lookup answers "no account" only when it FOUND none, and both account
+  lookups compare the canonical number (MSISDN-LOOKUP-EXCEPT-00): ✅ `GET users/msisdn-lookup/` (anonymous, the sign-up
+  page's existence check) wrapped its lookup in `except Exception` and answered every
+  exception with the not-found envelope. The frontend sends the OTP on exactly that
+  envelope (Dinify-Frontend #742), so **a database failure sent an OTP** for a number that
+  may have an account. **A missing `msisdn` was worse**: `.get(phone_number=None)` is
+  `IS NULL`, which matches the phone-less PLATFORM-STAFF accounts, so the answer
+  depended on how many exist: 404 with none, **200 "User found" with exactly one**,
+  and 404 again (through `MultipleObjectsReturned`) with more. Now a missing, empty
+  or whitespace-only `msisdn` is a 400, the lookup is `filter(...).exists()`, and
+  nothing around the query is caught: a database failure is a 500. **The number is
+  now compared through `normalise_msisdn()`**, as the MSISDN rule below requires at
+  every compare site. It was compared AS SENT, so `0701…` or `+256 701 …` for a
+  number with an account was told "no account", and so was a value that is not a
+  phone number at all. Now "found" means exactly what `self_register`'s duplicate
+  check means (a test pins the two together), and a value the normaliser refuses is
+  the 400 registration gives it, `Please provide a valid Ugandan phone number.` The
+  missing-`msisdn` guard stays ahead of the normaliser for its own message. The 200
+  and 404 bodies are pinned byte for byte, and the sign-up page sends the canonical
+  form, so its answers do not change. **`users/user-lookup/` (the owner-only
+  staff-add lookup) gets the same canonical comparison for a phone `contact`.** It
+  compared as sent too, so `0750…` for a number with an account was 404, the staff
+  form offered to create a new employee, and `create-employee` (which delegates to
+  `self_register`) then refused the number as taken. An invalid number is now the
+  same 400 there, checked AFTER the team-access gate, so a caller without access
+  learns nothing from the contact. An EMAIL `contact` is still compared as sent, and
+  a test pins it with an email whose digits spell another account's phone. The staff
+  form checks only that a number is present, so a short one now fails at the
+  lookup, where the form shows its own generic "Could not look up that number"
+  message, instead of after the new-employee form. No migration. Pinned by
+  `users_app/tests_msisdn_lookup.py` (12 tests; 8 fail on `43ac554` and the 4
+  controls pass) and `users_app/tests_user_lookup.py` (18 tests, 6 of them new; the
+  3 new regressions fail on `43ac554` and the other 15 pass). See
+  `BREAKING_CHANGES.md` §27
 - MSISDN canonicalisation: ✅ Complete (PR #189) — `256XXXXXXXXX` (12 digits, no
   `+`) is the canonical stored/compared form for `User.phone_number` /
   `User.username`, enforced at every write site (registration, profile update,
@@ -5873,8 +5907,11 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
 - Apply it at EVERY write/compare site. It is already wired into `self_register`
   (registration / staff invite / admin onboarding), `self_update_user_profile`
   (before Secretary — the manager-OTP `update_user_profile` sibling has since been
-  deleted), payment `initiate()` intake, and OTP `make_otp`/`verify_otp` (so
-  create/verify compare canonical-to-canonical). Do NOT reintroduce the deleted
+  deleted), payment `initiate()` intake, OTP `make_otp`/`verify_otp` (so
+  create/verify compare canonical-to-canonical), and the two account lookups,
+  `MsisdnLookupEndpoint` (`users/msisdn-lookup/`, the anonymous sign-up check) and
+  the phone branch of `UserLookupEndpoint` (`users/user-lookup/`, the staff-add
+  lookup), so each agrees with registration's duplicate check. Do NOT reintroduce the deleted
   `clean_msisdn.py` / `internationalise_msisdn` helper or hand-roll ad-hoc phone
   formatting
 - `mask_msisdn()` (length-based, defensive) is the helper for logging phone-ish

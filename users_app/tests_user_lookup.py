@@ -13,11 +13,22 @@ This suite pins the fix:
   * the response is minimized to existence + id + name only — never
     phone_number / email;
   * missing contact -> 400, unknown contact -> 404.
+
+A phone `contact` is compared in canonical form (MSISDN-LOOKUP-EXCEPT-00). It was
+compared as sent, while the stored value is the canonical `256XXXXXXXXX` and
+`self_register` (which `create-employee` delegates to) canonicalises before its
+duplicate check. So `0750...` for a number with an account was 404, the staff form
+offered to create a new employee, and creating one was refused because the number
+was taken. The lookup now runs the same `normalise_msisdn()`: found means
+registration would refuse the number, and a value that cannot be canonicalised is
+the 400 registration gives it. An email `contact` is unchanged.
 """
 from django.test import TestCase
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from dinify_backend.configss.messages import MESSAGES
 from platform_admin_app.testing import give_legacy_platform_role
+from users_app.controllers.self_register import self_register
 from users_app.models import User
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from dinify_backend.configss.string_definitions import (
@@ -27,6 +38,22 @@ from dinify_backend.configss.string_definitions import (
 )
 
 URL = '/api/v1/users/user-lookup/'
+
+TARGET_PHONE = '256750000099'
+# Other ways a person can type TARGET_PHONE. Each canonicalises to it.
+TARGET_SPELLINGS = (
+    '+256750000099',
+    '+256 750 000 099',
+    '256-750-000-099',
+    '0750000099',
+    '0750 000 099',
+    '750000099',
+)
+# Values `normalise_msisdn` refuses: too short, no digits, a Kenyan number, and a
+# 256 number one digit too long.
+NOT_PHONE_NUMBERS = ('12345', 'not-a-number', '+254712345678', '2567500000991')
+NOT_FOUND = {'status': 404, 'message': 'User not found'}
+INVALID = {'status': 400, 'message': 'Please provide a valid Ugandan phone number.'}
 
 
 def make_user(phone, roles=None):
@@ -45,7 +72,7 @@ def auth(user):
 class UserLookupEndpointTests(TestCase):
     def setUp(self):
         # The person being looked up — whose PII must not leak.
-        self.target = make_user('256750000099')
+        self.target = make_user(TARGET_PHONE)
 
         # Owner + their active restaurant. The owner needs the employee row too:
         # the resolver reads RestaurantEmployee, not the Restaurant.owner FK.
@@ -143,3 +170,69 @@ class UserLookupEndpointTests(TestCase):
     def test_unknown_contact_returns_404(self):
         resp = self.client.get(URL, {'contact': 'nobody@nowhere.test'}, **auth(self.owner))
         self.assertEqual(resp.status_code, 404, resp.content)
+
+    # ------------------------------------------ a phone is compared canonically
+    def test_every_spelling_of_a_known_number_is_found(self):
+        # REGRESSION: compared as sent, so each of these was 404 and the staff form
+        # offered to create an account the number already has.
+        for spelling in TARGET_SPELLINGS:
+            with self.subTest(contact=spelling):
+                resp = self.client.get(URL, {'contact': spelling}, **auth(self.owner))
+                self.assertEqual(resp.status_code, 200, resp.content)
+                self.assertEqual(resp.json()['data']['id'], str(self.target.id))
+
+    def test_found_is_exactly_when_registration_refuses_the_number(self):
+        # REGRESSION: create-employee delegates to `self_register`, so the lookup
+        # and its duplicate check must give the same answer. Before, they
+        # disagreed for every spelling but the canonical one.
+        for spelling in (TARGET_PHONE,) + TARGET_SPELLINGS:
+            with self.subTest(contact=spelling):
+                resp = self.client.get(URL, {'contact': spelling}, **auth(self.owner))
+                self.assertEqual(resp.status_code, 200, resp.content)
+                refusal = self_register({
+                    'first_name': 'New', 'last_name': 'Person', 'country': 'UG',
+                    'phone_number': spelling, 'password': 'password',
+                })
+                self.assertEqual(refusal, {
+                    'status': 400, 'message': MESSAGES['PHONE_NUMBER_EXISTS'],
+                })
+
+    def test_an_unknown_number_is_not_found_however_it_is_spelled(self):
+        # CONTROL: canonicalising must not turn "no account" into anything else.
+        # The body is the one the staff form reads as "no account".
+        for spelling in ('0750000098', '+256 750 000 098', '750000098'):
+            with self.subTest(contact=spelling):
+                resp = self.client.get(URL, {'contact': spelling}, **auth(self.owner))
+                self.assertEqual(resp.status_code, 404, resp.content)
+                self.assertEqual(resp.json(), NOT_FOUND)
+
+    def test_a_value_that_is_not_a_ugandan_number_is_refused(self):
+        # REGRESSION: each of these was 404, so the staff form offered to create
+        # an employee that registration then refused with this same message.
+        for value in NOT_PHONE_NUMBERS:
+            with self.subTest(contact=value):
+                resp = self.client.get(URL, {'contact': value}, **auth(self.owner))
+                self.assertEqual(resp.status_code, 400, resp.content)
+                self.assertEqual(resp.json(), INVALID)
+
+    def test_the_gate_runs_before_the_number_is_read(self):
+        # CONTROL: a caller without team access learns nothing from the contact,
+        # not even whether it is a valid number.
+        for value in ('12345', '0750000099'):
+            with self.subTest(contact=value):
+                resp = self.client.get(URL, {'contact': value}, **auth(self.manager))
+                self.assertEqual(resp.status_code, 403, resp.content)
+
+    def test_an_email_contact_is_compared_as_an_email(self):
+        # CONTROL: only a phone contact is canonicalised. This email's digits
+        # spell the OWNER's phone number, so canonicalising it would find the
+        # wrong person.
+        holder = User.objects.create_user(
+            first_name='Email', last_name='Holder',
+            email='alias0750000001@test.com', phone_number='256750000007',
+            username='256750000007', country='Uganda', password='password',
+        )
+        resp = self.client.get(
+            URL, {'contact': 'alias0750000001@test.com'}, **auth(self.owner))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()['data']['id'], str(holder.id))
