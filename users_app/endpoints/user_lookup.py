@@ -40,17 +40,27 @@ class UserLookupEndpoint(APIView):
                 status=400,
             )
 
+        # check if the identity includes @
+        if '@' in contact:
+            lookup = {'email': contact}
+        else:
+            # Compare in the stored, canonical form, as `self_register`'s
+            # duplicate check does (create-employee delegates to it), so "found"
+            # here means registration would refuse the number. A value that
+            # cannot be canonicalised gets the 400 registration gives it.
+            try:
+                lookup = {'phone_number': normalise_msisdn(contact)}
+            except MsisdnError:
+                return Response(
+                    {'status': 400,
+                     'message': 'Please provide a valid Ugandan phone number.'},
+                    status=400,
+                )
+
         try:
-            # check if the identity includes @
-            if '@' in contact:
-                found = User.objects.values(
-                    'id', 'first_name', 'last_name'
-                ).get(email=contact)
-            else:
-                # TODO internationalise the phone number
-                found = User.objects.values(
-                    'id', 'first_name', 'last_name'
-                ).get(phone_number=contact)
+            found = User.objects.values(
+                'id', 'first_name', 'last_name'
+            ).get(**lookup)
         except User.DoesNotExist:
             return Response(
                 {'status': 404, 'message': 'User not found'},
