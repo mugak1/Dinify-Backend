@@ -275,12 +275,10 @@ class TheDiscoveryCollector(unittest.TestCase):
         self.assertNotRegex(self.SOURCE, r"import (socket|urllib|http|requests)")
 
     def test_REGRESSION_an_environment_file_is_reported_by_key_presence_never_by_value(self):
+        # Parsed from text: the collector's file access is RealHost's, and release/tests_discovery.py
+        # drives it end to end on a synthetic host.
         from release.staged import discover_host as dh
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, ".env")
-            with open(path, "w") as fh:
-                fh.write("SECRET_KEY=s3cr3t-value-xyz\nENV=dev\nDATABASE_PASSWORD='hunter2-long'\nUNLISTED=abc123def\n")
-            doc = dh.env_file(path)
+        doc = dh.parse_env_text("SECRET_KEY=s3cr3t-value-xyz\nENV=dev\nDATABASE_PASSWORD='hunter2-long'\nUNLISTED=abc123def\n")
         blob = json.dumps(doc)
         for value in ("s3cr3t-value-xyz", "hunter2-long", "abc123def", "UNLISTED"):
             self.assertNotIn(value, blob)
@@ -289,8 +287,15 @@ class TheDiscoveryCollector(unittest.TestCase):
 
     def test_REGRESSION_a_directive_that_can_carry_a_secret_is_named_not_shown(self):
         from release.staged import discover_host as dh
-        self.assertIn("SetEnv", dh.REDACTED_DIRECTIVES)
-        self.assertIsNotNone(re.search(r"(?i)password|passwd|secret|credential", "AuthLDAPBindPassword"))
+        for name in ("SetEnv", "Header", "RewriteRule", "ProxyPass", "Define"):
+            self.assertIn(name, dh.REDACTED_DIRECTIVES)
+        parsed = dh.parse_config_text("SetEnv DJANGO_KEY hunter2-long\nHeader set X-Api-Key k3y-value-9f8e\n"
+                                      "AuthLDAPBindPassword pw-value-9f8e\n", "/etc/apache2/x.conf")
+        blob = json.dumps(parsed)
+        for value in ("hunter2-long", "DJANGO_KEY", "k3y-value-9f8e", "X-Api-Key", "pw-value-9f8e", "AuthLDAPBindPassword"):
+            self.assertNotIn(value, blob)
+        self.assertEqual([(d["directive"], d["state"]) for d in parsed["directives"]], [("SetEnv", "withheld"), ("Header", "withheld")])
+        self.assertEqual(parsed["otherDirectives"], 1)      # an unreviewed name is counted, never named
 
 
 if __name__ == "__main__":
