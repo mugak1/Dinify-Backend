@@ -134,6 +134,10 @@ CLAIM_REFUSAL = {
     'message': 'This owner claim or verification code is invalid or no longer available.',
 }
 LOGIN_RESEND_REFUSAL = 'Please provide your username and password again to get a login OTP'
+# Since D11 E-R4 a login resend is honoured only with the proof the password login
+# returned, and only a client that names this capability is given one.
+RESEND_PROOF = 'login_resend_proof'
+RESEND_PROTOCOL = {'login_resend_protocol': 'v1'}
 
 WAIT = 30   # seconds; the bound on every barrier, join and lock-wait observation
 
@@ -265,6 +269,7 @@ class _Er2Case(TestCase):
         self._delivery = _delivery_intercepted()
         self.sms, self.email = self._delivery.__enter__()
         self.addCleanup(self._delivery.__exit__, None, None, None)
+        self.proofs = {}   # user pk -> the resend proof that user's latest login returned
 
     # --- requests ---
 
@@ -282,12 +287,22 @@ class _Er2Case(TestCase):
         return response, new
 
     def login(self, user):
-        response, new = self.issued(LOGIN, {'username': user.phone_number, 'password': PASSWORD})
+        # The supported client's login body names the resend capability (D11 E-R4), so
+        # the response carries the proof that THIS login's resend must present.
+        response, new = self.issued(LOGIN, {'username': user.phone_number, 'password': PASSWORD,
+                                            **RESEND_PROTOCOL})
         self.assertEqual(response.status_code, 200, response.content)
         self.assertTrue(response.json()['data']['require_otp'], response.content)
         self.assertEqual(len(new), 1, 'a password login writes exactly one login challenge')
         self.assertEqual(self.row(new[0])['purpose'], 'login')
+        self.proofs[str(user.pk)] = response.json()['data'].get(RESEND_PROOF)
         return new[0]
+
+    def proof_for(self, user):
+        """The proof the user's own latest login in this test returned."""
+        proof = self.proofs.get(str(user.pk))
+        self.assertIsInstance(proof, str, 'this test has no login of its own to resend from')
+        return proof
 
     def initiate(self, user):
         response, new = self.issued(INITIATE, {'identifier': user.phone_number,
@@ -297,9 +312,11 @@ class _Er2Case(TestCase):
         self.assertEqual(self.row(new[0])['purpose'], 'reset-password')
         return new[0]
 
-    def resend(self, identification, identifier, purpose, expect=200):
-        response, new = self.issued(RESEND, {'identification': identification,
-                                             'identifier': identifier, 'purpose': purpose})
+    def resend(self, identification, identifier, purpose, expect=200, proof=None):
+        body = {'identification': identification, 'identifier': identifier, 'purpose': purpose}
+        if proof is not None:
+            body[RESEND_PROOF] = proof
+        response, new = self.issued(RESEND, body)
         self.assertEqual(response.status_code, expect, response.content)
         return new[0] if new else None
 
@@ -428,16 +445,18 @@ class LoginAndResetInitiationCoexistTests(_Er2Case):
     def test_S1_the_login_resend_anchor_survives_a_reset_initiation(self):
         """
         D11 B1 admits a login resend only within five minutes of the password-created
-        login row. Before P1 an anonymous reset initiation deleted that row, so the
-        user's "send the code again" was refused as though they had never entered their
-        password. The resent code completes the login.
+        login row (and, since D11 E-R4, only with the proof that login returned). Before
+        P1 an anonymous reset initiation deleted that row, so the user's "send the code
+        again" was refused as though they had never entered their password. The resent
+        code completes the login.
         """
         with _test_env(L_CODE, R_CODE, X_CODE):
             user = _owner('s1-anchor')
             self.login(user)
             reset_pk = self.initiate(user)
 
-            resent_pk = self.resend('id', str(user.pk), 'login')   # anchor still there
+            # The anchor is still there, so the login's own proof still admits the resend.
+            resent_pk = self.resend('id', str(user.pk), 'login', proof=self.proof_for(user))
             self.assertLoggedIn(self.verify(user, X_CODE), user)
             self.assertTrue(self.row(resent_pk)['consumed'])
             self.assertUntouched(reset_pk, 'the login verification spent the reset challenge')
@@ -636,7 +655,7 @@ class GenericVerificationIsLoginOnlyTests(_Er2Case):
         with _test_env(L_CODE, X_CODE, R_CODE):
             user = _owner('s11')
             self.login(user)
-            resent_pk = self.resend('id', str(user.pk), 'login')
+            resent_pk = self.resend('id', str(user.pk), 'login', proof=self.proof_for(user))
             reset_pk = self.resend('phone', user.phone_number, 'reset-password')
 
             self.assertUntouched(resent_pk, 'P1: the reset resend deleted the resent login code')
@@ -851,11 +870,14 @@ class ResendAllowedPurposesAreUnchangedTests(_Er2Case):
         self.assertEqual(refused.status_code, 400)
         self.assertEqual(refused.json()['message'], LOGIN_RESEND_REFUSAL)
         self.login(user)
-        self.assertIsNotNone(self.resend('id', str(user.pk), 'login'))
-        self.assertIsNotNone(self.resend('id', str(user.pk), 'login'))
+        proof = self.proof_for(user)
+        self.assertIsNotNone(self.resend('id', str(user.pk), 'login', proof=proof))
+        self.assertIsNotNone(self.resend('id', str(user.pk), 'login', proof=proof))
+        # The anchor is live, yet a resend without the proof is refused (D11 E-R4).
+        self.assertIsNone(self.resend('id', str(user.pk), 'login', expect=400))
         UserOtp.objects.filter(user=user).update(
             time_created=timezone.now() - timezone.timedelta(minutes=6))
-        self.assertIsNone(self.resend('id', str(user.pk), 'login', expect=400))
+        self.assertIsNone(self.resend('id', str(user.pk), 'login', expect=400, proof=proof))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1055,7 +1077,10 @@ class AccountingTests(_Er2Case):
         with _test_env(L_CODE, X_CODE, R_CODE, '4171', C_CODE):
             user = _owner('ledger')
             self.assertEqual(self.origin(self.login(user)), 'password_login')
-            self.assertEqual(self.origin(self.resend('id', str(user.pk), 'login')), 'login_resend')
+            self.assertEqual(
+                self.origin(self.resend('id', str(user.pk), 'login', proof=self.proof_for(user))),
+                'login_resend',
+            )
             self.assertEqual(self.origin(self.initiate(user)), 'reset_initiation')
             self.assertEqual(
                 self.origin(self.resend('phone', user.phone_number, 'reset-password')),
@@ -1092,14 +1117,32 @@ class SupportedClientShapesTests(_Er2Case):
     """
 
     def test_login_screen(self):
-        # authentication.service: login {username, password}; setOtp {user, otp};
-        # resendOtp('id', profile.id) -> {identification, identifier, purpose: 'login'}
+        # The login screen as updated for D11 E-R4: login {username, password,
+        # login_resend_protocol: 'v1'}; setOtp {user, otp}; resendOtp('id', profile.id,
+        # proof) -> {identification, identifier, purpose: 'login', login_resend_proof}.
         user = _owner('fe-login')
+        response = self.post(LOGIN, {'username': user.phone_number, 'password': PASSWORD,
+                                     **RESEND_PROTOCOL})
+        self.assertTrue(response.json()['data']['require_otp'])
+        proof = response.json()['data'][RESEND_PROOF]
+        resent = self.post(RESEND, {'identification': 'id', 'identifier': str(user.pk),
+                                    'purpose': 'login', RESEND_PROOF: proof})
+        self.assertEqual(resent.status_code, 200, resent.content)
+        self.assertLoggedIn(self.post(VERIFY, {'user': str(user.pk), 'otp': DEV_OTP}), user)
+
+    def test_login_screen_from_before_E_R4(self):
+        # The body a login screen deployed before D11 E-R4 sends: login {username,
+        # password}; resendOtp('id', profile.id) with no proof. It is given no proof,
+        # its resend is refused with the sentence it already shows, and the code its
+        # login sent still signs in.
+        user = _owner('fe-login-old')
         response = self.post(LOGIN, {'username': user.phone_number, 'password': PASSWORD})
         self.assertTrue(response.json()['data']['require_otp'])
+        self.assertNotIn(RESEND_PROOF, response.json()['data'])
         resent = self.post(RESEND, {'identification': 'id', 'identifier': str(user.pk),
                                     'purpose': 'login'})
-        self.assertEqual(resent.status_code, 200, resent.content)
+        self.assertEqual(resent.status_code, 400, resent.content)
+        self.assertEqual(resent.json(), {'status': 400, 'message': LOGIN_RESEND_REFUSAL})
         self.assertLoggedIn(self.post(VERIFY, {'user': str(user.pk), 'otp': DEV_OTP}), user)
 
     def test_register_screen(self):

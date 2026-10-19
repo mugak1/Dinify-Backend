@@ -448,6 +448,18 @@ class _LoginBucket(_Bucket):
     def login(self):
         return self.post(LOGIN, {'username': self.user.phone_number, 'password': PASSWORD})
 
+    def proof_login(self):
+        """A login that names the resend capability; returns the proof it was given (D11 E-R4)."""
+        status, body = self.post(LOGIN, {'username': self.user.phone_number, 'password': PASSWORD,
+                                         'login_resend_protocol': 'v1'})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body['data']['require_otp'], body)
+        return body['data']['login_resend_proof']
+
+    def login_resend(self, proof):
+        return self.post(RESEND, {'identification': 'id', 'identifier': str(self.user.pk),
+                                  'purpose': 'login', 'login_resend_proof': proof})
+
     def verify(self, code):
         return self.post(VERIFY, {'user': str(self.user.pk), 'otp': code})
 
@@ -750,13 +762,13 @@ class LoginResendUnderAnchorTests(_LoginBucket):
 
     def setUp(self):
         super().setUp()
-        status, body = self.login()
-        self.assertTrue(body['data']['require_otp'], body)
+        self.proof = self.proof_login()
         self.anchor = str(UserOtp.objects.get(user=self.user, purpose='login', msisdn=None).pk)
 
     def resend(self):
-        return self.post(RESEND, {'identification': 'phone', 'identifier': self.user.phone_number,
-                                  'purpose': 'login'})
+        # Both resends carry the proof this login returned (D11 E-R4). Two sends of one
+        # proof are two issuances into one bucket, which is what E-R3 serializes.
+        return self.login_resend(self.proof)
 
     def test_two_resends_under_one_anchor(self):
         seen, outcomes = self.race(self.resend, self.resend, 'after_insert')
@@ -931,15 +943,14 @@ class AnchorAndResendControl(_LoginBucket):
 
     def setUp(self):
         super().setUp()
-        status, body = self.login()
-        self.assertTrue(body['data']['require_otp'], body)
+        self.proof = self.proof_login()
 
     def test_a_password_login_and_a_login_resend_do_not_wait(self):
+        # The resend carries the first login's proof. The second login's replacement of
+        # that anchor is not committed while it is parked, so the proof still matches.
         seen, outcomes = self.race(
             self.login,
-            lambda: self.post(RESEND, {'identification': 'phone',
-                                       'identifier': self.user.phone_number,
-                                       'purpose': 'login'}),
+            lambda: self.login_resend(self.proof),
             'after_insert',
         )
         self.assertEqual(seen, {'state': 'finished'},

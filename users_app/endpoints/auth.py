@@ -68,7 +68,8 @@ class UsersAuthenticationEndpoint(APIView):
             response = login(
                 username=request.data.get('username'),
                 password=request.data.get('password'),
-                source=request.data.get('source', 'restaurant')
+                source=request.data.get('source', 'restaurant'),
+                login_resend_protocol=request.data.get('login_resend_protocol'),
             )
         elif action in ("initiate-reset-password", "reset-password") and (
             _reset_identifier(request.data) is None
@@ -105,7 +106,8 @@ class UsersAuthenticationEndpoint(APIView):
             response = OtpManager().resend_otp(
                 identification=identification,
                 identifier=identifier,
-                purpose=purpose
+                purpose=purpose,
+                login_resend_proof=request.data.get('login_resend_proof'),
             )
         elif action == 'verify-otp':
             user = request.data.get('user', None)

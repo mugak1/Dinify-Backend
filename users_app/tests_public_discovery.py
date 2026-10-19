@@ -16,7 +16,10 @@ Three properties, each driven through the REAL endpoint or service path:
    (``msisdn IS NULL``) inside the existing five-minute window. A row created by a
    resend stores the phone and must not qualify, so one genuine login can no longer
    keep the window open for ever. The clock is simulated by back-dating rows in the
-   test database.
+   test database. Since D11 E-R4 the resend must also carry the proof that login
+   returned (``users_app/tests_login_resend_requester.py``), so every resend below that
+   is meant to be admitted carries its own login's proof: a refusal here is about the
+   anchor, never about a missing proof.
 
 3. THE OTP DELIVERY CATCHES DO NOT RE-LOG A SECRET-BEARING EXCEPTION. The sender-side
    half (SMS and Messenger) is pinned in ``notifications_app/tests_sms.py``.
@@ -36,7 +39,7 @@ from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF, CUSTOMER_ACCESS_PENDING_INITIAL_CLAIM,
     RESTAURANT_OWNER, RestaurantStatus_Live,
 )
-from users_app.controllers.otp_manager import OtpManager
+from users_app.controllers.otp_manager import OtpManager, login_resend_proof
 from users_app.models import User, UserOtp
 
 LOGIN_URL = '/api/v1/users/auth/login/'
@@ -230,16 +233,23 @@ class LoginResendAnchorTests(_Api):
 
     def login(self):
         body = self.post(
-            LOGIN_URL, {'username': self.owner.phone_number, 'password': PASSWORD},
+            LOGIN_URL, {'username': self.owner.phone_number, 'password': PASSWORD,
+                        'login_resend_protocol': 'v1'},
         ).json()
         self.assertTrue(body['data']['require_otp'])
+        # The proof THIS login returned (D11 E-R4): every resend below carries the latest.
+        self.proof = body['data']['login_resend_proof']
 
     def resend(self, identification='id', identifier=None):
-        return self.post(RESEND_URL, {
+        body = {
             'identification': identification,
             'identifier': identifier or str(self.owner.id),
             'purpose': 'login',
-        })
+        }
+        proof = getattr(self, 'proof', None)
+        if proof is not None:
+            body['login_resend_proof'] = proof
+        return self.post(RESEND_URL, body)
 
     def anchor(self):
         return UserOtp.objects.filter(user=self.owner, purpose='login', msisdn__isnull=True)
@@ -320,9 +330,13 @@ class LoginResendAnchorTests(_Api):
             first_name='No', last_name='Phone', email='no.phone@example.test',
             username='no-phone-user', country='UG', password=PASSWORD, roles=[],
         )
-        OtpManager().make_otp(user=phoneless, purpose='login')   # the password proof
+        manager = OtpManager()
+        manager.make_otp(user=phoneless, purpose='login')   # the password proof
+        # The resend carries a proof that matches that anchor, so the refusal is about the
+        # missing phone, not about a missing proof (D11 E-R4).
         response = self.post(RESEND_URL, {
             'identification': 'id', 'identifier': str(phoneless.id), 'purpose': 'login',
+            'login_resend_proof': login_resend_proof(phoneless.pk, manager.issued_otp_id),
         })
         self.assertEqual(response.status_code, 400)
 
