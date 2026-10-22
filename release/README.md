@@ -39,11 +39,12 @@ pins). Lock entries are refused unless a wheel for that target can run them: a
 manylinux tag needing a newer glibc, another ABI, an sdist or a platform wheel for
 another OS is `wheel_incompatible` or `lock_invalid`.
 
-The closure is **26 application packages** — the 24 direct inputs plus `cffi 2.1.1`
-(required by `cryptography`) and `pycparser 3.0` (required by `cffi`) — plus **pip
-26.2.1** as the installer: 27 files, 28,540,311 bytes. Installer, application and the
-tool that resolved the lock are labelled apart in the lock; the scanner is a fourth
-identity, pinned separately in `dependency_audit/scanner-requirements.txt`.
+The closure is **26 application packages** — the 25 direct inputs plus `cffi 2.1.1`
+(required by `cryptography`) — plus **pip 26.2.1** as the installer: 27 files, 29,139,755
+bytes. `pycparser 3.0`, which `cffi` requires, is pinned directly rather than resolved.
+Installer, application and the tool that resolved the lock are labelled apart in the lock;
+the scanner is a fourth identity, pinned separately in
+`dependency_audit/scanner-requirements.txt`.
 
 ## The candidate
 

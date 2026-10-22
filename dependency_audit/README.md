@@ -18,7 +18,7 @@ dependencies on its own — it does NOT ignore transitives — but an independen
 is not the inventory the suite ran against. What is audited is the package inventory of
 the **disposable Python 3.12.3 validation environment itself**, read with that
 interpreter's own `pip inspect` right after it is installed: the pinned requirements,
-their transitives (`cffi`, `pycparser`) and `pip` — 27 packages on main. Since D08 B2.5
+the one unpinned transitive (`cffi`) and `pip` — 27 packages on main. Since D08 B2.5
 that environment is the CERTIFIED one (`release/README.md`): built offline from exactly
 the files `release/python-lock.json` names, the pinned pip 26.2.1 included, where it used
 to be `pip install --upgrade pip` then `pip install -r requirements.txt` resolving the
@@ -36,7 +36,8 @@ environment is not the one CI validates, and this does not pretend otherwise.
 **The scanner has its own environment and is audited as its own graph.** A fresh venv is
 created from the target interpreter and `scanner-requirements.txt` is installed into it
 with `--require-hashes --no-deps --only-binary=:all: --isolated` — 29 packages, every one
-hash-pinned, resolved no later than 2026-09-20. The target inventory is compared before and
+hash-pinned, resolved no later than 2026-09-20 except `certifi`, moved to 2026.10.19 on
+2026-10-22 to clear PYSEC-2026-4320. The target inventory is compared before and
 after, so installing the scanner cannot silently move a target package. The scanner's own
 inventory must equal the pinned set exactly, and is then scanned like any other tooling:
 the venv's bundled `pip 24.0` would otherwise carry twelve advisory entries, which is why
