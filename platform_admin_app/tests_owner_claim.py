@@ -37,7 +37,7 @@ from unittest import mock
 
 from django.core.cache import cache
 from django.db import connection, transaction
-from django.test import TestCase, TransactionTestCase
+from django.test import RequestFactory, TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 
 from dinify_backend.configss.string_definitions import (
@@ -1156,9 +1156,10 @@ class ThrottleTests(_ClaimTestCase):
         self.assertTrue(issubclass(OwnerClaimChallengeThrottle, AnonRateThrottle))
         self.assertEqual(OwnerClaimChallengeThrottle.scope, 'owner_claim_challenge')
 
-        request = mock.Mock()
+        # A real request, not a Mock: DRF 3.18's ``get_ident`` reads
+        # ``request.headers``, which a Mock answers with another (truthy) Mock.
+        request = RequestFactory().get('/', REMOTE_ADDR='203.0.113.9')
         request.user = None
-        request.META = {'REMOTE_ADDR': '203.0.113.9'}
         key = OwnerClaimChallengeThrottle().get_cache_key(request, view=None)
         self.assertIn('203.0.113.9', key)
         self.assertNotIn(self.token, key)

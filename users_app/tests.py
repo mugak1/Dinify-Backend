@@ -16,7 +16,7 @@ from users_app.controllers.reset_password import (
     RESET_ACKNOWLEDGEMENT, reset_password, initiate_password_reset,
 )
 from users_app.models import User, UserOtp
-from users_app.controllers.otp_manager import OtpManager, OTP_MAX_ATTEMPTS
+from users_app.controllers.otp_manager import OtpManager, OTP_MAX_ATTEMPTS, login_resend_proof
 from users_app.throttles import OtpIdentifierThrottle
 
 
@@ -161,12 +161,19 @@ class UsersAppTestFunctions(TestCase):
         otp_manager = OtpManager()
         # make an initial otp so resend can find it
         otp_manager.make_otp(user=user, purpose='login')
+        # A login resend carries the proof bound to that initial challenge (D11 E-R4).
+        proof = login_resend_proof(user.pk, otp_manager.issued_otp_id)
         result = otp_manager.resend_otp(
             identification='id',
             identifier=str(user.id),
-            purpose='login'
+            purpose='login',
+            login_resend_proof=proof,
         )
         self.assertEqual(result.get('status'), 200)
+        # Without the proof the same resend is refused.
+        refused = OtpManager().resend_otp(identification='id', identifier=str(user.id),
+                                          purpose='login')
+        self.assertEqual(refused.get('status'), 400)
 
     def test_msisdn_otp(self, *mocks):
         otp_manager = OtpManager()

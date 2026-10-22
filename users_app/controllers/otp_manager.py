@@ -1,6 +1,8 @@
 from typing import Optional
+import base64
 import logging
 import secrets
+import uuid
 import hmac
 import hashlib
 import json
@@ -126,6 +128,54 @@ CUSTOMER_AUTH_OTP_PURPOSES = frozenset({'login', 'reset-password'})
 GENERIC_RESEND_PURPOSES = ('login', 'reset-password', 'register', None)
 INVALID_RESEND_PURPOSE = {'status': 400, 'message': 'Invalid purpose'}
 
+# ━━ A LOGIN RESEND NAMES THE PASSWORD LOGIN IT CONTINUES (D11 E-R4) ━━━━━━━━━━━━━━━━━━━
+#
+# A login resend is honoured only for the client that completed the password step. That
+# client is handed ``login_resend_proof`` in the login response: an HMAC, under the OTP
+# pepper and its own domain, of the user's id and the id of the ANCHOR challenge that
+# login wrote (``(user, NULL, 'login')``). A resend must present it, and is honoured only
+# while that exact anchor still exists and is less than LOGIN_RESEND_WINDOW old.
+#
+# Nothing is stored: the proof is derived from two ids and the server key, so there is no
+# migration and no row to clean up. It dies on its own when the anchor is replaced (a newer
+# password login for the same account), when the anchor ages out of the window, and when
+# the pepper changes. It is never derived from anything a second party can learn: the user
+# id and the phone number select an account; they prove nothing.
+_LOGIN_RESEND_PROOF_DOMAIN = b'dinify.login-resend-proof.v1\x00'
+LOGIN_RESEND_PROOF_PREFIX = 'v1.'
+LOGIN_RESEND_PROOF_MAX_LENGTH = 128
+LOGIN_RESEND_WINDOW = timedelta(minutes=5)
+# The proof is DISCLOSED only to a client that says it can carry one: the login request
+# names `login_resend_protocol` with exactly this string. That is a compatibility signal,
+# not authentication. It authorizes no resend and selects no fallback: a client that
+# omits it still logs in and gets the login code, and its resend is refused like any
+# other resend without a proof.
+LOGIN_RESEND_PROTOCOL = 'v1'
+# One refusal for every login resend that is not honoured: unknown or malformed account,
+# no phone, no anchor in the window, a missing, malformed or wrong proof. The wording is
+# the one the anchor refusal has always used, so a deployed client shows the same toast.
+LOGIN_RESEND_REFUSAL = {
+    'status': 400,
+    'message': 'Please provide your username and password again to get a login OTP',
+}
+
+
+def wants_login_resend_proof(capability) -> bool:
+    """Whether a login request opted into the resend proof. Only the exact string."""
+    return type(capability) is str and capability == LOGIN_RESEND_PROTOCOL
+
+
+def login_resend_proof(user_pk, anchor_pk) -> str:
+    """The proof a password login hands its client. Both ids are UUIDs."""
+    mac = hmac.new(
+        _otp_pepper(),
+        _LOGIN_RESEND_PROOF_DOMAIN
+        + uuid.UUID(str(user_pk)).bytes
+        + uuid.UUID(str(anchor_pk)).bytes,
+        hashlib.sha256,
+    ).digest()
+    return LOGIN_RESEND_PROOF_PREFIX + base64.urlsafe_b64encode(mac).rstrip(b'=').decode('ascii')
+
 
 def _otp_pepper() -> bytes:
     """
@@ -145,6 +195,12 @@ def _otp_pepper() -> bytes:
 
 
 class OtpManager:
+    # The pk of the challenge the last `make_otp` call on THIS instance committed, or
+    # None when that call committed nothing. Cleared at the start of every call and set
+    # only from the row its own transaction wrote, so a password login binds its resend
+    # proof to the exact anchor it created, never to whichever row is newest (D11 E-R4).
+    issued_otp_id = None
+
     def make_otp(
         self,
         user: Optional[User] = None,
@@ -181,6 +237,7 @@ class OtpManager:
         the challenge it would have replaced survives — nothing is sent, and the answer
         is ``False``, the value every caller already handles as a delivery failure.
         """
+        self.issued_otp_id = None
         # Canonicalise the msisdn at OTP creation so the stored UserOtp.msisdn,
         # the dedup filter and the SMS target are all canonical, and verify
         # (which also canonicalises) compares canonical-to-canonical. Defensive:
@@ -280,6 +337,8 @@ class OtpManager:
                 otp_accounting.failure_category(exc),
             )
             return False
+
+        self.issued_otp_id = user_otp.pk
 
         # Until a branch below establishes otherwise, the outcome is not known — which
         # is also what is recorded if a sender raises.
@@ -593,7 +652,8 @@ class OtpManager:
         self,
         identification: Optional[str] = None,
         identifier: Optional[str] = None,
-        purpose: Optional[str] = None
+        purpose: Optional[str] = None,
+        login_resend_proof: Optional[str] = None,
     ) -> dict:
         # The purpose is a fact about the REQUEST, so it is decided FIRST — before any
         # account is resolved, and before the presence check below — and the refusal is
@@ -610,6 +670,10 @@ class OtpManager:
                 'status': 400,
                 'message': 'Please provide both identification and identifier'
             }
+        # A LOGIN resend is decided before any other account lookup, so every refusal is
+        # one answer whatever the identifier names (D11 E-R4).
+        if purpose == 'login':
+            return self._resend_login(identification, identifier, login_resend_proof)
         try:
             if identification == 'id':
                 user = User.objects.get(pk=identifier)
@@ -637,53 +701,16 @@ class OtpManager:
                 'message': 'User not found'
             }
 
-        # A LOGIN resend is only honoured within five minutes of a PASSWORD proof
-        # (D11 B1). The proof is the challenge `login` itself created: it calls
-        # `make_otp(user=..., purpose='login')` with no msisdn, so that row — and only
-        # that row — stores `msisdn IS NULL`. A resend stores the destination phone, so
-        # its own row can never satisfy this check. Before B1 any recent login-purpose
-        # row qualified, which let each resend renew the window it was admitted under:
-        # one genuine login kept resends (and fresh verification budgets) available for
-        # ever to anyone holding the user id.
-        #
-        # The anchor's time is `time_created`, which nothing rewrites, so a resend never
-        # refreshes it; a new genuine login replaces it (make_otp's
-        # `(user, None, 'login')` replacement) and so restores eligibility. Deliberately
-        # NOT considered: whether the anchor was consumed or how many attempts it holds,
-        # and nothing about how a later verify selects its challenge — those are
-        # unchanged.
-        #
-        # An account with NO phone is refused outright: its resend row would also store
-        # `msisdn IS NULL`, replace the anchor through that same `(user, None, 'login')`
-        # key and so renew it — the exact loop this closes — and there is nowhere to
-        # send an SMS anyway.
-        if purpose == 'login':
-            five_minutes_ago = timezone.now() - timedelta(minutes=5)
-            anchored = user is not None and bool(user.phone_number) and UserOtp.objects.filter(
-                user_id=user.id,
-                purpose='login',
-                msisdn__isnull=True,
-                time_created__gte=five_minutes_ago,
-            ).exists()
-            if not anchored:
-                return {
-                    'status': 400,
-                    'message': 'Please provide your username and password again to get a login OTP'
-                }
-
         # Issue the OTP against whichever identity we resolved.
         # The origin says WHY a code was requested: a resend admitted under a login
         # anchor, or any other resend request.
         if user is not None:
             made = self.make_otp(
                 user=user, purpose=purpose, msisdn=user.phone_number,
-                origin=(
-                    otp_accounting.ORIGIN_LOGIN_RESEND if purpose == 'login'
-                    else otp_accounting.ORIGIN_RESEND_REQUEST
-                ),
+                origin=otp_accounting.ORIGIN_RESEND_REQUEST,
             )
         elif msisdn is not None:
-            # Never a login resend: that is refused above without a user.
+            # Never a login resend: those return from _resend_login above.
             made = self.make_otp(
                 msisdn=msisdn, purpose=purpose,
                 origin=otp_accounting.ORIGIN_RESEND_REQUEST,
@@ -700,6 +727,77 @@ class OtpManager:
                 'message': 'OTP sent successfully'
             }
 
+        return {
+            'status': 500,
+            'message': "We couldn't send your verification code. Please try again."
+        }
+
+    def _resend_login(self, identification, identifier, proof) -> dict:
+        """
+        Re-send a login code, but only to the client that completed the password step.
+
+        The account is selected by its id, the only shape a supported client sends, and
+        the request must carry the ``login_resend_proof`` that password login returned.
+        The proof is checked against every anchor ``(user, NULL, 'login')`` written in
+        the last LOGIN_RESEND_WINDOW; one matches only if this client's own login wrote
+        it and no newer login has replaced it. As before, the anchor's consumption and
+        attempt count are not considered, and a resend never renews the window: the
+        resend's own row stores the phone, so it is never an anchor.
+
+        Every refusal is the one ``LOGIN_RESEND_REFUSAL``, written before anything is
+        looked up beyond the anchors, so it issues, deletes, records and sends nothing.
+
+        What this does NOT promise, stated rather than implied:
+
+        * The check is a plain read at admission. A login that replaces the anchor, or
+          the window closing, after that read does not stop a resend already admitted:
+          it is issued, to the same account phone.
+        * A retry with the same proof is a NEW issuance, not a repeat delivery: it
+          replaces the earlier resend's row, whose code then stops working.
+        * While a resend row is live, the anchor's own code is shadowed at verification
+          (the newest live login row is selected); it can become selectable again once
+          the resend row is spent, expired or locked.
+        * The same body and status for every refusal is not the same timing, and says
+          nothing about throttling (a 429) or authentication outcomes.
+        """
+        if identification != 'id' or not isinstance(proof, str):
+            return dict(LOGIN_RESEND_REFUSAL)
+        if (
+            len(proof) > LOGIN_RESEND_PROOF_MAX_LENGTH
+            or not proof.startswith(LOGIN_RESEND_PROOF_PREFIX)
+            or not proof.isascii()
+        ):
+            return dict(LOGIN_RESEND_REFUSAL)
+        try:
+            user_pk = uuid.UUID(str(identifier))
+        except (ValueError, TypeError, AttributeError):
+            return dict(LOGIN_RESEND_REFUSAL)
+        anchors = UserOtp.objects.filter(
+            user_id=user_pk,
+            purpose='login',
+            msisdn__isnull=True,
+            time_created__gte=timezone.now() - LOGIN_RESEND_WINDOW,
+        ).values_list('pk', flat=True)
+        if not any(
+            hmac.compare_digest(login_resend_proof(user_pk, anchor).encode('ascii'),
+                                proof.encode('ascii'))
+            for anchor in anchors
+        ):
+            return dict(LOGIN_RESEND_REFUSAL)
+        user = User.objects.filter(pk=user_pk).first()
+        # An account with NO phone is refused: its resend row would store `msisdn IS
+        # NULL`, replace the anchor and renew the window, and there is nowhere to send.
+        if user is None or not user.phone_number:
+            return dict(LOGIN_RESEND_REFUSAL)
+        made = self.make_otp(
+            user=user, purpose='login', msisdn=user.phone_number,
+            origin=otp_accounting.ORIGIN_LOGIN_RESEND,
+        )
+        if made:
+            return {
+                'status': 200,
+                'message': 'OTP sent successfully'
+            }
         return {
             'status': 500,
             'message': "We couldn't send your verification code. Please try again."

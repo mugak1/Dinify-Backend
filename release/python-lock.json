@@ -21,7 +21,7 @@
   },
   "directInputs": {
     "path": "requirements.txt",
-    "sha256": "053d9d7ed8929550cdea6e4ea18d849f3dfea93a6eb3e2871fe73289813ec16b"
+    "sha256": "18bf8cf2e4d76222d808c1243cc52fc0d77109999f96b4bad9b6213339401a44"
   },
   "generator": {
     "tool": "pip",
@@ -45,8 +45,8 @@
       "-r",
       "requirements.txt"
     ],
-    "resolvedAt": "2026-10-08T10:25:24Z",
-    "reportSha256": "ddc427586f6aa3d7f7f3bb882f7d9008298350f9af700c791aa3c3c8ec269cd3"
+    "resolvedAt": "2026-10-22T20:45:03Z",
+    "reportSha256": "abf7aca2125b52e80ff5139c39245def6b505ac601c8c473d4b320b39e15f812"
   },
   "bootstrap": [
     {
@@ -74,11 +74,11 @@
     },
     {
       "name": "certifi",
-      "version": "2026.5.20",
-      "filename": "certifi-2026.5.20-py3-none-any.whl",
-      "url": "https://files.pythonhosted.org/packages/59/8c/57e832b7af6d7c5abe66eb3fbe3a3a32f4d11ea23a1aa7131371035be991/certifi-2026.5.20-py3-none-any.whl",
-      "sha256": "3c52e209ba0a4ad7aebe60436a4ab349c39e1e602e8c134221e546902ad25897",
-      "size": 134134,
+      "version": "2026.10.19",
+      "filename": "certifi-2026.10.19-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl",
+      "sha256": "42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b",
+      "size": 136464,
       "direct": true,
       "requiredBy": [
         "requests"
@@ -144,11 +144,11 @@
     },
     {
       "name": "djangorestframework",
-      "version": "3.17.2",
-      "filename": "djangorestframework-3.17.2-py3-none-any.whl",
-      "url": "https://files.pythonhosted.org/packages/a2/46/c14108e400b208c394325eb63fbae06c81341b6447fa1a6f9da718b17fe7/djangorestframework-3.17.2-py3-none-any.whl",
-      "sha256": "cb0546a7415d5b46c04e0f4fe0a54b2109f4fdd5e83ca773c8c6183a6493d042",
-      "size": 899109,
+      "version": "3.18.3",
+      "filename": "djangorestframework-3.18.3-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/c4/dd/de5f4543765bec94e036a5e9593a42f8fa7efec8de78eb56b9ca834385f3/djangorestframework-3.18.3-py3-none-any.whl",
+      "sha256": "8544bb674846731b1e3c9b309236ee1dc412905a0aa725be2ec193ca950a7d12",
+      "size": 903986,
       "direct": true,
       "requiredBy": [
         "djangorestframework-simplejwt"
@@ -190,11 +190,11 @@
     },
     {
       "name": "pillow",
-      "version": "12.3.0",
-      "filename": "pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "url": "https://files.pythonhosted.org/packages/84/21/a35af28dcc61f37ed850a2d64c65c701321dfbf25085e469d5559360cbbf/pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "sha256": "78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91",
-      "size": 6940830,
+      "version": "13.0.0",
+      "filename": "pillow-13.0.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/e6/99/fdf65cc539e266ab93546c261bdf98411fe165c6e4e13f9dbf597097192b/pillow-13.0.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "42d63be3af4f9b951b199b0a9d23365d37ab14687e6d77b74940432c8515c4ca",
+      "size": 7144542,
       "direct": true,
       "requiredBy": []
     },
@@ -225,7 +225,7 @@
       "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
       "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
       "size": 48172,
-      "direct": false,
+      "direct": true,
       "requiredBy": [
         "cffi"
       ]

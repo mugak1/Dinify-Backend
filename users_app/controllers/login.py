@@ -2,6 +2,7 @@
 implementation to handle user login i.e. authentication
 """
 import logging
+import uuid
 import time
 from typing import Optional
 from django.utils import timezone
@@ -12,7 +13,9 @@ from dinify_backend.configs import ACTION_LOG_STATUSES
 from dinify_backend.configss.messages import MESSAGES
 from misc_app.controllers.save_action_log import save_action
 from users_app.controllers.email_lookup import get_user_by_email
-from users_app.controllers.otp_manager import OtpManager
+from users_app.controllers.otp_manager import (
+    OtpManager, login_resend_proof, wants_login_resend_proof,
+)
 from users_app.controllers.permissions_check import get_any_restaurant_roles
 from users_app import customer_access
 from dinify_backend.configss.string_definitions import (
@@ -28,10 +31,15 @@ logger = logging.getLogger(__name__)
 def login(
     username: str,
     password: str,
-    source: Optional[str] = 'restaurant'
+    source: Optional[str] = 'restaurant',
+    login_resend_protocol=None,
 ) -> dict:
     """
     handle the login of a user
+
+    ``login_resend_protocol`` is the client's compatibility signal for the login resend
+    proof (D11 E-R4): only the exact string ``'v1'`` adds ``login_resend_proof`` to the
+    OTP-branch response. Anything else, including its absence, changes nothing.
     """
     t_start = time.monotonic()
     username = username.strip()
@@ -207,7 +215,18 @@ def login(
         # before OTP is verified.  When prompt_password_change is True
         # the frontend should complete OTP first, then call
         # change-password with the token returned by verify-otp.
-        otp = OtpManager().make_otp(user=auth_user, purpose='login', origin='password_login')
+        manager = OtpManager()
+        otp = manager.make_otp(user=auth_user, purpose='login', origin='password_login')
+        # Only the client that completed the password step can ask for the code again
+        # (D11 E-R4). The proof names the anchor this login's own transaction committed,
+        # and it is disclosed only to a client that said it can carry it. A client that
+        # did not ask gets the response it always got.
+        if (
+            otp
+            and wants_login_resend_proof(login_resend_protocol)
+            and isinstance(manager.issued_otp_id, uuid.UUID)
+        ):
+            data['login_resend_proof'] = login_resend_proof(auth_user.pk, manager.issued_otp_id)
 
         logger.info("login [%s]: otp created, total %.3fs", username, time.monotonic() - t_start)
 

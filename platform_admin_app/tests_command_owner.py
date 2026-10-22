@@ -40,9 +40,13 @@ spent, no failure counted), an unchanged ``AdminSession``. Several also re-send 
 request WITHOUT the header to show that the header was the only thing stopping it.
 """
 import copy
+import time
 import uuid
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest import mock
 
+import pyotp
 from django.conf import settings as dj_settings
 from django.test import Client, TestCase, override_settings
 from django.utils import timezone
@@ -68,10 +72,10 @@ from platform_admin_app.tests_auth import (
     _ADMIN_OVERRIDES,
     PASSWORD,
     ThrottleIsolationMixin,
-    _code,
     _make_admin,
     _make_user,
 )
+from platform_admin_app.totp import TOTP_STEP_SECONDS
 from restaurants_app.models import Restaurant
 from users_app.models import User
 
@@ -136,13 +140,32 @@ class _OwnerCase(ThrottleIsolationMixin, TestCase):
         # verification window and each strictly later than the last, so a later code
         # is never a replay of an earlier one.
         self._step = {self.alice.pk: -1, self.bob.pk: -1}
+        # The verifier reads the clock again during the request, so a step boundary
+        # falling between making a code and checking it made the step -1 code two
+        # steps old and outside the window (Backend CI run 39602360303). The clock
+        # the verifier reads is frozen at the middle of a step, and every code here
+        # is made from that same instant, so no boundary can fall between the two.
+        self._totp_instant = (
+            int(time.time()) // TOTP_STEP_SECONDS * TOTP_STEP_SECONDS
+            + TOTP_STEP_SECONDS // 2
+        )
+        frozen = mock.patch(
+            'platform_admin_app.totp.time',
+            SimpleNamespace(time=lambda: float(self._totp_instant)),
+        )
+        frozen.start()
+        self.addCleanup(frozen.stop)
 
     # --- the browser -------------------------------------------------------------
+
+    def totp_code(self, secret, offset):
+        """A code for the step ``offset`` away from the frozen verifier clock."""
+        return pyotp.TOTP(secret).at(self._totp_instant + offset * TOTP_STEP_SECONDS)
 
     def next_totp(self, user, secret):
         offset = self._step[user.pk]
         self._step[user.pk] += 1
-        return _code(secret, offset)
+        return self.totp_code(secret, offset)
 
     def sign_in(self, user, secret):
         """A real two-step sign-in in the shared browser. Returns the verify/ response."""
@@ -396,7 +419,7 @@ class CommandOwnerRefusalTests(_OwnerCase):
 
         # A code that is wrong for the new session would count a failure against it.
         wrong = self.elevate(
-            'totp', _code(self.alice_secret, 0), owner=alice_owner, csrf=csrf_a,
+            'totp', self.totp_code(self.alice_secret, 0), owner=alice_owner, csrf=csrf_a,
         )
         self.assert_refused(wrong, 409, ACTOR_CHANGED)
         # A code that is right for it would be spent on it.

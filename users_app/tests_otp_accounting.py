@@ -662,9 +662,12 @@ class OriginThroughEndpointsTests(TestCase):
     def test_login_resend(self):
         owner = _owner()
         with Senders():
-            self.post(LOGIN_URL, {'username': owner.phone_number, 'password': PASSWORD})
+            login = self.post(LOGIN_URL, {'username': owner.phone_number, 'password': PASSWORD,
+                                          'login_resend_protocol': 'v1'}).json()
+            # The resend carries the proof its own login returned (D11 E-R4).
             response = self.post(RESEND_URL, {
                 'identification': 'id', 'identifier': str(owner.pk), 'purpose': 'login',
+                'login_resend_proof': login['data']['login_resend_proof'],
             })
         self.assertEqual(response.json()['status'], 200, response.content)
         self.assertEqual(

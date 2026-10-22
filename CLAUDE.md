@@ -6548,7 +6548,7 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `dependency_audit/README.md`), so the `test` aggregator cannot go green without it.**
   `python -m dependency_audit snapshot` runs directly after the environment is installed
   and records THIS interpreter's installed inventory (`pip inspect`, per-package RECORD
-  digests — 27 packages on main, including the `cffi` / `pycparser` transitives and
+  digests — 27 packages on main, including the unpinned `cffi` transitive and
   `pip`; since D08 B2.5 that environment is the certified one built from the lock, see the
   next bullet); the offline evaluator matrix runs with
   the other gates; and `self-test && audit` runs LAST, scanning exactly that inventory as

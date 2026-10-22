@@ -5,7 +5,7 @@ WHAT IS AUDITED. Not ``requirements.txt`` resolved afresh: the package inventory
 Python environment the suite actually ran in, read with the target interpreter's own
 ``pip inspect``. ``pip-audit -r requirements.txt`` resolves dependencies on its own (it
 does NOT ignore transitives), but an independent resolution is not the inventory that was
-validated — the unpinned transitives (``cffi``, ``pycparser``) and the ``pip`` CI upgrades
+validated — the unpinned transitive (``cffi``) and the ``pip`` CI upgrades
 to latest are all in the real environment and all in this inventory. That inventory is
 written out as exact ``name==version`` pins and audited with ``--no-deps --disable-pip
 --strict``, so pip-audit resolves nothing and may skip nothing.

@@ -4,8 +4,8 @@ dependency closure, and the rules that tie it to ``requirements.txt``.
 ``requirements.txt`` stays what it is: the DIRECT-INPUT CONTRACT, and still exactly what the
 live UAT deploy installs from (unchanged by this delivery). ``release/python-lock.json`` is
 the resolved closure for ONE declared target (CPython 3.12.3, Linux x86_64, glibc): every
-package the application needs — the direct pins AND the transitives ``requirements.txt``
-does not name (``cffi``, ``pycparser``) — each as one exact wheel file with its URL,
+package the application needs — the direct pins AND the transitive ``requirements.txt``
+does not name (``cffi``) — each as one exact wheel file with its URL,
 SHA-256 and size, plus the installer (``pip``) as a separately labelled bootstrap entry.
 
 TWO SPECIFICATIONS MUST NEVER DRIFT APART SILENTLY. The lock records the SHA-256 of the
