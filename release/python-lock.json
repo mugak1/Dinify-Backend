@@ -21,7 +21,7 @@
   },
   "directInputs": {
     "path": "requirements.txt",
-    "sha256": "e8fb72353cb62558bd51315844851cf6ebb9d97f4b1d6e76ad7a1e9bcbe908d4"
+    "sha256": "18bf8cf2e4d76222d808c1243cc52fc0d77109999f96b4bad9b6213339401a44"
   },
   "generator": {
     "tool": "pip",
@@ -45,8 +45,8 @@
       "-r",
       "requirements.txt"
     ],
-    "resolvedAt": "2026-10-22T20:35:02Z",
-    "reportSha256": "1ee9bbd3c5ebe5688c3998bda7d6a81c306aec845f1e77ff830d1a998db95dbd"
+    "resolvedAt": "2026-10-22T20:45:03Z",
+    "reportSha256": "abf7aca2125b52e80ff5139c39245def6b505ac601c8c473d4b320b39e15f812"
   },
   "bootstrap": [
     {
@@ -144,11 +144,11 @@
     },
     {
       "name": "djangorestframework",
-      "version": "3.17.2",
-      "filename": "djangorestframework-3.17.2-py3-none-any.whl",
-      "url": "https://files.pythonhosted.org/packages/a2/46/c14108e400b208c394325eb63fbae06c81341b6447fa1a6f9da718b17fe7/djangorestframework-3.17.2-py3-none-any.whl",
-      "sha256": "cb0546a7415d5b46c04e0f4fe0a54b2109f4fdd5e83ca773c8c6183a6493d042",
-      "size": 899109,
+      "version": "3.18.3",
+      "filename": "djangorestframework-3.18.3-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/c4/dd/de5f4543765bec94e036a5e9593a42f8fa7efec8de78eb56b9ca834385f3/djangorestframework-3.18.3-py3-none-any.whl",
+      "sha256": "8544bb674846731b1e3c9b309236ee1dc412905a0aa725be2ec193ca950a7d12",
+      "size": 903986,
       "direct": true,
       "requiredBy": [
         "djangorestframework-simplejwt"
