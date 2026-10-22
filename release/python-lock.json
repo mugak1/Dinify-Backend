@@ -21,7 +21,7 @@
   },
   "directInputs": {
     "path": "requirements.txt",
-    "sha256": "053d9d7ed8929550cdea6e4ea18d849f3dfea93a6eb3e2871fe73289813ec16b"
+    "sha256": "e8fb72353cb62558bd51315844851cf6ebb9d97f4b1d6e76ad7a1e9bcbe908d4"
   },
   "generator": {
     "tool": "pip",
@@ -45,8 +45,8 @@
       "-r",
       "requirements.txt"
     ],
-    "resolvedAt": "2026-10-08T10:25:24Z",
-    "reportSha256": "ddc427586f6aa3d7f7f3bb882f7d9008298350f9af700c791aa3c3c8ec269cd3"
+    "resolvedAt": "2026-10-22T20:35:02Z",
+    "reportSha256": "1ee9bbd3c5ebe5688c3998bda7d6a81c306aec845f1e77ff830d1a998db95dbd"
   },
   "bootstrap": [
     {
@@ -74,11 +74,11 @@
     },
     {
       "name": "certifi",
-      "version": "2026.5.20",
-      "filename": "certifi-2026.5.20-py3-none-any.whl",
-      "url": "https://files.pythonhosted.org/packages/59/8c/57e832b7af6d7c5abe66eb3fbe3a3a32f4d11ea23a1aa7131371035be991/certifi-2026.5.20-py3-none-any.whl",
-      "sha256": "3c52e209ba0a4ad7aebe60436a4ab349c39e1e602e8c134221e546902ad25897",
-      "size": 134134,
+      "version": "2026.10.19",
+      "filename": "certifi-2026.10.19-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/c4/51/29046e48f693c54e5b7412216d447a1d8362c9653148d98c02cdf65fa733/certifi-2026.10.19-py3-none-any.whl",
+      "sha256": "42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b",
+      "size": 136464,
       "direct": true,
       "requiredBy": [
         "requests"
@@ -190,11 +190,11 @@
     },
     {
       "name": "pillow",
-      "version": "12.3.0",
-      "filename": "pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "url": "https://files.pythonhosted.org/packages/84/21/a35af28dcc61f37ed850a2d64c65c701321dfbf25085e469d5559360cbbf/pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
-      "sha256": "78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91",
-      "size": 6940830,
+      "version": "13.0.0",
+      "filename": "pillow-13.0.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "url": "https://files.pythonhosted.org/packages/e6/99/fdf65cc539e266ab93546c261bdf98411fe165c6e4e13f9dbf597097192b/pillow-13.0.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "sha256": "42d63be3af4f9b951b199b0a9d23365d37ab14687e6d77b74940432c8515c4ca",
+      "size": 7144542,
       "direct": true,
       "requiredBy": []
     },
@@ -225,7 +225,7 @@
       "url": "https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl",
       "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
       "size": 48172,
-      "direct": false,
+      "direct": true,
       "requiredBy": [
         "cffi"
       ]

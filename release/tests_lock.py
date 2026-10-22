@@ -56,7 +56,7 @@ class TheCommittedLock(unittest.TestCase):
 
     def test_CONTRACT_the_only_undeclared_packages_are_required_transitives(self):
         undeclared = {e["name"]: e["requiredBy"] for e in LOCK["packages"] if not e["direct"]}
-        self.assertEqual(undeclared, {"cffi": ["cryptography"], "pycparser": ["cffi"]})
+        self.assertEqual(undeclared, {"cffi": ["cryptography"]})
 
     def test_CONTRACT_every_locked_file_is_a_wheel_the_declared_target_supports(self):
         for e in lf.entries(LOCK):
