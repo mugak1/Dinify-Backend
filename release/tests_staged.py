@@ -16,6 +16,7 @@ from release import hostprofile as hp
 from release import installation as ins
 from release.__main__ import main as cli
 from release.staged import markers, ordering
+from release.tests_workflow import WindowJobContract
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STAGED = os.path.join(ROOT, "release", "staged")
@@ -296,6 +297,23 @@ class TheDiscoveryCollector(unittest.TestCase):
             self.assertNotIn(value, blob)
         self.assertEqual([(d["directive"], d["state"]) for d in parsed["directives"]], [("SetEnv", "withheld"), ("Header", "withheld")])
         self.assertEqual(parsed["otherDirectives"], 1)      # an unreviewed name is counted, never named
+
+
+class TheStagedDeployDefersOffHours(WindowJobContract, unittest.TestCase):
+    """The same window job, ahead of the pre-OIDC ordering read. It stays inside the staged
+    file: NoSecondWriter above still holds, and nothing active names this workflow."""
+    WORKFLOW = TEMPLATE
+    WORKFLOW_TEXT = text(os.path.join(STAGED, "deploy-backend.yml"))
+    DEPLOYING = ("receive", "deploy")
+    FIRST_GATED = "receive"
+    TITLE = "Backend deploy (B3)"
+    PRE_OIDC = (("receive", "Ordering guard"), ("deploy", "Re-receive, and agree with the receive job"),
+                ("deploy", "Refuse an unset bucket or an unexpected role"))
+
+    def test_CONTRACT_the_ordering_read_waits_for_the_window(self):
+        self.assertEqual(TEMPLATE["jobs"]["receive"]["needs"], ["window"])
+        self.assertEqual(TEMPLATE["jobs"]["deploy"]["needs"], ["window", "receive"])
+        self.assertEqual(self.job()["runs-on"], TEMPLATE["jobs"]["receive"]["runs-on"])
 
 
 if __name__ == "__main__":
