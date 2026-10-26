@@ -81,6 +81,24 @@ class TheAuditIsPartOfTheRequiredCheck(unittest.TestCase):
         setup = next(s for s in AUDIT["jobs"]["audit"]["steps"] if str(s.get("uses", "")).startswith("actions/setup-python"))
         self.assertEqual(setup["with"]["python-version"], target)
 
+    def test_CONTRACT_the_scheduled_audit_runs_where_ci_runs(self):
+        # The scheduled re-scan must describe the environment CI validates: the same runner
+        # image, interpreter and checkout/setup-python references as the `suite` leg. Under
+        # ubuntu-latest (26.04 from 2026-10-19) setup-python had no 3.12.3 build and the
+        # audit failed before it ran.
+        suite, audit = CI["jobs"]["suite"], AUDIT["jobs"]["audit"]
+        self.assertEqual(audit["runs-on"], suite["runs-on"])
+        self.assertEqual(audit["runs-on"], "ubuntu-24.04")
+        setup = next(s for s in audit["steps"] if str(s.get("uses", "")).startswith("actions/setup-python"))
+        self.assertEqual([setup["with"]["python-version"]], suite["strategy"]["matrix"]["python-version"])
+
+        def uses(steps, action):
+            return {s["uses"] for s in steps if str(s.get("uses", "")).startswith(action + "@")}
+
+        for action in ("actions/checkout", "actions/setup-python"):
+            self.assertEqual(uses(audit["steps"], action), uses(suite["steps"], action), action)
+            self.assertEqual(len(uses(audit["steps"], action)), 1, action)
+
 
 class AFailureReachesTheRequiredCheck(unittest.TestCase):
     """Executed, not asserted."""

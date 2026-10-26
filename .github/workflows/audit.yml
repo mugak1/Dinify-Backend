@@ -18,7 +18,8 @@ on:
 
 jobs:
   audit:
-    runs-on: ubuntu-latest
+    # Same image as ci.yml's `suite`: ubuntu-latest moved to 26.04, which has no 3.12.3 build.
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
