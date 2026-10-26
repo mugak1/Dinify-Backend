@@ -22,7 +22,251 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ════════════════════════════════════════════════════════════════════════════════
+  # WINDOW — IS THE DEVELOPMENT SERVER SCHEDULED ON? (CI-signal C3, owner decision of
+  # 26 October 2026.) The server and its database run only inside the owner's AWS
+  # schedule, so a deploy that starts while they are off used to fail red with nothing
+  # broken. This job decides PROCEED, DEFER or FAIL — from evidence first, the clock second:
+  #
+  #   the target origin answers                 -> PROCEED, whatever the time
+  #   no answer, London time outside the window -> DEFER: write a summary, cancel this
+  #                                                run (grey), and never exit 0
+  #   no answer inside the window               -> FAIL red: that is a real outage
+  #
+  # It only decides whether the run continues; every later job and gate is unchanged.
+  # It holds `actions: write` (to cancel its own run) and nothing else: no id-token, no
+  # secret, no checkout, no third-party action and no npm or pip — only workflow shell
+  # with curl, date and the preinstalled gh. A run that did not deploy is never green: if
+  # the cancellation does not land, this job fails red.
+  # ════════════════════════════════════════════════════════════════════════════════
+  window:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    # The same event gate as `deploy`: a Backend CI run that did not succeed skips the
+    # whole workflow cleanly rather than probing anything.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      actions: write
+
+    env:
+      # THE SERVER'S SCHEDULE, written once. The authority is the owner's AWS schedule for
+      # instance i-0eeb7c0c3a36d3667 (Admin and Backend share it): when that schedule
+      # moves, update this line, its margin, and the self-test cases below. London wall
+      # time — BST in summer, GMT in winter — computed from the system tz database,
+      # never a fixed UTC offset. The margin ends the window early, so a silent server in
+      # its last 20 minutes is treated as off rather than as an outage.
+      DEV_SERVER_WINDOW: "11:00–23:00 Europe/London"
+      DEV_SERVER_WINDOW_END_MARGIN_MINUTES: "20"
+      # Reachability only. What the answer says is for the existing gates downstream.
+      WINDOW_PROBE_URL: https://api-test.dinifyapp.com/uat/api/v1/health/
+      WINDOW_DECISION_SH: |
+        # window_decide URL WINDOW MARGIN_MINUTES [NOW_EPOCH] [PROBE]
+        #
+        # Prints ONE line, "<WORD> at <London time>: <reason>", where WORD is PROCEED,
+        # DEFER or FAIL, and sets WINDOW_DECISION, WINDOW_AT and WINDOW_REASON.
+        # Evidence first, the clock second:
+        #   the origin answered (any HTTP status)       -> PROCEED, whatever the time
+        #   no answer, London time outside the window   -> DEFER
+        #   no answer, London time inside the window    -> FAIL (a real outage)
+        # "Inside" is [start, end - margin). NOW_EPOCH and PROBE ("answered" | "silent")
+        # are injectable for the self-test; when absent, the clock is read and URL probed.
+        # Anything it cannot establish is FAIL, never PROCEED and never DEFER.
+        window_decide() {
+          local url="${1:-}" window="${2:-}" margin="${3:-}" now="${4:-}" probe="${5:-}"
+          local re='^([01][0-9]|2[0-3]):([0-5][0-9])–([01][0-9]|2[0-3]):([0-5][0-9]) ([A-Za-z]+/[A-Za-z_]+)$'
+          local start=-1 end=-1 zone="" hm minute
+          WINDOW_DECISION=FAIL; WINDOW_AT=unknown; WINDOW_REASON=""
+          if [[ "$window" =~ $re ]]; then
+            start=$((10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]}))
+            end=$((10#${BASH_REMATCH[3]} * 60 + 10#${BASH_REMATCH[4]}))
+            zone="${BASH_REMATCH[5]}"
+          fi
+          if [ -z "$zone" ]; then
+            WINDOW_REASON="the window constant '${window}' is not 'HH:MM–HH:MM Area/City'"
+          elif [[ ! "$margin" =~ ^[0-9]{1,3}$ ]]; then
+            WINDOW_REASON="the end margin '${margin}' is not a number of minutes"
+          else
+            end=$((end - 10#${margin}))
+            if [ "$start" -ge "$end" ]; then
+              WINDOW_REASON="the window '${window}' less ${margin} minutes is empty"
+            elif [ ! -f "${TZDIR:-/usr/share/zoneinfo}/${zone}" ]; then
+              # An unknown TZ makes date(1) silently fall back to UTC: refuse instead.
+              WINDOW_REASON="the time zone '${zone}' is not in the system tz database"
+            else
+              if [ -z "$now" ]; then now="$(date -u +%s)" || now=""; fi
+              if [[ ! "$now" =~ ^[0-9]+$ ]]; then
+                WINDOW_REASON="the clock could not be read"
+              else
+                WINDOW_AT="$(TZ="$zone" date -d "@${now}" '+%Y-%m-%d %H:%M %Z')" || WINDOW_AT=unknown
+                hm="$(TZ="$zone" date -d "@${now}" '+%H:%M')" || hm=""
+                if [[ ! "$hm" =~ ^([0-9]{2}):([0-9]{2})$ ]]; then
+                  WINDOW_AT=unknown
+                  WINDOW_REASON="the ${zone} time could not be computed"
+                else
+                  minute=$((10#${BASH_REMATCH[1]} * 60 + 10#${BASH_REMATCH[2]}))
+                  if [ -z "$probe" ]; then probe="$(window_probe "$url")" || probe=""; fi
+                  case "$probe" in
+                    answered)
+                      WINDOW_DECISION=PROCEED
+                      WINDOW_REASON="${url} answered" ;;
+                    silent)
+                      if [ "$minute" -ge "$start" ] && [ "$minute" -lt "$end" ]; then
+                        WINDOW_DECISION=FAIL
+                        WINDOW_REASON="${url} did not answer inside the scheduled window ${window} (end margin ${margin} min): a real outage"
+                      else
+                        WINDOW_DECISION=DEFER
+                        WINDOW_REASON="${url} did not answer and the server is scheduled off (${window}, end margin ${margin} min)"
+                      fi ;;
+                    *)
+                      WINDOW_REASON="the probe result '${probe}' is neither answered nor silent" ;;
+                  esac
+                fi
+              fi
+            fi
+          fi
+          printf '%s at %s: %s\n' "$WINDOW_DECISION" "$WINDOW_AT" "$WINDOW_REASON"
+        }
+
+        # window_probe URL -> "answered" if any HTTP status came back within three
+        # attempts, else "silent". Reachability only: what the answer SAYS is for the
+        # existing gates downstream, which are unchanged.
+        window_probe() {
+          local url="$1" code attempt
+          for attempt in 1 2 3; do
+            code="$(curl -sS -o /dev/null --connect-timeout 10 --max-time 20 -w '%{http_code}' "$url" 2>/dev/null)" || true
+            echo "window probe ${attempt}/3: ${url} -> HTTP ${code:-000}" >&2
+            if [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then echo answered; return 0; fi
+            if [ "$attempt" -lt 3 ]; then sleep 10; fi
+          done
+          echo silent
+        }
+
+    steps:
+      - name: Self-test the window decision
+        run: |
+          set -euo pipefail
+          eval "$WINDOW_DECISION_SH"
+          # The cases are written for the window constant and margin above. When the
+          # schedule moves, move them with it. Each case is a UTC instant, a probe result,
+          # and the expected "<WORD> at <London time>".
+          # The daylight-saving days use instants a fixed UTC offset gets wrong.
+          FAILED=0
+          check() {
+            local utc="$1" probe="$2" want="$3" got
+            got="$(window_decide "https://self-test.invalid/" "$DEV_SERVER_WINDOW" "$DEV_SERVER_WINDOW_END_MARGIN_MINUTES" "$(date -u -d "$utc" +%s)" "$probe")"
+            if [ "${got%%: *}" = "$want" ]; then
+              echo "ok    ${utc} ${probe} -> ${got}"
+            else
+              echo "FAIL  ${utc} ${probe}: expected '${want}', got '${got}'"; FAILED=1
+            fi
+          }
+          check 2026-10-26T14:00:00Z answered "PROCEED at 2026-10-26 14:00 GMT"   # in window, answering
+          check 2026-10-26T14:00:00Z silent   "FAIL at 2026-10-26 14:00 GMT"      # in window, silent: an outage
+          check 2026-10-27T03:00:00Z silent   "DEFER at 2026-10-27 03:00 GMT"     # off window, silent
+          check 2026-10-27T03:00:00Z answered "PROCEED at 2026-10-27 03:00 GMT"   # off window, answering: evidence wins
+          check 2026-10-26T10:59:00Z silent   "DEFER at 2026-10-26 10:59 GMT"     # one minute before the start
+          check 2026-10-26T11:00:00Z silent   "FAIL at 2026-10-26 11:00 GMT"      # the start is inside
+          check 2026-10-26T22:39:00Z silent   "FAIL at 2026-10-26 22:39 GMT"      # last minute before the margin
+          check 2026-10-26T22:40:00Z silent   "DEFER at 2026-10-26 22:40 GMT"     # the 20-minute margin begins
+          check 2026-10-26T22:45:00Z silent   "DEFER at 2026-10-26 22:45 GMT"     # inside the margin
+          check 2026-10-26T22:45:00Z answered "PROCEED at 2026-10-26 22:45 GMT"   # inside the margin, answering
+          check 2026-10-26T23:00:00Z silent   "DEFER at 2026-10-26 23:00 GMT"     # the end is outside
+          check 2026-07-15T10:30:00Z silent   "FAIL at 2026-07-15 11:30 BST"      # summer: UTC 10:30 is 11:30 London
+          check 2026-07-15T22:30:00Z silent   "DEFER at 2026-07-15 23:30 BST"     # summer: UTC 22:30 is 23:30 London
+          # 29 March 2026: clocks go forward at 01:00 UTC.
+          check 2026-03-29T00:30:00Z silent   "DEFER at 2026-03-29 00:30 GMT"
+          check 2026-03-29T01:30:00Z silent   "DEFER at 2026-03-29 02:30 BST"
+          check 2026-03-29T10:30:00Z silent   "FAIL at 2026-03-29 11:30 BST"      # UTC+0 would say 10:30, DEFER
+          check 2026-03-29T22:30:00Z silent   "DEFER at 2026-03-29 23:30 BST"     # UTC+0 would say 22:30, FAIL
+          # 25 October 2026: clocks go back at 01:00 UTC; 01:30 London happens twice.
+          check 2026-10-25T00:30:00Z silent   "DEFER at 2026-10-25 01:30 BST"
+          check 2026-10-25T01:30:00Z silent   "DEFER at 2026-10-25 01:30 GMT"
+          check 2026-10-25T10:30:00Z silent   "DEFER at 2026-10-25 10:30 GMT"     # UTC+1 would say 11:30, FAIL
+          check 2026-10-25T22:30:00Z silent   "FAIL at 2026-10-25 22:30 GMT"      # UTC+1 would say 23:30, DEFER
+          check 2026-10-25T22:30:00Z answered "PROCEED at 2026-10-25 22:30 GMT"
+          # What it cannot establish is FAIL, never PROCEED or DEFER.
+          [[ "$(window_decide u "$DEV_SERVER_WINDOW" "$DEV_SERVER_WINDOW_END_MARGIN_MINUTES" 1793000000 maybe)" == FAIL* ]] || { echo "FAIL  an unknown probe result must FAIL"; FAILED=1; }
+          [[ "$(window_decide u "11:00-23:00 Europe/London" 20 1793000000 silent)" == FAIL* ]] || { echo "FAIL  a malformed window must FAIL"; FAILED=1; }
+          [[ "$(window_decide u "11:00–23:00 Nowhere/Atlantis" 20 1793000000 silent)" == FAIL* ]] || { echo "FAIL  an unknown zone must FAIL"; FAILED=1; }
+          [[ "$(window_decide u "$DEV_SERVER_WINDOW" x 1793000000 silent)" == FAIL* ]] || { echo "FAIL  a malformed margin must FAIL"; FAILED=1; }
+          [[ "$(window_decide u "$DEV_SERVER_WINDOW" "$DEV_SERVER_WINDOW_END_MARGIN_MINUTES" never silent)" == FAIL* ]] || { echo "FAIL  an unreadable clock must FAIL"; FAILED=1; }
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::error::The window decision failed its self-test; refusing to decide with it." >&2
+            exit 1
+          fi
+          echo "window self-test: all cases passed"
+
+      - name: Decide PROCEED, DEFER or FAIL
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          eval "$WINDOW_DECISION_SH"
+          window_decide "$WINDOW_PROBE_URL" "$DEV_SERVER_WINDOW" "$DEV_SERVER_WINDOW_END_MARGIN_MINUTES"
+          case "$WINDOW_DECISION" in PROCEED|DEFER|FAIL) ;; *) WINDOW_DECISION=FAIL ;; esac
+          echo "decision=${WINDOW_DECISION}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then TARGET="${INPUT_SHA:-}"; else TARGET="${RUN_SHA:-}"; fi
+          [[ "$TARGET" =~ ^[0-9a-f]{40}$ ]] || TARGET="(not a full 40-character SHA)"
+          case "$WINDOW_DECISION" in
+            PROCEED)
+              echo "PROCEED: the run continues, and every existing gate still applies." ;;
+            DEFER)
+              echo "::notice::Deploy UAT Backend deferred: ${WINDOW_REASON} (${WINDOW_AT}). This run cancels itself."
+              {
+                echo "## Deploy UAT Backend: DEFERRED — the development server is scheduled off"
+                echo ""
+                echo "- Target SHA: \`${TARGET}\`"
+                echo "- London time: ${WINDOW_AT}"
+                echo "- Evidence: ${WINDOW_REASON}"
+                echo ""
+                echo "The development server is scheduled off (${DEV_SERVER_WINDOW}). Re-run all jobs at or after ${DEV_SERVER_WINDOW%%–*} London, or dispatch Deploy UAT Backend with sha=${TARGET}."
+                echo ""
+                echo "Nothing was deployed. This run cancels itself, so it shows as cancelled (grey). If it shows red instead, the cancellation did not land; nothing was deployed then either."
+              } >> "$GITHUB_STEP_SUMMARY" ;;
+            FAIL)
+              echo "::error::Deploy UAT Backend stopped before deploying: ${WINDOW_REASON} (${WINDOW_AT})." >&2
+              {
+                echo "## Deploy UAT Backend: FAILED before deploying"
+                echo ""
+                echo "- Target SHA: \`${TARGET}\`"
+                echo "- London time: ${WINDOW_AT}"
+                echo "- Evidence: ${WINDOW_REASON}"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1 ;;
+          esac
+
+      # The ONLY way out with status 0 is PROCEED. A deferred run cancels itself; the
+      # cancellation is asynchronous, so this step then waits for the runner to stop it,
+      # and if that has not happened within about two minutes it fails red.
+      - name: Enforce the decision (a deferred run cancels itself)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DECISION: ${{ steps.decide.outputs.decision }}
+        run: |
+          set -euo pipefail
+          case "${DECISION:-}" in
+            PROCEED) exit 0 ;;
+            DEFER) ;;
+            *) echo "::error::No PROCEED decision (got '${DECISION:-}'). Failing closed." >&2; exit 1 ;;
+          esac
+          echo "DEFER: cancelling run ${GITHUB_RUN_ID} so it concludes cancelled, never green."
+          if ! gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"; then
+            echo "::error::The deploy was deferred but the cancellation request failed. Failing red: a run that did not deploy is never green." >&2
+            exit 1
+          fi
+          for i in $(seq 1 24); do
+            sleep 5
+            STATE="$(gh run view "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --json status,conclusion --jq '.status + "/" + (.conclusion // "")' 2>/dev/null)" || STATE=unreadable
+            echo "waiting for the cancellation to land (${i}/24): run ${STATE}"
+          done
+          echo "::error::The deploy was deferred and its cancellation requested, but the run was not cancelled within about 2 minutes. Failing red: a run that did not deploy is never green." >&2
+          exit 1
+
   deploy:
+    needs: window
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     timeout-minutes: 30
