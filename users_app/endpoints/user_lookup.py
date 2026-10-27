@@ -3,6 +3,7 @@ from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from users_app.models import User
+from users_app import otp_limits
 from users_app.controllers.permissions_check import (
     get_module_restaurant_ids,
     MODULE_TEAM,
@@ -86,6 +87,12 @@ class MsisdnLookupEndpoint(APIView):
     permission_classes = (AllowAny,)
 
     def get(self, request):
+        # D11 L5: a durable per-client limit, decided FIRST, before the number is
+        # read, so the refusal is the same 429 whether or not the number has an
+        # account. A refused request is not counted and looks nothing up.
+        if not otp_limits.admit_lookup(otp_limits.Client.from_request(request)):
+            return Response(otp_limits.limit_refusal(), status=429)
+
         # The public sign-up page reads 404 as "no account" and sends an OTP, so
         # that answer is given only when the lookup ran and found nobody
         # (tests_msisdn_lookup.py). Nothing around the query is caught: a
