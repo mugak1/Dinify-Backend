@@ -9,6 +9,7 @@ from users_app.controllers.reset_password import reset_password, initiate_passwo
 from users_app.controllers.change_password import change_password
 from misc_app.controllers.decode_auth_token import decode_jwt_token
 from users_app.controllers.otp_manager import OtpManager
+from users_app import otp_limits
 from users_app.throttles import (
     LoginThrottle, OtpThrottle, OtpIdentifierThrottle, PasswordResetThrottle
 )
@@ -61,6 +62,9 @@ class UsersAuthenticationEndpoint(APIView):
         """
 
         response = {'status': 500, 'message': "Invalid request"}
+        # The network client, for the D11 per-client limit on OTP issuance. Every
+        # action below that can issue a code passes it on; nothing here decides a limit.
+        client = otp_limits.Client.from_request(request)
 
         if action == 'register':
             response = self_register(data=request.data)
@@ -70,6 +74,7 @@ class UsersAuthenticationEndpoint(APIView):
                 password=request.data.get('password'),
                 source=request.data.get('source', 'restaurant'),
                 login_resend_protocol=request.data.get('login_resend_protocol'),
+                client=client,
             )
         elif action in ("initiate-reset-password", "reset-password") and (
             _reset_identifier(request.data) is None
@@ -79,12 +84,14 @@ class UsersAuthenticationEndpoint(APIView):
             response = {'status': 400, 'message': MESSAGES.get('NO_RESET_IDENTIFIER')}
         elif action == "initiate-reset-password":
             response = initiate_password_reset(
-                username=_reset_identifier(request.data)
+                username=_reset_identifier(request.data),
+                client=client,
             )
         elif action == "reset-password":
             response = reset_password(
                 username=_reset_identifier(request.data),
-                otp=request.data.get('otp')
+                otp=request.data.get('otp'),
+                client=client,
             )
         elif action == "change-password":
             # decode the token to get the user id
@@ -108,6 +115,7 @@ class UsersAuthenticationEndpoint(APIView):
                 identifier=identifier,
                 purpose=purpose,
                 login_resend_proof=request.data.get('login_resend_proof'),
+                client=client,
             )
         elif action == 'verify-otp':
             user = request.data.get('user', None)

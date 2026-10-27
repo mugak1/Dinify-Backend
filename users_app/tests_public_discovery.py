@@ -31,6 +31,7 @@ from unittest import mock
 
 from django.core.cache import cache
 from django.test import TestCase
+from users_app.tests_challenge_replacement import relaxed_otp_limits
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -300,6 +301,7 @@ class LoginResendAnchorTests(_Api):
         self.assertEqual(self.resend().status_code, 400)
         self.assertEqual(self.sent, [])
 
+    @relaxed_otp_limits   # a login and three resends: four codes to one account
     def test_resends_do_not_refresh_the_anchor(self, *mocks):
         self.login()
         _age(self.anchor(), 2)

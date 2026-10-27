@@ -17,7 +17,7 @@ from users_app.controllers.otp_manager import (
     OtpManager, login_resend_proof, wants_login_resend_proof,
 )
 from users_app.controllers.permissions_check import get_any_restaurant_roles
-from users_app import customer_access
+from users_app import customer_access, otp_limits
 from dinify_backend.configss.string_definitions import (
     ACCOUNT_TYPE_PLATFORM_STAFF,
     RESTAURANT_OWNER,
@@ -33,6 +33,7 @@ def login(
     password: str,
     source: Optional[str] = 'restaurant',
     login_resend_protocol=None,
+    client: Optional[otp_limits.Client] = None,
 ) -> dict:
     """
     handle the login of a user
@@ -40,6 +41,11 @@ def login(
     ``login_resend_protocol`` is the client's compatibility signal for the login resend
     proof (D11 E-R4): only the exact string ``'v1'`` adds ``login_resend_proof`` to the
     OTP-branch response. Anything else, including its absence, changes nothing.
+
+    ``client`` is the network client the request came from, for the D11 per-client
+    limit. A limit refusal of the login OTP is the one 429 (``otp_limits``). It can
+    only happen after the password was accepted, where the answer already differs
+    from a wrong password, so it reveals nothing about the account.
     """
     t_start = time.monotonic()
     username = username.strip()
@@ -216,7 +222,12 @@ def login(
         # the frontend should complete OTP first, then call
         # change-password with the token returned by verify-otp.
         manager = OtpManager()
-        otp = manager.make_otp(user=auth_user, purpose='login', origin='password_login')
+        try:
+            otp = manager.make_otp(
+                user=auth_user, purpose='login', origin='password_login', client=client)
+        except otp_limits.OtpIssuanceLimited:
+            logger.info("login [%s]: refused (OTP issuance limit)", username)
+            return otp_limits.limit_refusal()
         # Only the client that completed the password step can ask for the code again
         # (D11 E-R4). The proof names the anchor this login's own transaction committed,
         # and it is disclosed only to a client that said it can carry it. A client that

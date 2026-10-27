@@ -8,11 +8,16 @@ WHAT THIS IS. Two append-mostly tables and the only code that writes them:
   from ``pending`` to a terminal state when the send's outcome is known.
 * ``OtpVerificationFailure`` — one row per wrong code that was actually compared.
 
-WHAT THIS IS NOT. Nothing reads these tables to decide anything. There is no rate
-limit, no shadow decision and no refusal here, and recording never changes what an OTP
-flow answers: a ledger failure before dispatch sends nothing (the challenge rolls back
-with it), and every failure after dispatch is logged under a fixed category and
-otherwise ignored.
+WHAT THIS IS NOT. There is no rate limit, no shadow decision and no refusal in THIS
+module, and recording never changes what an OTP flow answers: a ledger failure before
+dispatch sends nothing (the challenge rolls back with it), and every failure after
+dispatch is logged under a fixed category and otherwise ignored.
+
+WHO READS IT (D11 enforcement). ``users_app.otp_limits`` READS ``otp_issuances`` inside
+the issuance transaction to decide the per-subject, per-destination and global limits
+(L1, L2, L4), so a row written here now counts against later issuances. It never writes
+either table; this module is still their only writer. ``otp_verification_failures`` is
+read by nothing.
 
 KEYS, NOT IDENTIFIERS. A subject is ``u:<User UUID>`` or a phone key; a destination is
 only ever a phone key. A phone key is ``p1:`` + HMAC-SHA256 under the existing OTP

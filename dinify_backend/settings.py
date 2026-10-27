@@ -328,6 +328,39 @@ REST_FRAMEWORK = {
     },
 }
 
+# D11 enforcement: durable abuse limits on the public account endpoints. Unlike the
+# per-process throttles above, these live in PostgreSQL and hold across every worker.
+# The defaults are the owner's starting values (27 October 2026); each can be set per
+# environment. A count is at least 1 and a window is 60 s to 7 days; the users_app
+# system check refuses anything else, so `check --deploy` stops a bad value before
+# Apache restarts. See docs/engineering/d11-enforcement.md.
+# L1: OTP issuance per subject (an account, or a phone with no account).
+OTP_LIMIT_SUBJECT_SHORT_COUNT = config('OTP_LIMIT_SUBJECT_SHORT_COUNT', default=3, cast=int)
+OTP_LIMIT_SUBJECT_SHORT_SECONDS = config('OTP_LIMIT_SUBJECT_SHORT_SECONDS', default=900, cast=int)
+OTP_LIMIT_SUBJECT_LONG_COUNT = config('OTP_LIMIT_SUBJECT_LONG_COUNT', default=10, cast=int)
+OTP_LIMIT_SUBJECT_LONG_SECONDS = config('OTP_LIMIT_SUBJECT_LONG_SECONDS', default=86400, cast=int)
+# L2: OTP issuance per destination phone, across every subject and purpose.
+OTP_LIMIT_DESTINATION_SHORT_COUNT = config('OTP_LIMIT_DESTINATION_SHORT_COUNT', default=3, cast=int)
+OTP_LIMIT_DESTINATION_SHORT_SECONDS = config(
+    'OTP_LIMIT_DESTINATION_SHORT_SECONDS', default=900, cast=int)
+OTP_LIMIT_DESTINATION_LONG_COUNT = config('OTP_LIMIT_DESTINATION_LONG_COUNT', default=10, cast=int)
+OTP_LIMIT_DESTINATION_LONG_SECONDS = config(
+    'OTP_LIMIT_DESTINATION_LONG_SECONDS', default=86400, cast=int)
+# L3: OTP issuance per client IP, across every route that issues a code.
+OTP_LIMIT_CLIENT_COUNT = config('OTP_LIMIT_CLIENT_COUNT', default=20, cast=int)
+OTP_LIMIT_CLIENT_SECONDS = config('OTP_LIMIT_CLIENT_SECONDS', default=3600, cast=int)
+# L4: global OTP issuance, with one alert at OTP_SPEND_ALERT_PERCENT and one at the cap,
+# each at most once per 24 hours, e-mailed to OTP_SPEND_ALERT_EMAIL. Empty means no
+# e-mail is sent; the alert's log line is still written.
+OTP_LIMIT_GLOBAL_COUNT = config('OTP_LIMIT_GLOBAL_COUNT', default=300, cast=int)
+OTP_LIMIT_GLOBAL_SECONDS = config('OTP_LIMIT_GLOBAL_SECONDS', default=86400, cast=int)
+OTP_SPEND_ALERT_PERCENT = config('OTP_SPEND_ALERT_PERCENT', default=80, cast=int)
+OTP_SPEND_ALERT_EMAIL = config('OTP_SPEND_ALERT_EMAIL', default='')
+# L5: `GET users/msisdn-lookup/` per client IP.
+MSISDN_LOOKUP_LIMIT_CLIENT_COUNT = config('MSISDN_LOOKUP_LIMIT_CLIENT_COUNT', default=30, cast=int)
+MSISDN_LOOKUP_LIMIT_CLIENT_SECONDS = config(
+    'MSISDN_LOOKUP_LIMIT_CLIENT_SECONDS', default=3600, cast=int)
+
 # email settings
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = config('EMAIL_HOST')

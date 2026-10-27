@@ -99,6 +99,7 @@ from django.core.cache import cache
 from django.db import DatabaseError
 from django.db.models.signals import post_save
 from django.test import SimpleTestCase, TestCase
+from users_app.tests_challenge_replacement import relaxed_otp_limits
 from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
@@ -439,6 +440,7 @@ class LoginCapabilityTests(_Case):
             self.assertSignedIn(self.verify(self.A, '6201'))
         self.assertEqual([(a, d) for a, d, _ in self.sends], [('A:initiator', self.user.phone_number)])
 
+    @relaxed_otp_limits   # one account logs in once per sub-case
     def test_an_unrecognised_capability_is_ignored_not_refused(self):
         for value in ('V1', 'v2', ' v1', 'v1 ', '', 'v1.0', None, 1, True, ['v1'], {'v': 'v1'}):
             with self.subTest(value=value), _env('dev'):
@@ -692,6 +694,7 @@ class S06RepeatedGenuineResendTests(_Case):
     code, which can be selected again once that row is spent.
     """
 
+    @relaxed_otp_limits   # a login and three resends: four codes to one account
     def test_three_resends_with_one_proof(self):
         with _env('test', '7601', '7602', '7603', '7604'):
             proof, anchor = self.login()
@@ -785,6 +788,7 @@ class S10OlderClientTests(_Case):
             self.assertEqual(self.row(anchor).attempts, 0)
             self.assertSignedIn(self.verify(self.A, '8001'))
 
+    @relaxed_otp_limits   # more than three codes to one account
     def test_a_legacy_re_login_restores_a_login_code_but_not_the_resend(self):
         with _env('test', '8101', '8102', '8103', '8104'):
             self.login(extra={})

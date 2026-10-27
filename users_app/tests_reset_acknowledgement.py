@@ -53,6 +53,7 @@ from unittest import mock
 from django.core.cache import cache
 from django.db import DatabaseError
 from django.test import TestCase
+from users_app.tests_challenge_replacement import relaxed_otp_limits
 from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
@@ -257,6 +258,7 @@ class InitiationEnvelopeTests(_ResetTestCase):
             'reset-password without otp, legacy': (COMPLETE, {'phone_number': identifier}),
         }
 
+    @relaxed_otp_limits   # one account, one code per route variant
     def test_an_eligible_request_is_acknowledged_and_issues_one_reset_challenge(self):
         for identifier in ('eligible@example.com', self.eligible.phone_number):
             for label, (url, body) in self.bodies(identifier).items():
@@ -558,6 +560,7 @@ class ResetPurposeControlTests(_ResetTestCase):
         self.assertEqual(self.origin_of_only_reset_challenge(), 'reset_initiation')
         self.complete()
 
+    @relaxed_otp_limits   # one account, one code per resolving mode
     def test_a_challenge_from_resend_completes_for_every_account_resolving_mode(self):
         modes = {
             'id': str(self.user.pk),

@@ -1342,8 +1342,12 @@ so keep it current when conventions change.
   acceptance stay open). `users_app/otp_accounting.py` is the only writer of two tables
   (migration `users_app/0015_otp_accounting`, expand-only): `otp_issuances`, one row per
   challenge `make_otp` wrote, and `otp_verification_failures`, one row per wrong code
-  actually compared. The rows serve their own provenance, finalization and cleanup;
-  **no rate-limit, shadow, admission or refusal decision reads them.**
+  actually compared. When B2-C shipped the rows served only their own provenance,
+  finalization and cleanup, and no rate-limit, shadow, admission or refusal decision read
+  them. **That is no longer true of `otp_issuances`**: since D11 enforcement (below)
+  `users_app/otp_limits.py` READS it to decide the per-subject, per-destination and
+  global issuance limits. It writes neither table; `otp_verification_failures` is still
+  read by nothing.
   - **Keys are PSEUDONYMOUS, not anonymous**: `u:<User UUID>` or `p1:` + a versioned,
     domain-separated HMAC of the CANONICAL phone under the existing OTP pepper. The OTP
     HASH is not stored here; the phone HMAC key is. Rotating the pepper (or
@@ -1357,8 +1361,9 @@ so keep it current when conventions change.
     failure on a pre-ledger challenge records `unrecorded`).
   - **`make_otp` is now one short `atomic(durable=True)`**: `User` `FOR KEY SHARE`
     first (user-backed only), then the bucket's advisory lock (every issuance, since
-    D11 E-R3), then the replacement delete, the challenge and the `pending` row,
-    committed BEFORE any sender runs. The key share first is what keeps a replacement
+    D11 E-R3), then the D11 limit locks and decision (since D11 enforcement), then the
+    replacement delete, the challenge and the `pending` row, committed BEFORE any sender
+    runs. The key share first is what keeps a replacement
     from deadlocking an owner-claim redemption. A caller's transaction is refused
     before any write or send; a ledger failure sends nothing and returns `False`.
     Nothing — no `Restaurant`/ownership barrier, no `User`/`UserOtp` lock, no advisory
@@ -1479,8 +1484,10 @@ so keep it current when conventions change.
   `FOR KEY SHARE` and before the DELETE, `otp_manager._hold_bucket` takes
   `pg_advisory_xact_lock(0x4F545049, key)`. The namespace is `"OTPI"`, in the
   TWO-INTEGER form (`pg_locks.objsubid = 2`), which keeps it apart from the admission
-  locks' single-`bigint` keys (`objsubid = 1`). Nothing else in the tree takes a
-  two-integer advisory lock, and no registry is kept. The key is the first 32 bits of
+  locks' single-`bigint` keys (`objsubid = 1`). When E-R3 landed nothing else took a
+  two-integer advisory lock; D11 enforcement added three more classes in the same form
+  (`OTPS`, `OTPD`, `OTPC`, below), each with its own first key, and still no registry is
+  kept. The key is the first 32 bits of
   SHA-256 over a versioned domain plus the JSON array `[user pk or null, msisdn,
   purpose]` (`issuance_bucket_key`), so null, `""` and `"null"` are different buckets.
   The msisdn and purpose are first coerced the way the DELETE's lookups coerce them, so a
@@ -1490,7 +1497,9 @@ so keep it current when conventions change.
   held across delivery. A second issuer waits, and its DELETE then removes the first
   issuer's committed row. A failed lock statement is a database error like any other:
   rolled back, `False`, nothing sent. Order: `users` key share, bucket lock, DELETE,
-  challenge, ledger row, COMMIT, delivery.
+  challenge, ledger row, COMMIT, delivery. (D11 enforcement inserts its subject,
+  destination and client locks and its decision after the bucket lock and before the
+  DELETE; see the next bullet.)
   **WHAT IT DOES NOT PROMISE**: it serializes the issuers that take the lock; it does
   not order requests by network arrival or SMS delivery, so whichever issuer gets the
   lock second wins. Two different buckets can share a 32-bit key; they then take turns
@@ -1508,6 +1517,80 @@ so keep it current when conventions change.
   The incidental finding it recorded, that `self_register`'s phone-already-exists
   branch answered 500 instead of a refusal, has since been fixed by
   REGISTER-EXISTING-PHONE-00 (next bullet)
+- Durable abuse limits on the public account endpoints (D11 enforcement): ✅ ENFORCED,
+  and D11 itself stays open (post-launch values, the alert's delivery path and the
+  residuals below are the owner's). The DRF throttles are per-process LocMemCache; these
+  limits live in PostgreSQL and hold across workers. The throttles stay as defence in
+  depth. One module decides, `users_app/otp_limits.py`; design note
+  `docs/engineering/d11-enforcement.md`. The owner's starting values (27 October 2026),
+  each a setting of the same name read from the environment:
+  **L1** issuance per subject (`u:`/`p1:` key) 3 / 15 min and 10 / 24 h; **L2** per
+  destination phone, across subjects and purposes, the same; **L3** per client IP across
+  every route that issues a code, 20 / hour; **L4** global, 300 / 24 h with one alert at
+  `OTP_SPEND_ALERT_PERCENT` (80) and one at the cap; **L5** `msisdn-lookup` per client
+  IP, 30 / hour; **L6** verify attempts per challenge, 5, unchanged.
+  - **WHERE IT IS DECIDED.** L1 to L4 inside `make_otp`'s issuance transaction, after the
+    bucket lock and before the DELETE: `decide_issuance` takes the subject (`OTPS`
+    `0x4F545053`), destination (`OTPD` `0x4F545044`) and client (`OTPC` `0x4F545043`)
+    advisory locks IN THAT ORDER (two-integer form, transaction-scoped), then runs ONE
+    statement over `otp_issuances` for all five ledger counts and ONE over
+    `account_abuse_counters` for the client, and decides in Python. **LOCK ORDER:
+    `users` KEY SHARE → `OTPI` → `OTPS` → `OTPD` → `OTPC` → rows.** An issuer holding a
+    later class never waits for an earlier one; the lookup takes `OTPC` alone; verify
+    and redemption take none. L1, L2 and L3 are therefore EXACT. **L4 IS NOT, by
+    decision**: exactness would need one global serialization point for every issuance
+    on the platform, so concurrent issuers at `cap - 1` can each be admitted; the
+    overshoot is one per issuance transaction in flight between its decision and COMMIT.
+  - **WINDOWS.** L1, L2, L4 are true rolling windows on the database clock. L3 and L5 are
+    12 aligned buckets per window on the host clock, summing every bucket that started
+    after `now - window - bucket`: never more than the limit in any rolling window, and
+    a hit is forgotten between 60 and 65 minutes after it happened.
+  - **THE REFUSAL** is one body, `429 {"status":429,"message":"Too many attempts. Please
+    wait and try again."}`, with no reason and NO `Retry-After` (either would say which
+    window fired), on login (only after the password is accepted), resend, the owner-claim
+    challenge and `msisdn-lookup` (decided first, before the number is read). **Reset
+    initiation answers E-R1's acknowledgement unchanged and issues nothing.** A refusal
+    issues, deletes, records, counts and sends nothing. Every refusal runs the same
+    statements, so timing does not say which limit fired; it cannot hide refused vs
+    admitted, lock waits, or the per-process throttles' own `{"detail"}` 429.
+  - **`make_otp` RAISES `otp_limits.OtpIssuanceLimited`** (an `APIException`, status 429,
+    the body above) on a refusal instead of returning `False`. The users_app callers
+    catch it; the owner-claim view in `platform_admin_app/` does not and needs not, since
+    DRF renders it. A caller passes `client=otp_limits.Client.from_request(request)`;
+    a caller that passes none is not acting for a network client and L3 does not apply.
+  - **THE CLIENT KEY** is `ip1:` + HMAC-SHA256 under the OTP pepper over a versioned
+    domain and the address (IPv6 by its /64, IPv4-mapped as IPv4, unparseable as one
+    shared `unknown`); the raw IP is never stored. A pepper rotation resets the counters.
+  - **ALERTS.** Each is claimed by one locked upsert on `otp_spend_alerts`, so it fires
+    at most once per rolling 24 hours across every worker. A claim logs one bounded line
+    `OTP_SPEND_ALERT threshold=<warning|cap> issued=<n> cap=<n> email=<sending|not_configured>`
+    and e-mails `OTP_SPEND_ALERT_EMAIL` through `Messenger.send_email`, in a daemon
+    thread off the request path (at most one per alert per minute per process). A
+    failed send logs `OTP_SPEND_ALERT_EMAIL_FAILED`; the claim stands for 24 hours.
+    **UNSET means no e-mail**, and the e-mail reaches a person only if the host's mail
+    path delivers (H5: the box had `EMAIL_HOST=localhost`).
+  - **SETTINGS FAIL CLOSED.** A count below 1, a window outside 60 s to 7 days (the
+    ledger keeps 7 days), a percentage outside 1 to 100 or a malformed e-mail fails
+    system check `users_app.E001`, so `check --deploy` stops the deploy; set on the host
+    without a deploy, the OTP routes answer 500 rather than issue unlimited codes. There
+    is no "off".
+  - **NOT PROTECTED** (stated in the note): distributed sources, shared addresses (CGNAT
+    is common on Ugandan mobile networks, so unrelated people share L3 and L5), SIM farms,
+    the provider's own limits, and password guessing at login. **Anyone who knows a phone
+    number can spend that account's L1/L2 budget with anonymous reset initiations and
+    lock its owner out of login codes for up to 24 hours**; that follows from the decided
+    policy. **The owner-claim challenge is not under L3** (it lives in
+    `platform_admin_app/`, outside this change, and passes no client); it needs a valid
+    claim token, and L1, L2 and L4 still apply. A sequence of requests can learn whether
+    an account is eligible from whether a later request is refused, which
+    `msisdn-lookup` and `resend-otp` (`identification=phone`) already disclose directly;
+    no route that is uniform today answers differently per account in one request.
+  - Migration `users_app/0016_d11_enforcement`: two `CreateModel`s
+    (`account_abuse_counters`, `otp_spend_alerts`), no existing table touched, no
+    `RunPython`. A code rollback leaves them in place and the limits stop. `ENV=dev`'s
+    `1234` is unchanged and the limits apply under `dev` too. Pinned by
+    `users_app/tests_otp_limits.py` and `users_app/tests_otp_limits_concurrency.py`. See
+    `BREAKING_CHANGES.md` §28
 - A phone number that already has an account gets a REFUSAL, not a 500
   (REGISTER-EXISTING-PHONE-00): ✅ `self_register`'s phone-already-exists branch
   returned the existing `User` INSTANCE under `user_profile`, beside its id. Two routes
@@ -4891,9 +4974,9 @@ lock.**
 
 **THE ISSUANCE THAT FOLLOWS IS ONE SHORT TRANSACTION (D11 B2-C), AND IT ENDS BEFORE
 TRANSPORT.** `make_otp` opens `atomic(durable=True)`, takes the owner's `users` row
-`FOR KEY SHARE` FIRST, then the bucket's advisory lock (D11 E-R3), then deletes the
-challenge it replaces, inserts the new one and its `pending` ledger row, and COMMITS —
-only then is the sender entered. The key share
+`FOR KEY SHARE` FIRST, then the bucket's advisory lock (D11 E-R3), then the D11
+enforcement locks and decision, then deletes the challenge it replaces, inserts the new
+one and its `pending` ledger row, and COMMITS — only then is the sender entered. The key share
 comes first because the challenge's foreign key to `users` is deferred: without it the
 `users` row would be reached only at COMMIT, after the old challenge was locked, which
 is the reverse of redemption's `users` then `user_otps` order and deadlocks. It takes
@@ -4964,7 +5047,9 @@ alike) are `no-store, private` + `Pragma: no-cache` + `Expires: 0`; no cookie, n
 ### DELIVERY FAILURE FAILS CLOSED
 A falsy `make_otp` is a 500 ("We couldn't send your verification code. Please try
 again."), exactly as login and password reset do. The invitation, the access state and
-the password are all untouched.
+the password are all untouched. A D11 limit refusal is NOT a delivery failure:
+`make_otp` raises `otp_limits.OtpIssuanceLimited`, which DRF renders as the shared 429
+(`no-store` still stamped), and nothing is written.
 
 ### THROTTLE
 `owner_claim_challenge`, default `5/min` per IP (`THROTTLE_OWNER_CLAIM_CHALLENGE`).
@@ -5119,8 +5204,8 @@ where a join could otherwise widen the lock. `Restaurant -> RestaurantOnboarding
 OwnerInvitation` is what `onboarding_invitations` already takes; `UserOtp` is otherwise
 locked only by `make_otp`'s replacement delete, inside its short issuance transaction,
 which takes `User` `FOR KEY SHARE` BEFORE that delete so the two cannot deadlock (D11
-B2-C; the bucket advisory lock D11 E-R3 adds comes after the key share and is never
-taken by a redemption); `User` is taken AFTER `Restaurant`, the same direction as
+B2-C; the bucket advisory lock D11 E-R3 adds, and the D11 enforcement locks after it,
+come after the key share and are never taken by a redemption); `User` is taken AFTER `Restaurant`, the same direction as
 the lifecycle transition. The one service that locks `User` FIRST — `onboarding_creation`
 — goes on to INSERT a `Restaurant` and never waits on an existing one, so it cannot close
 a cycle. **NO ADMISSION ADVISORY LOCK**: the order path reads no invitation, OTP or
@@ -6433,7 +6518,7 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   but brings CASCADE back),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
-  `users_app/migrations/0015_otp_accounting.py` (0010 adds
+  `users_app/migrations/0016_d11_enforcement.py` (0010 adds
   `User.account_type`; 0011 flips existing platform-role holders to
   `platform_staff`; 0012 makes `phone_number` unique — see the "Platform-admin
   identity layer" bullet; 0013 blacklists outstanding platform-staff refresh
@@ -6443,7 +6528,10 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `AddConstraint`, NO `RunPython` — see "Pre-Claim Customer Access"; 0015 follows
   0014 and creates the D11 B2-C OTP ledger, two `CreateModel`s and nothing else — no
   existing table touched, no `RunPython`, no backfill. A rollback leaves the tables and
-  rows in place and stops collection and automatic cleanup),
+  rows in place and stops collection and automatic cleanup; 0016 follows 0015 and creates
+  the D11 enforcement state, `account_abuse_counters` and `otp_spend_alerts`, two
+  `CreateModel`s and nothing else. A rollback leaves both tables in place and the limits
+  stop),
   `platform_admin_app/migrations/0009_restaurantonboarding_ownerinvitation_and_more.py`
   (0001 identity, 0002 `AdminSession`, 0003 `AdminAuditLog`, 0004 TOTP replay counter,
   0005 `DelegationGrant`, 0006 `DelegatedSession`, 0007 the break-glass

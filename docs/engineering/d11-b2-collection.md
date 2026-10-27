@@ -1,9 +1,15 @@
 # D11 B2-C: OTP collection
 
 This change collects evidence and does nothing else. It adds no rate limit, no shadow
-decision, no admission decision and no refusal. The rows are used only for their own
-provenance, finalization and cleanup; nothing reads them to decide anything. D11 stays
-open: policy, enforcement and operational acceptance are later decisions.
+decision, no admission decision and no refusal. When it shipped, the rows were used only
+for their own provenance, finalization and cleanup, and nothing read them to decide
+anything. D11 stays open: policy, enforcement and operational acceptance are later
+decisions.
+
+**Superseded in part by D11 enforcement** (`docs/engineering/d11-enforcement.md`):
+`users_app/otp_limits.py` now READS `otp_issuances` to decide the per-subject,
+per-destination and global issuance limits (L1, L2, L4). It writes neither table.
+`otp_verification_failures` is still read by nothing.
 
 ## What is recorded
 

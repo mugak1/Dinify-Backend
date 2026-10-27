@@ -194,8 +194,9 @@ def set_expiry_time(sender, instance, **kwargs):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OTP accounting (D11 B2-C). EVIDENCE ONLY: nothing reads these tables to decide
-# anything, and they are written by `users_app.otp_accounting` and nothing else.
+# OTP accounting (D11 B2-C). Written by `users_app.otp_accounting` and nothing else.
+# Since D11 enforcement, `users_app.otp_limits` also READS `otp_issuances` to decide
+# whether a new challenge may be issued (L1, L2, L4); it never writes them.
 #
 # Two deliberate absences shape both models:
 #   * NO FOREIGN KEY. A challenge row is deleted when it is replaced, and a user may be
@@ -327,5 +328,80 @@ class OtpVerificationFailure(models.Model):
                     | models.Q(subject_key__regex=OTP_SUBJECT_KEY_RE)
                 ),
                 name='otp_failure_subject_is_a_key',
+            ),
+        ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D11 enforcement. Durable abuse limits that hold across workers, written and read
+# only by `users_app.otp_limits`. See docs/engineering/d11-enforcement.md.
+#
+# NO RAW IDENTIFIER here either: a client is `ip1:<HMAC of its address>` and the
+# database refuses anything else.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ABUSE_SCOPE_OTP_ISSUE = 'otp_issue'
+ABUSE_SCOPE_MSISDN_LOOKUP = 'msisdn_lookup'
+ABUSE_SCOPES = (ABUSE_SCOPE_OTP_ISSUE, ABUSE_SCOPE_MSISDN_LOOKUP)
+ABUSE_CLIENT_KEY_RE = r'^ip1:[0-9a-f]{64}$'
+
+OTP_SPEND_ALERT_WARNING = 'warning'
+OTP_SPEND_ALERT_CAP = 'cap'
+OTP_SPEND_ALERTS = (OTP_SPEND_ALERT_WARNING, OTP_SPEND_ALERT_CAP)
+
+
+class AbuseCounter(models.Model):
+    """
+    Hits by one client, in one scope, in one aligned bucket of its window (L3, L5).
+
+    A window is cut into aligned buckets and a request is admitted while the current
+    bucket and the window's worth before it hold fewer hits than the limit. Rows are
+    dead once ``expires_at`` has passed, and are deleted in bounded batches.
+    """
+    scope = models.CharField(max_length=32)
+    client_key = models.CharField(max_length=80)
+    bucket_start = models.DateTimeField()
+    hits = models.PositiveIntegerField()
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'account_abuse_counters'
+        indexes = [
+            models.Index(fields=['expires_at'], name='abuse_counter_expires_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['scope', 'client_key', 'bucket_start'],
+                name='abuse_counter_one_row_per_bucket',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(scope__in=ABUSE_SCOPES),
+                name='abuse_counter_scope_vocabulary',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(client_key__regex=ABUSE_CLIENT_KEY_RE),
+                name='abuse_counter_client_is_a_key',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(hits__gte=1),
+                name='abuse_counter_hits_positive',
+            ),
+        ]
+
+
+class OtpSpendAlert(models.Model):
+    """
+    When each L4 alert was last claimed. One row per alert, written by one conditional
+    upsert, so each alert is sent at most once per 24 hours across every worker.
+    """
+    alert = models.CharField(max_length=16, primary_key=True)
+    last_sent_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'otp_spend_alerts'
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(alert__in=OTP_SPEND_ALERTS),
+                name='otp_spend_alert_vocabulary',
             ),
         ]

@@ -18,7 +18,7 @@ from notifications_app.controllers.messenger import Messenger
 from notifications_app.controllers.sms import send_sms
 from misc_app.controllers.msisdn import normalise_msisdn, MsisdnError
 from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STAFF
-from users_app import customer_access, otp_accounting
+from users_app import customer_access, otp_accounting, otp_limits
 
 logger = logging.getLogger(__name__)
 
@@ -207,10 +207,12 @@ class OtpManager:
         msisdn: Optional[str] = None,
         purpose: Optional[str] = None,
         origin: Optional[str] = None,
+        client: Optional[otp_limits.Client] = None,
     ) -> bool:
         """
         Write one challenge and deliver its code. Returns whether delivery was
-        established (see each environment branch below).
+        established (see each environment branch below), or RAISES
+        ``otp_limits.OtpIssuanceLimited`` when a D11 limit refuses the issuance.
 
         ``origin`` is the SERVER-OWNED reason the code was requested, recorded in the
         OTP accounting ledger (D11 B2-C). Each production caller names its own; any
@@ -236,6 +238,17 @@ class OtpManager:
         delivery. If the ledger cannot be written, the whole transaction rolls back —
         the challenge it would have replaced survives — nothing is sent, and the answer
         is ``False``, the value every caller already handles as a delivery failure.
+
+        ━━ THE LIMITS (D11 enforcement) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        After the bucket lock and before the DELETE, ``otp_limits.decide_issuance``
+        takes the subject, destination and client locks (in that order) and decides L1
+        to L4 from one ledger statement and one counter statement. A refusal rolls the
+        transaction back, so it issues, deletes, records and sends nothing, and RAISES
+        ``otp_limits.OtpIssuanceLimited``: a 429 with one body for every limit. It is
+        an ``APIException``, so a DRF view that does not catch it still answers that
+        429. ``client`` is the network client a request came from; pass none for a
+        caller that is not acting for one, and L3 does not apply to it.
         """
         self.issued_otp_id = None
         # Canonicalise the msisdn at OTP creation so the stored UserOtp.msisdn,
@@ -299,6 +312,8 @@ class OtpManager:
             user=user, msisdn=msisdn, pepper=pepper,
         )
 
+        client_key = None if client is None else otp_limits.client_key(client, pepper)
+
         user_otp = UserOtp(
             user=user,
             msisdn=msisdn,
@@ -309,6 +324,7 @@ class OtpManager:
             attempts=0,
             consumed_at=None,
         )
+        decision = None
         try:
             with transaction.atomic(durable=True):
                 if user is not None:
@@ -317,6 +333,13 @@ class OtpManager:
                 # a second issuer's DELETE runs after this transaction commits and sees
                 # the row it wrote.
                 _hold_bucket(user, msisdn, purpose)
+                # The D11 limits, decided here and nowhere else: after the bucket lock,
+                # before anything is deleted or written. A refusal raises and rolls back.
+                decision = otp_limits.decide_issuance(
+                    subject_key=subject_key, destination_key=destination_key,
+                    client_key=client_key,
+                )
+                otp_limits.refuse_inside(decision)
                 # Replace only this PURPOSE's earlier challenge to the same identity and
                 # destination (D11 E-R2). A challenge issued for another purpose belongs
                 # to another flow, and deleting it interrupted that flow: an anonymous
@@ -331,6 +354,10 @@ class OtpManager:
                     otp_id=user_otp.pk, subject_key=subject_key,
                     destination_key=destination_key, origin=origin,
                 )
+                otp_limits.record_admission(decision)
+        except otp_limits.Refused:
+            # Rolled back: no challenge, no deletion, no ledger row, no counter hit.
+            raise otp_limits.refusal(decision) from None
         except DatabaseError as exc:
             logger.error(
                 'make_otp: challenge not recorded; nothing was sent (category=%s)',
@@ -339,6 +366,7 @@ class OtpManager:
             return False
 
         self.issued_otp_id = user_otp.pk
+        otp_limits.after_admission(decision)
 
         # Until a branch below establishes otherwise, the outcome is not known — which
         # is also what is recorded if a sender raises.
@@ -347,6 +375,7 @@ class OtpManager:
             delivered, dispatch_state = self._dispatch(user, msisdn, otp_str, env)
         finally:
             otp_accounting.conclude_issuance(user_otp.pk, dispatch_state)
+            otp_limits.prune_expired()
         return delivered
 
     @staticmethod
@@ -654,6 +683,7 @@ class OtpManager:
         identifier: Optional[str] = None,
         purpose: Optional[str] = None,
         login_resend_proof: Optional[str] = None,
+        client: Optional[otp_limits.Client] = None,
     ) -> dict:
         # The purpose is a fact about the REQUEST, so it is decided FIRST — before any
         # account is resolved, and before the presence check below — and the refusal is
@@ -673,7 +703,7 @@ class OtpManager:
         # A LOGIN resend is decided before any other account lookup, so every refusal is
         # one answer whatever the identifier names (D11 E-R4).
         if purpose == 'login':
-            return self._resend_login(identification, identifier, login_resend_proof)
+            return self._resend_login(identification, identifier, login_resend_proof, client)
         try:
             if identification == 'id':
                 user = User.objects.get(pk=identifier)
@@ -703,23 +733,26 @@ class OtpManager:
 
         # Issue the OTP against whichever identity we resolved.
         # The origin says WHY a code was requested: a resend admitted under a login
-        # anchor, or any other resend request.
-        if user is not None:
-            made = self.make_otp(
-                user=user, purpose=purpose, msisdn=user.phone_number,
-                origin=otp_accounting.ORIGIN_RESEND_REQUEST,
-            )
-        elif msisdn is not None:
-            # Never a login resend: those return from _resend_login above.
-            made = self.make_otp(
-                msisdn=msisdn, purpose=purpose,
-                origin=otp_accounting.ORIGIN_RESEND_REQUEST,
-            )
-        else:
-            return {
-                'status': 400,
-                'message': 'User not found'
-            }
+        # anchor, or any other resend request. A D11 limit refusal is the one 429.
+        try:
+            if user is not None:
+                made = self.make_otp(
+                    user=user, purpose=purpose, msisdn=user.phone_number,
+                    origin=otp_accounting.ORIGIN_RESEND_REQUEST, client=client,
+                )
+            elif msisdn is not None:
+                # Never a login resend: those return from _resend_login above.
+                made = self.make_otp(
+                    msisdn=msisdn, purpose=purpose,
+                    origin=otp_accounting.ORIGIN_RESEND_REQUEST, client=client,
+                )
+            else:
+                return {
+                    'status': 400,
+                    'message': 'User not found'
+                }
+        except otp_limits.OtpIssuanceLimited:
+            return otp_limits.limit_refusal()
 
         if made:
             return {
@@ -732,7 +765,7 @@ class OtpManager:
             'message': "We couldn't send your verification code. Please try again."
         }
 
-    def _resend_login(self, identification, identifier, proof) -> dict:
+    def _resend_login(self, identification, identifier, proof, client=None) -> dict:
         """
         Re-send a login code, but only to the client that completed the password step.
 
@@ -789,10 +822,13 @@ class OtpManager:
         # NULL`, replace the anchor and renew the window, and there is nowhere to send.
         if user is None or not user.phone_number:
             return dict(LOGIN_RESEND_REFUSAL)
-        made = self.make_otp(
-            user=user, purpose='login', msisdn=user.phone_number,
-            origin=otp_accounting.ORIGIN_LOGIN_RESEND,
-        )
+        try:
+            made = self.make_otp(
+                user=user, purpose='login', msisdn=user.phone_number,
+                origin=otp_accounting.ORIGIN_LOGIN_RESEND, client=client,
+            )
+        except otp_limits.OtpIssuanceLimited:
+            return otp_limits.limit_refusal()
         if made:
             return {
                 'status': 200,

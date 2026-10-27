@@ -44,7 +44,7 @@ from dinify_backend.configss.string_definitions import ACCOUNT_TYPE_PLATFORM_STA
 from misc_app.controllers.save_action_log import save_action
 from users_app.controllers.email_lookup import get_user_by_email
 from users_app.controllers.otp_manager import OtpManager
-from users_app import customer_access
+from users_app import customer_access, otp_limits
 
 logger = logging.getLogger(__name__)
 
@@ -74,19 +74,28 @@ def _make_random_password(length=20):
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
 
-def initiate_password_reset(username):
+def initiate_password_reset(username, client=None):
     """
     Step 1: issue an OTP for purpose='reset-password' to an ELIGIBLE identity.
 
     An identity ``_resolve_user`` does not resolve gets the same acknowledgement and
     nothing else: no challenge, no accounting row, no SMS or email. A ``make_otp``
     failure keeps its own 500 — it is never turned into an acknowledgement.
+
+    A D11 LIMIT REFUSAL IS ACKNOWLEDGED, and issues nothing. That is the only answer
+    that keeps initiation uniform: a 429 would be given only for an account that
+    exists, which is the oracle E-R1 closed. ``client`` is the request's network
+    client, for the per-client limit.
     """
     user = _resolve_user(username)
     if user is None:
         return _acknowledgement()
 
-    otp_sent = OtpManager().make_otp(user=user, purpose=RESET_PURPOSE, origin='reset_initiation')
+    try:
+        otp_sent = OtpManager().make_otp(
+            user=user, purpose=RESET_PURPOSE, origin='reset_initiation', client=client)
+    except otp_limits.OtpIssuanceLimited:
+        return _acknowledgement()
     if otp_sent:
         return _acknowledgement()
 
@@ -96,7 +105,7 @@ def initiate_password_reset(username):
     }
 
 
-def reset_password(username, otp):
+def reset_password(username, otp, client=None):
     """
     Step 2: verify the OTP, set a temporary internal password,
     mark prompt_password_change, and return a token so the client
@@ -120,7 +129,7 @@ def reset_password(username, otp):
         return _acknowledgement() if otp is None else _invalid_code()
 
     if otp is None:
-        return initiate_password_reset(username)
+        return initiate_password_reset(username, client=client)
 
     # Verify against a RESET challenge only. Without the purpose, verify_otp takes
     # the newest live challenge of any purpose, so a login or owner-claim challenge
