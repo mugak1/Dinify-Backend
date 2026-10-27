@@ -59,6 +59,7 @@ from platform_admin_app.onboarding_reads import onboarding_summary
 from restaurants_app.models import Restaurant, RestaurantEmployee
 from users_app.controllers.otp_manager import OtpManager
 from users_app.models import User, UserOtp
+from users_app.tests_challenge_replacement import relaxed_otp_limits
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -728,6 +729,9 @@ class DestinationBindingTests(RedemptionTestCase):
 
 @_UNTHROTTLED
 @_CHALLENGE_UNTHROTTLED
+# Exhausting the budget takes five claim codes for one owner in a minute, which the D11
+# issuance limits (3 per 15 minutes) would refuse from the fourth.
+@relaxed_otp_limits
 class InvitationAttemptBudgetTests(RedemptionTestCase):
     """
     §19. The proof that repeated OTP issuance cannot reset the guessing budget.
