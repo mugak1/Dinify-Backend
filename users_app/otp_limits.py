@@ -8,12 +8,22 @@ worker. The throttles stay, as defence in depth. The design note is
 
 THE LIMITS (owner's starting values, each a setting):
 
-* L1  issuance per subject (``u:<User>``, or ``p1:<phone>`` with no account)
-* L2  issuance per destination phone, across every subject and purpose
-* L3  issuance per client IP, across every route that issues a code
-* L4  global issuance, with one alert at a percentage and one at the cap
+* L1  issuance per subject (``u:<User>``, or ``p1:<phone>`` with no account), per class
+* L2  issuance per destination phone, across subjects and purposes, per class
+* L3  issuance per client IP, unverified class only
+* L4  global issuance: refuses the unverified class only; its two alerts count every
+      issuance
 * L5  ``GET users/msisdn-lookup/`` per client IP
 * L6  verify attempts per challenge: ``otp_manager.OTP_MAX_ATTEMPTS``, unchanged
+
+THE TWO CLASSES. An issuance is VERIFIED when the requester proved something only the
+account holder has before the code was issued, and UNVERIFIED when anyone could have
+asked. The class is a function of the issuance's server-owned ``origin``, the value
+``make_otp`` records in the ledger, and of nothing in the request (``issuance_class``).
+L1 and L2 count only the rows of the issuance's own class, against the same numbers, so
+anonymous requests cannot spend a verified budget and verified ones cannot spend an
+anonymous one. L3 and L4 never refuse a verified issuance: it has passed a credential
+check, and L1 and L2 still bound it per account.
 
 L1, L2 and L4 count rows of ``otp_issuances``, the B2-C ledger, which this module only
 READS. L3 and L5 count hits in ``account_abuse_counters``, which this module alone
@@ -21,10 +31,11 @@ writes.
 
 WHERE L1 TO L4 ARE DECIDED. Inside ``make_otp``'s issuance transaction, after the
 user's KEY SHARE and the bucket lock (E-R3), before the replacement DELETE:
-``decide_issuance`` takes three more transaction-scoped advisory locks, in this order
-(subject ``OTPS``, destination ``OTPD``, client ``OTPC``), then runs ONE statement for
-the five ledger counts and ONE for the client's hits, and decides in Python. Every
-refusal therefore runs the same statements, whichever limit fired.
+``decide_issuance`` takes more transaction-scoped advisory locks, in this order (subject
+``OTPS``, destination ``OTPD``, and for an unverified issuance client ``OTPC``), then
+runs ONE statement for the ledger counts and, when L3 applies, ONE for the client's
+hits, and decides in Python. Every refusal of one class on one route therefore runs the
+same statements, whichever limit fired.
 
 A REFUSAL writes nothing: ``make_otp`` rolls its transaction back and raises
 ``OtpIssuanceLimited``, whose body is the same for every reason.
@@ -56,6 +67,9 @@ from platform_admin_app.middleware import client_ip_from_request
 from users_app.models import (
     ABUSE_SCOPE_MSISDN_LOOKUP,
     ABUSE_SCOPE_OTP_ISSUE,
+    OTP_ORIGIN_LOGIN_RESEND,
+    OTP_ORIGIN_OWNER_CLAIM_CHALLENGE,
+    OTP_ORIGIN_PASSWORD_LOGIN,
     OTP_SPEND_ALERT_CAP,
     OTP_SPEND_ALERT_WARNING,
     AbuseCounter,
@@ -102,6 +116,41 @@ class OtpIssuanceLimited(APIException):
 
 class Refused(Exception):
     """Raised INSIDE the issuance transaction so that it rolls back."""
+
+
+# ── the issuance class ───────────────────────────────────────────────────────────
+
+CLASS_VERIFIED = 'verified'
+CLASS_UNVERIFIED = 'unverified'
+
+# The origins whose code is issued only after the requester proved something the account
+# holder has. AN ALLOWLIST: every other origin is unverified, ``unattributed`` (no origin,
+# or one outside the vocabulary) and any origin the vocabulary gains later included, so a
+# new caller is limited as an anonymous one until somebody decides otherwise.
+VERIFIED_ORIGINS = frozenset({
+    OTP_ORIGIN_PASSWORD_LOGIN,          # issued only after the password is accepted
+    OTP_ORIGIN_LOGIN_RESEND,            # E-R4: bound to that password step's proof
+    OTP_ORIGIN_OWNER_CLAIM_CHALLENGE,   # needs a valid claim token, about 288 bits
+})
+
+
+def issuance_class(origin) -> str:
+    """
+    ``verified`` or ``unverified`` for an issuance's server-owned origin. Total: any value
+    that is not exactly a verified origin, a non-string included, is unverified.
+    """
+    if isinstance(origin, str) and origin in VERIFIED_ORIGINS:
+        return CLASS_VERIFIED
+    return CLASS_UNVERIFIED
+
+
+def _class_rows(verified: bool) -> Q:
+    """
+    The ledger rows of one class. ``origin`` is NOT NULL and constrained to the
+    vocabulary, so the two filters partition the ledger with nothing left over.
+    """
+    verified_rows = Q(origin__in=sorted(VERIFIED_ORIGINS))
+    return verified_rows if verified else ~verified_rows
 
 
 # ── configuration ────────────────────────────────────────────────────────────────
@@ -215,8 +264,10 @@ class Client:
     The network client a request came from, as the trusted position reports it.
 
     A caller that is NOT acting for a network client passes no ``Client`` at all, and
-    L3 does not apply to it. A request with no usable address still gets a ``Client``;
-    its key is the one shared ``unknown`` key, which fails closed together.
+    L3 does not apply to it. Nor does L3 apply to a VERIFIED issuance, whatever its
+    client: ``decide_issuance`` drops the key, so it takes no client lock, reads no
+    counter and writes no hit. A request with no usable address still gets a
+    ``Client``; its key is the one shared ``unknown`` key, which fails closed together.
     """
     address: Optional[str]
 
@@ -354,22 +405,31 @@ def _keyed(field: str, key: Optional[str], seconds: int) -> Q:
     return Q(**{field: key}) & _recent(seconds)
 
 
-def _ledger_counts(subject_key, destination_key, limits: Limits) -> dict:
+def _ledger_counts(subject_key, destination_key, verified: bool, limits: Limits) -> dict:
     """
-    ONE statement for all five ledger counts, the same statement whichever limit will
-    fire. It reads every issuance in the longest window through the ``created_at``
-    index; L4 bounds how many that is.
+    ONE statement for every ledger count, the same statement whichever limit will fire.
+
+    The four keyed counts are of the issuance's OWN class only. ``issued`` is every
+    issuance, whatever its class: it is what the alerts report. ``issued_unverified`` is
+    what L4 compares with the cap.
+
+    It reads every issuance in the longest window through the ``created_at`` index. L4
+    bounds the unverified rows (the cap, plus its overshoot); L1 bounds the verified rows
+    to 10 a day per account that receives a verified code.
     """
+    own = _class_rows(verified)
     return OtpIssuance.objects.filter(_recent(limits.longest_ledger_window)).aggregate(
-        subject_short=Count('pk', filter=_keyed(
+        subject_short=Count('pk', filter=own & _keyed(
             'subject_key', subject_key, limits.subject_short.seconds)),
-        subject_long=Count('pk', filter=_keyed(
+        subject_long=Count('pk', filter=own & _keyed(
             'subject_key', subject_key, limits.subject_long.seconds)),
-        destination_short=Count('pk', filter=_keyed(
+        destination_short=Count('pk', filter=own & _keyed(
             'destination_key', destination_key, limits.destination_short.seconds)),
-        destination_long=Count('pk', filter=_keyed(
+        destination_long=Count('pk', filter=own & _keyed(
             'destination_key', destination_key, limits.destination_long.seconds)),
         issued=Count('pk', filter=_recent(limits.global_.seconds)),
+        issued_unverified=Count('pk', filter=_class_rows(False) & _recent(
+            limits.global_.seconds)),
     )
 
 
@@ -378,9 +438,14 @@ def _ledger_counts(subject_key, destination_key, limits: Limits) -> dict:
 @dataclasses.dataclass(frozen=True)
 class IssuanceDecision:
     refused: FrozenSet[str]
-    # The global count BEFORE this issuance, in the L4 window.
+    # ``issuance_class`` of the origin this decision was made for.
+    issuance_class: str
+    # Every issuance BEFORE this one in the L4 window, whatever its class: the alerts.
     issued: int
+    # The unverified issuances before this one in the L4 window: what L4 compares.
+    issued_unverified: int
     limits: Limits
+    # ``None`` when L3 does not apply: no client, or a verified issuance.
     client_key: Optional[str]
     bucket: Optional[_Bucket]
 
@@ -388,18 +453,32 @@ class IssuanceDecision:
     def admitted(self) -> bool:
         return not self.refused
 
+    @property
+    def verified(self) -> bool:
+        return self.issuance_class == CLASS_VERIFIED
 
-def decide_issuance(*, subject_key, destination_key, client_key) -> IssuanceDecision:
+
+def decide_issuance(*, subject_key, destination_key, client_key, origin) -> IssuanceDecision:
     """
     Decide L1-L4 for one challenge about to be written. Called INSIDE the issuance
     transaction, after the user's KEY SHARE and the bucket lock, before the DELETE.
 
+    ``origin`` is the server-owned origin ``make_otp`` records for this challenge, and it
+    alone decides the class. It is REQUIRED: a caller that forgot it would otherwise be
+    decided under a default class.
+
     Takes the subject, destination and client locks in that fixed order (each only when
     its key exists), so concurrent issuers for one subject, destination or client take
-    turns and those three counts are exact. L4 takes no lock: see the design note for
-    its bounded overshoot.
+    turns and those three counts are exact. The subject and destination locks are the
+    same for both classes, so each class's counts are exact while the other class
+    issues too. A verified issuance takes no client lock (L3 does not apply to it). L4
+    takes no lock: see the design note for its bounded overshoot.
     """
     limits = current()
+    issuance_class_ = issuance_class(origin)
+    verified = issuance_class_ == CLASS_VERIFIED
+    if verified:
+        client_key = None
     if subject_key is not None:
         _hold(SUBJECT_LOCK_CLASS, lock_key('subject', subject_key))
     if destination_key is not None:
@@ -407,7 +486,7 @@ def decide_issuance(*, subject_key, destination_key, client_key) -> IssuanceDeci
     if client_key is not None:
         _hold(CLIENT_LOCK_CLASS, lock_key(ABUSE_SCOPE_OTP_ISSUE, client_key))
 
-    counts = _ledger_counts(subject_key, destination_key, limits)
+    counts = _ledger_counts(subject_key, destination_key, verified, limits)
     bucket, hits = None, 0
     if client_key is not None:
         bucket = _bucket(limits.client, _now())
@@ -426,11 +505,12 @@ def decide_issuance(*, subject_key, destination_key, client_key) -> IssuanceDeci
         refused.add(L2)
     if client_key is not None and hits >= limits.client.count:
         refused.add(L3)
-    if counts['issued'] >= limits.global_.count:
+    if not verified and counts['issued_unverified'] >= limits.global_.count:
         refused.add(L4)
     return IssuanceDecision(
-        refused=frozenset(refused), issued=counts['issued'], limits=limits,
-        client_key=client_key, bucket=bucket,
+        refused=frozenset(refused), issuance_class=issuance_class_,
+        issued=counts['issued'], issued_unverified=counts['issued_unverified'],
+        limits=limits, client_key=client_key, bucket=bucket,
     )
 
 
@@ -447,21 +527,27 @@ def record_admission(decision: IssuanceDecision) -> None:
 
 
 def after_admission(decision: IssuanceDecision) -> None:
-    """After COMMIT. Starts the warning alert when this issuance reached its threshold."""
+    """
+    After COMMIT. Starts the warning alert when this issuance brought the count of EVERY
+    issuance, verified ones included, to the threshold: the alert is about spend.
+    """
     issued = decision.issued + 1
+    unverified = decision.issued_unverified + (0 if decision.verified else 1)
     if issued >= decision.limits.warning_at:
-        _start_alert(OTP_SPEND_ALERT_WARNING, issued, decision.limits)
+        _start_alert(OTP_SPEND_ALERT_WARNING, issued, unverified, decision.limits)
 
 
 def refusal(decision: IssuanceDecision) -> OtpIssuanceLimited:
     """
-    After ROLLBACK: log the refusal, start the cap alert when L4 refused, and return the
-    exception for ``make_otp`` to raise. The log names the limits; the response never
-    does.
+    After ROLLBACK: log the refusal, start the cap alert when L4 refused (which only an
+    unverified issuance can be), and return the exception for ``make_otp`` to raise. The
+    log names the class and the limits; the response never does.
     """
-    logger.info('otp_limits: issuance refused (limits=%s)', ','.join(sorted(decision.refused)))
+    logger.info('otp_limits: issuance refused (class=%s limits=%s)',
+                decision.issuance_class, ','.join(sorted(decision.refused)))
     if L4 in decision.refused:
-        _start_alert(OTP_SPEND_ALERT_CAP, decision.issued, decision.limits)
+        _start_alert(OTP_SPEND_ALERT_CAP, decision.issued, decision.issued_unverified,
+                     decision.limits)
     return OtpIssuanceLimited(decision.refused)
 
 
@@ -518,12 +604,17 @@ ALERT_LOG_MARKER = 'OTP_SPEND_ALERT'
 ALERT_EMAIL_FAILED_MARKER = 'OTP_SPEND_ALERT_EMAIL_FAILED'
 _ALERT_SUBJECTS = {
     OTP_SPEND_ALERT_WARNING: 'Dinify: one-time codes have reached {percent}% of the daily cap',
-    OTP_SPEND_ALERT_CAP: 'Dinify: the daily cap on one-time codes is reached',
+    OTP_SPEND_ALERT_CAP:
+        'Dinify: the daily cap on one-time codes for unverified requests is reached',
 }
 
 
-def _start_alert(alert: str, issued: int, limits: Limits) -> None:
-    """Hand the alert to a daemon thread, off the request path."""
+def _start_alert(alert: str, issued: int, unverified: int, limits: Limits) -> None:
+    """
+    Hand the alert to a daemon thread, off the request path. ``issued`` is every
+    issuance in the L4 window, whatever its class; ``unverified`` is the part the cap
+    applies to.
+    """
     started = time.monotonic()
     with _ALERT_GATE_LOCK:
         last = _ALERT_GATE.get(alert)
@@ -534,7 +625,7 @@ def _start_alert(alert: str, issued: int, limits: Limits) -> None:
 
     def run():
         try:
-            send_alert(alert, issued, limits)
+            send_alert(alert, issued, unverified, limits)
         except Exception as exc:  # noqa: BLE001 - an alert never breaks issuance
             logger.error('%s threshold=%s (category=%s)',
                          ALERT_EMAIL_FAILED_MARKER, alert, type(exc).__name__)
@@ -571,11 +662,13 @@ def claim_alert(alert: str) -> bool:
         return True
 
 
-def send_alert(alert: str, issued: int, limits: Limits) -> None:
+def send_alert(alert: str, issued: int, unverified: int, limits: Limits) -> None:
     """Claim, log one bounded line, and e-mail. Runs in the alert thread."""
     if not claim_alert(alert):
         return
     email = limits.alert_email
+    # The line is #374's, byte for byte: ``issued`` is every issuance, whatever its
+    # class. How many of them the cap applies to is in the e-mail.
     logger.warning(
         '%s threshold=%s issued=%d cap=%d email=%s',
         ALERT_LOG_MARKER, alert, issued, limits.global_.count,
@@ -584,27 +677,31 @@ def send_alert(alert: str, issued: int, limits: Limits) -> None:
     if not email:
         return
     subject = _ALERT_SUBJECTS[alert].format(percent=limits.alert_percent)
-    message = alert_message(alert, issued, limits)
+    message = alert_message(alert, issued, unverified, limits)
     if not Messenger().send_email(to=[email], cc=[], subject=subject, message=message):
         logger.error('%s threshold=%s', ALERT_EMAIL_FAILED_MARKER, alert)
 
 
-def alert_message(alert: str, issued: int, limits: Limits) -> str:
+def alert_message(alert: str, issued: int, unverified: int, limits: Limits) -> str:
     """The e-mail body. Counts and settings only: no phone, account or address."""
     hours = limits.global_.seconds // 3600
     lines = [
         f'Environment: {config("ENV", default="unknown")}',
-        f'In the last {hours} hours Dinify issued {issued} one-time codes. '
-        f'The cap is {limits.global_.count} (OTP_LIMIT_GLOBAL_COUNT).',
+        f'In the last {hours} hours Dinify issued {issued} one-time codes. {unverified} of '
+        'them answered requests that proved nothing about the requester (password reset, '
+        'registration and other resends). The cap applies to those requests only and is '
+        f'{limits.global_.count} (OTP_LIMIT_GLOBAL_COUNT).',
     ]
     if alert == OTP_SPEND_ALERT_CAP:
         lines.append(
-            'Every request that would issue a code is now refused with HTTP 429 until the '
-            'oldest codes age out of the window. Raise OTP_LIMIT_GLOBAL_COUNT on the host '
-            'to relax the cap.')
+            'Those requests are now refused until the oldest of their codes age out of the '
+            'window: HTTP 429, except a password reset request, which is acknowledged and '
+            'sends nothing. Password logins, login resends and owner-claim challenges are '
+            'not refused by the cap. Raise OTP_LIMIT_GLOBAL_COUNT on the host to relax it.')
     else:
         lines.append(
             f'This is the warning at {limits.alert_percent}% of the cap '
-            '(OTP_SPEND_ALERT_PERCENT).')
+            '(OTP_SPEND_ALERT_PERCENT). It counts every code issued, whatever the request, '
+            'because it is about what codes cost.')
     lines.append('This alert is sent at most once every 24 hours.')
     return '<br>'.join(lines)
