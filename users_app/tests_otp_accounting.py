@@ -578,8 +578,11 @@ class FinalizationTests(TestCase):
         for env, sms, expected in (('prod', True, True), ('prod', False, False),
                                    ('dev', True, True)):
             with self.subTest(env=env, sms=sms):
+                # The finalizing UPDATE fails. This patched `Issuance().objects.filter`
+                # until D11 enforcement, which READS the ledger before writing a
+                # challenge; that read failing is a different case (nothing is issued).
                 with Senders(env, sms=sms) as senders, mock.patch.object(
-                    Issuance().objects, 'filter', side_effect=DatabaseError('secret-x'),
+                    acct(), 'finalize_issuance', side_effect=DatabaseError('secret-x'),
                 ), self.assertLogs('users_app', level='WARNING') as logs:
                     self.assertIs(
                         OtpManager().make_otp(user=user, purpose='login'), expected,
@@ -2115,13 +2118,18 @@ class MigrationShapeTests(TestCase):
         loader = MigrationLoader(None, ignore_no_migrations=True)
         return loader, loader.get_migration('users_app', '0015_otp_accounting')
 
-    def test_it_follows_the_customer_access_migration_and_is_the_leaf(self):
+    def test_it_follows_the_customer_access_migration_and_d11_enforcement_follows_it(self):
+        # It was the leaf until D11 enforcement added 0016, which depends on it alone.
         loader, migration = self.migration()
         self.assertEqual(
             migration.dependencies, [('users_app', '0014_customer_access_state')],
         )
         self.assertEqual(
-            loader.graph.leaf_nodes('users_app'), [('users_app', '0015_otp_accounting')],
+            loader.graph.leaf_nodes('users_app'), [('users_app', '0016_d11_enforcement')],
+        )
+        self.assertEqual(
+            loader.graph.nodes[('users_app', '0016_d11_enforcement')].dependencies,
+            [('users_app', '0015_otp_accounting')],
         )
 
     def test_it_only_creates_the_two_ledger_tables(self):

@@ -45,10 +45,18 @@ Codes are distinct under ``ENV=test``, so a code identifies the row it was issue
 Under ``ENV=dev`` every code is ``1234``. That case asserts WHICH ROW the consumer spent
 and that nothing is left to spend afterwards. It never infers a row from the digits.
 
-The controls hold with and without the lock: issuers of DIFFERENT buckets do not wait for
-each other, a rolled-back issuance leaves the bucket to the next issuer, and a redemption
+The controls hold with and without the lock: issuers of DIFFERENT buckets never wait on a
+BUCKET lock, a rolled-back issuance leaves the bucket to the next issuer, and a redemption
 overlapping two issuances completes. Nothing in a control assumes which of two unordered
 issuers came first.
+
+D11 ENFORCEMENT ADDED THREE LOCKS AFTER THE BUCKET LOCK (subject, destination, client;
+``users_app.otp_limits``), so two issuers for ONE ACCOUNT now take turns on the subject
+lock even when their buckets differ, and two issuers from ONE CLIENT take turns on the
+client lock. The controls below say which: two accounts or two numbers are sent from two
+client addresses and still do not wait, and the one-account controls assert that the wait
+is on the subject lock and never on a bucket lock. Those locks are pinned in
+``tests_otp_limits_concurrency``.
 
 Delivery is replaced (SMS, e-mail, notification, and the dispatch thread runs inline), and
 the code draw and ``ENV`` are fixed so each issuer's code is known in advance. Selection,
@@ -333,6 +341,18 @@ class _Bucket(_Schedule):
                 time.sleep(0.02)
         self.fail(f'{name} neither waited on a lock nor finished within {WAIT}s')
 
+    def assertWaitedOnSubjectNotBucket(self, seen, user):
+        """
+        B waited on the D11 SUBJECT lock of ``user``, held by A, and on no bucket lock:
+        the buckets differ, the account (one L1 subject) does not.
+        """
+        from users_app import otp_limits
+        subject = ('advisory', 0x4F545053,
+                   as_oid(otp_limits.lock_key('subject', f'u:{user.pk}')), 2)
+        self.assertEqual(seen.get('state'), 'waiting', seen)
+        self.assertEqual(seen['waiting_for'], [subject], seen)
+        self.assertTrue(seen['blocked_by_holder'], seen)
+
     def assertWaitedOnBucket(self, seen, expected_lock):
         """B waited on THIS bucket's advisory lock, and A was the session holding it."""
         self.assertEqual(seen.get('state'), 'waiting',
@@ -428,9 +448,9 @@ class _Bucket(_Schedule):
         return outcome[1][1]
 
     @staticmethod
-    def post(url, body, headers=None):
+    def post(url, body, headers=None, address=None):
         cache.clear()   # every route here is throttled; throttling is not under test
-        return _Schedule.request(url, body, headers)
+        return _Schedule.request(url, body, headers, address)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -885,15 +905,19 @@ class FailedLockWaitTests(_LoginBucket):
 class DifferentBucketControls(_Bucket):
     CODES = (CA, CB)
 
-    def test_a_reset_initiation_and_a_login_for_one_account_do_not_wait(self):
+    def test_a_reset_initiation_and_a_login_for_one_account_wait_on_no_bucket_lock(self):
+        # CHANGED BY D11 ENFORCEMENT, deliberately. This used to assert no wait at all.
+        # The buckets still differ, so neither waits on a BUCKET lock; but one account is
+        # one L1 subject, and its issuers now take turns on the subject lock so the
+        # account's budget is counted exactly.
         user = _owner('er3-two-purposes')
         seen, outcomes = self.race(
-            lambda: self.post(INITIATE, {'identifier': user.phone_number}),
-            lambda: self.post(LOGIN, {'username': user.phone_number, 'password': PASSWORD}),
+            lambda: self.post(INITIATE, {'identifier': user.phone_number}, address='203.0.113.1'),
+            lambda: self.post(LOGIN, {'username': user.phone_number, 'password': PASSWORD},
+                              address='203.0.113.2'),
             'after_insert',
         )
-        self.assertEqual(seen, {'state': 'finished'},
-                         'issuers of different purposes serialized on each other')
+        self.assertWaitedOnSubjectNotBucket(seen, user)
         self.assertEqual(self.live(user=user, purpose='reset-password'),
                          [self.created_by('issuer')])
         self.assertEqual(self.live(user=user, purpose='login'), [self.created_by('second')])
@@ -904,10 +928,14 @@ class DifferentBucketControls(_Bucket):
         self.assertNothingHeldWhenSent(['issuer', 'second'], user.phone_number)
 
     def test_two_accounts_logging_in_at_once_do_not_wait(self):
+        # Two accounts from two clients: since D11, two issuers from ONE client take turns
+        # on that client's lock, which is not what this control is about.
         first, other = _owner('er3-one'), _owner('er3-two')
         seen, outcomes = self.race(
-            lambda: self.post(LOGIN, {'username': first.phone_number, 'password': PASSWORD}),
-            lambda: self.post(LOGIN, {'username': other.phone_number, 'password': PASSWORD}),
+            lambda: self.post(LOGIN, {'username': first.phone_number, 'password': PASSWORD},
+                              address='203.0.113.1'),
+            lambda: self.post(LOGIN, {'username': other.phone_number, 'password': PASSWORD},
+                              address='203.0.113.2'),
             'after_insert',
         )
         self.assertEqual(seen, {'state': 'finished'}, 'issuers for two users serialized')
@@ -921,9 +949,9 @@ class DifferentBucketControls(_Bucket):
         one, two = _phone(), _phone()
         seen, outcomes = self.race(
             lambda: self.post(RESEND, {'identification': 'msisdn', 'identifier': one,
-                                       'purpose': 'register'}),
+                                       'purpose': 'register'}, address='203.0.113.1'),
             lambda: self.post(RESEND, {'identification': 'msisdn', 'identifier': two,
-                                       'purpose': 'register'}),
+                                       'purpose': 'register'}, address='203.0.113.2'),
             'after_insert',
         )
         self.assertEqual(seen, {'state': 'finished'}, 'issuers for two numbers serialized')
@@ -937,7 +965,8 @@ class AnchorAndResendControl(_LoginBucket):
     """
     One user, one purpose, two destinations: the password login's anchor
     ``(user, NULL, 'login')`` and a login resend ``(user, phone, 'login')`` are different
-    buckets, so a new password login and a resend do not wait for each other.
+    buckets, so a new password login and a resend do not wait on a BUCKET lock. Since D11
+    they are one L1 subject, and take turns on the subject lock instead.
     """
     CODES = (C0, CA, CB)
 
@@ -945,16 +974,16 @@ class AnchorAndResendControl(_LoginBucket):
         super().setUp()
         self.proof = self.proof_login()
 
-    def test_a_password_login_and_a_login_resend_do_not_wait(self):
+    def test_a_password_login_and_a_login_resend_wait_on_no_bucket_lock(self):
         # The resend carries the first login's proof. The second login's replacement of
         # that anchor is not committed while it is parked, so the proof still matches.
+        # CHANGED BY D11 ENFORCEMENT: this used to assert no wait at all; see the class.
         seen, outcomes = self.race(
             self.login,
             lambda: self.login_resend(self.proof),
             'after_insert',
         )
-        self.assertEqual(seen, {'state': 'finished'},
-                         'issuers for two destinations serialized on each other')
+        self.assertWaitedOnSubjectNotBucket(seen, self.user)
         self.assertOk(outcomes['issuer'])
         self.assertOk(outcomes['second'])
         self.assertEqual(self.live(user=self.user, msisdn=None, purpose='login'),
@@ -1074,7 +1103,11 @@ class IssuanceTransactionOrderTests(_Bucket):
         return hits[0] if hits else None
 
     def locks(self, statements):
-        return [(params, atomic) for sql, params, atomic in statements if 'pg_advisory' in sql]
+        # The BUCKET locks. Since D11 enforcement the subject, destination and client
+        # locks follow this one in the same transaction (pinned in
+        # tests_otp_limits_concurrency.LockOrderTests); they are not bucket locks.
+        return [(params, atomic) for sql, params, atomic in statements
+                if 'pg_advisory' in sql and list(params)[0] == BUCKET_LOCK_CLASS]
 
     def assertOneBucketLock(self, statements, user_pk, msisdn, purpose):
         locks = self.locks(statements)
@@ -1155,8 +1188,12 @@ class BucketLockLifetimeTests(_Bucket):
             status, body = self.post(LOGIN, {'username': user.phone_number,
                                              'password': PASSWORD})
         self.assertEqual(status, 200, body)
-        self.assertEqual(inside, [bucket_lock(user.pk, None, 'login')],
+        self.assertEqual([lock for lock in inside if lock[1] == BUCKET_LOCK_CLASS],
+                         [bucket_lock(user.pk, None, 'login')],
                          'the issuance did not hold exactly its own bucket lock')
+        # Beside it, only the D11 subject, destination and client locks (one each).
+        self.assertEqual(sorted(lock[1] for lock in inside if lock[1] != BUCKET_LOCK_CLASS),
+                         sorted([0x4F545053, 0x4F545044, 0x4F545043]), inside)
         self.assertEqual(len(self.sends), 1)
         self.assertEqual(self.sends[0]['bucket'], 0,
                          'the bucket lock was still held when the code was sent')

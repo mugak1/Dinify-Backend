@@ -84,7 +84,7 @@ import psycopg
 from django.core.cache import cache
 from django.db import connection, connections, transaction
 from django.db.models.signals import post_save
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -144,6 +144,17 @@ WAIT = 30   # seconds; the bound on every barrier, join and lock-wait observatio
 # A synthetic phone range distinct from every other suite (never dialled: the SMS
 # sender is a mock for every test in this module).
 _PHONES = iter(f'2567724{n:05d}' for n in range(20000, 29999))
+
+# D11 enforcement. A case that is about something else, and issues more codes to one
+# account, phone or client than the owner's limits allow (3 per 15 minutes per account
+# and per phone, 20 per hour per client), raises those limits for itself. Each use is a
+# decorator on that one test, so the diff shows exactly which cases needed it. The
+# limits themselves are pinned in tests_otp_limits and tests_otp_limits_concurrency.
+relaxed_otp_limits = override_settings(
+    OTP_LIMIT_SUBJECT_SHORT_COUNT=1000, OTP_LIMIT_SUBJECT_LONG_COUNT=1000,
+    OTP_LIMIT_DESTINATION_SHORT_COUNT=1000, OTP_LIMIT_DESTINATION_LONG_COUNT=1000,
+    OTP_LIMIT_CLIENT_COUNT=1000,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1071,6 +1082,7 @@ class AccountingTests(_Er2Case):
     def origin(self, pk):
         return OtpIssuance.objects.get(pk=pk).origin
 
+    @relaxed_otp_limits   # one account receives four codes in one minute
     def test_origins_are_recorded_per_path(self):
         # The login resend is taken while its password anchor is certainly live, so this
         # control asks only about origins and not about which challenges survive.
@@ -1351,9 +1363,12 @@ class _Schedule(TransactionTestCase):
     # --- requests (each worker builds its own client) ---
 
     @staticmethod
-    def request(url, body, headers=None):
+    def request(url, body, headers=None, address=None):
+        # ``address`` is the client's REMOTE_ADDR. Since D11 enforcement, issuers from one
+        # client take turns on its lock, so a schedule about two DIFFERENT clients says so.
+        extra = {} if address is None else {'REMOTE_ADDR': address}
         response = APIClient(raise_request_exception=False).post(
-            url, body, format='json', headers=headers or {})
+            url, body, format='json', headers=headers or {}, **extra)
         return response.status_code, response.json()
 
     def assertTokensFor(self, data, user):
