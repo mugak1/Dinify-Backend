@@ -6497,7 +6497,8 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
     failure and would block merges on a pending check instead of failing loudly
   - Note: Django 5.2.x is the LAST series supporting Python 3.10/3.11, so the
     3.12 move is also what unblocks a future Django 6.0 upgrade
-- Spins up a real Postgres 15, runs `django check`,
+- Spins up a real PostgreSQL 18.3 — exactly the RDS target's engine version, moving
+  only with it (`dependency_audit/tests_workflow.py` pins it) — runs `django check`,
   `makemigrations --check --dry-run`, then the money-field guard
   (`scripts/check_money_fields.py`) against `dinify_backend.test_settings`
 - Then the ambient-authority gate (`scripts/check_ambient_authority.py`,
