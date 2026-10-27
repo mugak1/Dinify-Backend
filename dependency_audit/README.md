@@ -36,8 +36,10 @@ environment is not the one CI validates, and this does not pretend otherwise.
 **The scanner has its own environment and is audited as its own graph.** A fresh venv is
 created from the target interpreter and `scanner-requirements.txt` is installed into it
 with `--require-hashes --no-deps --only-binary=:all: --isolated` — 29 packages, every one
-hash-pinned, resolved no later than 2026-09-20 except `certifi`, moved to 2026.10.19 on
-2026-10-22 to clear PYSEC-2026-4320. The target inventory is compared before and
+hash-pinned, resolved no later than 2026-09-20 except three pins moved later to clear
+published advisories: `certifi` to 2026.10.19 on 2026-10-22 (PYSEC-2026-4320), `filelock`
+to 4.2.4 on 2026-10-26 (CVE-2026-112907, CVE-2026-112913, CVE-2026-112940) and `msgpack`
+to 1.2.3 on 2026-10-27 (CVE-2026-114613). The target inventory is compared before and
 after, so installing the scanner cannot silently move a target package. The scanner's own
 inventory must equal the pinned set exactly, and is then scanned like any other tooling:
 the venv's bundled `pip 24.0` would otherwise carry twelve advisory entries, which is why

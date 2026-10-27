@@ -1524,23 +1524,45 @@ so keep it current when conventions change.
   depth. One module decides, `users_app/otp_limits.py`; design note
   `docs/engineering/d11-enforcement.md`. The owner's starting values (27 October 2026),
   each a setting of the same name read from the environment:
-  **L1** issuance per subject (`u:`/`p1:` key) 3 / 15 min and 10 / 24 h; **L2** per
-  destination phone, across subjects and purposes, the same; **L3** per client IP across
-  every route that issues a code, 20 / hour; **L4** global, 300 / 24 h with one alert at
-  `OTP_SPEND_ALERT_PERCENT` (80) and one at the cap; **L5** `msisdn-lookup` per client
-  IP, 30 / hour; **L6** verify attempts per challenge, 5, unchanged.
+  **L1** issuance per subject (`u:`/`p1:` key) 3 / 15 min and 10 / 24 h, PER CLASS;
+  **L2** per destination phone, across subjects and purposes, the same, PER CLASS;
+  **L3** per client IP, 20 / hour, UNVERIFIED ONLY; **L4** global, 300 / 24 h, REFUSES
+  UNVERIFIED ONLY, with one alert at `OTP_SPEND_ALERT_PERCENT` (80) and one at the cap,
+  both counting every issuance; **L5** `msisdn-lookup` per client IP, 30 / hour; **L6**
+  verify attempts per challenge, 5, unchanged.
+  - **COUNTED AND REFUSED BY WHAT THE REQUESTER PROVED** (the correction to #374). An
+    issuance is VERIFIED when its origin is `password_login` (after the password),
+    `login_resend` (E-R4's proof) or `owner_claim_challenge` (the claim token), and
+    UNVERIFIED otherwise: `reset_initiation`, `resend_request` (registration's code, reset
+    resends, null purpose) and `unattributed`. `otp_limits.issuance_class` derives it from
+    the server-owned origin alone (the one the ledger row records), never from the
+    request; the verified set is an ALLOWLIST, so a new origin is unverified until decided.
+    L1 and L2 count only the rows of the issuance's own class, against unchanged numbers,
+    so anonymous requests can no longer spend an account's login budget (as first merged,
+    ten reset requests naming an owner's phone locked them out of sign-in for a day) and
+    an owner's sign-ins no longer show in an anonymous resend's answer. L3 and L4 never
+    refuse a verified issuance, so a CGNAT neighbour or an anonymous flood at the global
+    cap can no longer refuse sign-ins. All six production `make_otp` calls name their
+    origin; none reaches the limits unattributed, and `OriginInventoryTests` fails if one
+    is added without a deliberate class. No migration: the class is derived from
+    `otp_issuances.origin`, which B2-C already stores.
   - **WHERE IT IS DECIDED.** L1 to L4 inside `make_otp`'s issuance transaction, after the
-    bucket lock and before the DELETE: `decide_issuance` takes the subject (`OTPS`
-    `0x4F545053`), destination (`OTPD` `0x4F545044`) and client (`OTPC` `0x4F545043`)
-    advisory locks IN THAT ORDER (two-integer form, transaction-scoped), then runs ONE
-    statement over `otp_issuances` for all five ledger counts and ONE over
-    `account_abuse_counters` for the client, and decides in Python. **LOCK ORDER:
-    `users` KEY SHARE → `OTPI` → `OTPS` → `OTPD` → `OTPC` → rows.** An issuer holding a
-    later class never waits for an earlier one; the lookup takes `OTPC` alone; verify
-    and redemption take none. L1, L2 and L3 are therefore EXACT. **L4 IS NOT, by
-    decision**: exactness would need one global serialization point for every issuance
-    on the platform, so concurrent issuers at `cap - 1` can each be admitted; the
-    overshoot is one per issuance transaction in flight between its decision and COMMIT.
+    bucket lock and before the DELETE: `decide_issuance` (which REQUIRES the origin)
+    takes the subject (`OTPS` `0x4F545053`), destination (`OTPD` `0x4F545044`) and, for an
+    unverified issuance only, client (`OTPC` `0x4F545043`) advisory locks IN THAT ORDER
+    (two-integer form, transaction-scoped), then runs ONE statement over `otp_issuances`
+    for every ledger count (the own-class keyed counts, every issuance for the alerts, the
+    unverified ones for L4) and, where L3 applies, ONE over `account_abuse_counters` for
+    the client, and decides in Python. **LOCK ORDER: `users` KEY SHARE → `OTPI` → `OTPS` →
+    `OTPD` → `OTPC` → rows**; a verified issuer takes the first four and no `OTPC`. The
+    subject and destination locks are keyed without the class, so both classes take
+    turns on them and EACH CLASS'S COUNT IS EXACT while the other issues. An issuer
+    holding a later class never waits for an earlier one; the lookup takes `OTPC` alone;
+    verify and redemption take none. L1, L2 and L3 are therefore EXACT. **L4 IS NOT, by
+    decision**: exactness would need one global serialization point for every unverified
+    issuance on the platform, so concurrent issuers at `cap - 1` can each be admitted; the
+    overshoot is one per unverified issuance transaction in flight between its decision
+    and COMMIT.
   - **WINDOWS.** L1, L2, L4 are true rolling windows on the database clock. L3 and L5 are
     12 aligned buckets per window on the host clock, summing every bucket that started
     after `now - window - bucket`: never more than the limit in any rolling window, and
@@ -1550,21 +1572,26 @@ so keep it current when conventions change.
     window fired), on login (only after the password is accepted), resend, the owner-claim
     challenge and `msisdn-lookup` (decided first, before the number is read). **Reset
     initiation answers E-R1's acknowledgement unchanged and issues nothing.** A refusal
-    issues, deletes, records, counts and sends nothing. Every refusal runs the same
-    statements, so timing does not say which limit fired; it cannot hide refused vs
-    admitted, lock waits, or the per-process throttles' own `{"detail"}` 429.
+    issues, deletes, records, counts and sends nothing. Every refusal of one class on one
+    route runs the same statements (a verified refusal, L1 or L2 only, runs no counter
+    statement, as a caller passing no client never did), so timing does not say which
+    limit fired; it cannot hide refused vs admitted, lock waits, or the per-process
+    throttles' own `{"detail"}` 429.
   - **`make_otp` RAISES `otp_limits.OtpIssuanceLimited`** (an `APIException`, status 429,
     the body above) on a refusal instead of returning `False`. The users_app callers
     catch it; the owner-claim view in `platform_admin_app/` does not and needs not, since
     DRF renders it. A caller passes `client=otp_limits.Client.from_request(request)`;
     a caller that passes none is not acting for a network client and L3 does not apply.
+    The owner-claim challenge passes none and needs none: it is verified.
   - **THE CLIENT KEY** is `ip1:` + HMAC-SHA256 under the OTP pepper over a versioned
     domain and the address (IPv6 by its /64, IPv4-mapped as IPv4, unparseable as one
     shared `unknown`); the raw IP is never stored. A pepper rotation resets the counters.
   - **ALERTS.** Each is claimed by one locked upsert on `otp_spend_alerts`, so it fires
     at most once per rolling 24 hours across every worker. A claim logs one bounded line
     `OTP_SPEND_ALERT threshold=<warning|cap> issued=<n> cap=<n> email=<sending|not_configured>`
-    and e-mails `OTP_SPEND_ALERT_EMAIL` through `Messenger.send_email`, in a daemon
+    (unchanged; `issued` is EVERY issuance, so a cap alert can read above the cap, and the
+    e-mail says how many were unverified) and e-mails `OTP_SPEND_ALERT_EMAIL` through
+    `Messenger.send_email`, in a daemon
     thread off the request path (at most one per alert per minute per process). A
     failed send logs `OTP_SPEND_ALERT_EMAIL_FAILED`; the claim stands for 24 hours.
     **UNSET means no e-mail**, and the e-mail reaches a person only if the host's mail
@@ -1574,17 +1601,20 @@ so keep it current when conventions change.
     system check `users_app.E001`, so `check --deploy` stops the deploy; set on the host
     without a deploy, the OTP routes answer 500 rather than issue unlimited codes. There
     is no "off".
-  - **NOT PROTECTED** (stated in the note): distributed sources, shared addresses (CGNAT
-    is common on Ugandan mobile networks, so unrelated people share L3 and L5), SIM farms,
-    the provider's own limits, and password guessing at login. **Anyone who knows a phone
-    number can spend that account's L1/L2 budget with anonymous reset initiations and
-    lock its owner out of login codes for up to 24 hours**; that follows from the decided
-    policy. **The owner-claim challenge is not under L3** (it lives in
-    `platform_admin_app/`, outside this change, and passes no client); it needs a valid
-    claim token, and L1, L2 and L4 still apply. A sequence of requests can learn whether
-    an account is eligible from whether a later request is refused, which
-    `msisdn-lookup` and `resend-otp` (`identification=phone`) already disclose directly;
-    no route that is uniform today answers differently per account in one request.
+  - **NOT PROTECTED** (stated in the note): distributed sources, shared addresses for
+    ANONYMOUS flows (CGNAT is common on Ugandan mobile networks, so unrelated people share
+    L3 and L5; their sign-ins are not affected), SIM farms, the provider's own limits, and
+    password guessing at login. **A verified flood needs credentials** and is bounded per
+    account by L1/L2 only, not by L3 or L4. **An anonymous flood still blocks anonymous
+    flows**: at the unverified cap every reset, registration code and other unverified
+    resend is refused for up to a day, and anyone who knows a phone number can spend that
+    account's anonymous L1/L2 budget and block its password reset for up to 24 hours,
+    never its sign-in. **Per-class budgets allow up to double the per-account SMS volume
+    before a refusal** (6 in 15 minutes, 20 a day, at most half anonymous). A sequence of
+    requests can learn whether an account is eligible from whether a later request of the
+    same class is refused, which `msisdn-lookup` and `resend-otp` (`identification=phone`)
+    already disclose directly; no route that is uniform today answers differently per
+    account in one request.
   - Migration `users_app/0016_d11_enforcement`: two `CreateModel`s
     (`account_abuse_counters`, `otp_spend_alerts`), no existing table touched, no
     `RunPython`. A code rollback leaves them in place and the limits stop. `ENV=dev`'s

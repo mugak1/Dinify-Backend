@@ -2102,14 +2102,29 @@ across every worker, all in PostgreSQL (`users_app/otp_limits.py`, design note
 `docs/engineering/d11-enforcement.md`). The defaults are the owner's starting values;
 each is a setting of the same name in the environment.
 
+Issuances are counted and refused by what the requester has proved. A code is
+**verified** when it is issued after a password was accepted (`password_login`), for a
+login resend bound to that login's proof (`login_resend`), or for an owner-claim
+challenge, which needs the claim token (`owner_claim_challenge`). Every other code is
+**unverified**: reset initiation, every other resend (which is how registration sends
+its code), and anything unattributed. The class comes from the server-owned origin, never
+from the request.
+
 | # | limit | default |
 |---|---|---|
-| L1 | OTP issuance per account (or per phone with no account), every purpose | 3 / 15 min, 10 / 24 h |
-| L2 | OTP issuance per destination phone, every subject and purpose | 3 / 15 min, 10 / 24 h |
-| L3 | OTP issuance per client IP, every route that issues a code | 20 / hour |
-| L4 | OTP issuance in total | 300 / 24 h |
+| L1 | OTP issuance per account (or per phone with no account), counted per class | 3 / 15 min, 10 / 24 h, per class |
+| L2 | OTP issuance per destination phone, every subject and purpose, counted per class | 3 / 15 min, 10 / 24 h, per class |
+| L3 | unverified OTP issuance per client IP | 20 / hour |
+| L4 | unverified OTP issuance in total (the alerts count every code) | 300 / 24 h |
 | L5 | `GET users/msisdn-lookup/` per client IP | 30 / hour |
 | L6 | verify attempts per challenge | 5, unchanged |
+
+**Corrected after #374.** As first merged, every code counted in one budget, whatever the
+requester had proved. So anyone who knew an owner's or manager's phone number could spend
+that account's login budget with anonymous reset requests, and its holder's next sign-in
+answered 429 for up to 24 hours; and about fifteen addresses could reach the global cap
+with anonymous requests and refuse every sign-in on the platform. Neither is possible
+now. The numbers are unchanged.
 
 **What a client can notice.**
 
@@ -2127,13 +2142,18 @@ each is a setting of the same name in the environment.
 - **A refusal writes nothing.** No challenge is issued, an earlier challenge is not
   replaced, no ledger row or counter hit is written, and nothing is sent. So an earlier
   code, if still live, keeps working.
-- **A legitimate user can be refused.** Examples: a fourth code for one account within
-  15 minutes; an eleventh in a day; a 21st code from one network address within an
-  hour; a 31st lookup from one address within an hour. Carrier-grade NAT can put many
-  people behind one address. So can anyone who knows the phone number and keeps
-  requesting resets for it. A reissued owner invitation resets the claim-attempt
-  budget but not these limits, so an owner who has just requested 3 claim codes waits
-  before the new invitation can be challenged.
+- **A legitimate user can be refused.** Examples: a fourth sign-in code for one account
+  within 15 minutes, or an eleventh in a day; the same for anonymous codes (resets,
+  registration); a 21st anonymous code from one network address within an hour; a 31st
+  lookup from one address within an hour. Carrier-grade NAT can put many people behind
+  one address, and they share its anonymous budget; a sign-in from that address is not
+  affected. Anyone who knows a phone number can still spend that account's ANONYMOUS
+  budget, which blocks its password reset for up to a day, never its sign-in. A
+  reissued owner invitation resets the claim-attempt budget but not these limits, so an
+  owner who has just requested 3 claim codes waits before the new invitation can be
+  challenged.
+- **Up to twice the codes per account before a refusal**, since each class has the
+  numbers above: 6 in 15 minutes and 20 in a day, at most half of them anonymous.
 - `ENV=dev`'s `1234` is unchanged, and the limits apply under `dev` too.
 
 **Frontend.** No change is required. The login screen, the sign-up page and the owner
@@ -2162,8 +2182,12 @@ service maps 429 to its rate-limited message. Forgot-password never sees this 42
 - **Spread-out sources.** Many IP addresses, SIM farms, and the SMS provider's own
   limits.
 - **Password guessing.**
-- **The owner-claim challenge under L3.** It is in `platform_admin_app/`, outside this
-  change, and does not pass the client.
+- **A flood with credentials.** Verified codes are bounded per account (L1, L2), not by
+  L3 or L4, so someone holding many accounts' passwords can issue that many accounts'
+  codes. The spend alerts still count them.
+- **An anonymous flood blocks anonymous flows.** Once the unverified cap is reached,
+  every password reset, registration code and other resend on the platform is refused
+  until the oldest anonymous codes age out, for up to a day. Sign-ins are not.
 - **A sequence of requests can still learn an account's eligibility.** Whether a later
   request is refused depends on earlier issuances, and reset initiation issues only for
   an eligible account. That fact is already disclosed directly: `msisdn-lookup` answers
@@ -2206,7 +2230,8 @@ D11 remains open.
 12. **OTP and lookup limits (D11 enforcement):** none required. Login, resend, the
     owner-claim challenge and `msisdn-lookup` can answer `429 {"status":429,"message":
     "Too many attempts. Please wait and try again."}`, which the deployed client
-    already shows. Reset initiation is unchanged — see §28.
+    already shows. Reset initiation is unchanged. The later per-class correction changes
+    when the 429 is given, not what it says — see §28.
 
 ---
 
