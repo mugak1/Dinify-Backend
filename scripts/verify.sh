@@ -57,7 +57,8 @@
 # SQLite does NOT support — run those against Postgres (as CI does). Export
 # DATABASE_ENGINE=django.db.backends.postgresql plus DATABASE_NAME/USER/PASSWORD/
 # HOST/PORT to point at a local Postgres, or VERIFY_SETTINGS=<module> for another
-# settings module. CI (Postgres 15) is the authoritative full-suite gate.
+# settings module. CI is the authoritative full-suite gate; its PostgreSQL is the
+# RDS target's exact version, pinned in .github/workflows/ci.yml.
 #
 # This is a manual, post-change pre-PR gate — run it after making changes and
 # paste the output into the PR. It is intentionally NOT wired as a hook.
