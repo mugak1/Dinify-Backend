@@ -1854,6 +1854,726 @@
           "blocking": 1
         }
       }
+    },
+    {
+      "name": "deferral: an inherited high tooling finding inside its window is deferred, never clean",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0001-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "obligations_pending",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "deferred": 1,
+          "blocking": 0,
+          "excepted": 0
+        },
+        "deadlines": [
+          "2026-10-07"
+        ]
+      }
+    },
+    {
+      "name": "deferral: one second before 00:00 UTC on the deadline it is still deferred",
+      "now": "2026-10-06T23:59:59Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0002-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "obligations_pending",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "deferred": 1,
+          "blocking": 0
+        },
+        "deadlines": [
+          "2026-10-07"
+        ]
+      }
+    },
+    {
+      "name": "deferral: from 00:00 UTC on the deadline it blocks",
+      "now": "2026-10-07T00:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0003-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "deferral: an introduced high tooling finding blocks",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0004-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "introduced",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "deferral: a missing or null provenance blocks",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0005-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "reportableSince": "2026-09-30"
+        },
+        {
+          "advisory": "GHSA-dfr1-0005-bbbb",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": null,
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 2,
+          "blocking": 2,
+          "unresolved": 0
+        }
+      }
+    },
+    {
+      "name": "deferral: a malformed provenance blocks: the word must be exactly inherited",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0006-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "",
+          "reportableSince": "2026-09-30"
+        },
+        {
+          "advisory": "GHSA-dfr1-0006-bbbb",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "Inherited ",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 2,
+          "blocking": 2,
+          "unresolved": 0
+        }
+      }
+    },
+    {
+      "name": "deferral: an unknown provenance blocks",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0007-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "transitive",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "blocking": 1,
+          "unresolved": 0
+        }
+      }
+    },
+    {
+      "name": "deferral: a missing or null reportableSince blocks",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0008-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited"
+        },
+        {
+          "advisory": "GHSA-dfr1-0008-bbbb",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": null
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 2,
+          "blocking": 2,
+          "unresolved": 0
+        }
+      }
+    },
+    {
+      "name": "deferral: a malformed or calendar-impossible reportableSince blocks",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0009-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-31"
+        },
+        {
+          "advisory": "GHSA-dfr1-0009-bbbb",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30T00:00:00Z"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 2,
+          "blocking": 2,
+          "unresolved": 0
+        }
+      }
+    },
+    {
+      "name": "deferral: a reportableSince after the decision day blocks",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0010-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-10-04"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "deferral: a reportableSince on the decision day itself is deferred",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0011-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-10-03"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "obligations_pending",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "deferred": 1,
+          "blocking": 0
+        },
+        "deadlines": [
+          "2026-10-10"
+        ]
+      }
+    },
+    {
+      "name": "deferral: an inherited critical blocks immediately: critical is never deferred",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0012-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "critical",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "deferral: an inherited runtime high blocks",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0013-aaaa",
+          "aliases": [],
+          "package": "lib-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "deferral: an inherited runtime moderate blocks",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0014-aaaa",
+          "aliases": [],
+          "package": "lib-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/lib-a",
+          "scope": "runtime",
+          "severity": "moderate",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "blocking": 1
+        }
+      }
+    },
+    {
+      "name": "deferral: an inherited tooling moderate is still triage, not deferred",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0015-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "moderate",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "within_policy",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "triageRequired": 1,
+          "blocking": 0
+        }
+      }
+    },
+    {
+      "name": "deferral: records apply first: an exception covering an inherited high is an exception",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0016-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-DFR-0016",
+          "kind": "exception",
+          "advisory": "GHSA-dfr1-0016-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "paths": [
+            "application:node_modules/tool-a"
+          ],
+          "scope": "tooling",
+          "applicability": "The vulnerable code path is only reached by a build tool that never handles untrusted input.",
+          "reason": "No compatible fixed release exists yet; the upgrade is tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-25"
+          },
+          "expires": "2026-12-01"
+        }
+      ],
+      "expect": {
+        "outcome": "exceptions_only",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "excepted": 1,
+          "blocking": 0,
+          "refusedRecords": 0
+        }
+      }
+    },
+    {
+      "name": "deferral: deferred plus excepted is obligations_pending",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0017-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        },
+        {
+          "advisory": "GHSA-dfr1-0017-bbbb",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "introduced",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [
+        {
+          "id": "EXC-DFR-0017",
+          "kind": "exception",
+          "advisory": "GHSA-dfr1-0017-bbbb",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "2.0.0",
+          "paths": [
+            "application:node_modules/tool-b"
+          ],
+          "scope": "tooling",
+          "applicability": "The vulnerable code path is only reached by a build tool that never handles untrusted input.",
+          "reason": "No compatible fixed release exists yet; the upgrade is tracked in the linked review.",
+          "owner": "Dinify platform owner",
+          "approval": {
+            "by": "Dinify platform owner",
+            "reference": "https://github.com/mugak1/Dinify-Admin/pull/999",
+            "date": "2026-09-25"
+          },
+          "expires": "2026-12-01"
+        }
+      ],
+      "expect": {
+        "outcome": "obligations_pending",
+        "exitCode": 0,
+        "refused": [],
+        "counts": {
+          "findings": 2,
+          "deferred": 1,
+          "excepted": 1,
+          "blocking": 0,
+          "refusedRecords": 0
+        },
+        "deadlines": [
+          "2026-10-07"
+        ]
+      }
+    },
+    {
+      "name": "deferral: deferred plus a blocking finding is blocking",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0018-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        },
+        {
+          "advisory": "GHSA-dfr1-0018-bbbb",
+          "aliases": [],
+          "package": "tool-b",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-b",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "introduced",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "blocking",
+        "exitCode": 1,
+        "refused": [],
+        "counts": {
+          "findings": 2,
+          "deferred": 1,
+          "blocking": 1
+        },
+        "deadlines": [
+          "2026-10-07"
+        ]
+      }
+    },
+    {
+      "name": "deferral: deferred plus an incomplete input is incomplete",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [
+        {
+          "code": "scanner_timeout",
+          "detail": "timed out"
+        }
+      ],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0019-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": "2026-09-30"
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "incomplete",
+        "exitCode": 2,
+        "refused": [],
+        "counts": {
+          "findings": 1,
+          "deferred": 1,
+          "blocking": 0
+        },
+        "deadlines": [
+          "2026-10-07"
+        ]
+      }
+    },
+    {
+      "name": "deferral: a provenance or reportableSince of the wrong JSON type is a malformed finding",
+      "now": "2026-10-03T12:00:00Z",
+      "incomplete": [],
+      "findings": [
+        {
+          "advisory": "GHSA-dfr1-0020-aaaa",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": 1,
+          "reportableSince": "2026-09-30"
+        },
+        {
+          "advisory": "GHSA-dfr1-0020-bbbb",
+          "aliases": [],
+          "package": "tool-a",
+          "version": "2.0.0",
+          "path": "application:node_modules/tool-a",
+          "scope": "tooling",
+          "severity": "high",
+          "provenance": "inherited",
+          "reportableSince": 20260930
+        }
+      ],
+      "records": [],
+      "expect": {
+        "outcome": "incomplete",
+        "exitCode": 2,
+        "refused": [],
+        "counts": {
+          "findings": 2,
+          "unresolved": 2,
+          "blocking": 0
+        }
+      }
     }
   ]
 }

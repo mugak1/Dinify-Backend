@@ -6644,9 +6644,23 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   exact pins (`pip-audit --no-deps --disable-pip --strict`) plus the scanner's own venv
   (29 hash-pinned packages, `--require-hashes --only-binary=:all: --isolated`). The
   policy is shared with Frontend and Admin (`conformance.json` byte-identical, digest
-  pinned in each suite): four outcomes, `within_policy` 0 / `exceptions_only` 0 /
-  `blocking` 1 / `incomplete` 2. **pip-audit reports no severity**, so a Python finding
-  on a runtime package blocks and one on `pip` is incomplete — never read as low. A
+  pinned in each suite; 61 vectors since A-1, digest `6365e880…`): five outcomes,
+  `within_policy` 0 / `exceptions_only` 0 / `obligations_pending` 0 / `blocking` 1 /
+  `incomplete` 2. **pip-audit reports no severity**, so a Python finding on a runtime
+  package blocks and one on `pip` is incomplete — never read as low. **The fifth outcome
+  is the DATED OBLIGATION (CI-signal A-1)**: after the records, an unexcepted TOOLING HIGH
+  finding whose optional `provenance` is exactly `"inherited"` and whose optional
+  `reportableSince` is a calendar date no later than the decision day is deferred until
+  00:00 UTC on `reportableSince` + 7 days (`HIGH_DEFERRAL_DAYS` in `core.py`, never a policy
+  value); critical is never deferred and anything not established blocks as before. **It
+  is inert here twice over**: no adapter supplies either field (A-2 is Frontend and Admin
+  only), and with no severity a Python finding is never `high`. A result that deferred
+  nothing is byte-identical to before (`counts.deferred`, `deadline` and
+  `deferred_finding` appear only when a deferral applied), which `release/preflight.py`
+  depends on: it re-decides and compares `counts` exactly. `tests_core.py` pins the full
+  result of the 41 earlier vectors by digest. `release/candidate.py`'s
+  `ACCEPTED_AUDIT_OUTCOMES` accepts the new word and nothing else new; the preflight's
+  deadline is not yet cut short by a deferred finding's deadline. A
   failed scan is never clean: measured, PyPI unreachable makes pip-audit exit 1 with EMPTY
   stdout (the same status as "vulnerabilities found"), so the status is only accepted when
   the body agrees. `policy.json → records` is empty — nothing is pre-approved. Evidence is

@@ -53,6 +53,7 @@ The same table as the npm repositories:
 | finding | decision |
 |---|---|
 | critical or high, any scope | **blocking** |
+| high on tooling, INHERITED and inside its 7-day window | **deferred** (see "Dated obligations" below) |
 | any severity on a runtime package | **blocking** |
 | moderate / low / info on tooling | visible, **triage required** |
 | anything the policy cannot evaluate | **incomplete** |
@@ -61,11 +62,38 @@ The same table as the npm repositories:
 runtime package it blocks; on `pip` it cannot be evaluated and the audit is incomplete.
 That is the conservative reading the policy requires, not an approximation of one.
 
-Outcomes and exit statuses: `within_policy` 0, `exceptions_only` 0, `blocking` 1,
-`incomplete` 2. **An incomplete audit fails the required check.** Measured: when PyPI is
+Outcomes and exit statuses: `within_policy` 0, `exceptions_only` 0,
+`obligations_pending` 0, `blocking` 1, `incomplete` 2 — precedence `incomplete` >
+`blocking` > `obligations_pending` > `exceptions_only` > `within_policy`. **An incomplete
+audit fails the required check.** Measured: when PyPI is
 unreachable pip-audit exits **1 with empty stdout** — the same status it uses for
 "vulnerabilities found" — so the status is only ever accepted when the JSON body agrees
 with it, and every package in the inventory must appear in the report at its version.
+
+### Dated obligations (CI-signal A-1): the shared rule, which no Python finding can reach
+
+The shared evaluator gained a fifth outcome, `obligations_pending` (exit 0, headline
+"AUDIT COMPLETE — PASSES WITH DATED OBLIGATIONS OUTSTANDING"). After the disposition
+records, a finding the policy would block and no record covers is deferred (class
+`deferred`, a `deadline`, counted under `deferred`) only when its scope is `tooling`, its
+severity is `high` (critical never), its optional `provenance` is exactly `"inherited"`,
+its optional `reportableSince` is a calendar date no later than the decision day, and the
+decision is made before 00:00 UTC on `reportableSince` + `HIGH_DEFERRAL_DAYS` (7, a
+constant in `core.py`, not a policy value). Anything not established blocks as before; a
+provenance or date of the wrong JSON type is a malformed finding (incomplete); `null`
+reads as absent. The rule and its 20 vectors are identical in the three repositories and
+both languages.
+
+**Here it is inert twice over.** No adapter supplies `provenance` or `reportableSince` (A-2
+does that for Dinify-Frontend and Dinify-Admin only), and pip-audit reports no severity, so
+a Python finding is never `high` and can never be deferred. A result in which nothing was
+deferred is byte-identical to the one this evaluator produced before the rule:
+`counts.deferred`, a finding's `deadline` and the `deferred_finding` reason appear only when
+a deferral applied, because `release/preflight.py` and `release/consumer.py` re-decide
+retained results and compare them exactly. `tests_core.py` pins the full result of each of
+the 41 vectors that predate the rule, by digest (the same digests the JavaScript suites
+pin). `release/candidate.py`'s `ACCEPTED_AUDIT_OUTCOMES` accepts `obligations_pending`, and
+nothing else new.
 
 pip and pip-audit configuration is never inherited: `PIP_*` (including `PIP_AUDIT_*`),
 `PYTHON*`, `VIRTUAL_ENV` and `CONDA_PREFIX` are removed from the scanner's environment, the

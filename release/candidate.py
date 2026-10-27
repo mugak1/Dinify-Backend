@@ -46,7 +46,12 @@ REQUIRED_STEPS = (
     "ratchet", "guards", "audit-tests", "release-tests", "tenant", "suite", "audit",
 )
 
-ACCEPTED_AUDIT_OUTCOMES = ("within_policy", "exceptions_only")
+# Exactly the evaluator's exit-0 outcomes (dependency_audit/core.py). ``obligations_pending``
+# is reachable only once an adapter supplies a finding's provenance and reportable date
+# (CI-signal A-2); until then no result carries it, and every re-decision of retained
+# evidence is what it was before A-1. preflight.PASSING, the producer, the consumer and the
+# installation all read this tuple by reference.
+ACCEPTED_AUDIT_OUTCOMES = ("within_policy", "exceptions_only", "obligations_pending")
 
 
 def eligibility(event, ref, repository):
