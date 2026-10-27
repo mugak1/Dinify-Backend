@@ -2094,6 +2094,81 @@ migration and no new route.
 **Rollback.** Reverting the code brings back the not-found answers above, the
 `IS NULL` query and the as-sent comparison in both lookups. Nothing is stored.
 
+## 28. OTP issuance and the msisdn lookup have durable limits (D11 enforcement)
+
+**What changed.** The per-process DRF throttles counted in each mod_wsgi process
+separately, and `register` and `msisdn-lookup` had no limit at all. Six limits now hold
+across every worker, all in PostgreSQL (`users_app/otp_limits.py`, design note
+`docs/engineering/d11-enforcement.md`). The defaults are the owner's starting values;
+each is a setting of the same name in the environment.
+
+| # | limit | default |
+|---|---|---|
+| L1 | OTP issuance per account (or per phone with no account), every purpose | 3 / 15 min, 10 / 24 h |
+| L2 | OTP issuance per destination phone, every subject and purpose | 3 / 15 min, 10 / 24 h |
+| L3 | OTP issuance per client IP, every route that issues a code | 20 / hour |
+| L4 | OTP issuance in total | 300 / 24 h |
+| L5 | `GET users/msisdn-lookup/` per client IP | 30 / hour |
+| L6 | verify attempts per challenge | 5, unchanged |
+
+**What a client can notice.**
+
+- **A new status on four routes.** `auth/login/` (owner/manager OTP branch, only after
+  the password was accepted), `auth/resend-otp/`, `owner-claim/challenge/` and
+  `msisdn-lookup/` can answer
+  `429 {"status":429,"message":"Too many attempts. Please wait and try again."}`.
+  - The body is the same for every limit.
+  - There is no `Retry-After` header: it would say which window fired.
+  - The DRF throttles' own 429 (`{"detail": …}` with `Retry-After`) is unchanged and
+    can still come first.
+- **Reset initiation is unchanged** (`initiate-reset-password`, and `reset-password`
+  without `otp`). A refused initiation answers §21's acknowledgement and issues
+  nothing, so the answer stays the same whether or not the details match an account.
+- **A refusal writes nothing.** No challenge is issued, an earlier challenge is not
+  replaced, no ledger row or counter hit is written, and nothing is sent. So an earlier
+  code, if still live, keeps working.
+- **A legitimate user can be refused.** Examples: a fourth code for one account within
+  15 minutes; an eleventh in a day; a 21st code from one network address within an
+  hour; a 31st lookup from one address within an hour. Carrier-grade NAT can put many
+  people behind one address. So can anyone who knows the phone number and keeps
+  requesting resets for it.
+- `ENV=dev`'s `1234` is unchanged, and the limits apply under `dev` too.
+
+**Frontend.** No change is required. The login screen, the sign-up page and the owner
+claim already handle a 429: the interceptor shows the message, and the owner-claim
+service maps 429 to its rate-limited message. Forgot-password never sees this 429.
+
+**Settings.** `OTP_LIMIT_{SUBJECT,DESTINATION}_{SHORT,LONG}_{COUNT,SECONDS}`,
+`OTP_LIMIT_CLIENT_{COUNT,SECONDS}`, `OTP_LIMIT_GLOBAL_{COUNT,SECONDS}`,
+`OTP_SPEND_ALERT_PERCENT`, `OTP_SPEND_ALERT_EMAIL`,
+`MSISDN_LOOKUP_LIMIT_CLIENT_{COUNT,SECONDS}`.
+- A bad value fails system check `users_app.E001`, so `check --deploy` stops the
+  deploy. On a live process it makes the OTP routes answer 500.
+- **`OTP_SPEND_ALERT_EMAIL` is unset by default, so no alert e-mail is sent until the
+  host sets it.** The alert's log line (`OTP_SPEND_ALERT …`) is written either way.
+- An e-mail reaches a person only if the host's mail path delivers. See H5 in
+  `REGULATORY_AUDIT.md`.
+
+**Rollout and rollback.**
+- Migration `users_app/0016_d11_enforcement` creates two tables,
+  `account_abuse_counters` and `otp_spend_alerts`, and touches nothing else. While older
+  workers are still serving during the restart, they enforce nothing.
+- Rolling the code back leaves both tables in place and stops the limits. Nothing is
+  restored, because nothing else was changed.
+
+**Not covered.**
+- **Spread-out sources.** Many IP addresses, SIM farms, and the SMS provider's own
+  limits.
+- **Password guessing.**
+- **The owner-claim challenge under L3.** It is in `platform_admin_app/`, outside this
+  change, and does not pass the client.
+- **A sequence of requests can still learn an account's eligibility.** Whether a later
+  request is refused depends on earlier issuances, and reset initiation issues only for
+  an eligible account. That fact is already disclosed directly: `msisdn-lookup` answers
+  it, and so does `resend-otp` with `identification=phone`.
+
+D11 remains open.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
@@ -2126,6 +2201,10 @@ migration and no new route.
     now a 500 rather than "User not found" and a blank `msisdn` is a 400. On both
     lookups any spelling of a registered number is found, and a value that is not a
     Ugandan number is a 400 — see §27.
+12. **OTP and lookup limits (D11 enforcement):** none required. Login, resend, the
+    owner-claim challenge and `msisdn-lookup` can answer `429 {"status":429,"message":
+    "Too many attempts. Please wait and try again."}`, which the deployed client
+    already shows. Reset initiation is unchanged — see §28.
 
 ---
 
