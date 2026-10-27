@@ -268,4 +268,9 @@ apply.
   minutes, or more than 10 times in a day, gets "Too many attempts. Please wait and try
   again." until the oldest code ages out. The same goes for repeated resends or resets
   for one account or one number.
+- **An owner claim after a lockout.** Every claim challenge is an issuance to the
+  invited owner, so it counts towards L1 and L2. A reissued invitation starts a fresh
+  claim-attempt budget, but it does not reset these limits: an owner who requested 3
+  claim codes in 15 minutes waits for the oldest to age out before the new invitation
+  can be challenged.
 - The UAT host can raise any limit in its `.env`.

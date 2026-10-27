@@ -2131,7 +2131,9 @@ each is a setting of the same name in the environment.
   15 minutes; an eleventh in a day; a 21st code from one network address within an
   hour; a 31st lookup from one address within an hour. Carrier-grade NAT can put many
   people behind one address. So can anyone who knows the phone number and keeps
-  requesting resets for it.
+  requesting resets for it. A reissued owner invitation resets the claim-attempt
+  budget but not these limits, so an owner who has just requested 3 claim codes waits
+  before the new invitation can be challenged.
 - `ENV=dev`'s `1234` is unchanged, and the limits apply under `dev` too.
 
 **Frontend.** No change is required. The login screen, the sign-up page and the owner
