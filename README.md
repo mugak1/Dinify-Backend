@@ -185,7 +185,7 @@ break-glass sequence for a lost `ADMIN_SECRET_ENCRYPTION_KEY`.
 
 CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-**What CI runs** (a single-leg Python matrix pinned to **3.12.3**, matching the prod interpreter — on Ubuntu, against a **PostgreSQL 15** service, using `dinify_backend.test_settings`):
+**What CI runs** (a single-leg Python matrix pinned to **3.12.3**, matching the prod interpreter — on Ubuntu, against a **PostgreSQL 18.3** service, exactly the RDS target's engine version, using `dinify_backend.test_settings`):
 1. `pip install -r requirements.txt`
 2. `django check`
 3. `makemigrations --check --dry-run` — fails on un-generated migrations
@@ -197,7 +197,7 @@ CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 8. the tenant-isolation closure gate
 9. the **full** test suite: `python -m django test --settings=dinify_backend.test_settings`
 
-**Test database:** PostgreSQL 15 in CI; `test_settings.py` falls back to SQLite in-memory locally when no `DATABASE_*` env vars are set. MongoDB is mocked with `unittest.mock.MagicMock`. `scripts/verify.sh` runs the same checks locally in the same order — run it before opening a PR.
+**Test database:** PostgreSQL 18.3 in CI (the RDS target's exact version); `test_settings.py` falls back to SQLite in-memory locally when no `DATABASE_*` env vars are set. MongoDB is mocked with `unittest.mock.MagicMock`. `scripts/verify.sh` runs the same checks locally in the same order — run it before opening a PR.
 
 ### Test Coverage by App
 

@@ -36,7 +36,8 @@ jobs:
 
     services:
       postgres:
-        image: postgres:15
+        # Exactly the RDS target's engine version (dinifydb); moves only with it.
+        image: postgres:18.3
         env:
           POSTGRES_DB: test_dinify
           POSTGRES_USER: test_user

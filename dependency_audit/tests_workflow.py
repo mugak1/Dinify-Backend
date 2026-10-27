@@ -20,6 +20,9 @@ DEPLOY = load_workflow(WF("deploy-uat.yml"))
 SUITE = CI["jobs"]["suite"]["steps"]
 SNAPSHOT = "python -m dependency_audit snapshot"
 SCAN = "python -m dependency_audit self-test && python -m dependency_audit audit"
+# The engine version of the RDS target (dinifydb). CI's PostgreSQL service is exactly this
+# version and moves only with it: change the target, this constant and ci.yml together.
+TARGET_POSTGRES_VERSION = "18.3"
 
 
 def index_of(steps, run):
@@ -98,6 +101,12 @@ class TheAuditIsPartOfTheRequiredCheck(unittest.TestCase):
         for action in ("actions/checkout", "actions/setup-python"):
             self.assertEqual(uses(audit["steps"], action), uses(suite["steps"], action), action)
             self.assertEqual(len(uses(audit["steps"], action)), 1, action)
+
+
+class TheSuiteRunsAgainstTheTargetDatabase(unittest.TestCase):
+    def test_CONTRACT_the_postgres_service_is_exactly_the_target_engine_version(self):
+        # An exact minor, never a major tag or `latest`, so CI cannot drift from the target unseen.
+        self.assertEqual(CI["jobs"]["suite"]["services"]["postgres"]["image"], "postgres:" + TARGET_POSTGRES_VERSION)
 
 
 class AFailureReachesTheRequiredCheck(unittest.TestCase):
