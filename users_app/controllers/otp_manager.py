@@ -243,12 +243,18 @@ class OtpManager:
 
         After the bucket lock and before the DELETE, ``otp_limits.decide_issuance``
         takes the subject, destination and client locks (in that order) and decides L1
-        to L4 from one ledger statement and one counter statement. A refusal rolls the
-        transaction back, so it issues, deletes, records and sends nothing, and RAISES
-        ``otp_limits.OtpIssuanceLimited``: a 429 with one body for every limit. It is
-        an ``APIException``, so a DRF view that does not catch it still answers that
-        429. ``client`` is the network client a request came from; pass none for a
-        caller that is not acting for one, and L3 does not apply to it.
+        to L4 from one ledger statement and, when L3 applies, one counter statement. A
+        refusal rolls the transaction back, so it issues, deletes, records and sends
+        nothing, and RAISES ``otp_limits.OtpIssuanceLimited``: a 429 with one body for
+        every limit. It is an ``APIException``, so a DRF view that does not catch it
+        still answers that 429. ``client`` is the network client a request came from;
+        pass none for a caller that is not acting for one, and L3 does not apply to it.
+
+        The limits count and refuse by CLASS, decided from ``origin`` alone once it is
+        server-owned (``otp_limits.issuance_class``). A verified origin (password login,
+        login resend, owner-claim challenge) is counted against its own class's L1 and
+        L2 and is not subject to L3 or L4: it takes no client lock and reads no counter.
+        Any other origin, ``unattributed`` included, is unverified.
         """
         self.issued_otp_id = None
         # Canonicalise the msisdn at OTP creation so the stored UserOtp.msisdn,
@@ -335,9 +341,11 @@ class OtpManager:
                 _hold_bucket(user, msisdn, purpose)
                 # The D11 limits, decided here and nowhere else: after the bucket lock,
                 # before anything is deleted or written. A refusal raises and rolls back.
+                # The origin is the one recorded below, so the class the issuance is
+                # decided under is the class its ledger row is counted in afterwards.
                 decision = otp_limits.decide_issuance(
                     subject_key=subject_key, destination_key=destination_key,
-                    client_key=client_key,
+                    client_key=client_key, origin=origin,
                 )
                 otp_limits.refuse_inside(decision)
                 # Replace only this PURPOSE's earlier challenge to the same identity and

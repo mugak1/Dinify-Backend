@@ -1191,9 +1191,11 @@ class BucketLockLifetimeTests(_Bucket):
         self.assertEqual([lock for lock in inside if lock[1] == BUCKET_LOCK_CLASS],
                          [bucket_lock(user.pk, None, 'login')],
                          'the issuance did not hold exactly its own bucket lock')
-        # Beside it, only the D11 subject, destination and client locks (one each).
+        # Beside it, only the D11 subject and destination locks (one each). CHANGED BY THE
+        # D11 CLASS CORRECTION: a password login is a verified issuance, which takes no
+        # client lock (``OTPC``, 0x4F545043); #374 expected that lock here too.
         self.assertEqual(sorted(lock[1] for lock in inside if lock[1] != BUCKET_LOCK_CLASS),
-                         sorted([0x4F545053, 0x4F545044, 0x4F545043]), inside)
+                         sorted([0x4F545053, 0x4F545044]), inside)
         self.assertEqual(len(self.sends), 1)
         self.assertEqual(self.sends[0]['bucket'], 0,
                          'the bucket lock was still held when the code was sent')
