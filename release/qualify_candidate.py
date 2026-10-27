@@ -18,6 +18,7 @@ from release import candidate as cd
 from release import consumer as cs
 from release import sourcetree as st
 from release import testing as tt
+from dependency_audit import core
 
 MAIN_RUN, PR_RUN, OTHER_RUN = "9001", "9002", "9003"
 
@@ -415,6 +416,23 @@ class TheProducerRefusesToCertify(unittest.TestCase):
                 record = json.load(fh)
             self.assertIs(record["eligibility"]["promotable"], promotable, ci)
             self.assertEqual(record["artifact"]["name"].startswith("backend-candidate-nonpromotable-"), not promotable, ci)
+
+
+class TheAcceptedAuditOutcomes(unittest.TestCase):
+    """The audit outcomes a candidate may carry (CI-signal A-1). Every producer and consumer
+    here re-decides from RAW scanner output, and no adapter supplies the provenance that
+    defers a finding until A-2, so ``obligations_pending`` cannot yet be produced end to
+    end. These pin the set itself, and its agreement with the evaluator."""
+
+    def test_CONTRACT_obligations_pending_is_accepted_beside_the_two_that_already_were(self):
+        self.assertEqual(cd.ACCEPTED_AUDIT_OUTCOMES, ("within_policy", "exceptions_only", "obligations_pending"))
+
+    def test_CONTRACT_the_accepted_set_is_the_evaluators_exit_0_set(self):
+        self.assertEqual(cd.ACCEPTED_AUDIT_OUTCOMES, tuple(o for o in core.OUTCOMES if core.exit_code_for(o) == 0))
+
+    def test_CONTRACT_a_word_the_evaluator_does_not_emit_is_not_accepted(self):
+        for word in ("obligations_overdue", "clean", "blocking", "incomplete", ""):
+            self.assertNotIn(word, cd.ACCEPTED_AUDIT_OUTCOMES, word)
 
 
 if __name__ == "__main__":

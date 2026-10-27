@@ -7,17 +7,22 @@ repositories, digest pinned in all three suites — is the oracle both implement
 tested against. Change a rule here and the vectors fail until the same change lands in the
 other ecosystem.
 
-FOUR OUTCOMES, and they are not shades of one another:
+FIVE OUTCOMES, and they are not shades of one another:
 
-    within_policy    the audit completed and nothing the policy blocks was found
-    exceptions_only  the audit completed and passes ONLY because of specifically approved,
-                     still-valid exception records — visible, never reported as clean
-    blocking         the audit completed and found something the policy blocks, or a
-                     disposition record was refused (expired, malformed, broadened,
-                     mismatched, unused)
-    incomplete       no trustworthy result exists: the scanner, the collection, the parse,
-                     the inventory binding or the provenance failed, or a finding could not
-                     be classified. An empty report is NOT a clean report.
+    within_policy        the audit completed and nothing the policy blocks was found
+    exceptions_only      the audit completed and passes ONLY because of specifically
+                         approved, still-valid exception records — visible, never clean
+    obligations_pending  the audit completed and passes ONLY because an inherited high
+                         tooling finding is inside its dated deferral window — visible,
+                         with the date it starts to block, never clean
+    blocking             the audit completed and found something the policy blocks, or a
+                         disposition record was refused (expired, malformed, broadened,
+                         mismatched, unused)
+    incomplete           no trustworthy result exists: the scanner, the collection, the
+                         parse, the inventory binding or the provenance failed, or a finding
+                         could not be classified. An empty report is NOT a clean report.
+
+Precedence: incomplete > blocking > obligations_pending > exceptions_only > within_policy.
 
 THE RULES (the parent policy, D08 Stage B §6):
   - a CRITICAL or HIGH advisory blocks, whatever the scope;
@@ -27,6 +32,30 @@ THE RULES (the parent policy, D08 Stage B §6):
     as TRIAGE REQUIRED — never a zero-findings result;
   - anything else (unknown severity on tooling, unknown scope below high) cannot be
     evaluated, and a policy that cannot be evaluated has not passed: incomplete.
+
+THE DATED OBLIGATION (CI-signal A-1). Disposition records apply first, unchanged.
+Then an UNEXCEPTED finding that would block is DEFERRED — class ``deferred``, a
+``deadline``, counted under ``deferred`` — only when ALL of these hold:
+  - its scope is ``tooling`` and its severity is ``high`` (critical is never deferred);
+  - its optional ``provenance`` is exactly "inherited": the advisory was already
+    reportable for the base the change was made on, so the change did not introduce it;
+  - its optional ``reportableSince`` is a calendar date (the same check records use) no
+    later than the decision day;
+  - ``now`` is before 00:00 UTC on the deadline, ``reportableSince`` + HIGH_DEFERRAL_DAYS.
+Anything not ESTABLISHED falls back to blocking, exactly as before: a missing, null,
+malformed or unknown provenance; a missing, null, malformed, impossible or future date; a
+deadline already reached. It never falls back to deferral, and never to incomplete. The
+one exception is a field of the wrong JSON TYPE (a number, a boolean, a list, an object):
+that is an adapter that cannot fill in a finding, which the existing malformed-finding
+rule already answers — incomplete.
+
+INERT UNTIL SUPPLIED. No adapter emits ``provenance`` or ``reportableSince`` yet (step A-2
+does, and pip-audit's findings carry no severity, so none of them is "high" today), and a
+result in which nothing was deferred is byte-identical to the one this evaluator produced
+before the rule existed: the ``deferred`` count, a finding's ``deadline`` and the
+``deferred_finding`` reason appear ONLY when a deferral applied. Consumers re-decide
+retained results and compare ``counts`` exactly, so an always-present ``deferred: 0`` would
+make every result certified before the rule unreproducible.
 
 pip-audit reports NO severity, so every Python finding reaches this module as severity
 "unknown": on a runtime package it blocks, on tooling (pip) it is incomplete. That is the
@@ -40,15 +69,22 @@ from __future__ import annotations
 import datetime as _dt
 import re
 
-OUTCOMES = ("within_policy", "exceptions_only", "blocking", "incomplete")
+OUTCOMES = ("within_policy", "exceptions_only", "obligations_pending", "blocking", "incomplete")
 SEVERITIES = ("critical", "high", "moderate", "low", "info")
 SCOPES = ("runtime", "tooling")
 RECORD_KINDS = ("exception", "triage")
+# A finding's optional provenance. Only "inherited" can defer; anything else blocks as before.
+PROVENANCES = ("inherited", "introduced")
+
+# The dated-obligation window for an inherited HIGH tooling finding, in calendar days from
+# ``reportableSince``. A reviewed code change in all three repositories, never a policy
+# value. There is deliberately no window for CRITICAL: a critical finding blocks immediately.
+HIGH_DEFERRAL_DAYS = 7
 
 MAX_RECORD_DAYS = 90
 MIN_TEXT = 20
 
-_EXIT = {"within_policy": 0, "exceptions_only": 0, "blocking": 1, "incomplete": 2}
+_EXIT = {"within_policy": 0, "exceptions_only": 0, "obligations_pending": 0, "blocking": 1, "incomplete": 2}
 
 RECORD_KEYS = ("id", "kind", "advisory", "aliases", "package", "version", "paths", "scope",
                "applicability", "reason", "owner", "approval", "expires")
@@ -64,6 +100,8 @@ _REFERENCE_RE = re.compile(r"https://github\.com/mugak1/[A-Za-z0-9._-]+/(pull|is
 _DATE_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
 _DAY_MS = 86400000
 _FINDING_KEYS = ("advisory", "package", "version", "path", "scope", "severity")
+# Optional: absent and null both mean "not supplied". Any other non-string is malformed.
+_OPTIONAL_FINDING_KEYS = ("provenance", "reportableSince")
 
 
 def exit_code_for(outcome):
@@ -86,6 +124,15 @@ def parse_date(text):
     except ValueError:
         return None
     return int(_dt.datetime(d.year, d.month, d.day, tzinfo=_dt.timezone.utc).timestamp() * 1000)
+
+
+def _iso_date(ms):
+    """Epoch milliseconds at 00:00 UTC as ``YYYY-MM-DD``, or None when it is not one."""
+    try:
+        text = _dt.datetime.fromtimestamp(ms / 1000, tz=_dt.timezone.utc).date().isoformat()
+    except (OverflowError, ValueError, OSError):
+        return None
+    return text if parse_date(text) == ms else None
 
 
 def parse_instant(text):
@@ -213,8 +260,35 @@ def _uncorroborated_aliases(record, finding):
 def _finding_problems(finding, index):
     if not isinstance(finding, dict):
         return ["finding %d is not an object" % index]
+    problems = []
     missing = [k for k in _FINDING_KEYS if not (isinstance(finding.get(k), str) and finding.get(k) != "")]
-    return ["finding %d lacks %s" % (index, ", ".join(missing))] if missing else []
+    if missing:
+        problems.append("finding %d lacks %s" % (index, ", ".join(missing)))
+    mistyped = [k for k in _OPTIONAL_FINDING_KEYS if finding.get(k) is not None and not isinstance(finding.get(k), str)]
+    if mistyped:
+        problems.append("finding %d has %s that is not a string" % (index, ", ".join(mistyped)))
+    return problems
+
+
+def deferral_deadline(finding, now_ms):
+    """The dated obligation for ONE finding the policy would otherwise block, decided after
+    the records: its deadline (``YYYY-MM-DD``, from 00:00 UTC on which it blocks), or None
+    when deferral is not ESTABLISHED — which means the finding blocks, exactly as before."""
+    if not isinstance(finding, dict):
+        return None
+    if finding.get("scope") != "tooling" or finding.get("severity") != "high":
+        return None
+    if finding.get("provenance") != "inherited":
+        return None
+    since_ms = parse_date(finding.get("reportableSince"))
+    if since_ms is None or now_ms is None:
+        return None
+    if since_ms > (now_ms // _DAY_MS) * _DAY_MS:
+        return None
+    deadline_ms = since_ms + HIGH_DEFERRAL_DAYS * _DAY_MS
+    if now_ms >= deadline_ms:
+        return None
+    return _iso_date(deadline_ms)
 
 
 def evaluate(incomplete=(), findings=(), records=(), now=None):
@@ -319,6 +393,15 @@ def evaluate(incomplete=(), findings=(), records=(), now=None):
             reasons.append({"outcome": "blocking", "code": "record_refused", "detail": "%s: %s" % (entry["id"], "; ".join(entry["problems"]))})
     for f in decided:
         if f["class"] == "blocking" and f["disposition"] == "open":
+            deadline = deferral_deadline(f, now_ms)
+            if deadline is not None:
+                f["class"] = "deferred"
+                f["deadline"] = deadline
+                reasons.append({"outcome": "obligations_pending", "code": "deferred_finding",
+                                "detail": "%s (%s) on %s@%s at %s [%s]: inherited, reportable since %s; deferred until %s, from 00:00 UTC on which it blocks"
+                                          % (f.get("advisory"), f.get("severity"), f.get("package"), f.get("version"), f.get("path"),
+                                             f.get("scope"), f.get("reportableSince"), deadline)})
+                continue
             reasons.append({"outcome": "blocking", "code": "blocking_finding",
                             "detail": "%s (%s) on %s@%s at %s [%s]" % (f.get("advisory"), f.get("severity"), f.get("package"),
                                                                      f.get("version"), f.get("path"), f.get("scope"))})
@@ -333,10 +416,16 @@ def evaluate(incomplete=(), findings=(), records=(), now=None):
         "refusedRecords": sum(1 for e in checked if e["problems"]),
         "appliedRecords": sum(1 for e in checked if not e["problems"] and e["applied"] > 0),
     }
+    # Emitted only when a deferral applied: see INERT UNTIL SUPPLIED above.
+    deferred = sum(1 for f in decided if f["class"] == "deferred")
+    if deferred > 0:
+        counts["deferred"] = deferred
     if any(r["outcome"] == "incomplete" for r in reasons):
         outcome = "incomplete"
     elif any(r["outcome"] == "blocking" for r in reasons):
         outcome = "blocking"
+    elif deferred > 0:
+        outcome = "obligations_pending"
     elif counts["excepted"] > 0:
         outcome = "exceptions_only"
     else:
@@ -358,6 +447,12 @@ def headline(result):
     tail = ["no advisories reported for the audited inventory" if c["findings"] == 0 else "%d advisory finding(s)" % c["findings"]]
     if c["blocking"]:
         tail.append("%d BLOCKING" % c["blocking"])
+    if c.get("deferred"):
+        findings = result.get("findings") if isinstance(result.get("findings"), list) else []
+        deadlines = sorted(f["deadline"] for f in findings
+                           if isinstance(f, dict) and f.get("class") == "deferred" and isinstance(f.get("deadline"), str))
+        tail.append("%d inherited high tooling finding(s) DEFERRED under a dated obligation%s"
+                    % (c["deferred"], " (blocks from 00:00 UTC on %s at the earliest)" % deadlines[0] if deadlines else ""))
     if c["excepted"]:
         tail.append("%d under approved exception" % c["excepted"])
     if c["triageRequired"]:
@@ -371,6 +466,7 @@ def headline(result):
     label = {
         "within_policy": "AUDIT COMPLETE — WITHIN POLICY",
         "exceptions_only": "AUDIT COMPLETE — PASSES ONLY WITH APPROVED EXCEPTIONS",
+        "obligations_pending": "AUDIT COMPLETE — PASSES WITH DATED OBLIGATIONS OUTSTANDING",
         "blocking": "AUDIT COMPLETE — BLOCKING",
         "incomplete": "AUDIT UNAVAILABLE OR INCOMPLETE — NOT A CLEAN RESULT",
     }.get(result["outcome"], "AUDIT OUTCOME UNKNOWN")
