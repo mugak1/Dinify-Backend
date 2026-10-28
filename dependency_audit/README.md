@@ -97,6 +97,13 @@ the 41 vectors that predate the rule, by digest (the same digests the JavaScript
 pin). `release/candidate.py`'s `ACCEPTED_AUDIT_OUTCOMES` accepts `obligations_pending`, and
 nothing else new.
 
+**Not yet handled, for a future Backend A-3 (the provenance step for Python, deferred by the
+owner):** `release/preflight.py`'s `deadline_ms` builds the preflight deadline from the
+assessment window and the applied records only, not from any obligation deadline, which is
+unreachable today only because `pip_adapter.py` gives every finding severity `"unknown"`, so
+nothing can be deferred; A-3 must add obligation deadlines to it before any Python finding
+can defer.
+
 pip and pip-audit configuration is never inherited: `PIP_*` (including `PIP_AUDIT_*`),
 `PYTHON*`, `VIRTUAL_ENV` and `CONDA_PREFIX` are removed from the scanner's environment, the
 index is named explicitly, and each scan gets a fresh cache directory so no earlier
