@@ -8,6 +8,7 @@ in two languages are held to ONE policy without giving a pull-request job access
 another repository.
 """
 
+import datetime
 import hashlib
 import json
 import os
@@ -127,6 +128,50 @@ class ConformanceVectorTests(unittest.TestCase):
         for outcome in core.OUTCOMES:
             mutated = {"cases": [dict(c, expect=dict(c["expect"], outcome=outcome)) for c in VECTORS["cases"]]}
             self.assertTrue(run_conformance(mutated), outcome)
+
+    # The RUNTIME self-test (run before every real audit) must refuse what the unit suite
+    # above refuses, because a build can reach the gate without its unit suite having run.
+    # Two mutants of the dated obligation the outcome/exit/records/counts comparison alone
+    # let through:
+    @staticmethod
+    def _emits_deferred_zero(*args):
+        r = core.evaluate(*args)
+        if "deferred" not in r["counts"]:
+            r = dict(r, counts=dict(r["counts"], deferred=0))
+        return r
+
+    @staticmethod
+    def _deadline_one_day_late(*args):
+        r = core.evaluate(*args)
+
+        def later(d):
+            return (datetime.date.fromisoformat(d) + datetime.timedelta(days=1)).isoformat()
+
+        return dict(r, findings=[dict(f, deadline=later(f["deadline"])) if f["class"] == "deferred" else f for f in r["findings"]])
+
+    def test_REGRESSION_the_runtime_self_test_refuses_an_evaluator_that_emits_deferred_0(self):
+        failures = run_conformance(VECTORS, self._emits_deferred_zero)
+        self.assertGreaterEqual(len(failures), 41)
+        self.assertTrue(all("counts.deferred is present (0)" in f for f in failures), failures[:3])
+
+    def test_REGRESSION_the_runtime_self_test_refuses_an_evaluator_whose_deadline_is_one_day_late(self):
+        deferring = sum(1 for c in VECTORS["cases"] if c["expect"].get("deadlines"))
+        self.assertGreater(deferring, 0)
+        failures = run_conformance(VECTORS, self._deadline_one_day_late)
+        self.assertEqual(len(failures), deferring, failures)
+        self.assertTrue(all("deadlines [" in f for f in failures))
+
+    def test_REGRESSION_a_count_the_result_lacks_is_a_reported_failure_not_a_KeyError(self):
+        def drops_findings_count(*args):
+            r = core.evaluate(*args)
+            return dict(r, counts={k: v for k, v in r["counts"].items() if k != "findings"})
+
+        failures = run_conformance(VECTORS, drops_findings_count)
+        self.assertTrue(failures)
+        self.assertTrue(any("findings None != " in f for f in failures), failures[:3])
+
+    def test_CONTROL_the_same_comparison_with_the_real_evaluator_passed_explicitly_finds_nothing(self):
+        self.assertEqual(run_conformance(VECTORS, core.evaluate), [])
 
 
 class RuleTests(unittest.TestCase):
