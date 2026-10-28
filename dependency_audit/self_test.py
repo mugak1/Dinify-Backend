@@ -1,11 +1,13 @@
 """THE SELF-TEST — run before every real audit, as the repository's other gates run
 theirs: an evaluator that silently stopped refusing would pass everything.
 
-Offline and deterministic: every conformance vector decides as recorded; a known-clean
-pip-audit report passes (so an always-failing gate cannot pass here); a runtime advisory
-blocks; a tooling advisory with pip-audit's absent severity is incomplete; and an empty,
-truncated, uncovered or status-contradicting answer, a skipped package and a timeout are
-each incomplete. Returns the list of failures; empty means trustworthy.
+Offline and deterministic: every conformance vector decides as recorded (the dated
+obligation's deadlines, and the ABSENCE of every deferral field where nothing was
+deferred, included); a known-clean pip-audit report passes (so an always-failing gate
+cannot pass here); a runtime advisory blocks; a tooling advisory with pip-audit's absent
+severity is incomplete; and an empty, truncated, uncovered or status-contradicting answer,
+a skipped package and a timeout are each incomplete. Returns the list of failures; empty
+means trustworthy.
 """
 
 from __future__ import annotations
@@ -19,21 +21,47 @@ from . import pip_adapter as pa
 CONFORMANCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conformance.json")
 
 
-def run_conformance(doc):
+def run_conformance(doc, decide=None):
+    """Every vector, decided by ``decide`` (the evaluator; a parameter only so a test can
+    hand it a mutant and see the comparison refuse it). Beyond outcome, exit code, refused
+    records and counts, the dated obligation is held to what the vector records — the same
+    assertions tests_core.py makes, so a build whose unit suite never ran still cannot pass
+    the gate with them broken: the deferred findings' deadlines are exactly the vector's
+    ``deadlines`` (absent: none); ``counts.deferred`` is PRESENT only when something was
+    deferred (an emitted ``deferred: 0`` would make every result certified before A-1
+    unreproducible); no finding that was not deferred carries a ``deadline``; and the
+    ``deferred_finding`` reason appears exactly when something was deferred. A count the
+    result lacks is a reported failure, never a KeyError.
+    """
+    decide = decide or core.evaluate
     failures = []
     for c in doc["cases"]:
-        r = core.evaluate(c["incomplete"], c["findings"], c["records"], c["now"])
-        refused = sorted(x["id"] for x in r["records"] if x["status"] == "refused")
+        r = decide(c["incomplete"], c["findings"], c["records"], c["now"])
+        counts = r.get("counts") if isinstance(r.get("counts"), dict) else {}
+        findings = r.get("findings") if isinstance(r.get("findings"), list) else []
+        reasons = r.get("reasons") if isinstance(r.get("reasons"), list) else []
+        refused = sorted(x.get("id") for x in r.get("records", []) if x.get("status") == "refused")
         errs = []
-        if r["outcome"] != c["expect"]["outcome"]:
-            errs.append("outcome %s != %s" % (r["outcome"], c["expect"]["outcome"]))
-        if r["exitCode"] != c["expect"]["exitCode"]:
-            errs.append("exit %s != %s" % (r["exitCode"], c["expect"]["exitCode"]))
+        if r.get("outcome") != c["expect"]["outcome"]:
+            errs.append("outcome %s != %s" % (r.get("outcome"), c["expect"]["outcome"]))
+        if r.get("exitCode") != c["expect"]["exitCode"]:
+            errs.append("exit %s != %s" % (r.get("exitCode"), c["expect"]["exitCode"]))
         if refused != c["expect"]["refused"]:
             errs.append("refused %s != %s" % (refused, c["expect"]["refused"]))
         for k, v in c["expect"]["counts"].items():
-            if r["counts"][k] != v:
-                errs.append("%s %s != %s" % (k, r["counts"][k], v))
+            if counts.get(k) != v:
+                errs.append("%s %s != %s" % (k, counts.get(k), v))
+        deadlines = c["expect"].get("deadlines", [])
+        deferred = sorted(str(f.get("deadline")) for f in findings if f.get("class") == "deferred")
+        if deferred != deadlines:
+            errs.append("deadlines %s != %s" % (deferred, deadlines))
+        if ("deferred" in counts) != (len(deadlines) > 0):
+            errs.append("counts.deferred is %s, %d deferral(s) expected"
+                        % ("present (%s)" % counts.get("deferred") if "deferred" in counts else "absent", len(deadlines)))
+        if any(f.get("class") != "deferred" and "deadline" in f for f in findings):
+            errs.append("a finding that was not deferred carries a deadline")
+        if any(x.get("code") == "deferred_finding" for x in reasons) != (len(deadlines) > 0):
+            errs.append("the deferred_finding reason is %s" % ("missing" if deadlines else "present with nothing deferred"))
         if errs:
             failures.append('conformance "%s": %s' % (c["name"], "; ".join(errs)))
     return failures
