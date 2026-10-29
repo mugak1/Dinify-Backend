@@ -466,8 +466,61 @@ class ProducerTransactionTests(InboxTestBase):
         RestaurantNotification.objects.create(
             restaurant=self.restaurant_b, module=MODULE_TABLES,
             kind=NotificationKind.ITEM_SOLD_OUT, dedupe_key='sold_out:oldb', occurred_at=old)
+        Restaurant.objects.filter(pk=self.restaurant_a.pk).update(accepting_orders=False)
         with mock.patch.object(producers, 'PRUNE_BATCH', 2):
             producers.notify_ordering_changed(self.restaurant_a.pk, False, None)
         self.assertEqual(
             RestaurantNotification.objects.filter(restaurant=self.restaurant_a, occurred_at=old).count(), 1)
         self.assertTrue(RestaurantNotification.objects.filter(dedupe_key='sold_out:oldb').exists())
+
+class OutOfOrderCallbackTests(InboxTestBase):
+    """Codex P2 on #379: two overlapping changes can run their after-commit
+    callbacks in the opposite order to their commits. A stale event must not
+    overwrite the state that actually stands."""
+
+    def _put_ordering(self, user, accepting):
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            resp = self.client.put(
+                RESTAURANTS_PUT,
+                data=json.dumps({'id': str(self.restaurant_a.pk), 'accepting_orders': accepting}),
+                content_type='application/json', **self.auth(user))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(len(callbacks), 1)
+        return callbacks[0]
+
+    def _put_stock(self, user, in_stock):
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            resp = self.client.put(
+                _stock_url(self.item.pk), data=json.dumps({'in_stock': in_stock}),
+                content_type='application/json', **self.auth(user))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return callbacks
+
+    def test_a_pause_callback_landing_after_a_resume_does_not_overwrite_it(self):
+        pause = self._put_ordering(self.manager_a, False)
+        resume = self._put_ordering(self.owner_a, True)
+        resume()   # the later change's callback runs first...
+        pause()    # ...and the earlier one lands after it
+        row = RestaurantNotification.objects.get()
+        self.assertEqual((row.kind, row.payload, row.actor_id),
+                         ('ordering_resumed', {'accepting_orders': True}, self.owner_a.pk))
+
+    def test_a_stale_pause_with_no_row_yet_writes_nothing(self):
+        pause = self._put_ordering(self.manager_a, False)
+        self._put_ordering(self.owner_a, True)
+        pause()
+        self.assertFalse(RestaurantNotification.objects.exists())
+
+    def test_control_in_order_callbacks_still_announce_the_latest(self):
+        pause = self._put_ordering(self.manager_a, False)
+        pause()
+        self.assertEqual(RestaurantNotification.objects.get().kind, 'ordering_paused')
+        resume = self._put_ordering(self.owner_a, True)
+        resume()
+        self.assertEqual(RestaurantNotification.objects.get().kind, 'ordering_resumed')
+
+    def test_a_sold_out_callback_landing_after_back_in_stock_writes_nothing(self):
+        sold_out = self._put_stock(self.manager_a, False)
+        self.assertEqual(self._put_stock(self.owner_a, True), [], 'back in stock schedules nothing')
+        sold_out[0]()
+        self.assertFalse(RestaurantNotification.objects.exists())

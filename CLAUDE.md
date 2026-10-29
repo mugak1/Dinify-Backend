@@ -2506,7 +2506,10 @@ so keep it current when conventions change.
   - **REPEAT RULES:** a review alerts once; a sold-out repeat re-alerts only when the
     last alert is older than 10 minutes (`SOLD_OUT_REALERT_AFTER`), otherwise it
     updates the payload; ordering re-alerts on EVERY actual change and an unchanged
-    save writes nothing.
+    save writes nothing. **A STALE EVENT IS DROPPED** (Codex P2 on #379): the
+    callbacks of two overlapping changes can run in the opposite order to their
+    commits, so the ordering and sold-out producers re-read the state they announce
+    under the notification row lock and skip the write when it no longer holds.
   - **PAYLOADS** carry no credentials, OTPs or diner contact details, and no diner
     free text: a review's comment is not copied. The actor's display name is read
     at read time (a first name, or "Dinify support" for a platform-staff actor).
@@ -2520,7 +2523,7 @@ so keep it current when conventions change.
     the producer/read-record writes and `(restaurant, dedupe_key)` `remediated`),
     and a §8 addendum in `dinify_backend/tenancy/TENANT_ISOLATION_CLOSURE.md`. No
     `ModelSerializer` was added, so the relation ratchet's baseline is unchanged.
-    Pinned by `notifications_app/tests_inbox.py` (35)
+    Pinned by `notifications_app/tests_inbox.py` (39)
 - Support module: ✅ `support_app` — restaurant-facing `SupportIssue`
   ticketing, Secretary-pattern
   endpoints at `api/v1/support/` (`support_app/urls.py`): `issues/` and

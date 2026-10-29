@@ -33,6 +33,11 @@ THE REPEAT RULES:
     ``accepting_orders`` re-alerts. A save that leaves it unchanged never reaches
     this module (the call site compares before and after).
 
+A STALE EVENT IS DROPPED. Callbacks of two overlapping changes can run in the
+opposite order to their commits, so the ordering and sold-out producers re-read
+the state they announce under the notification row lock and skip the write when
+it no longer holds; the later change's own callback announces what stands.
+
 PAYLOADS are built here, server-side, and carry no credentials, OTPs, diner
 contact details or diner free text: a review's comment is NOT copied, because it
 is written by a diner and may hold a phone number.
@@ -106,6 +111,7 @@ def notify_item_sold_out(restaurant_id, menu_item_id, item_name, actor_id) -> No
         payload={'menu_item_id': str(menu_item_id), 'item_name': item_name or ''},
         actor_id=actor_id,
         realert=lambda row, now: now - row.occurred_at >= SOLD_OUT_REALERT_AFTER,
+        still_true=lambda: _item_in_stock(menu_item_id) is False,
     )
 
 
@@ -120,14 +126,24 @@ def notify_ordering_changed(restaurant_id, accepting_orders: bool, actor_id) -> 
         payload={'accepting_orders': bool(accepting_orders)},
         actor_id=actor_id,
         realert=lambda row, now: True,
+        still_true=lambda: _accepting_orders(restaurant_id) is bool(accepting_orders),
     )
 
 
 # --- the one write path -------------------------------------------------------
 
-def _upsert(*, restaurant_id, module, kind, dedupe_key, payload, actor_id, realert) -> None:
+def _upsert(*, restaurant_id, module, kind, dedupe_key, payload, actor_id, realert,
+            still_true=None) -> None:
     """
     Create the (restaurant, dedupe_key) row, or apply the repeat rule to it.
+
+    ``still_true`` (optional) re-reads the state this event announces, and the
+    write is skipped when it no longer holds. It is asked AFTER the row lock (or
+    just before the create that the unique key arbitrates), because callbacks of
+    two overlapping changes can run in the opposite order to their commits: a
+    pause's callback landing after a resume committed would otherwise overwrite
+    "resumed" with "paused". The later change's own callback announces the state
+    that actually stands (Codex P2 on #379).
 
     A RE-ALERT moves ``occurred_at`` forward and records the kind, payload and
     actor of this occurrence. A bump that does not re-alert updates the payload
@@ -139,6 +155,8 @@ def _upsert(*, restaurant_id, module, kind, dedupe_key, payload, actor_id, reale
         row = (RestaurantNotification.objects.select_for_update()
                .filter(restaurant_id=restaurant_id, dedupe_key=dedupe_key).first())
         if row is None:
+            if still_true is not None and not still_true():
+                return
             try:
                 with transaction.atomic():
                     RestaurantNotification.objects.create(
@@ -153,6 +171,8 @@ def _upsert(*, restaurant_id, module, kind, dedupe_key, payload, actor_id, reale
                 # the repeat rule to that row instead.
                 row = (RestaurantNotification.objects.select_for_update()
                        .get(restaurant_id=restaurant_id, dedupe_key=dedupe_key))
+        if still_true is not None and not still_true():
+            return
         if realert(row, now):
             row.kind = kind
             row.module = module
@@ -164,6 +184,18 @@ def _upsert(*, restaurant_id, module, kind, dedupe_key, payload, actor_id, reale
             row.payload = payload
             row.save(update_fields=['payload', 'updated_at'])
         _prune(restaurant_id, now)
+
+
+def _accepting_orders(restaurant_id):
+    from restaurants_app.models import Restaurant
+    return (Restaurant.objects.filter(pk=restaurant_id)
+            .values_list('accepting_orders', flat=True).first())
+
+
+def _item_in_stock(menu_item_id):
+    from restaurants_app.models import MenuItem
+    return (MenuItem.objects.filter(pk=menu_item_id)
+            .values_list('in_stock', flat=True).first())
 
 
 def _prune(restaurant_id, now) -> None:
