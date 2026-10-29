@@ -21,6 +21,7 @@ from reviews_app.serializers import (
     ReviewWriteSerializer,
     ReviewRestaurantReadSerializer,
 )
+from notifications_app.producers import notify_low_review, schedule
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,10 @@ def submit_review(order_id, rating_fields, comment=None, tags=None,
     try:
         with transaction.atomic():
             review = serializer.save(order=order)
+            # A low review tells the restaurant's staff in-app (SHELL-FINISH-00).
+            # After commit and best-effort: it never changes this response, and a
+            # review that rolled back is never announced.
+            schedule(notify_low_review, review)
     except IntegrityError:
         return {
             'status': 409,

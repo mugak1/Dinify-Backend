@@ -244,6 +244,12 @@ _RECORD_MODULE = {
 }
 
 
+def _accepting_orders(restaurant_id):
+    """The stored ``accepting_orders`` for one restaurant, or None if not found."""
+    return (Restaurant.objects.filter(pk=restaurant_id)
+            .values_list('accepting_orders', flat=True).first())
+
+
 #: The records whose WRITES an order admission reads, and which therefore take
 #: the exclusive admission barrier. `restaurants` is the pause writer
 #: (`accepting_orders`); the three menu records are what `purchase_integrity`
@@ -1411,7 +1417,27 @@ class RestaurantSetupEndpoint(APIView):
                 _lock_parent_section(
                     config_detail, secretary_args['instance_queryset'],
                     put_data.get('id'))
+                # Ordering paused or resumed tells the floor in-app
+                # (SHELL-FINISH-00). Read before and after UNDER the exclusive
+                # admission lock this writer already holds, so a concurrent pause
+                # cannot be misattributed; only an actual change notifies. After
+                # commit and best-effort: the response never depends on it.
+                watch_ordering = (
+                    config_detail == 'restaurants'
+                    and admission_target is not None
+                    and 'accepting_orders' in put_data
+                )
+                ordering_before = (
+                    _accepting_orders(admission_target) if watch_ordering else None)
                 response = Secretary(secretary_args).update()
+                if watch_ordering and ordering_before is not None:
+                    ordering_after = _accepting_orders(admission_target)
+                    if ordering_after is not None and ordering_after != ordering_before:
+                        from notifications_app.producers import (
+                            notify_ordering_changed, schedule,
+                        )
+                        schedule(notify_ordering_changed, admission_target,
+                                 ordering_after, getattr(request.user, 'pk', None))
         else:
             response = Secretary(secretary_args).update()
 

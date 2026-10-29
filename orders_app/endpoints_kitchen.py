@@ -391,6 +391,7 @@ class KitchenMenuItemStockView(APIView):
             # being told. The explicit branch does not need it and is harmless
             # either way; asking once keeps the two on one path.
             item = MenuItem.objects.select_for_update().get(pk=item.pk)
+            was_in_stock = item.in_stock
 
             if 'in_stock' in request.data:
                 item.in_stock = bool(request.data.get('in_stock'))
@@ -398,6 +399,13 @@ class KitchenMenuItemStockView(APIView):
                 item.in_stock = not item.in_stock
 
             item.save(update_fields=['in_stock', 'time_last_updated'])
+            # Sold out FROM THE BOARD tells the floor in-app (SHELL-FINISH-00): the
+            # True -> False transition only, read under the row lock above. After
+            # commit and best-effort; the response below never depends on it.
+            if was_in_stock and not item.in_stock:
+                from notifications_app.producers import notify_item_sold_out, schedule
+                schedule(notify_item_sold_out, item.section.restaurant_id, item.pk,
+                         item.name, getattr(request.user, 'pk', None))
             audit_delegated_write(request, after_state={
                 'resource': 'MenuItem',
                 'menu_item_id': str(item.id),
