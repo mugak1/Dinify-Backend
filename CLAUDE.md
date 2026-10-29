@@ -2458,6 +2458,69 @@ so keep it current when conventions change.
   `on_delete=PROTECT`; dining areas and tables expose `deletion_blockers()`
   and the restaurant-setup DELETE endpoint returns HTTP 409 when a dependent
   still exists
+- In-app notifications store (SHELL-FINISH-00, PR 4): ✅ `notifications_app` now has
+  a PostgreSQL store for operational events a restaurant's staff need, read by the
+  portal's bell. **It is NOT the MongoDB `notifications` collection**, which is the
+  email/SMS outbox (`send_messages`) and the source of the legacy
+  `api/v1/notifications/` endpoint; both are untouched. Migration
+  `notifications_app/0001_initial`: two `CreateModel`s and nothing else.
+  - **`RestaurantNotification`** is addressed to a RESTAURANT and a MODULE, never a
+    person: `restaurant` (FK, CASCADE), `module` (`reviews` | `tables`, a
+    `CheckConstraint`), `kind`, a server-built `payload`, `actor` (FK, SET_NULL),
+    `dedupe_key` (UNIQUE with `restaurant`) and `occurred_at`. **`NotificationRead`**
+    is per user: one row per (notification, user) with `read_at`.
+  - **VISIBILITY IS DECIDED AT READ TIME, in one place** (`notifications_app/inbox.py`
+    `visible_notifications`): the user must be employed at the restaurant, the row's
+    module must pass `can_user_access_module` for them there, and the row's actor
+    never sees it. So a Roles & Access change applies to every existing row at once
+    and no row is rewritten. List, count, mark-one and mark-all all go through it.
+  - **UNREAD = no read record at or after `occurred_at`.** A RE-ALERT moves
+    `occurred_at` forward, so an earlier read goes stale without being deleted; a
+    bump that does not re-alert updates the payload only. Nothing deletes a read
+    record except the cascade.
+  - **Routes** (`api/v1/notifications/inbox/…`): `GET ?restaurant=` (newest first, at
+    most 50, plus the count), `GET unread-count/?restaurant=` (cheap enough to poll;
+    pinned flat in the row count), `POST <uuid>/read/`, `POST read-all/?restaurant=`.
+    `restaurant` is REQUIRED (the bell covers the selected restaurant only). A
+    missing, malformed, foreign or unknown restaurant, and a row the caller may not
+    see, all get the same `404 {"status":404,"message":"Not found"}`. Responses are
+    `no-store`. Not on the delegated `ALLOWED_ROUTES`, so a delegated session is
+    refused before dispatch.
+  - **THREE PRODUCERS** (`notifications_app/producers.py`), each called from one
+    place: a review below `PUBLIC_RATING_THRESHOLD` (`submit_review.py`, module
+    `reviews`, one row per review); a dish sold out FROM THE KITCHEN BOARD,
+    `in_stock` True→False only, read under the board's row lock
+    (`KitchenMenuItemStockView`, module `tables`); and `accepting_orders` changed,
+    read before and after under the restaurants PUT's exclusive admission lock (the
+    restaurants PUT in `restaurant_setup.py`, module `tables`). Owner decisions: the
+    two `tables` events are what the floor needs mid-service; the menu-setup PUT's
+    `in_stock` write is NOT a source (audit item 7 makes its transitions
+    unreliable); a support-status event was dropped because nothing writes an
+    issue's status.
+  - **AFTER COMMIT AND BEST-EFFORT.** Producers are registered with
+    `producers.schedule`, which calls `transaction.on_commit(..., robust=True)`
+    inside the triggering transaction and catches and logs any failure. **This is
+    the repository's first `on_commit`.** A rolled-back change is never announced,
+    and a producer failure never changes the triggering response (pinned per
+    producer).
+  - **REPEAT RULES:** a review alerts once; a sold-out repeat re-alerts only when the
+    last alert is older than 10 minutes (`SOLD_OUT_REALERT_AFTER`), otherwise it
+    updates the payload; ordering re-alerts on EVERY actual change and an unchanged
+    save writes nothing.
+  - **PAYLOADS** carry no credentials, OTPs or diner contact details, and no diner
+    free text: a review's comment is not copied. The actor's display name is read
+    at read time (a first name, or "Dinify support" for a platform-staff actor).
+  - **RETENTION:** the inbox shows the last 30 days; each producer write prunes that
+    restaurant's rows older than 60 days, at most 200 per write. Nothing is
+    scheduled.
+  - **ROLLBACK:** the migration only adds tables, so rolling the CODE back leaves them
+    inert. Reversing the schema needs a forward migration dropping both tables,
+    which loses only inbox rows and read state.
+  - Tenancy: three `non_fk_tenant_inventory.py` entries (payload ids `audited`;
+    the producer/read-record writes and `(restaurant, dedupe_key)` `remediated`),
+    and a §8 addendum in `dinify_backend/tenancy/TENANT_ISOLATION_CLOSURE.md`. No
+    `ModelSerializer` was added, so the relation ratchet's baseline is unchanged.
+    Pinned by `notifications_app/tests_inbox.py` (35)
 - Support module: ✅ `support_app` — restaurant-facing `SupportIssue`
   ticketing, Secretary-pattern
   endpoints at `api/v1/support/` (`support_app/urls.py`): `issues/` and
@@ -3119,6 +3182,10 @@ so keep it current when conventions change.
   `delegation_scopes.py`, which records why for each
 - `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
   `issues/`, `issues/<uuid:issue_id>/` — separate app (`admin/issues/` retired)
+- `api/v1/notifications/` → notifications_app (`notifications_app/urls.py`): the
+  root is the legacy MongoDB-backed endpoint (unchanged); `inbox/`,
+  `inbox/unread-count/`, `inbox/<id>/read/` and `inbox/read-all/` are the
+  PostgreSQL in-app inbox (SHELL-FINISH-00, PR 4)
 - `api/v1/reviews/` → reviews_app endpoints (`reviews_app/urls.py`):
   `submit/`, `summary/`, `analytics/`, `<int:review_id>/resolution/`,
   `` (root) — separate app
@@ -6574,7 +6641,10 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `commercial_app/migrations/0001_initial.py` (the Step-3B commercial domain: two
   new tables with their constraints and one index, NO `RunPython`/`RunSQL`, no
   existing table touched, zero rows created — see "Commercial & Service
-  Configuration Domain")
+  Configuration Domain"),
+  `notifications_app/migrations/0001_initial.py` (the SHELL-FINISH-00 in-app
+  notifications store: two new tables, their constraints and one index, NO
+  `RunPython`, no existing table touched — see "In-app notifications store")
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main` and on PRs to `main`

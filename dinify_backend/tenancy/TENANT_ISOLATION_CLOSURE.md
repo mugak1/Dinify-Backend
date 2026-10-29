@@ -139,6 +139,24 @@ exact assurance boundary; `WRITE_ALL_FIELDS_DEBT` is empty and frozen.
   construction/reasoning (with adjacent test evidence cited), but resting on
   argument rather than a dedicated adversarial test.
 
+**Addendum, SHELL-FINISH-00 PR 4 (October 2026): the in-app notifications store.**
+Three entries were added, so the inventory now holds 20 (15 remediated, 5
+audited, 0 pending-audit). The store (`notifications_app`) keeps its tenant in a
+real foreign key, `RestaurantNotification.restaurant`; the three entries cover what
+sits beside it:
+
+- **remediated, `direct-write`:** the producer writes and the read-record upsert.
+  No request field reaches either; a producer's restaurant comes from the row its
+  already-authorized caller holds, and a read record is written only for a row that
+  passes the inbox's one visibility rule (employment, `can_user_access_module` on
+  the row's module, not the actor);
+- **remediated, `cache-idempotency-key`:** `(restaurant, dedupe_key)`, unique
+  together at the database and filtered by both on every lookup;
+- **audited, `json-uuid`:** the payload's `menu_item_id` / `review_id`, which are
+  display data built server-side and never used to select or bind a row.
+
+Each note cites its proving test in `notifications_app/tests_inbox.py`.
+
 ## 9. Public-media disposition
 
 Every uploaded file field is a public-by-design `ImageField`:
@@ -153,7 +171,8 @@ must not rely on an unguessable URL alone (a re-audit trigger, below).
 ## 10. Accepted residual risks
 
 - The suite proves the **tested threat model**, not the absence of all defects.
-- The four `audited` non-FK entries rest on reasoning + adjacent tests, not
+- The `audited` non-FK entries (four from this pass, and the notifications
+  payload entry added in §8's addendum) rest on reasoning + adjacent tests, not
   dedicated adversarial tests.
 - Mocked MongoDB behaviour (`archive_record` / `save_action_log` are wrapped and
   best-effort) does not prove live Mongo deployment behaviour; Mongo is currently

@@ -356,6 +356,61 @@ INVENTORY = [
                 "by tests_tenant_isolation_closure.IdempotencyCounterScopingClosureTests."
                 "test_daily_counters_are_per_restaurant.",
     },
+    # --- in-app notifications store (SHELL-FINISH-00, PR 4) --------------------
+    {
+        "identifier": "RestaurantNotification.payload (menu_item_id, review_id)",
+        "location": "notifications_app/producers.py (notify_item_sold_out, notify_low_review)",
+        "kind": "json-uuid",
+        "owner": "notifications",
+        "follow_up_domain": "in-app-notifications",
+        "status": "audited",
+        "note": "The payload carries a menu item UUID (sold out) or a review id "
+                "(low review) as DISPLAY data. Both are built server-side from the "
+                "row the producer was handed — the item locked under the kitchen "
+                "stock toggle, the review just saved — and the notification's own "
+                "restaurant FK is that same row's restaurant. No read path SELECTS "
+                "or BINDS anything by a payload id: the inbox scopes every row by "
+                "its restaurant FK, an employment check and the module resolver, "
+                "then returns the payload verbatim. Proven by "
+                "notifications_app.tests_inbox.TenantIsolationTests and "
+                "SoldOutProducerTests.test_fires_after_commit_never_before.",
+    },
+    {
+        "identifier": "RestaurantNotification.objects.create/update + NotificationRead bulk upsert",
+        "location": "notifications_app/producers.py:_upsert; notifications_app/inbox.py:_upsert_reads",
+        "kind": "direct-write",
+        "owner": "notifications",
+        "follow_up_domain": "in-app-notifications",
+        "status": "remediated",
+        "note": "No serializer and no request field reaches either write. A "
+                "producer's restaurant id comes from the triggering row the caller "
+                "already authorized (the kitchen toggle's item, gated on the "
+                "kitchen module; the restaurants PUT's server-resolved admission "
+                "target, gated by check_permission; the saved review's "
+                "denormalised restaurant). A read record is written only for a "
+                "notification that passes the inbox's ONE visibility rule "
+                "(employment + can_user_access_module on its module + not the "
+                "actor), so a user cannot mark another tenant's or another "
+                "module's row. Proven by "
+                "notifications_app.tests_inbox.TenantIsolationTests"
+                ".test_marking_a_foreign_notification_is_404_and_writes_nothing and "
+                "ModuleVisibilityTests.test_a_row_the_user_cannot_see_cannot_be_marked.",
+    },
+    {
+        "identifier": "RestaurantNotification (restaurant, dedupe_key)",
+        "location": "notifications_app/models.py (restaurant_notification_dedupe_unique)",
+        "kind": "cache-idempotency-key",
+        "owner": "notifications",
+        "follow_up_domain": "in-app-notifications",
+        "status": "remediated",
+        "note": "The repeat rule's key is UNIQUE together with the restaurant FK at "
+                "the database, and every producer lookup filters by both, so the "
+                "same dedupe_key at two restaurants is two rows and one tenant's "
+                "repeat can never bump another tenant's notification. Proven by "
+                "notifications_app.tests_inbox.TenantIsolationTests (B's 'ordering' "
+                "row is untouched by A's inbox) and "
+                "ProducerTransactionTests.test_prune_is_per_restaurant_and_bounded.",
+    },
 ]
 
 
