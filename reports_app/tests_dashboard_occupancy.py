@@ -270,11 +270,19 @@ class OneDefinitionTests(TestCase):
     def test_every_reader_names_the_shared_predicate(self):
         for reader in (
             ConOrder.any_present_ongoing_order,
-            standalone.any_present_ongoing_order,
             dashboard._build_tables,
         ):
             with self.subTest(reader=reader.__qualname__):
                 self.assertIn('ongoing_order_q()', inspect.getsource(reader))
+
+    def test_the_standalone_twin_delegates_rather_than_restating(self):
+        """Dining model Step 1 made the twin DELEGATE to ``ConOrder`` instead of
+        repeating the query beside it: one function answering, not two copies of
+        the same filter. It must name no query of its own."""
+        source = inspect.getsource(standalone.any_present_ongoing_order)
+        self.assertIn('ConOrder.any_present_ongoing_order(table)', source)
+        self.assertNotIn('Order.objects', source)
+        self.assertNotIn('.filter(', source)
 
     def test_the_card_no_longer_reads_the_payment_axis_for_occupancy(self):
         source = inspect.getsource(dashboard._build_tables)

@@ -21,6 +21,7 @@ on a foundation that is already proven:
 No test here rewinds migrations (``dinify_backend/tests_migration_test_isolation.py``).
 """
 import ast
+import re
 import uuid
 from datetime import date, time
 from pathlib import Path
@@ -505,19 +506,74 @@ class DeletionMirrorsTheExistingGraphTests(TestCase):
                 restaurant.delete()
 
 
-# --- nothing writes these yet --------------------------------------------------------
+# --- who may reference these --------------------------------------------------------
 
-class NothingWritesTheseYetTests(TestCase):
-    """PR 1 is the schema alone. The writer arrives behind
-    ``DINING_VISIT_WRITES_ENABLED`` in its own pull request, which updates this
-    inventory deliberately."""
+#: An ORM lookup that crosses into the Step 1 tables through a reverse relation:
+#: ``Order.placement``, ``Restaurant.visits`` / ``Table.visits``,
+#: ``User.visits_opened``, ``Visit.bills`` / ``Visit.placements``. A module can
+#: query the new tables through one of these without ever naming a model.
+_RELATIONS = ('placement', 'placements', 'visits', 'visits_opened', 'bills')
+_LOOKUP = re.compile(r'(?:^|__)(?:' + '|'.join(_RELATIONS) + r')(?:__|$)')
+
+
+def _references(tree, names):
+    """Every place an AST names one of ``names``, or uses a lookup string that
+    reaches them, as ``(lineno, label)``."""
+    found = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and _LOOKUP.search(node.value)):
+            found.append((node.lineno, f'lookup {node.value!r}'))
+        if (isinstance(node, ast.keyword) and node.arg
+                and _LOOKUP.search(node.arg)):
+            found.append((node.lineno, f'lookup {node.arg}='))
+        name = (
+            node.id if isinstance(node, ast.Name)
+            else node.attr if isinstance(node, ast.Attribute)
+            else None
+        )
+        if name in names:
+            found.append((node.lineno, name))
+        if isinstance(node, ast.Attribute) and node.attr in _RELATIONS:
+            found.append((node.lineno, f'.{node.attr}'))
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in names:
+                    found.append((node.lineno, f'import {alias.name}'))
+    return found
+
+
+class OnlyTheDiningModulesReferenceTheseTests(TestCase):
+    """An ALLOWLIST of the production modules that may name the Step 1 models.
+
+    PR 1 shipped this as "nothing writes these yet", allowing ``models.py`` alone.
+    PR 2 adds the writer and its two readers, deliberately and by name:
+
+    - ``orders_app/models.py`` declares them;
+    - ``orders_app/controllers/services/round_placement.py`` is the ONLY writer, and
+      holds the visit-state reader (``open_visits_q`` / ``visit_state``);
+    - ``orders_app/controllers/test_orders.py`` holds ``counted_visits_q``, beside the
+      one test-order rule it follows.
+
+    "Naming" covers the model names, an attribute through one of their reverse
+    relations (``order.placement``, ``restaurant.visits`` ...) and an ORM lookup
+    string that crosses into them (``'placement__visit'``): a module can query
+    these tables without ever importing a model, as ``counted_visits_q`` does.
+
+    Any other production module that starts naming them fails here, so a second
+    writer (or a reader that bypasses the derived visit state) is a deliberate edit to
+    this list rather than an accident. Tests and migrations are out of scope.
+    """
 
     NAMES = {'Visit', 'Bill', 'OrderPlacement'}
-    ALLOWED = {Path('orders_app/models.py')}
+    ALLOWED = {
+        Path('orders_app/models.py'),
+        Path('orders_app/controllers/services/round_placement.py'),
+        Path('orders_app/controllers/test_orders.py'),
+    }
 
-    def test_no_production_module_references_the_new_models(self):
+    def _production_modules(self):
         root = Path(settings.BASE_DIR)
-        offenders = []
         for path in root.rglob('*.py'):
             relative = path.relative_to(root)
             parts = relative.parts
@@ -525,22 +581,44 @@ class NothingWritesTheseYetTests(TestCase):
                 continue
             if 'migrations' in parts or any(p.startswith('test') for p in parts):
                 continue
+            yield path, relative
+
+    def test_no_unlisted_production_module_references_the_new_models(self):
+        offenders = []
+        for path, relative in self._production_modules():
             if relative in self.ALLOWED:
                 continue
             try:
                 tree = ast.parse(path.read_text(encoding='utf-8'))
             except (SyntaxError, UnicodeDecodeError):
                 continue
-            for node in ast.walk(tree):
-                name = (
-                    node.id if isinstance(node, ast.Name)
-                    else node.attr if isinstance(node, ast.Attribute)
-                    else None
-                )
-                if name in self.NAMES:
-                    offenders.append(f'{relative}:{node.lineno} {name}')
-                if isinstance(node, ast.ImportFrom):
-                    for alias in node.names:
-                        if alias.name in self.NAMES:
-                            offenders.append(f'{relative}:{node.lineno} import {alias.name}')
+            offenders.extend(f'{relative}:{line} {label}'
+                             for line, label in _references(tree, self.NAMES))
         self.assertEqual(offenders, [])
+
+    def test_every_listed_module_exists_and_still_references_them(self):
+        """A stale entry would let a future module of the same path in unseen."""
+        root = Path(settings.BASE_DIR)
+        for relative in sorted(self.ALLOWED):
+            with self.subTest(module=str(relative)):
+                path = root / relative
+                self.assertTrue(path.exists())
+                tree = ast.parse(path.read_text(encoding='utf-8'))
+                self.assertTrue(_references(tree, self.NAMES))
+
+    def test_the_scan_fires_on_each_way_of_naming_them(self):
+        """Self-test: an unlisted module would be caught however it names them."""
+        for source in (
+            'from orders_app.models import Visit\n',
+            'import orders_app.models as m\nm.Bill.objects.all()\n',
+            'def f(order):\n    return OrderPlacement.objects.create(order=order)\n',
+            "Order.objects.filter(placement__visit=v)\n",
+            "q = 'placement__business_date'\n",
+            "restaurant.visits.all()\n",
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(_references(ast.parse(source), self.NAMES))
+        for innocent in ('x = Order\n', "f(replacement='a', placement_note=1)\n",
+                         "s = 'the visits page'\n"):
+            with self.subTest(innocent=innocent):
+                self.assertEqual(_references(ast.parse(innocent), self.NAMES), [])

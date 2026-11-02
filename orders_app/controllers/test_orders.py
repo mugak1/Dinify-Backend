@@ -38,7 +38,7 @@ The rest of this module exists so the go-live checklist can ask its question thr
 named function rather than growing an ad-hoc queryset. It is a FACT, not an endpoint:
 nothing here is routed, and nothing here writes.
 """
-from django.db.models import Q
+from django.db.models import Exists, OuterRef, Q
 
 from orders_app.models import Order
 from dinify_backend.configss.string_definitions import (
@@ -73,6 +73,25 @@ def counted_orders_q(prefix=''):
         Q(**{f'{prefix}is_test': False})
         | Q(**{f'{prefix}restaurant__is_test': True})
     )
+
+
+def counted_visits_q():
+    """
+    The VISITS a restaurant's figures act on: the same rule, carried to the visit.
+
+    A ``Visit`` (dining model, Step 1) carries NO test flag of its own. It inherits
+    through its orders: a visit counts when at least one of its orders passes
+    ``counted_orders_q``. A practice order's visit is therefore left out, and a test
+    restaurant's visits are kept, exactly as their orders are. A flag copied onto the
+    visit would freeze one answer, while from Step 3 a visit can hold several rounds
+    (one before go-live, one after) and the restaurant's classification can change; it
+    would also invite the bare ``is_test`` filter this module exists to prevent.
+
+    A filter over ``Visit``, one correlated ``EXISTS``, so it adds no query.
+    """
+    return Q(Exists(
+        Order.objects.filter(counted_orders_q(), placement__visit=OuterRef('pk'))
+    ))
 
 
 def is_practice_order(order) -> bool:

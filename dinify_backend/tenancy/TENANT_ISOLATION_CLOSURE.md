@@ -157,6 +157,25 @@ sits beside it:
 
 Each note cites its proving test in `notifications_app/tests_inbox.py`.
 
+**Addendum, dining model Step 1 writer (November 2026): visits and bills.** Two
+entries were added, so the inventory now holds 22 (17 remediated, 5 audited, 0
+pending-audit). Every accepted order now gets a `Visit`, a `Bill` and an
+`OrderPlacement`, written in the acceptance's own transaction by
+`orders_app/controllers/services/round_placement.py`, the only production module
+allowed to reference them (with `models.py` and `test_orders.py`, which reads them
+through a lookup string). All three keep their tenant in real foreign keys; the two
+entries cover how those keys are filled:
+
+- **remediated, `direct-write`:** the three INSERTs. No request field reaches them;
+  every value comes from the order row re-read under the acceptance's Table and
+  Order locks, the acceptance instant, or one read of that order's own restaurant;
+- **remediated, `denormalised-id`:** `Visit.restaurant` / `Visit.table`, copied
+  from that locked order row, so a visit and its order always name the same tenant
+  and table, even when the caller's order instance is stale or tampered with.
+
+Each note cites its proving test in `orders_app/tests_dining_writer.py` and
+`orders_app/tests_dining_schema.py`.
+
 ## 9. Public-media disposition
 
 Every uploaded file field is a public-by-design `ImageField`:

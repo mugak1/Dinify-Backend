@@ -1,8 +1,6 @@
 import logging
 
 from restaurants_app.models import Table
-from orders_app.models import Order
-from orders_app.controllers.occupancy import ongoing_order_q
 
 logger = logging.getLogger(__name__)
 
@@ -19,20 +17,14 @@ def any_present_ongoing_order(table: Table) -> dict:
     payment_status), so a table frees up once the kitchen serves its order.
     Returns the most recent such order.
 
-    The predicate is ``orders_app.controllers.occupancy.ongoing_order_q`` — the ONE
-    definition, shared with ``ConOrder.any_present_ongoing_order`` and the
-    dashboard-v2 tables card.
+    THIS IS NOT A SECOND COPY. It delegates to ``ConOrder.any_present_ongoing_order``,
+    whose predicate is ``orders_app.controllers.occupancy.ongoing_order_q``, the ONE
+    definition of "is the table busy?". It used to restate the query; one function
+    answering the question is what keeps the table cards (``restaurants_app.
+    controllers.tables``), the order gates and the Step 1 visit state agreeing.
+
+    Imported lazily: ``restaurants_app.controllers.tables`` imports this module at
+    load time, and ``con_orders`` pulls in a large part of both apps.
     """
-    ongoing_order = (
-        Order.objects
-        .filter(ongoing_order_q(), table=table)
-        .order_by('-time_created')
-        .values('id')
-        .first()
-    )
-    if ongoing_order is not None:
-        return {
-            'present': True,
-            'order_id': ongoing_order['id']
-        }
-    return {'present': False}
+    from orders_app.controllers.con_orders import ConOrder
+    return ConOrder.any_present_ongoing_order(table)

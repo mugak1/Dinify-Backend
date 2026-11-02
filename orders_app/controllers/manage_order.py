@@ -601,6 +601,7 @@ def _submit_order(order: Order, user: Union[User, None],
     from orders_app.controllers.services.order_authority import (
         StaffAuthorityError, assert_authority_current,
     )
+    from orders_app.controllers.services.round_placement import place_first_round
 
     # an unauthenticated diner arrives as AnonymousUser (not None); never
     # assign it to a User FK — normalise to None so attribution stays null.
@@ -841,6 +842,18 @@ def _submit_order(order: Order, user: Union[User, None],
                 order.pk, terminal.reason,
             )
             return terminal.as_refusal()
+
+        # DINING MODEL, STEP 1: THE ROUND'S VISIT, BILL AND PLACEMENT. Written HERE
+        # and nowhere else, because this is the first point every refusal and every
+        # replay has already returned from: a retried submit, a refused one and a
+        # draft that is never submitted write nothing, so one order never gets two
+        # visits. Inside this transaction, so the rows commit with the acceptance or
+        # not at all; a fault here fails the acceptance (the switch is the remedy).
+        # `order` is the row re-read under the Table and Order locks, which is where
+        # the visit's restaurant and table come from; `now` is the instant the
+        # acceptance records, so released time and business date describe it.
+        # Behind DINING_VISIT_WRITES_ENABLED; 1 read + 3 INSERTs when on, none off.
+        place_first_round(order, now)
 
         order.order_status = OrderStatus_Pending
         if user is not None:
