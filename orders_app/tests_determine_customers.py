@@ -26,13 +26,20 @@ is skipped, a test restaurant's orders are not) is pinned by ``tests_launch_boun
 and ``tests_test_restaurant_parity``.
 """
 import contextlib
+import importlib
 import io
 from decimal import Decimal
+from unittest import mock
 
 from django.core.management import call_command
+from django.db.models import F
 from django.test import TestCase
+from django.utils import timezone
 
 from dinify_backend.configss.string_definitions import (
+    OrderStatus_Initiated,
+    OrderStatus_Pending,
+    OrderStatus_Served,
     RestaurantStatus_Live,
     TransactionStatus_Success,
     TransactionType_OrderPayment,
@@ -319,3 +326,74 @@ class UnmatchedContactCreationTests(DetermineCustomersFixture):
         self.assertIsNone(order.customer_id)
         self.assertTrue(order.customer_match_attempted)
         self.assertEqual(User.objects.count(), before)
+
+
+_command_module = importlib.import_module(
+    'orders_app.management.commands.determine-customers'
+)
+
+
+class ConcurrentOrderChangeTests(DetermineCustomersFixture):
+    """
+    The command writes only what it decided, never a stale copy of the whole order.
+
+    THE DEFECT THIS PINS. The command reads its batch at the top of one transaction,
+    with no row lock, and used to finish each order with a bare ``order.save()``, which
+    writes EVERY column from that in-memory instance. Anything committed to the order
+    between the read and the save was put back: an acceptance (``initiated`` ->
+    ``pending``, so the order left the kitchen board), a serve, cancel or recall, and a
+    ``fulfilment_revision`` bump the kitchen's compare-and-set depends on.
+
+    The interleaving is made deterministic by patching ``Command.match_customer``: before
+    it returns its user it writes the same order row with a queryset ``.update()``, which
+    leaves the command's instance stale exactly where a concurrent writer would.
+    """
+
+    def _run_with_change_during_match(self, order, **changes):
+        real = _command_module.Command.match_customer
+
+        def match_then_change(command, *args, **kwargs):
+            user = real(command, *args, **kwargs)
+            Order.objects.filter(pk=order.pk).update(**changes)
+            return user
+
+        with mock.patch.object(
+            _command_module.Command, 'match_customer', match_then_change,
+        ):
+            self._run()
+
+    def test_a_draft_accepted_during_matching_stays_accepted(self):
+        known = self._person('256772123456', email='known@example.com')
+        order = self._order(customer_phone='0772123456')
+        self.assertEqual(order.order_status, OrderStatus_Initiated)  # premise: a draft
+
+        self._run_with_change_during_match(order, order_status=OrderStatus_Pending)
+
+        order.refresh_from_db()
+        self.assertEqual(order.order_status, OrderStatus_Pending)
+        self.assertEqual(order.customer_id, known.id)
+        self.assertTrue(order.customer_match_attempted)
+
+    def test_an_order_served_during_matching_keeps_the_kitchen_state(self):
+        known = self._person('256772123456', email='known@example.com')
+        order = self._order(customer_phone='0772123456')
+        Order.objects.filter(pk=order.pk).update(
+            order_status=OrderStatus_Pending, fulfilment_revision=3,
+        )
+        served_at = timezone.now()
+
+        self._run_with_change_during_match(
+            order,
+            fulfilment_status='served',
+            order_status=OrderStatus_Served,
+            served_at=served_at,
+            fulfilment_revision=F('fulfilment_revision') + 1,
+        )
+
+        order.refresh_from_db()
+        self.assertEqual(order.fulfilment_status, 'served')
+        self.assertEqual(order.order_status, OrderStatus_Served)
+        self.assertEqual(order.served_at, served_at)
+        self.assertEqual(order.fulfilment_revision, 4)
+        self.assertEqual(order.customer_id, known.id)
+        self.assertTrue(order.customer_match_attempted)
