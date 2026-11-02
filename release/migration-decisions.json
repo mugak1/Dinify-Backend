@@ -17,6 +17,30 @@
       ],
       "class": "expand",
       "reviewedIn": "mugak1/Dinify-Backend#363"
+    },
+    "restaurants_app.0060_restaurant_business_day_cutoff": {
+      "sha256": "f43076da204d8a24926ffe717aeac72d03d540de5a48d8679c43778c7e60087b",
+      "operations": [
+        "SetLockTimeout",
+        "AddField"
+      ],
+      "class": "expand",
+      "reviewedIn": "mugak1/Dinify-Backend#380"
+    },
+    "orders_app.0043_visit_bill_orderplacement": {
+      "sha256": "2cfd5668c688a877f6b77031223345956de6459eb481d01d77fcd9887940646a",
+      "operations": [
+        "SetLockTimeout",
+        "CreateModel",
+        "CreateModel",
+        "CreateModel",
+        "AddField",
+        "AddConstraint",
+        "AddConstraint",
+        "AddConstraint"
+      ],
+      "class": "expand",
+      "reviewedIn": "mugak1/Dinify-Backend#380"
     }
   }
 }

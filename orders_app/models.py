@@ -4,6 +4,9 @@ from decimal import Decimal
 from django.db import models
 from users_app.models import User, BaseModel
 from restaurants_app.models import Restaurant, MenuItem, Table
+from commercial_app.models import (
+    PAYMENT_TIMING_PAY_AFTER, PAYMENT_TIMING_PAY_FIRST,
+)
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_LEGACY,
 )
@@ -485,3 +488,173 @@ class OrderQuoteClosure(models.Model):
 
     def __str__(self):                             # pragma: no cover
         return f'quote closure of {self.order_id} ({self.reason})'
+
+
+# ===========================================================================
+# DINING MODEL, STEP 1 — visits, bills and round placement (SCHEMA ONLY)
+# ===========================================================================
+#
+# A VISIT is one party's stay at one table. A BILL is what that party owes; there
+# is one per visit in the first release. An ``Order`` becomes one ROUND on a bill,
+# and ``OrderPlacement`` records where that round sits.
+#
+# NOTHING WRITES THESE YET. Step 1's writer arrives in its own pull request,
+# behind ``DINING_VISIT_WRITES_ENABLED``, and creates the three rows in the
+# transaction that accepts an order. Until then every table is empty and no
+# reader consults them.
+#
+# NON-CUSTODIAL: no model here has a money column, and none may gain one. Bill
+# totals are always COMPUTED from rounds, adjustments and payments, never
+# stored, so nothing can drift and nothing reads as a held balance
+# (REGULATORY_AUDIT.md).
+#
+# WHY A SEPARATE PLACEMENT ROW AND NOT COLUMNS ON ``Order`` — the design review
+# put these facts on Order; this amends it, for the reason D04 moved acceptance
+# evidence off Order. Django's ``save()`` writes every field from the in-memory
+# instance, so a caller holding an ``Order`` loaded before acceptance would write
+# a NULL visit and bill straight back over the real ones — and once later steps
+# hang payments off the bill, that silently drops a charge from it. A separate
+# row makes that impossible rather than merely currently unreached: no ``Order``
+# save can touch it.
+#
+# DELETION MIRRORS THE EXISTING GRAPH rather than inventing a stricter one:
+#   Visit.restaurant      CASCADE   as Order.restaurant
+#   Visit.table           PROTECT   as Order.table
+#   Visit.opened_by       SET_NULL  as Order.created_by
+#   Bill.visit            CASCADE
+#   OrderPlacement.order  CASCADE   as OrderAcceptance.order
+#   OrderPlacement.visit  RESTRICT  } a visit or bill that still has rounds
+#   OrderPlacement.bill   RESTRICT  } cannot be deleted on its own, but may go
+#                                     inside a cascade that also removes them.
+# So a restaurant with orders still cannot be hard-deleted (Order.table and
+# Visit.table both PROTECT), exactly as before this schema existed.
+
+#: The one value Dinify adds to commercial_app's payment-timing vocabulary: no
+#: timing had been chosen when the visit opened. Stated explicitly rather than
+#: left NULL, so "nobody chose" can never be confused with "the writer forgot".
+PAYMENT_TIMING_NOT_CHOSEN = 'not_chosen'
+
+#: Every value a visit or a round may record, built from commercial_app's OWN
+#: constants so the two spellings cannot drift. Module level because a
+#: ``CheckConstraint`` in a nested ``Meta`` cannot see the enclosing class body.
+DINING_PAYMENT_TIMINGS = (
+    PAYMENT_TIMING_PAY_FIRST,
+    PAYMENT_TIMING_PAY_AFTER,
+    PAYMENT_TIMING_NOT_CHOSEN,
+)
+DINING_PAYMENT_TIMING_CHOICES = [(value, value) for value in DINING_PAYMENT_TIMINGS]
+
+
+class Visit(models.Model):
+    """One party's stay at one table.
+
+    Step 1 fills only what is known at acceptance: where, when, the payment
+    timing in force, and — for a staff order — the staff member. State,
+    completion and how it ended arrive with the steps that write them.
+
+    ``payment_timing`` is a COPY of the timing in force when the visit opened,
+    with no link to where it came from. Its source is decided by the writer, so a
+    later per-dining-area timing changes the writer, not this table.
+
+    ``opened_by`` is the ORDER's ``created_by``: the staff member who placed a
+    staff order, NULL for a diner's. Never the submitter — a diner's draft stays
+    a diner's draft whoever taps submit (D06).
+
+    Not ``users_app.BaseModel``: a visit is never soft-deleted, so ``deleted`` /
+    ``archived`` / ``vacuumed`` would assert something untrue.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    restaurant = models.ForeignKey(
+        Restaurant, on_delete=models.CASCADE, related_name='visits',
+    )
+    table = models.ForeignKey(
+        Table, on_delete=models.PROTECT, related_name='visits',
+    )
+    opened_at = models.DateTimeField()
+    opened_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='visits_opened',
+    )
+    payment_timing = models.CharField(
+        max_length=16, choices=DINING_PAYMENT_TIMING_CHOICES,
+    )
+
+    class Meta:
+        db_table = 'visits'
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(payment_timing__in=DINING_PAYMENT_TIMINGS),
+                name='visit_payment_timing_vocabulary',
+            ),
+        ]
+
+    def __str__(self):                             # pragma: no cover
+        return f'visit {self.id} at table {self.table_id}'
+
+
+class Bill(models.Model):
+    """What one visit's party owes.
+
+    IT STORES NO AMOUNT. Its total is computed from its rounds, adjustments and
+    payments. Step 1 records only which visit it belongs to.
+
+    ONE PER VISIT in the first release, as a database fact. The constraint can be
+    dropped later without breaking older code, if bills are ever split.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    visit = models.ForeignKey(
+        Visit, on_delete=models.CASCADE, related_name='bills',
+    )
+
+    class Meta:
+        db_table = 'bills'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['visit'], name='one_bill_per_visit',
+            ),
+        ]
+
+    def __str__(self):                             # pragma: no cover
+        return f'bill {self.id} for visit {self.visit_id}'
+
+
+class OrderPlacement(models.Model):
+    """Where one round (an ``Order``) sits: its visit, its bill, and the facts
+    fixed when it was accepted.
+
+    ``released_at`` is NULLABLE for Step 2's held rounds; until then it equals
+    the acceptance instant. ``business_date`` comes from that instant, the
+    restaurant's ``business_day_cutoff`` and ``TIME_ZONE``. ``round_number`` is 1
+    until Step 3 lets a visit hold several rounds.
+
+    An order with NO placement predates Step 1 (or was accepted while the writer
+    was switched off). That absence is never backfilled here.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order = models.OneToOneField(
+        Order, on_delete=models.CASCADE, related_name='placement',
+    )
+    visit = models.ForeignKey(
+        Visit, on_delete=models.RESTRICT, related_name='placements',
+    )
+    bill = models.ForeignKey(
+        Bill, on_delete=models.RESTRICT, related_name='placements',
+    )
+    payment_timing = models.CharField(
+        max_length=16, choices=DINING_PAYMENT_TIMING_CHOICES,
+    )
+    released_at = models.DateTimeField(null=True, blank=True)
+    business_date = models.DateField()
+    round_number = models.PositiveSmallIntegerField()
+
+    class Meta:
+        db_table = 'order_placements'
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(payment_timing__in=DINING_PAYMENT_TIMINGS),
+                name='order_placement_payment_timing_vocabulary',
+            ),
+        ]
+
+    def __str__(self):                             # pragma: no cover
+        return f'placement of {self.order_id} (round {self.round_number})'

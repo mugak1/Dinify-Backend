@@ -1193,6 +1193,42 @@ so keep it current when conventions change.
   **B2 (#360) added retention**: `OrderItem.item` is PROTECT, so an ORM delete of
   an ordered catalogue row is refused instead of taking the order's lines with it.
   See "Deletion & Referential Integrity" and `BREAKING_CHANGES.md` §23
+- Dining model, Step 1 schema (visits and bills): ✅ SCHEMA ONLY — **NOTHING WRITES
+  OR READS THESE YET.** Step 1 of the dining and payments design review (final
+  baseline, 13 October 2026) gives every newly accepted order a visit, a bill and a
+  placement record; this is the first of its three PRs. A VISIT is one party's stay
+  at one table, a BILL is what that party owes (one per visit in the first release,
+  a `UniqueConstraint`), and an `Order` becomes one ROUND, whose placement facts live
+  in `OrderPlacement`: visit, bill, `payment_timing`, `released_at` (NULLABLE, for
+  Step 2's held rounds), `business_date`, `round_number`. All three are plain models
+  with UUID keys and explicit `db_table`s (`visits`, `bills`, `order_placements`), no
+  soft delete and **NO MONEY COLUMN — bill totals are always computed, never stored
+  (non-custodial)**. `Restaurant.business_day_cutoff` (04:00, `db_default`) is the
+  turnover of the business day; it has no writer and appears only as one additive
+  key in the `__all__` restaurant-detail read (`BREAKING_CHANGES.md` §29).
+  **DESIGN AMENDMENT (owner + reviewer, 2 November 2026):** the review put
+  visit/bill/timing/released/business-date/round on `Order` as columns. They live in
+  a separate `OrderPlacement` row instead, for D04's reason — a stale full `Order`
+  save writes every field back, so it could null a round's visit and bill and, once
+  payments hang off bills, silently drop a charge. A separate row makes that
+  impossible, and `orders` is never altered. **THE TIMING VOCABULARY** is
+  `pay_first` / `pay_after` / `not_chosen` on both `Visit` and `OrderPlacement`,
+  each a `CheckConstraint`, built in `orders_app/models.py` from `commercial_app`'s
+  own `PAYMENT_TIMING_*` constants plus `PAYMENT_TIMING_NOT_CHOSEN` — "no timing
+  chosen" is explicit, never NULL. `Visit.opened_by` will be the ORDER's
+  `created_by` (the staff member who placed a staff order), never the submitter.
+  **DELETION MIRRORS THE EXISTING GRAPH:** `Visit.restaurant` CASCADE and
+  `Visit.table` PROTECT (as `Order.restaurant` / `Order.table`), `Visit.opened_by`
+  SET_NULL, `Bill.visit` CASCADE, `OrderPlacement.order` CASCADE (as
+  `OrderAcceptance`), and `OrderPlacement.visit` / `.bill` RESTRICT. So a restaurant
+  with an order still cannot be hard-deleted, with or without Step 1 rows (pinned).
+  Measured consequence: a visit OUTLIVES a hard-deleted order and still holds its
+  table, so "delete the orders, then the restaurant" is refused where it used to
+  succeed; no production path hard-deletes an order. The writer (PR 2, behind
+  `DINING_VISIT_WRITES_ENABLED`) adds the full "Dining model: visits and bills"
+  section and must not merge before this schema is deployed and confirmed on UAT.
+  Pinned by `orders_app/tests_dining_schema.py`, whose
+  `NothingWritesTheseYetTests` fails if production code references the new models
 - Request correlation and order-command trace (D15 R2): ✅ `dinify_backend/request_context.py`,
   installed ONCE and OUTERMOST on both planes (`settings_admin.py` re-adds it first, then
   ClientIP; `RequestIDMiddleware` is now an alias). Every HTTP request gets one fresh server
@@ -2871,7 +2907,7 @@ so keep it current when conventions change.
   inline anywhere that answers "is this table occupied"**; a structural test names
   the three readers. Test/rehearsal orders STILL count (live floor state;
   `counted_orders_q` does not apply). The figure DROPS on deploy — see
-  `BREAKING_CHANGES.md` §29. Cost unchanged: one statement, `_build_tables` pinned at
+  `BREAKING_CHANGES.md` §30. Cost unchanged: one statement, `_build_tables` pinned at
   7 queries and flat in the order count (`reports_app/tests_dashboard_occupancy.py`,
   23 tests; 11 of them fail on the pre-change code and the controls pass on both).
   REPORTED, NOT CHANGED: the shared predicate does not exclude `refunded` (the old
@@ -6580,7 +6616,7 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   only into packages), requires every one that drives `MigrationExecutor` to be listed,
   checks each listed tearDown restores the whole graph, and runs each listed class to
   prove nothing is left unapplied
-- Latest migration: `restaurants_app/migrations/0059_restaurant_first_time_menu_submitted_by.py`
+- Latest migration: `restaurants_app/migrations/0060_restaurant_business_day_cutoff.py`
   (0059 adds `Restaurant.first_time_menu_submitted_by`: one generated `AddField`, a
   nullable FK to `users` with its index, NO `RunPython` and NO backfill. The FK is
   added `DEFERRABLE INITIALLY DEFERRED` like every Django FK. It runs in ONE
@@ -6600,8 +6636,13 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   "Write-time menu relationship integrity" bullet; 0056 constrains
   `Restaurant.status` and fail-closed-maps the legacy vocabulary — see
   "Restaurant Lifecycle"; 0057 adds the platform-owned `Restaurant.is_test` flag,
-  additive with NO backfill — see "Canonical Data Shapes"),
-  `orders_app/migrations/0042_alter_orderitem_item.py` (0034 removed the
+  additive with NO backfill — see "Canonical Data Shapes"; 0060 adds the dining
+  model's `Restaurant.business_day_cutoff`, one `AddField` with a constant DATABASE
+  default of 04:00 (`db_default`, so rolled-back code can still insert a
+  restaurant; measured), after a vendor-guarded `SET LOCAL lock_timeout = '5s'` so
+  a lock wait fails the deploy instead of queueing diner requests — see "Dining
+  model, Step 1 schema"),
+  `orders_app/migrations/0043_visit_bill_orderplacement.py` (0034 removed the
   inline review fields; 0035 adds the launch-boundary `Order.is_test` flag; 0036
   adds the D01 `quantity >= 0` CHECK constraint, additive and reversible with NO
   `RunPython`; 0037 adds `Order.pricing_version`, one `AddField` carrying BOTH
@@ -6641,7 +6682,11 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   `OrderItem.item` PROTECT. It changes Django's model state only: `sqlmigrate`
   prints a no-op both ways, the constraint stays NO ACTION DEFERRABLE INITIALLY
   DEFERRED, and no row is touched. A code rollback past it is schema-compatible
-  but brings CASCADE back),
+  but brings CASCADE back; 0043 creates the dining model's `visits`, `bills` and
+  `order_placements` tables and NOTHING else — no existing table altered, no
+  `RunPython`, no backfill, zero rows — after the same `lock_timeout`, because its
+  foreign keys take SHARE ROW EXCLUSIVE on `restaurants`, `tables`, `users` and
+  `orders` — see "Dining model, Step 1 schema"),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
   `users_app/migrations/0016_d11_enforcement.py` (0010 adds
