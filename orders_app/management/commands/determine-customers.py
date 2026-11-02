@@ -134,5 +134,13 @@ class Command(BaseCommand):
                 if customer is not None:
                     order.customer = customer
                 order.customer_match_attempted = True
-                order.save()
+                # Write ONLY what this command decided. The instance was read at the
+                # top of the batch, with no row lock, and a full `save()` writes every
+                # column from it: an acceptance (`initiated` -> `pending`), a kitchen
+                # serve, cancel or recall, or a `fulfilment_revision` bump committed
+                # since that read would be silently put back to the old values.
+                # `time_last_updated` keeps the stamp a full save always gave it.
+                order.save(update_fields=[
+                    'customer', 'customer_match_attempted', 'time_last_updated',
+                ])
             print(orders.count())
