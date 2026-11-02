@@ -2857,6 +2857,29 @@ so keep it current when conventions change.
   the same thing under both conventions — so the mixing there is confined to a
   non-headline column and widening the change would have touched four more response
   shapes.
+  **The `dashboard-v2` TABLES CARD COUNTS OCCUPANCY BY THE OCCUPANCY RULE**
+  (DASH-OCCUPANCY-00). `_build_tables`' `occupied` used to restate occupancy for
+  itself — `payment_status='pending'` minus initiated/cancelled/refunded — while its
+  own comment said it "must agree with the occupancy helpers and the table cards".
+  Nothing in production moves `payment_status` off `pending`, so every order ever
+  placed and not cancelled kept its table "occupied" forever after it was served; it
+  also counted soft-deleted orders and dropped a `paid`-but-unserved one. It now counts
+  distinct tables through `orders_app/controllers/occupancy.py::ongoing_order_q`, THE
+  ONE DEFINITION — not deleted, not `initiated`, not `cancelled`,
+  `fulfilment_status != 'served'` — which both `any_present_ongoing_order` copies
+  (`ConOrder` and `initiate_order`) now ask through as well. **Do not restate it
+  inline anywhere that answers "is this table occupied"**; a structural test names
+  the three readers. Test/rehearsal orders STILL count (live floor state;
+  `counted_orders_q` does not apply). The figure DROPS on deploy — see
+  `BREAKING_CHANGES.md` §29. Cost unchanged: one statement, `_build_tables` pinned at
+  7 queries and flat in the order count (`reports_app/tests_dashboard_occupancy.py`,
+  23 tests; 11 of them fail on the pre-change code and the controls pass on both).
+  REPORTED, NOT CHANGED: the shared predicate does not exclude `refunded` (the old
+  card did) because the occupancy gates never did, and nothing in production writes
+  `refunded`; `occupied` counts every table with an ongoing order while `total` counts
+  only enabled, non-deleted tables; and the kitchen active feed, `_build_kds` and
+  `misc_app/restore_usability.py` still restate the same predicate inline (the last
+  deliberately, as an independent oracle).
   Sales/Diners/Menu are Order-based and share `sale_filters`; Diners operates
   strictly on non-NULL-customer sale orders so anonymous-QR guests are never
   collapsed into a phantom repeat diner (guests are surfaced as a separate count,
@@ -6221,9 +6244,10 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   **KNOWN EDGE**, stated rather than hidden: review READS aggregate on
   `Review.restaurant` and never consult the order's flag, so reviews left on a test
   restaurant's orders stay visible if it is later switched to real. The
-  DELIBERATE inclusions are dashboard-v2's `_build_kds` and the OCCUPANCY queryset
-  inside `_build_tables` — live floor state, which must agree with the kitchen board,
-  and which counts practice orders too; note `_build_tables` is split, so its
+  DELIBERATE inclusions are dashboard-v2's `_build_kds` and the OCCUPANCY count
+  inside `_build_tables` (`ongoing_order_q`, the occupancy helpers' own predicate) —
+  live floor state, which must agree with the kitchen board, and which counts practice
+  orders too; note `_build_tables` is split, so its
   median-visit / turns / avg-ticket metrics DO apply the rule (history and money). `has_completed_test_order`
   (`orders_app/controllers/test_orders.py`) is the queryable fact Phase-1's readiness
   checklist consumes. Accepted and documented: a rehearsal order consumes a real
@@ -6342,7 +6366,9 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
   FREES the table for diner checkout instead of blocking forever on the stale
   payment axis (PR #186; diner payment is unwired, so `payment_status` never
   leaves `'pending'`). Do NOT regress `get_current_order` to the
-  `order_status`/`payment_status` axis
+  `order_status`/`payment_status` axis. The predicate lives ONCE in
+  `orders_app/controllers/occupancy.py::ongoing_order_q`, shared by both helper
+  copies and the dashboard-v2 tables card (DASH-OCCUPANCY-00)
 
 ## Existing Management Commands
 - `optimize_images` in `restaurants_app/management/commands/` — resizes

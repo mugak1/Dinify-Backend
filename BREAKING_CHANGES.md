@@ -2195,6 +2195,52 @@ service maps 429 to its rate-limited message. Forgot-password never sees this 42
 
 D11 remains open.
 
+## 29. The dashboard tables card counts occupied tables by the occupancy rule (DASH-OCCUPANCY-00)
+
+**Endpoint:** `GET api/v1/reports/restaurant/dashboard-v2/` → `data.tables.occupied`
+and `data.tables.occupancy_pct`.
+
+**What changed.** The card used to count the distinct tables of every order with
+`payment_status = 'pending'` that was not `initiated`, `cancelled` or `refunded`. It
+now counts the tables `any_present_ongoing_order` calls occupied, through the same
+shared predicate (`orders_app.controllers.occupancy.ongoing_order_q`): not
+soft-deleted, not `initiated`, not `cancelled`, and `fulfilment_status != 'served'`.
+Three consequences:
+
+- **A served order frees its table on the card.** Nothing in production moves
+  `payment_status` off `pending` (diner payment is not wired), so under the old rule
+  every order ever placed and not cancelled kept its table "occupied" forever. On any
+  restaurant that has served orders, the old figure was close to every table that had
+  ever been ordered at.
+- **A soft-deleted order no longer counts.**
+- **`payment_status` is no longer read.** An order marked `paid` that the kitchen has
+  not served still occupies its table; the old card dropped it. No production writer
+  sets `paid` today, so this is a consistency fix rather than a visible one.
+
+**Effect on the figure.** `occupied` and `occupancy_pct` FALL, usually sharply, to the
+number of tables with an unserved submitted order: the same answer the table cards and
+the order-create, submit and recall occupancy gates already gave. No key was renamed,
+added or removed, and the type is unchanged. No other figure on the card moved: turns,
+median visit and average ticket keep their own queries.
+
+**Unchanged, deliberately.** Test and rehearsal orders still occupy their tables. This
+is live floor state, so the `counted_orders_q` rule for a restaurant's figures does
+not apply. `occupied` still counts every table that has an ongoing order, while
+`total` counts only enabled, non-deleted tables, so an ongoing order on a disabled
+table can still make `occupancy_pct` disagree with `occupied / total`. That mismatch
+predates this change and is not addressed here.
+
+**`refunded`.** The old card excluded `refunded` orders and the shared predicate does
+not, because the occupancy gates never did. Nothing in production writes
+`order_status = 'refunded'` (the refund path was removed in the custodial teardown), so
+no reachable order changes. Whether the gates should exclude it is a separate decision.
+
+**Cost.** Unchanged: occupancy is still one `COUNT(DISTINCT table)` statement and
+`_build_tables` still runs 7 queries, now pinned flat in the number of orders.
+
+**Rollback.** Reverting the code restores the old figure. Nothing is stored and there
+is no migration.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
@@ -2232,6 +2278,8 @@ D11 remains open.
     "Too many attempts. Please wait and try again."}`, which the deployed client
     already shows. Reset initiation is unchanged. The later per-class correction changes
     when the 429 is given, not what it says — see §28.
+13. **Dashboard tables card:** none required. `tables.occupied` and
+    `tables.occupancy_pct` fall: a served order now frees its table — see §29.
 
 ---
 

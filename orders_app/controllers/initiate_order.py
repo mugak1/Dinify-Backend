@@ -1,11 +1,8 @@
 import logging
 
 from restaurants_app.models import Table
-from dinify_backend.configss.string_definitions import (
-    OrderStatus_Cancelled,
-    OrderStatus_Initiated,
-)
 from orders_app.models import Order
+from orders_app.controllers.occupancy import ongoing_order_q
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +18,14 @@ def any_present_ongoing_order(table: Table) -> dict:
     Occupancy otherwise keys off the kitchen-owned fulfilment axis (not
     payment_status), so a table frees up once the kitchen serves its order.
     Returns the most recent such order.
+
+    The predicate is ``orders_app.controllers.occupancy.ongoing_order_q`` — the ONE
+    definition, shared with ``ConOrder.any_present_ongoing_order`` and the
+    dashboard-v2 tables card.
     """
     ongoing_order = (
         Order.objects
-        .filter(table=table, deleted=False)
-        .exclude(order_status=OrderStatus_Initiated)
-        .exclude(order_status=OrderStatus_Cancelled)
-        .exclude(fulfilment_status='served')
+        .filter(ongoing_order_q(), table=table)
         .order_by('-time_created')
         .values('id')
         .first()

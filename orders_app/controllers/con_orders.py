@@ -10,11 +10,10 @@ from dinify_backend.configss.messages import MESSAGES
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from restaurants_app.models import Restaurant, MenuItem, Table
 from dinify_backend.configss.string_definitions import (
-    OrderStatus_Cancelled,
-    OrderStatus_Initiated,
     TransactionStatus_Success
 )
 from orders_app.models import Order, OrderItem
+from orders_app.controllers.occupancy import ongoing_order_q
 from orders_app.serializers import SerializerPutOrderItem
 from finance_app.models import DinifyTransaction
 from orders_app.controllers.orders.serializers import serialize_order_details
@@ -444,13 +443,14 @@ class ConOrder:
         only at submit). Occupancy otherwise keys off the kitchen-owned
         fulfilment axis (not payment_status), so a table frees up once the
         kitchen serves its order. Returns the most recent such order.
+
+        The predicate is ``orders_app.controllers.occupancy.ongoing_order_q`` —
+        the ONE definition, shared with the standalone twin in
+        ``initiate_order`` and the dashboard-v2 tables card.
         """
         ongoing_order = (
             Order.objects
-            .filter(table=table, deleted=False)
-            .exclude(order_status=OrderStatus_Initiated)
-            .exclude(order_status=OrderStatus_Cancelled)
-            .exclude(fulfilment_status='served')
+            .filter(ongoing_order_q(), table=table)
             .order_by('-time_created')
             .values('id')
             .first()
