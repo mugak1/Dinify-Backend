@@ -3,6 +3,7 @@ models for the restaurant app
 """
 import logging
 from datetime import datetime
+from datetime import time as time_of_day
 from decimal import Decimal
 
 from django.db import models
@@ -193,6 +194,28 @@ class Restaurant(BaseModel):
     accepting_orders = models.BooleanField(default=True)
     # weekly opening hours: per-day {'closed': bool, 'open': 'HH:MM', 'close': 'HH:MM'}
     opening_hours = models.JSONField(default=default_opening_hours, blank=True)
+
+    # --- Business day (dining model, Step 1) ---
+    # The local time at which this restaurant's trading day turns over. An order
+    # accepted at 01:30 belongs to the previous business day; one accepted at or
+    # after the cut-off belongs to the new one (the start is inclusive, as section
+    # schedules already treat a window's start). It feeds the business date a round
+    # records at acceptance; `Order.order_date` and the daily order number are a
+    # different thing (the calendar day a draft was created) and are untouched.
+    #
+    # BOTH `default` AND `db_default`, and the second is load-bearing: a rollback lands
+    # OLD CODE ON THIS SCHEMA, and old code INSERTs restaurants without naming this
+    # column. Django drops a Python-only default after `AddField`, so without
+    # `db_default` those inserts would hit a NOT NULL violation (measured).
+    #
+    # NO WRITER IN STEP 1: absent from EDIT_INFORMATION['restaurants'] and from
+    # SerializerPutRestaurant, so nothing can change it yet. It is READ by the
+    # `__all__` restaurant-detail serializer, where it is one additive key
+    # (BREAKING_CHANGES.md §29).
+    business_day_cutoff = models.TimeField(
+        default=time_of_day(4, 0),
+        db_default=time_of_day(4, 0),
+    )
 
     # --- Tax / receipts ---
     vat_registered = models.BooleanField(default=False)
