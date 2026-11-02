@@ -25,7 +25,7 @@ import uuid
 from decimal import Decimal
 
 from django.db import connection
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory
@@ -573,8 +573,15 @@ class WhatTheEvidenceCostsTests(AcceptanceFixture):
             result = fn()
         return len(captured.captured_queries), result
 
-    def test_a_first_submission_costs_two_more_than_before(self):
-        """D04 added two (ask for evidence, write it); D06 added two more.
+    def test_a_first_submission_costs_what_each_change_added(self):
+        """D04 added two (ask for evidence, write it); D06 added two more; the
+        dining model's Step 1 writer added four: 10 -> 12 -> 14 -> 18.
+
+        The Step 1 four are ONE plain read (the restaurant's business-day cut-off
+        and its configured payment timing, together, through a LEFT JOIN, with no
+        lock) and the three INSERTs (visit, bill, placement). They are flat in the
+        size of the order: one visit per acceptance, whatever it holds. With the
+        switch off they all go, which the twin below pins at 14.
 
         The D06 pair is the closure read and ONE catalogue statement for the
         whole purchase — the same single-statement contract `catalogue_snapshot`
@@ -592,6 +599,18 @@ class WhatTheEvidenceCostsTests(AcceptanceFixture):
         # sends one it already holds — otherwise the helper's own
         # `quote_ref()` read lands inside the count and describes the test
         # rather than the path.
+        ref = quote_ref(order)
+        count, result = self._measure(lambda: self._submit(order, ref))
+        self.assertEqual(result.get('status'), 200, result)
+        self.assertEqual(count, 18)
+
+    @override_settings(DINING_VISIT_WRITES_ENABLED=False)
+    def test_with_the_dining_writer_off_a_first_submission_costs_14(self):
+        """The switch-off twin: no cut-off read and no INSERT, so exactly the
+        D06 cost. Turning the writer off must not leave anything behind on the
+        hot path."""
+        self._submit(self._draft())                   # warm
+        order = self._draft(table=self.table_b)
         ref = quote_ref(order)
         count, result = self._measure(lambda: self._submit(order, ref))
         self.assertEqual(result.get('status'), 200, result)

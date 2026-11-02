@@ -39,7 +39,9 @@ LOCK ORDER — this lock is a single TOP level, taken before any row lock, so th
 ordering across every transaction that takes it stays acyclic by construction:
 
     order create           SHARED    -> Table -> Counter -> Order -> OrderItem
-    order submit           SHARED    -> Table -> Order
+    order submit           SHARED    -> Table -> Order (-> INSERT Visit, Bill,
+                                        OrderPlacement; FOR KEY SHARE on Restaurant,
+                                        Table, User at COMMIT)
     retire-for-review      SHARED    -> Table -> Order
     lifecycle transition   EXCLUSIVE -> Restaurant -> AdminAuditLog
     test classification    EXCLUSIVE -> Restaurant -> AdminAuditLog
@@ -61,6 +63,26 @@ worth stating plainly, because the row lock beside it looks sufficient and is no
 ``order_admission.admit`` reads ``is_test`` with a PLAIN ``values_list().get()``,
 never a ``select_for_update``, so under MVCC that read does not block on a row held
 FOR UPDATE. The advisory lock is the only thing the two transactions share.
+
+THE SUBMIT ROW'S TAIL IS THE DINING MODEL'S STEP 1 WRITER
+(``orders_app/controllers/services/round_placement.py``, behind
+``DINING_VISIT_WRITES_ENABLED``). After every lock above it inserts a visit, a bill
+and a placement. New rows are invisible to every other transaction until COMMIT, so
+nothing can wait on them. Their foreign keys are ``DEFERRABLE INITIALLY DEFERRED``,
+so the referenced ``restaurants``, ``tables`` and ``users`` rows are taken
+``FOR KEY SHARE`` at COMMIT. The Table row is already held. ``FOR KEY SHARE`` conflicts
+only with ``FOR UPDATE`` (and a key-changing UPDATE or a DELETE) on those rows. The
+writers that take a ``Restaurant`` row ``FOR UPDATE`` WITHOUT this lock — table-number
+allocation, membership mutation, the commercial writers, onboarding adoption,
+creation and invitations, and owner-claim redemption — can therefore make a submit's
+COMMIT wait for their short transaction, exactly as the create path's ``Order``
+INSERT has always waited (its ``restaurant`` key share is the same lock); the same
+holds for a ``User`` row locked ``FOR UPDATE`` (restaurant creation naming an
+existing owner, owner-claim redemption) when that user placed the order. None of
+them ever waits on a ``Table`` or ``Order`` row or on this advisory lock, so no
+cycle closes. The ones behind the EXCLUSIVE side (the transition, the test
+classification, the restaurants PUT) cannot overlap a submit at all. The
+writer's one READ (the cut-off and the payment timing) takes no lock.
 
 THE LAST FOUR ENTRIES ARE THE D06 COMPLETION (G1a), and they exist because D06
 changed what an admission READS. Until then this lock guarded three

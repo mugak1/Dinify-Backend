@@ -411,6 +411,46 @@ INVENTORY = [
                 "row is untouched by A's inbox) and "
                 "ProducerTransactionTests.test_prune_is_per_restaurant_and_bounded.",
     },
+    # --- dining model, Step 1 writer (visits and bills) ------------------------
+    {
+        "identifier": "Visit/Bill/OrderPlacement.objects.create",
+        "location": "orders_app/controllers/services/round_placement.py:place_first_round",
+        "kind": "direct-write",
+        "owner": "orders",
+        "follow_up_domain": "dining-model",
+        "status": "remediated",
+        "note": "No serializer and no request field reaches any of the three "
+                "INSERTs. They run only inside manage_order._submit_order, after "
+                "the endpoint's capability/authority gate and its re-check under "
+                "the locks, and every value comes from the order row RE-READ under "
+                "the Table and Order locks, the acceptance instant, or one plain "
+                "read of that order's own restaurant (cut-off, payment timing). "
+                "The bill hangs off the visit just written and the placement "
+                "names that order, visit and bill. No other production module may "
+                "reference the models (allowlist). Proven by "
+                "orders_app.tests_dining_writer.EveryAcceptedOrderGetsOneRoundTests"
+                ".test_the_visit_is_copied_from_the_locked_row_not_the_callers_instance "
+                "and orders_app.tests_dining_schema."
+                "OnlyTheDiningModulesReferenceTheseTests.",
+    },
+    {
+        "identifier": "Visit.restaurant / Visit.table (copied from the order)",
+        "location": "orders_app/controllers/services/round_placement.py:place_first_round",
+        "kind": "denormalised-id",
+        "owner": "orders",
+        "follow_up_domain": "dining-model",
+        "status": "remediated",
+        "note": "A visit repeats its order's restaurant and table as real FKs, so "
+                "a visit could in principle name a different tenant than the "
+                "orders placed on it. The writer copies both from the locked order "
+                "row and nothing else writes a visit, so the two always agree; the "
+                "placement's own FKs to the order, visit and bill are written in "
+                "the same three statements. Proven by "
+                "orders_app.tests_dining_writer.EveryAcceptedOrderGetsOneRoundTests "
+                "(assert_one_round checks restaurant and table on every acceptance "
+                "kind, and the locked-row test feeds a foreign tenant's ids on the "
+                "caller's instance).",
+    },
 ]
 
 

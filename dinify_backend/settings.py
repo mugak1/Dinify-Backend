@@ -151,6 +151,18 @@ DINER_SESSION_TTL_SECONDS = config(
     'DINER_SESSION_TTL_SECONDS', default=6 * 60 * 60, cast=int
 )
 
+# Dining model, Step 1: whether accepting an order also writes its visit, bill and
+# placement (orders_app/controllers/services/round_placement.py). ON by default. It
+# exists so the owner can stop new rows without a code rollback if those writes
+# fault, because while it is on a fault refuses the acceptance. Read at CALL time
+# through django.conf.settings, never captured at import. python-decouple reads
+# false/0/no/off/n/f as off, AND AN EMPTY VALUE AS OFF; an unrecognised value raises
+# at settings import, which `check --deploy` catches before Apache restarts. While it
+# is off, the orders_app.W001 system check prints a warning in every deploy log.
+DINING_VISIT_WRITES_ENABLED = config(
+    'DINING_VISIT_WRITES_ENABLED', default=True, cast=bool
+)
+
 ROOT_URLCONF = 'dinify_backend.urls'
 
 TEMPLATES = [

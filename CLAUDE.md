@@ -1193,10 +1193,13 @@ so keep it current when conventions change.
   **B2 (#360) added retention**: `OrderItem.item` is PROTECT, so an ORM delete of
   an ordered catalogue row is refused instead of taking the order's lines with it.
   See "Deletion & Referential Integrity" and `BREAKING_CHANGES.md` §23
-- Dining model, Step 1 schema (visits and bills): ✅ SCHEMA ONLY — **NOTHING WRITES
-  OR READS THESE YET.** Step 1 of the dining and payments design review (final
-  baseline, 13 October 2026) gives every newly accepted order a visit, a bill and a
-  placement record; this is the first of its three PRs. A VISIT is one party's stay
+- Dining model, Step 1 (visits and bills): ✅ SCHEMA (PR 1, #380) + WRITER (PR 2,
+  behind `DINING_VISIT_WRITES_ENABLED`, default ON). Every order accepted from PR 2's
+  deploy onwards gets one visit, one bill and one placement, written in the
+  transaction that accepts it; **NOTHING A DINER, THE KITCHEN OR A REPORT SEES
+  CHANGED**. The writer, the visit-state rule, the switch and its owner runbook are in
+  "Dining model: visits and bills" below. Step 1 of the dining and payments design
+  review (final baseline, 13 October 2026) has three PRs; this records the first two. A VISIT is one party's stay
   at one table, a BILL is what that party owes (one per visit in the first release,
   a `UniqueConstraint`), and an `Order` becomes one ROUND, whose placement facts live
   in `OrderPlacement`: visit, bill, `payment_timing`, `released_at` (NULLABLE, for
@@ -1215,7 +1218,7 @@ so keep it current when conventions change.
   `pay_first` / `pay_after` / `not_chosen` on both `Visit` and `OrderPlacement`,
   each a `CheckConstraint`, built in `orders_app/models.py` from `commercial_app`'s
   own `PAYMENT_TIMING_*` constants plus `PAYMENT_TIMING_NOT_CHOSEN` — "no timing
-  chosen" is explicit, never NULL. `Visit.opened_by` will be the ORDER's
+  chosen" is explicit, never NULL. `Visit.opened_by` is the ORDER's
   `created_by` (the staff member who placed a staff order), never the submitter.
   **DELETION MIRRORS THE EXISTING GRAPH:** `Visit.restaurant` CASCADE and
   `Visit.table` PROTECT (as `Order.restaurant` / `Order.table`), `Visit.opened_by`
@@ -1224,11 +1227,11 @@ so keep it current when conventions change.
   with an order still cannot be hard-deleted, with or without Step 1 rows (pinned).
   Measured consequence: a visit OUTLIVES a hard-deleted order and still holds its
   table, so "delete the orders, then the restaurant" is refused where it used to
-  succeed; no production path hard-deletes an order. The writer (PR 2, behind
-  `DINING_VISIT_WRITES_ENABLED`) adds the full "Dining model: visits and bills"
-  section and must not merge before this schema is deployed and confirmed on UAT.
-  Pinned by `orders_app/tests_dining_schema.py`, whose
-  `NothingWritesTheseYetTests` fails if production code references the new models
+  succeed; no production path hard-deletes an order. Pinned by
+  `orders_app/tests_dining_schema.py`, whose `OnlyTheDiningModulesReferenceTheseTests`
+  (PR 1's "nothing writes these yet", turned into an allowlist by PR 2) fails if any
+  other production module names the new models, a reverse relation into them or an
+  ORM lookup string that reaches them
 - Request correlation and order-command trace (D15 R2): ✅ `dinify_backend/request_context.py`,
   installed ONCE and OUTERMOST on both planes (`settings_admin.py` re-adds it first, then
   ClientIP; `RequestIDMiddleware` is now an alias). Every HTTP request gets one fresh server
@@ -2902,10 +2905,13 @@ so keep it current when conventions change.
   also counted soft-deleted orders and dropped a `paid`-but-unserved one. It now counts
   distinct tables through `orders_app/controllers/occupancy.py::ongoing_order_q`, THE
   ONE DEFINITION — not deleted, not `initiated`, not `cancelled`,
-  `fulfilment_status != 'served'` — which both `any_present_ongoing_order` copies
-  (`ConOrder` and `initiate_order`) now ask through as well. **Do not restate it
-  inline anywhere that answers "is this table occupied"**; a structural test names
-  the three readers. Test/rehearsal orders STILL count (live floor state;
+  `fulfilment_status != 'served'` — which `ConOrder.any_present_ongoing_order` now
+  asks through as well (its `initiate_order` twin DELEGATES to it since the dining
+  model's Step 1 writer, so there is one function, not two copies). **Do not restate
+  it inline anywhere that answers "is this table occupied"**; a structural test names
+  the readers, and `orders_app/tests_dining_occupancy.py` proves every one of them
+  (and the Step 1 visit state) equal to the pre-consolidation predicate over every
+  order state. Test/rehearsal orders STILL count (live floor state;
   `counted_orders_q` does not apply). The figure DROPS on deploy — see
   `BREAKING_CHANGES.md` §30. Cost unchanged: one statement, `_build_tables` pinned at
   7 queries and flat in the order count (`reports_app/tests_dashboard_occupancy.py`,
@@ -3467,7 +3473,10 @@ the catch-all `<str:config_detail>/` route.
   every in-flight order admission (Closure PR 2). **LOCK ORDER, and the advisory lock
   is a single new TOP level in all three:**
   `advisory(restaurant) SHARED → Table → Counter → Order → OrderItem` (order create),
-  `advisory(restaurant) SHARED → Table → Order` (order submit),
+  `advisory(restaurant) SHARED → Table → Order → INSERT Visit → Bill →
+  OrderPlacement` (order submit; the inserts are the dining model's Step 1 writer,
+  whose deferred foreign keys take `FOR KEY SHARE` on `Restaurant`, `Table` and
+  `User` at COMMIT — see "Dining model: visits and bills"),
   `advisory(restaurant) EXCLUSIVE → Restaurant → AdminAuditLog` (transition), and
   the SAME pair again for `manage.py mark_restaurant_test` (the `Restaurant.is_test`
   writer) — it repeats the transition's order exactly, so it joins an ordering
@@ -4328,9 +4337,10 @@ structurally incapable of disagreeing about them.
 - **BOTH ARE ELEVATION-GATED** (`IsAuthenticated` + `IsRecentlyElevated`) and require a
   substantive `reason` — `MIN_REASON_LENGTH` imported from
   `platform_admin_app.delegation`, never respelled. Nothing in the order/kitchen path
-  reads payment timing yet and that is NOT a reason to gate it lightly: the decision is
-  consequential when it is RECORDED, because the enforcement built later is built
-  against whatever the configuration then says
+  ENFORCES payment timing yet (acceptance only COPIES it onto the new visit, see
+  "Dining model: visits and bills") and that is NOT a reason to gate it lightly: the
+  decision is consequential when it is RECORDED, because the enforcement built later
+  is built against whatever the configuration then says
 - **CSRF is the existing admin policy**, enforced by `AdminSessionAuthentication` — not
   disabled, not exempted, not reimplemented per route. Tests use
   `Client(enforce_csrf_checks=True)`; the DEFAULT test client sets
@@ -4422,9 +4432,13 @@ structurally incapable of disagreeing about them.
   as unremarkably as the other: a permanent, first-class mode, never a fallback
 - **NO ADMISSION ADVISORY LOCK.** Deliberate and load-bearing: the lifecycle transition takes
   `advisory → Restaurant row`, and taking it AFTER the row lock here would invert that order.
-  Nothing in the order path reads these values yet. When payment timing is eventually enforced
-  in order admission, changing it while live will need a deliberate lock-design update — not
-  a lock quietly added here first
+  Nothing in the order path ENFORCES these values yet. Since the dining model's Step 1
+  writer, acceptance READS payment timing (never collection mode) with one plain read
+  and no lock, and COPIES it onto the new visit and placement; a change committing
+  beside an acceptance lands on that visit or the next, and an existing visit keeps
+  the value it was opened with. When payment timing is eventually enforced in order
+  admission (Step 2), changing it while live will need a deliberate lock-design update —
+  not a lock quietly added here first
 - **GET COST IS UNCHANGED**: 4 queries for the list (flat across page size) and 8 for the
   detail, measured on this branch; no read module was touched. A POST costs 12–13 (auth,
   target resolve, row lock, actor, config read, the write, audit, canonical re-read)
@@ -5948,8 +5962,11 @@ with `errors.py` (one `CommercialMutationError` carrying a stable `.code`) and
   cannot cycle. **It must NEVER reach for the admission advisory lock afterwards**:
   the lifecycle transition takes that lock FIRST and the row second, so acquiring it
   after the row would invert that order. It is not needed at all today — nothing in
-  the order path reads payment timing or collection mode. WHEN timing is eventually
-  enforced in the order/kitchen path, changing it while live WILL need the barrier
+  the order path enforces payment timing or reads collection mode; acceptance copies
+  the timing onto a new visit with one unlocked read (dining model, Step 1), which
+  needs no barrier because a copy taken a moment early is still a value somebody
+  chose. WHEN timing is eventually enforced in the order/kitchen path, changing it
+  while live WILL need the barrier
 - **OPTIMISTIC CONCURRENCY.** Both configuration writers take `expected_current`
   (no default — `None` is a real assertion, so a forgotten argument must not make it
   by accident) and compare it against the value read UNDER THE LOCK; a mismatch is
@@ -6028,6 +6045,186 @@ writable relation to classify. Tests prove no serializer targets either model, t
 neither is reachable through the `restaurant-setup` catch-all, that a `restaurants`
 PUT cannot smuggle the fields, and that no delegated route mentions the domain.
 
+
+## Dining model: visits and bills — Step 1
+
+Step 1 of the dining and payments design review (final baseline, 13 October 2026).
+A VISIT is one party's stay at one table; a BILL is what that party owes; an `Order`
+is one ROUND on that bill, and `OrderPlacement` records where it sits. PR 1 (#380)
+built the schema; PR 2 built the writer described here. Step 2 (held rounds,
+payment timing at acceptance) and Step 3 (several rounds per visit) are NOT built.
+
+### DESIGN AMENDMENT (owner + reviewer, 2 November 2026)
+The review put visit, bill, timing, released time, business date and round on
+`Order` as columns. They live in a separate `OrderPlacement` row instead, for D04's
+reason: a stale full `Order.save()` writes every field back, so it could null a
+round's visit and bill and, once payments hang off bills, silently drop a charge.
+A separate row makes that impossible, and `orders` is never altered.
+
+### THE WRITER — `orders_app/controllers/services/round_placement.py`
+`place_first_round(order, accepted_at)` is THE ONLY production writer of `visits`,
+`bills` and `order_placements`. It is called from ONE place: `manage_order.
+_submit_order`, after `_terminal_quote_outcome` and before the order flips to
+`pending`, with the SAME `now` the acceptance stamps on `OrderAcceptance.accepted_at`.
+
+- **ONLY ON A FIRST ACCEPTANCE.** It sits after every refusal and after the D04
+  replay return, so a replay (same quote → 200 `idempotent`, different → 409), every
+  refusal and a draft that is never submitted write nothing. Two concurrent submits
+  of one draft write exactly one round (the second waits on the locks, finds the
+  first's evidence and replays) — pinned on two real connections in
+  `orders_app/tests_dining_writer_concurrency.py`.
+- **ONE TRANSACTION.** The rows commit with the acceptance or not at all. A fault at
+  any of the three INSERTs fails the acceptance (the endpoint's ordinary 400) and
+  rolls it back: the order stays a draft with no `OrderAcceptance`. That is
+  deliberate; the switch below is the remedy, not a swallowed exception.
+- **TENANT ISOLATION.** `Visit.restaurant` and `Visit.table` are copied from the
+  order row RE-READ under the Table and Order locks, never from the caller's
+  instance or a request. Pinned by feeding a stale and a foreign-tenant instance.
+- **`opened_by` IS THE ORDER'S `created_by`** — the staff member who placed a staff
+  order, NULL for a diner's — never whoever tapped submit.
+- **UNTIL STEP 2** `released_at` = `opened_at` = the acceptance instant. **UNTIL
+  STEP 3** every order is its own visit's round 1.
+- **THE BUSINESS DATE** (`business_date_for`): take the acceptance instant in the
+  DEFAULT time zone (`settings.TIME_ZONE`, Africa/Nairobi), never the zone active for
+  the request. At or after `Restaurant.business_day_cutoff` (04:00 by default) it is
+  that local day; before it, the previous day. 04:00:00 itself starts the new day,
+  03:59:59.999999 is the previous one, and a cut-off of 00:00 always gives the local
+  calendar day.
+- **THE PAYMENT TIMING** is COPIED from `RestaurantServiceConfiguration.
+  payment_timing`, read with the cut-off in ONE plain statement with no lock, kept
+  out of `admit()`. A missing configuration row and an unset axis both record
+  `not_chosen`; an unknown value raises (a data fault must not read as "nobody
+  chose"). A later configuration change leaves an existing visit alone. Nothing
+  ENFORCES timing yet — that is Step 2, and it will need the lock-design update the
+  commercial sections describe.
+- **COST: submit 14 → 18** (the one read plus three INSERTs, flat in the order's
+  size), and **14 with the switch off** — both pinned in `orders_app/
+  tests_order_acceptance.py::WhatTheEvidenceCostsTests`. A replay stays 7, and the
+  create path and every other pinned count are unchanged.
+- **LOCKS.** The INSERTs come after the acceptance's `advisory SHARED → Table →
+  Order`. New rows are invisible until COMMIT, so nothing can wait on them; their
+  foreign keys are `DEFERRABLE INITIALLY DEFERRED` and take `FOR KEY SHARE` on the
+  referenced `restaurants`, `tables` and `users` rows at COMMIT — the same key share
+  the create path's `Order` INSERT has always taken on the restaurant. The full
+  analysis is the lock-order table in `restaurants_app/controllers/admission_lock.py`.
+
+### VISIT STATE IS DERIVED, AND THE KITCHEN WRITES NOTHING
+Until Step 3 a visit is OPEN exactly when its order meets the occupancy rule
+(`occupancy.ongoing_order_q`) and ENDED otherwise: `round_placement.open_visits_q()`
+/ `visit_state(visit)`. So serve, cancel, recall and a soft delete write nothing to
+the new tables, and a recall reopens the visit by itself. **AN ENDED VISIT READS
+PAYMENT `unknown`** — nothing records payment, and the kitchen's serve is not a
+settlement. Pinned through the real kitchen endpoints with zero writes to the three
+tables, and over every order state against the pre-#381 predicate in
+`orders_app/tests_dining_occupancy.py`. The `initiate_order` occupancy twin now
+DELEGATES to `ConOrder.any_present_ongoing_order`, so one function answers.
+
+### TEST ORDERS
+A visit carries no `is_test` flag of its own; it inherits its status through its
+orders. `orders_app/controllers/test_orders.py::counted_visits_q()` is the visit
+counterpart of `counted_orders_q()` — it drops a PRACTICE order's visit and keeps a
+test restaurant's. Use it in any future figure over visits; never filter a flag.
+
+### NOTHING A READER SEES CHANGED
+No serializer, endpoint, report or kitchen feed reads the new tables. Pinned two
+ways in `orders_app/tests_dining_writer.py::ReadersSeeNoDifferenceTests`: the diner
+order read, both kitchen feeds, both dashboards and four report slugs are
+byte-identical with and without the rows, and the initiate and submit responses are
+identical (up to ids and instants) with the switch on and off.
+
+### WHO MAY REFERENCE THE MODELS
+`orders_app/tests_dining_schema.py::OnlyTheDiningModulesReferenceTheseTests` is an
+allowlist: `orders_app/models.py`, `round_placement.py` and `test_orders.py`. Any
+other production module that names `Visit` / `Bill` / `OrderPlacement`, a reverse
+relation into them (`order.placement`, `restaurant.visits` …) or an ORM lookup
+string that reaches them (`'placement__visit'`) fails the build.
+
+### THE SWITCH — `DINING_VISIT_WRITES_ENABLED` (default ON)
+Read from the environment by python-decouple (`cast=bool`) in `settings.py`, and at
+call time by the writer, so a worker restart is all it takes. **Off writes nothing
+and reads nothing** — accepted orders simply get no visit, bill or placement for as
+long as it is off, and they are NOT backfilled when it comes back on. While it is
+off, the ordinary system check `orders_app.W001` warns on every `manage.py check`
+(including the deploy's two `check --deploy` runs). **An EMPTY value means OFF**
+(`DINING_VISIT_WRITES_ENABLED=` is False), not "default"; an unrecognised value
+(e.g. `maybe`) raises at settings import, so the deploy's `check --deploy` fails and
+the deploy stops before the Apache restart, with the old workers still serving.
+
+#### Owner runbook — turning the writer off (or on again)
+Operated by the owner on the UAT box; nothing in this repository changes it. The
+deploy re-reads `.env` only when Apache restarts, which the deploy workflow does.
+
+1. On the box, in `/home/ubuntu/dinify_backend_handover_uat`, edit `.env` and set
+   `DINING_VISIT_WRITES_ENABLED=False` (to turn it back on: `True`, or delete the
+   line — the default is on).
+2. Restore ownership and mode, which the deploy gates check before anything
+   restarts: `sudo chown ubuntu:www-data .env && sudo chmod 640 .env`.
+3. In GitHub Actions, run **Deploy UAT Backend** (`workflow_dispatch`) with `sha` =
+   the full 40-hex commit already deployed (the step summary's `DEPLOYED-HEAD:` of
+   the last run). Re-deploying the deployed commit is an idempotent redeploy: it
+   re-runs the gates, restarts Apache and so re-reads `.env`.
+4. Confirm it took effect from the run's log: with the writer OFF, the
+   "---- remote stderr ----" section shows `orders_app.W001` ("DINING_VISIT_WRITES_
+   ENABLED is off …") under the `check --deploy` output, twice (once as `ubuntu`,
+   once as `www-data`). With it ON, that warning is absent.
+5. Optionally, run the verification query below from the moment it was turned back
+   on.
+
+#### Verification query (read-only)
+Run against the UAT database with `psql -v since='<deploy time, with offset>'`.
+Every check should report 0. While the writer was OFF, check 1 counts exactly the
+orders accepted in that period, which is expected. Check 4 uses each restaurant's
+CURRENT cut-off, so a cut-off edited since then is a false positive.
+
+```sql
+BEGIN TRANSACTION READ ONLY;
+WITH since AS (SELECT :'since'::timestamptz AS t),
+accepted AS (
+  SELECT a.order_id, a.accepted_at FROM order_acceptances a, since
+  WHERE a.accepted_at >= since.t),
+missing AS (
+  SELECT ac.order_id::text AS id FROM accepted ac
+  LEFT JOIN order_placements p ON p.order_id = ac.order_id WHERE p.id IS NULL),
+mismatched AS (
+  SELECT p.order_id::text AS id FROM order_placements p
+  JOIN accepted ac ON ac.order_id = p.order_id
+  JOIN orders o ON o.id = p.order_id
+  JOIN visits v ON v.id = p.visit_id
+  JOIN bills b ON b.id = p.bill_id
+  WHERE v.restaurant_id <> o.restaurant_id OR v.table_id <> o.table_id
+     OR b.visit_id <> p.visit_id),
+bill_count AS (
+  SELECT v.id::text AS id FROM visits v CROSS JOIN since
+  LEFT JOIN bills b ON b.visit_id = v.id
+  WHERE v.opened_at >= since.t GROUP BY v.id HAVING count(b.id) <> 1),
+wrong_date AS (
+  SELECT p.order_id::text AS id FROM order_placements p
+  JOIN accepted ac ON ac.order_id = p.order_id
+  JOIN visits v ON v.id = p.visit_id
+  JOIN restaurants r ON r.id = v.restaurant_id
+  WHERE p.business_date <> (
+          (ac.accepted_at AT TIME ZONE 'Africa/Nairobi')::date
+          - CASE WHEN (ac.accepted_at AT TIME ZONE 'Africa/Nairobi')::time
+                      < r.business_day_cutoff THEN 1 ELSE 0 END)
+     OR p.released_at IS DISTINCT FROM ac.accepted_at
+     OR v.opened_at <> ac.accepted_at OR p.round_number <> 1)
+SELECT '1 accepted orders without a placement' AS check_name,
+       count(*) AS offenders, (array_agg(id))[1:5] AS sample FROM missing
+UNION ALL SELECT '2 visit/bill tenant or table mismatch', count(*),
+       (array_agg(id))[1:5] FROM mismatched
+UNION ALL SELECT '3 visits without exactly one bill', count(*),
+       (array_agg(id))[1:5] FROM bill_count
+UNION ALL SELECT '4 business date / released time / round wrong', count(*),
+       (array_agg(id))[1:5] FROM wrong_date
+UNION ALL SELECT '- accepted orders checked', count(*), NULL FROM accepted
+ORDER BY 1;
+ROLLBACK;
+```
+
+### ROLLBACK
+No migration in PR 2. Rolling the CODE back to PR 1 stops the writes and leaves the
+rows; PR 1's code ignores them and still accepts orders and creates restaurants
+(rehearsed). Prefer the switch over a code rollback.
 
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns
