@@ -2195,6 +2195,34 @@ service maps 429 to its rate-limited message. Forgot-password never sees this 42
 
 D11 remains open.
 
+## 29. The restaurant-detail read gains `business_day_cutoff` (dining model, Step 1 schema)
+
+**What changed.** `GET api/v1/restaurant-setup/details/?record=restaurants&id=<uuid>`
+returns one more key in `data`: `"business_day_cutoff": "04:00:00"`. That serializer
+(`SerializerGetRestaurantDetail`) returns every model field, and the restaurant gained
+the column in migration `restaurants_app/0060`. Nothing else in the response moved, and
+no other response changed: the table, order, kitchen and report serializers keep exactly
+the fields they had (pinned in `orders_app/tests_dining_schema.py`). The MongoDB archive
+copy of a restaurant (`SerArcRestaurant`) gains the same key.
+
+**What it is.** The local time at which the restaurant's business day turns over. An
+order accepted at 01:30 belongs to the previous business day, and one accepted at or after
+04:00 belongs to the new one. Every restaurant has 04:00, from a database default.
+
+**What it is not, yet.** Nothing writes it and nothing reads it. It is not in
+`EDIT_INFORMATION['restaurants']` and not in `SerializerPutRestaurant`, so a PUT cannot
+set it. The Step 1 writer, a later pull request, reads it to stamp a business date on
+each accepted order.
+
+**Client action.** None. The key is additive, and no client needs to read it.
+
+**Rollback.** Old code ignores the column, and its restaurant INSERTs succeed because the
+column carries a database default (`db_default`). Rolled back, the response simply loses
+the key again.
+
+The same migration pair also creates three tables, `visits`, `bills` and
+`order_placements` (`orders_app/0043`). No response exposes them and nothing writes them.
+
 ## Summary of frontend changes needed before merge
 
 1. **Login flow:** Stop reading `token`/`refresh` when `require_otp == true`.
