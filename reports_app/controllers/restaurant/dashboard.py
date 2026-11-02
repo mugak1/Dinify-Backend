@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from orders_app.models import Order, OrderItem
 from orders_app.controllers.test_orders import counted_orders_q
+from orders_app.controllers.occupancy import ongoing_order_q
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED, PRICING_VERSION_LEGACY,
 )
@@ -610,19 +611,24 @@ def _build_tables(restaurant_id):
         restaurant=restaurant_id, enabled=True, deleted=False,
     ).count()
 
+    # OCCUPIED = the tables that `any_present_ongoing_order` answers yes for, asked
+    # through THE SAME predicate (`orders_app.controllers.occupancy.ongoing_order_q`)
+    # rather than a restatement of it. This card used to carry its own, keyed on
+    # `payment_status=pending` — which nothing in production ever moves, so every
+    # order not cancelled went on "occupying" its table after it was served — and it
+    # counted soft-deleted orders too. It disagreed with the occupancy gates and the
+    # table cards; one definition is what stops that.
+    #
     # DELIBERATELY includes test orders. This is LIVE FLOOR STATE, not history: a
     # rehearsal order really does occupy its table, and this card must agree with the
     # occupancy helpers and the table cards, which also count it. Excluding it here
-    # would show a table free while a ticket for it sat on the kitchen board.
-    active_orders = Order.objects.filter(
-        restaurant=restaurant_id,
-        payment_status=PaymentStatus_Pending,
-    ).exclude(
-        order_status__in=[
-            OrderStatus_Initiated, OrderStatus_Cancelled, OrderStatus_Refunded,
-        ],
+    # would show a table free while a ticket for it sat on the kitchen board. So
+    # `counted_orders_q` does NOT apply here.
+    occupied = (
+        Order.objects
+        .filter(ongoing_order_q(), restaurant=restaurant_id)
+        .values('table').distinct().count()
     )
-    occupied = active_orders.values('table').distinct().count()
     occupancy_pct = (
         str((Decimal(occupied) * Decimal(100) / Decimal(total)).quantize(Decimal('0.1')))
         if total > 0 else '0.0'
