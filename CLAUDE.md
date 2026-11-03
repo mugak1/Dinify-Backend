@@ -143,7 +143,37 @@ so keep it current when conventions change.
   is its own contract decision rather than this change's. It is DELIBERATELY ABSENT from the delegated `ALLOWED_ROUTES` — a
   delegated session can issue none of the three commands, so it can never hold an
   uncertain one to reconcile; the reasoning is recorded in `delegation_scopes.py`
-  beside the command exclusions. See `BREAKING_CHANGES.md` §15a
+  beside the command exclusions. See `BREAKING_CHANGES.md` §15a.
+  **THE KITCHEN SEES RELEASED ROUNDS ONLY (Step 2, PR BE-C).** A round reaches the
+  kitchen only once RELEASED: it has NO placement (it predates Step 1, or was accepted
+  with `DINING_VISIT_WRITES_ENABLED` off) or its `OrderPlacement.released_at` is set.
+  A HELD round is `order_status='pending'` with a placement whose `released_at` is
+  NULL. **THE RULE IS WRITTEN ONCE**, `round_placement.released_round_q()`, with a
+  Python twin (`round_is_held` / `is_held`) a test holds equal to it, and both feeds,
+  the command boundary and dashboard-v2's kitchen card (`_build_kds`) ask through it.
+  FEEDS: a held round is on neither; every ticket gains an additive `released_at` (the
+  placement's value, or `null` with no placement). COMMANDS: `_assert_operable`
+  refuses a held round **409 `order_held`** (after draft/cancelled/terminal, before
+  coherence and before the precondition), and a command that LOCATED a held round
+  released by the time the lock is taken is refused **409
+  `order_released_while_waiting`** — the acceptance boundary's shape, since releasing
+  is not a kitchen command and does not move the revision. `read_state` still answers
+  for a held round, the one place a client can see it. THE CARD leaves held rounds out
+  and ages a ticket from its release, falling back to its creation. **NO QUERY WAS
+  ADDED**: the placement rides one LEFT JOIN (`select_related('placement')`, and
+  `of=('self',)` on the locked read); measured identical at the head and on the
+  branch, with and without placements — each feed 4 with tickets (3 when empty, which
+  skips the item prefetch), commands 10/10/11/9/10/11/10/0, card 3.
+  **A WRITER OF `released_at` MUST TAKE `Table -> Order`**: the joined placement
+  comes from the Order statement's own READ COMMITTED snapshot, so a release that
+  locked only the Order row is read stale (measured: still refused, as `order_held`);
+  a writer moving a released round BACK to held without the Table lock would let a
+  command apply to it, and nothing may write that. NOTHING WRITES A HELD
+  ROUND YET, so the filter changes no result on today's data. **The card's AGE does**:
+  an order placed since Step 1's writer went live now ages from its acceptance
+  (`released_at`) rather than its draft's creation. **NEVER REVERT THIS FILTER WHILE
+  HELD ROUNDS EXIST** — a held round would reach the board and be cookable before it
+  was released. Pinned by `orders_app/tests_kitchen_release_filter.py`
 - Order-creation hardening: ✅ (PRs #198–#201, #210) — the live v2 `initiate`
   create path enforces tenant consistency (table + menu items must belong to the
   same restaurant, BUG-P1-1), rejects orders when the restaurant is not
@@ -1197,7 +1227,9 @@ so keep it current when conventions change.
   behind `DINING_VISIT_WRITES_ENABLED`, default ON). Every order accepted from PR 2's
   deploy onwards gets one visit, one bill and one placement, written in the
   transaction that accepts it; **NOTHING A DINER, THE KITCHEN OR A REPORT SEES
-  CHANGED**. The writer, the visit-state rule, the switch and its owner runbook are in
+  CHANGED** (Step 2's kitchen release filter has since made the kitchen read the
+  placement — see the Kitchen module bullet). The writer, the visit-state rule, the
+  switch and its owner runbook are in
   "Dining model: visits and bills" below. Step 1 of the dining and payments design
   review (final baseline, 13 October 2026) has three PRs; this records the first two. A VISIT is one party's stay
   at one table, a BILL is what that party owes (one per visit in the first release,
@@ -6051,8 +6083,9 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
 Step 1 of the dining and payments design review (final baseline, 13 October 2026).
 A VISIT is one party's stay at one table; a BILL is what that party owes; an `Order`
 is one ROUND on that bill, and `OrderPlacement` records where it sits. PR 1 (#380)
-built the schema; PR 2 built the writer described here. Step 2 (held rounds,
-payment timing at acceptance) and Step 3 (several rounds per visit) are NOT built.
+built the schema; PR 2 built the writer described here. Of Step 2 (held rounds,
+payment timing at acceptance), only the kitchen RELEASE FILTER (PR BE-C, below) is
+built: nothing holds a round yet. Step 3 (several rounds per visit) is NOT built.
 
 ### DESIGN AMENDMENT (owner + reviewer, 2 November 2026)
 The review put visit, bill, timing, released time, business date and round on
@@ -6119,25 +6152,46 @@ tables, and over every order state against the pre-#381 predicate in
 `orders_app/tests_dining_occupancy.py`. The `initiate_order` occupancy twin now
 DELEGATES to `ConOrder.any_present_ongoing_order`, so one function answers.
 
+### THE KITCHEN RELEASE FILTER — Step 2, PR BE-C
+A round is RELEASED when it has no placement or its `released_at` is set, and HELD
+when its placement's `released_at` is NULL (`order_status` stays `pending`).
+`round_placement.released_round_q()` is the rule; `round_is_held(has_placement,
+released_at)` / `is_held(order)` are its Python twins, and `released_at_of(order)` /
+`placement_of(order)` read a selected placement (or its absence) without a query. Both
+kitchen feeds, the kitchen command boundary and `_build_kds` use them; the full contract
+is in the Kitchen module bullet under Current Implementation Status. **THE "NO
+PLACEMENT" ARM IS LOAD-BEARING**: every order accepted before Step 1, or with the
+switch off, has no placement and must stay on the board. The writer is unchanged
+(`place_first_round` still stamps the acceptance instant), so no held round exists
+until Step 2's holding writer ships, and that writer must take `Table -> Order`.
+
 ### TEST ORDERS
 A visit carries no `is_test` flag of its own; it inherits its status through its
 orders. `orders_app/controllers/test_orders.py::counted_visits_q()` is the visit
 counterpart of `counted_orders_q()` — it drops a PRACTICE order's visit and keeps a
 test restaurant's. Use it in any future figure over visits; never filter a flag.
 
-### NOTHING A READER SEES CHANGED
-No serializer, endpoint, report or kitchen feed reads the new tables. Pinned two
-ways in `orders_app/tests_dining_writer.py::ReadersSeeNoDifferenceTests`: the diner
-order read, both kitchen feeds, both dashboards and four report slugs are
-byte-identical with and without the rows, and the initiate and submit responses are
-identical (up to ids and instants) with the switch on and off.
+### NOTHING A READER SEES CHANGED (BUT THE KITCHEN'S `released_at`)
+Step 1 added no reader of the new tables. Step 2's release filter (BE-C) made the
+kitchen the first, and it is visible in exactly ONE key: each kitchen ticket's
+`released_at` (the release instant with the rows, `null` without). Pinned two ways in
+`orders_app/tests_dining_writer.py::ReadersSeeNoDifferenceTests`: the diner order
+read, both kitchen feeds, both dashboards and four report slugs are byte-identical
+with and without the rows, except the active feed, which differs in that key alone
+(asserted, not skipped); and the initiate and submit responses are identical (up to
+ids and instants) with the switch on and off.
 
 ### WHO MAY REFERENCE THE MODELS
 `orders_app/tests_dining_schema.py::OnlyTheDiningModulesReferenceTheseTests` is an
-allowlist: `orders_app/models.py`, `round_placement.py` and `test_orders.py`. Any
-other production module that names `Visit` / `Bill` / `OrderPlacement`, a reverse
-relation into them (`order.placement`, `restaurant.visits` …) or an ORM lookup
-string that reaches them (`'placement__visit'`) fails the build.
+allowlist: `orders_app/models.py`, `round_placement.py` and `test_orders.py`, plus
+the release filter's three kitchen readers (BE-C): `orders_app/endpoints_kitchen.py`,
+`orders_app/controllers/services/kitchen_transition.py` and
+`reports_app/controllers/restaurant/dashboard.py`. Each names the relation only to
+`select_related` or read it in the same statement; the rule stays in
+`round_placement`, and the kitchen serializer is NOT listed because it reads through
+`released_at_of`. Any other production module that names `Visit` / `Bill` /
+`OrderPlacement`, a reverse relation into them (`order.placement`, `restaurant.visits`
+…) or an ORM lookup string that reaches them (`'placement__visit'`) fails the build.
 
 ### THE SWITCH — `DINING_VISIT_WRITES_ENABLED` (default ON)
 Read from the environment by python-decouple (`cast=bool`) in `settings.py`, and at
@@ -6225,6 +6279,14 @@ ROLLBACK;
 No migration in PR 2. Rolling the CODE back to PR 1 stops the writes and leaves the
 rows; PR 1's code ignores them and still accepts orders and creates restaurants
 (rehearsed). Prefer the switch over a code rollback.
+
+**THE KITCHEN RELEASE FILTER (BE-C) HAS NO MIGRATION EITHER, AND ROLLING IT BACK IS
+SAFE ONLY WHILE NO HELD ROUND EXISTS.** The reverted code puts every held round on the
+kitchen board and lets every kitchen command act on it. Before rolling it back, this
+read-only query must return 0 (today it always does, since nothing writes a NULL):
+`SELECT count(*) FROM order_placements WHERE released_at IS NULL;`. Once a writer of
+held rounds ships, it is rolled back or switched off FIRST, and this filter after
+it — never the other way round.
 
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns

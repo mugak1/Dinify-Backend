@@ -697,10 +697,19 @@ class ReadersSeeNoDifferenceTests(DiningFixture):
             bodies[name] = (response.status_code, response.content)
         return bodies
 
+    #: Reads that are ALLOWED one difference, and which key carries it. Step 2's
+    #: kitchen release filter (BE-C) adds `released_at` to every kitchen ticket:
+    #: the placement's release instant with the rows, null without them (an order
+    #: with no placement). That is the ONE place the rows are now visible, by
+    #: design; everything else on the ticket, and every other read, stays
+    #: byte-identical. (The completed feed is empty here, so it stays identical.)
+    DIFFERS_ONLY_IN = {'kitchen_active': 'released_at'}
+
     def test_every_read_is_identical_with_and_without_the_rows(self):
         order = self.draft()
         self.accept(order)
         self.assertEqual(self.counts(), (1, 1, 1))
+        released_at = OrderPlacement.objects.get(order=order).released_at
         with_rows = self.reads(order)
         OrderPlacement.objects.all().delete()
         Bill.objects.all().delete()
@@ -708,7 +717,21 @@ class ReadersSeeNoDifferenceTests(DiningFixture):
         without_rows = self.reads(order)
         for name in with_rows:
             with self.subTest(read=name):
-                self.assertEqual(with_rows[name], without_rows[name])
+                if name not in self.DIFFERS_ONLY_IN:
+                    self.assertEqual(with_rows[name], without_rows[name])
+                    continue
+                key = self.DIFFERS_ONLY_IN[name]
+                self.assertEqual(with_rows[name][0], without_rows[name][0])
+                body_with = json.loads(with_rows[name][1])
+                body_without = json.loads(without_rows[name][1])
+                [ticket_with] = body_with['data']
+                [ticket_without] = body_without['data']
+                self.assertEqual(
+                    datetime.fromisoformat(
+                        ticket_with.pop(key).replace('Z', '+00:00')),
+                    released_at)
+                self.assertIsNone(ticket_without.pop(key))
+                self.assertEqual(body_with, body_without)
         # And the reads did run: the order is on the active board.
         self.assertIn(str(order.pk).encode(), with_rows['kitchen_active'][1])
 

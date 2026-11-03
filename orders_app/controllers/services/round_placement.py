@@ -5,8 +5,8 @@ A VISIT is one party's stay at one table; a BILL is what that party owes (one pe
 in the first release); an ``Order`` is one ROUND on that bill, and ``OrderPlacement``
 records where it sits. The schema is PR 1 (``orders_app/0043``, ``restaurants_app/
 0060``). This module is the ONLY production writer of those three tables, and
-``orders_app/tests_dining_schema.py`` fails the build if any other module starts
-referencing them.
+``orders_app/tests_dining_schema.py`` fails the build if a module outside its stated
+allowlist starts referencing them.
 
 WHEN IT WRITES. Exactly once per order: on its FIRST acceptance, inside
 ``manage_order._submit_order``'s transaction, after every refusal and every replay has
@@ -40,11 +40,19 @@ lock-order table in ``restaurants_app/controllers/admission_lock.py``.
 NOTHING HERE READS A VISIT ON A HOT PATH. The kitchen keeps ``Table -> Order``, and no
 kitchen command writes these tables: until Step 3 a visit's state is DERIVED from its
 one order (``visit_state`` below).
+
+THE RELEASE RULE (Step 2, PR BE-C). A round reaches the kitchen only once it is
+RELEASED: it has NO placement (it predates Step 1, or was accepted with the writer off)
+or its placement's ``released_at`` is set. A HELD round is ``order_status='pending'``
+with a placement whose ``released_at`` is NULL. ``released_round_q`` is the rule, written
+once; ``round_is_held`` is its Python twin for one round in hand, and a test holds the
+two equal over every shape. Nothing writes a NULL ``released_at`` yet (``place_first_round``
+stamps the acceptance instant), so the rule changes no result on today's data.
 """
 from datetime import time, timedelta
 
 from django.conf import settings
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from commercial_app.models import PAYMENT_TIMING_PAY_AFTER, PAYMENT_TIMING_PAY_FIRST
@@ -159,6 +167,62 @@ def place_first_round(order, accepted_at):
         released_at=accepted_at,
         business_date=business_date_for(accepted_at, cutoff),
         round_number=FIRST_ROUND,
+    )
+
+
+def released_round_q():
+    """A filter over ``Order`` matching the rounds the kitchen may see: no placement,
+    or a placement whose ``released_at`` is set.
+
+    THE "NO PLACEMENT" ARM IS LOAD-BEARING: every order accepted before Step 1, or while
+    ``DINING_VISIT_WRITES_ENABLED`` was off, has no placement and must stay on the board.
+    Both arms sit in ONE ``Q`` so they share one LEFT JOIN to ``order_placements``,
+    which ``select_related('placement')`` then reuses: no query is added anywhere.
+
+    NEVER REVERT A CONSUMER OF THIS WHILE HELD ROUNDS EXIST: without it a held round
+    reaches the kitchen board before it was released.
+    """
+    return Q(placement__isnull=True) | Q(placement__released_at__isnull=False)
+
+
+def round_is_held(has_placement, released_at):
+    """THE held rule for one round, the Python twin of ``~released_round_q()``.
+
+    Held means a placement exists AND its ``released_at`` is unset. An order with no
+    placement is never held. Pure, so it can judge both a locked row and a pre-lock
+    ``.values()`` read.
+    """
+    return bool(has_placement) and released_at is None
+
+
+def placement_of(order):
+    """The order's placement, or ``None`` when it has none.
+
+    Select ``placement`` with the order (``select_related('placement')``): Django then
+    caches the absence too, and this costs no query either way.
+    """
+    try:
+        return order.placement
+    except OrderPlacement.DoesNotExist:
+        return None
+
+
+def released_at_of(order):
+    """The placement's ``released_at``, or ``None`` when the order has no placement.
+
+    ``None`` therefore means "no placement" OR "held"; ask ``is_held`` to tell them
+    apart.
+    """
+    placement = placement_of(order)
+    return None if placement is None else placement.released_at
+
+
+def is_held(order):
+    """True when ``order`` is a held round (see ``round_is_held``)."""
+    placement = placement_of(order)
+    return round_is_held(
+        placement is not None,
+        None if placement is None else placement.released_at,
     )
 
 

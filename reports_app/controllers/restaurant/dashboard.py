@@ -12,6 +12,9 @@ from django.utils import timezone
 from orders_app.models import Order, OrderItem
 from orders_app.controllers.test_orders import counted_orders_q
 from orders_app.controllers.occupancy import ongoing_order_q
+from orders_app.controllers.services.round_placement import (
+    released_at_of, released_round_q,
+)
 from orders_app.controllers.services.order_pricing import (
     PRICING_VERSION_CORRECTED, PRICING_VERSION_LEGACY,
 )
@@ -704,7 +707,11 @@ def _build_kds(restaurant_id):
     # the kitchen board itself. The fulfilment metrics below share that basis, so the
     # whole KDS card is coherent — open tickets and the time taken to clear them are
     # measured over the same set.
+    #
+    # RELEASED ROUNDS ONLY (Step 2), by the board's own rule (`released_round_q`):
+    # a held round is not on the kitchen board, so it is not an open ticket here.
     open_orders = Order.objects.filter(
+        released_round_q(),
         restaurant=restaurant_id,
         fulfilment_status__in=['new', 'preparing', 'ready'],
         deleted=False,
@@ -718,8 +725,16 @@ def _build_kds(restaurant_id):
     oldest_minutes = 0
     oldest_ticket_number = None
 
-    for order in open_orders.only('time_created', 'order_number'):
-        age_minutes = (now - order.time_created).total_seconds() / 60
+    # A ticket's age runs from when the KITCHEN GOT IT: its release, falling back
+    # to its creation for an order with no placement (pre-Step-1, or accepted with
+    # the writer off). Today every placement's `released_at` is its acceptance
+    # instant, so a placed ticket ages from acceptance rather than from draft
+    # creation; a held round would otherwise count its wait as kitchen lateness.
+    # `select_related` reuses the filter's LEFT JOIN: still one statement.
+    for order in (open_orders.select_related('placement')
+                  .only('time_created', 'order_number', 'placement__released_at')):
+        started = released_at_of(order) or order.time_created
+        age_minutes = (now - started).total_seconds() / 60
         if age_minutes > KDS_OVERDUE_MINUTES:
             over_sla += 1
         elif age_minutes > KDS_WARNING_MINUTES:

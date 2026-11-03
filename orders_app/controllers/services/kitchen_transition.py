@@ -24,7 +24,7 @@ around any of it. Measured on unmodified `fd190dd` with two connections:
   * and after a serve/recall/serve cycle a delayed recall reopened a LATER
     completion, because the source state was `served` again.
 
-FIVE THINGS ARE LOAD-BEARING HERE.
+SIX THINGS ARE LOAD-BEARING HERE.
 
 1. **THE DECISION AND THE WRITE SHARE ONE TRANSACTION AND ONE LOCK ORDER.**
    ``Table`` then ``Order``, matching the tail of acceptance's documented
@@ -52,7 +52,14 @@ FIVE THINGS ARE LOAD-BEARING HERE.
    no partial state. A stale precondition never performs the effect a second
    time, even when the current state happens to equal what was asked for.
 
-5. **NOTHING HERE TOUCHES THE DINER'S CONTRACT.** No reprice, no snapshot, no
+5. **A HELD ROUND IS NOT A KITCHEN TICKET** (Step 2, BE-C). A round whose
+   placement has no ``released_at`` is refused (``order_held``) before any edge
+   is considered, exactly as a draft is, and a command formed against a held round
+   that is released while it waits is refused too
+   (``order_released_while_waiting``). ``round_placement`` owns the rule; nothing
+   writes a held round yet, so on today's data neither refusal can occur.
+
+6. **NOTHING HERE TOUCHES THE DINER'S CONTRACT.** No reprice, no snapshot, no
    `OrderItem` row, no `OrderAcceptance`, no `quote_ref`, no payment field. The
    revision is deliberately absent from ``order_quote``'s fingerprint: that
    reference is what the diner agreed to pay, and a kitchen command must not move
@@ -79,6 +86,10 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Preparing,
     OrderStatus_Refunded,
     OrderStatus_Served,
+)
+from orders_app.controllers.services.round_placement import (
+    is_held,
+    round_is_held,
 )
 from orders_app.models import Order
 from users_app.controllers.permissions_check import (
@@ -170,6 +181,8 @@ REASON_RECALL_EXPIRED = 'recall_window_expired'
 REASON_TABLE_OCCUPIED = 'table_occupied'
 REASON_SCOPE_MISMATCH = 'order_scope_mismatch'
 REASON_ACCEPTED_WHILE_WAITING = 'order_accepted_while_waiting'
+REASON_HELD = 'order_held'
+REASON_RELEASED_WHILE_WAITING = 'order_released_while_waiting'
 REASON_REVISION_EXHAUSTED = 'revision_limit_reached'
 
 OUTCOME_APPLIED = 'applied'
@@ -471,6 +484,22 @@ def _assert_operable(order):
             'This order is closed and the kitchen cannot act on it.',
         )
 
+    if is_held(order):
+        # A HELD ROUND (Step 2) is accepted but not yet released to the kitchen:
+        # `order_status='pending'` with a placement whose `released_at` is unset.
+        # It is on neither feed, and no command may act on it until it is
+        # released — advancing or serving one would put food the diner has not
+        # been cleared for into the kitchen, and cancelling one belongs to
+        # whatever holds it. Asked AFTER draft/cancelled/terminal, because
+        # "this order has been cancelled" stays the more useful answer for a
+        # held round that was cancelled; asked BEFORE coherence, because a held
+        # round is otherwise an ordinary active row and "held" is the reason.
+        # An order with NO placement is never held (`round_placement`).
+        raise _conflict(
+            order, REASON_HELD,
+            'This order has not been sent to the kitchen yet.',
+        )
+
     has_cancellation_provenance = (
         order.cancelled_at is not None
         or order.cancelled_by_id is not None
@@ -563,15 +592,19 @@ def execute(order_id, actor, command):
     """
     _assert_known_action(command.action)
 
-    # THE LOCATOR. It resolves which table to lock, and records the ONE fact the
+    # THE LOCATOR. It resolves which table to lock, and records the TWO facts the
     # lock cannot recover afterwards: whether this command was formed against a
-    # DRAFT. Everything else it returns is re-read under the lock below.
+    # DRAFT, and whether it was formed against a HELD round. Everything else it
+    # returns is re-read under the lock below. The placement columns ride the
+    # same statement through a LEFT JOIN (no query added); `placement__id` is
+    # what tells "no placement" from "held", since both read `released_at` None.
     # Soft-deleted and unknown ids collapse to one non-disclosing outcome.
     try:
         located = (
             Order.objects
             .filter(id=order_id, deleted=False)
-            .values('id', 'table_id', 'restaurant_id', 'order_status')
+            .values('id', 'table_id', 'restaurant_id', 'order_status',
+                    'placement__id', 'placement__released_at')
             .first()
         )
     except (ValidationError, ValueError, TypeError):
@@ -608,9 +641,27 @@ def execute(order_id, actor, command):
             if locked_table is None:
                 raise OrderNotFound()
 
+        # The placement rides this statement (`select_related`, a LEFT JOIN) and
+        # `of=('self',)` keeps the lock on the `orders` row alone; the placement
+        # row is read, never locked.
+        #
+        # WHY THE JOINED PLACEMENT IS CURRENT, stated because it is not automatic.
+        # Under READ COMMITTED a statement reads the rows it joins from its OWN
+        # snapshot, taken when it starts; waiting on the Order row lock does not
+        # refresh the placement. It is fresh here because the Table lock above is
+        # a SEPARATE, earlier statement: a writer of `released_at` that takes
+        # `Table -> Order` (the documented lock order) has committed before this
+        # statement starts. So a release writer MUST take the Table lock first.
+        # One that locked only the Order row is read STALE: measured, the round
+        # still reads held and the command is refused `order_held` — a refusal,
+        # but the wrong sentence (`tests_kitchen_release_filter`). The unsafe
+        # direction would be a writer moving a RELEASED round back to held while
+        # skipping the Table lock: a command could then apply to it. Nothing
+        # writes that transition, and none may without the Table lock.
         order = (
             Order.objects
             .select_for_update(of=('self',))
+            .select_related('placement')
             .filter(pk=located['id'], deleted=False)
             .first()
         )
@@ -683,6 +734,27 @@ def execute(order_id, actor, command):
                 'Check the board before trying again.',
             )
 
+        # THE RELEASE BOUNDARY (Step 2), the same shape as the acceptance one
+        # above. A command formed against a HELD round — which the server refuses
+        # outright (`order_held`) — must not become a command against the round
+        # the kitchen has meanwhile been given. Releasing is not a kitchen
+        # command and does not advance the revision, so without this the
+        # precondition captured against the held round would still match.
+        if (
+            round_is_held(located['placement__id'] is not None,
+                          located['placement__released_at'])
+            and not is_held(order)
+        ):
+            logger.info(
+                'Kitchen command refused across the release boundary '
+                '(order_id=%s, action=%s)', order.pk, command.action,
+            )
+            raise _conflict(
+                order, REASON_RELEASED_WHILE_WAITING,
+                'This order was sent to the kitchen while your request was in '
+                'flight. Check the board before trying again.',
+            )
+
         _assert_operable(order)
 
         # The management escalation is STATE-DEPENDENT, so it is decided from the
@@ -739,10 +811,11 @@ def read_state(order_id, actor):
        `Table` lock would queue behind live service to answer a question about the
        past.
 
-    3. **NO ELIGIBILITY FILTER.** A draft, a cancelled order, a served one and a
-       paid one all answer. Refusing them would remove exactly the orders this
-       exists for. Eligibility is a question about what may be COMMANDED, and
-       ``execute`` still owns it.
+    3. **NO ELIGIBILITY FILTER.** A draft, a cancelled order, a served one, a
+       paid one and a HELD round (Step 2) all answer. Refusing them would remove
+       exactly the orders this exists for — a held round is on neither feed, so
+       this is the one place a client can see it. Eligibility is a question about
+       what may be COMMANDED, and ``execute`` still owns it.
 
     4. **THE SAME PROJECTION AS EVERY COMMAND ANSWER** (``order_state``), so a
        client reconciles against ONE shape however it obtained it. A second,
