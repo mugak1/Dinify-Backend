@@ -22,10 +22,14 @@ served_at, the fulfilment timestamps and the D05 revision) and, on the
 serve/recall completion transition and on cancel, order_status; payment_status
 stays finance-owned.
 
-The READ views are unchanged in shape and gate, and now publish the two fields a
-client needs to command safely (``order_status``, ``fulfilment_revision``) plus
+The READ views are unchanged in gate, and publish the two fields a client needs
+to command safely (``order_status``, ``fulfilment_revision``) plus
 ``kitchen_protocol`` — a narrow capability declaration, separate from D04's
 ``checkout_protocol`` because they are different contracts.
+
+Both feeds show RELEASED ROUNDS only (Step 2, BE-C): ``round_placement.
+released_round_q`` — no placement, or a placement with ``released_at`` set — and each
+ticket carries an additive ``released_at`` (``null`` when it has no placement).
 """
 import logging
 from datetime import timedelta
@@ -38,6 +42,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from orders_app.models import Order, OrderItem
+from orders_app.controllers.services.round_placement import released_round_q
 from orders_app.controllers.services.kitchen_transition import (
     KITCHEN_PROTOCOL,
     KitchenRefusal,
@@ -107,16 +112,22 @@ class ActiveKitchenOrdersView(APIView):
         # lapses. The board only ever shows SUBMITTED tickets that are
         # new / preparing / ready — an 'initiated' order is an unconfirmed
         # draft and never reaches the kitchen until it is submitted.
+        #
+        # AND ONLY RELEASED ROUNDS (Step 2): a held round (a placement with no
+        # `released_at`) is not the kitchen's yet. An order with NO placement
+        # stays on the board — see `released_round_q`. `select_related` reuses
+        # the filter's LEFT JOIN, so the serializer's `released_at` costs nothing.
         qs = (
             Order.objects
             .filter(
                 ~Q(fulfilment_status='served'),
+                released_round_q(),
                 deleted=False,
                 restaurant=restaurant_id,
             )
             .exclude(order_status=OrderStatus_Cancelled)
             .exclude(order_status=OrderStatus_Initiated)
-            .select_related('table')
+            .select_related('table', 'placement')
             .prefetch_related(
                 Prefetch(
                     'order',
@@ -155,16 +166,20 @@ class CompletedKitchenOrdersView(APIView):
                 status=403,
             )
 
+        # The same release rule as the active board. A held round cannot be
+        # served (the command boundary refuses it), so this changes nothing a
+        # kitchen can produce; it keeps the two feeds on one definition.
         qs = (
             Order.objects
             .filter(
+                released_round_q(),
                 fulfilment_status='served',
                 deleted=False,
                 restaurant=restaurant_id,
                 served_at__gte=timezone.now() - COMPLETED_WINDOW,
             )
             .exclude(order_status=OrderStatus_Cancelled)
-            .select_related('table')
+            .select_related('table', 'placement')
             .prefetch_related(
                 Prefetch(
                     'order',

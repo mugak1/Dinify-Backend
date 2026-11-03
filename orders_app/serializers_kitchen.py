@@ -9,7 +9,13 @@ from rest_framework import serializers
 from orders_app.controllers.orders.serializers import (
     historical_name, list_snapshot_provenance,
 )
+from orders_app.controllers.services.round_placement import released_at_of
 from orders_app.models import Order
+
+#: Renders ``released_at`` exactly as the ModelSerializer renders ``served_at`` and
+#: ``created_at`` (``DATETIME_FORMAT``), so the three timestamps on a ticket share one
+#: wire format.
+_TIMESTAMP = serializers.DateTimeField()
 from restaurants_app.models import MenuItem
 
 
@@ -24,6 +30,7 @@ class ActiveKitchenOrderSerializer(serializers.ModelSerializer):
     """
     table_label = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField(source='time_created')
+    released_at = serializers.SerializerMethodField()
     items = serializers.SerializerMethodField()
 
     class Meta:
@@ -48,6 +55,12 @@ class ActiveKitchenOrderSerializer(serializers.ModelSerializer):
             'fulfilment_status',
             'priority',
             'created_at',
+            # When the round was released to the kitchen (Step 2): the placement's
+            # `released_at`, or null for an order with no placement (it predates
+            # Step 1, or was accepted with the writer off). Additive. A held round
+            # never reaches either feed, so on the board a non-null value is a
+            # release, never "held".
+            'released_at',
             'served_at',
             'items',
         ]
@@ -56,6 +69,12 @@ class ActiveKitchenOrderSerializer(serializers.ModelSerializer):
     def get_table_label(self, obj):
         table = obj.table
         return table.display_name or table.str_number or str(table.number)
+
+    def get_released_at(self, obj):
+        # Both feeds `select_related('placement')`, so this reads a cached
+        # relation (or its cached absence) and adds no query per ticket.
+        value = released_at_of(obj)
+        return None if value is None else _TIMESTAMP.to_representation(value)
 
     @staticmethod
     def _line(row):

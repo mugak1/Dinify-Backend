@@ -186,6 +186,14 @@ GAINS_THE_KEY = {
     'restaurants_app.models.SerArcRestaurant',
 }
 
+#: The keys Step 2 adds, per serializer. The kitchen ticket gains `released_at`
+#: (BE-C, the kitchen release filter): when the round was released to the kitchen,
+#: or null for an order with no placement. It is a deliberate, additive key on the
+#: one serializer both kitchen feeds use, and no other serializer may gain it.
+STEP_2_ADDED_KEYS = {
+    'orders_app.serializers_kitchen.ActiveKitchenOrderSerializer': {'released_at'},
+}
+
 
 def _user(phone):
     return User.objects.create_user(
@@ -394,7 +402,14 @@ class SerializerFieldSetTests(TestCase):
                 module, _, name = dotted.rpartition('.')
                 fields = set(getattr(importlib.import_module(module), name)().fields)
                 expected = set(before) | ({ADDED_KEY} if dotted in GAINS_THE_KEY else set())
+                # Step 2 keys are listed apart, so the 0588a1d baseline above stays
+                # exactly what was captured there.
+                expected |= STEP_2_ADDED_KEYS.get(dotted, set())
                 self.assertEqual(fields, expected)
+
+    def test_every_step_2_key_names_a_pinned_serializer(self):
+        """A stale entry would let the key appear on a serializer nobody pinned."""
+        self.assertLessEqual(set(STEP_2_ADDED_KEYS), set(HEAD_SERIALIZER_FIELDS))
 
 
 # --- deletion -----------------------------------------------------------------------
@@ -555,6 +570,23 @@ class OnlyTheDiningModulesReferenceTheseTests(TestCase):
     - ``orders_app/controllers/test_orders.py`` holds ``counted_visits_q``, beside the
       one test-order rule it follows.
 
+    Step 2's kitchen release filter (BE-C) adds the three kitchen READERS of
+    ``OrderPlacement.released_at``, deliberately and by name. Each applies
+    ``round_placement.released_round_q`` (the rule stays written once there) and
+    names the relation only to ``select_related`` it, or to read it in the same
+    statement, so no query is added:
+
+    - ``orders_app/endpoints_kitchen.py`` — both feeds show released rounds only;
+    - ``orders_app/controllers/services/kitchen_transition.py`` — the locator and
+      the locked read carry the placement, so a command refuses a held round
+      (``order_held``) and one released while it waited
+      (``order_released_while_waiting``);
+    - ``reports_app/controllers/restaurant/dashboard.py`` — the kitchen card counts
+      released rounds and ages them from their release.
+
+    The kitchen serializer is deliberately NOT listed: it reads the value through
+    ``round_placement.released_at_of``, so it never names the relation.
+
     "Naming" covers the model names, an attribute through one of their reverse
     relations (``order.placement``, ``restaurant.visits`` ...) and an ORM lookup
     string that crosses into them (``'placement__visit'``): a module can query
@@ -570,6 +602,10 @@ class OnlyTheDiningModulesReferenceTheseTests(TestCase):
         Path('orders_app/models.py'),
         Path('orders_app/controllers/services/round_placement.py'),
         Path('orders_app/controllers/test_orders.py'),
+        # Step 2 BE-C: the kitchen release filter's three readers (see above).
+        Path('orders_app/endpoints_kitchen.py'),
+        Path('orders_app/controllers/services/kitchen_transition.py'),
+        Path('reports_app/controllers/restaurant/dashboard.py'),
     }
 
     def _production_modules(self):
