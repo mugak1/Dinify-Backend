@@ -42,6 +42,7 @@ ordering across every transaction that takes it stays acyclic by construction:
     order submit           SHARED    -> Table -> Order (-> INSERT Visit, Bill,
                                         OrderPlacement; FOR KEY SHARE on Restaurant,
                                         Table, User at COMMIT)
+    round release (floor)  SHARED    -> Table -> Order (-> UPDATE OrderPlacement)
     retire-for-review      SHARED    -> Table -> Order
     lifecycle transition   EXCLUSIVE -> Restaurant -> AdminAuditLog
     test classification    EXCLUSIVE -> Restaurant -> AdminAuditLog
@@ -88,6 +89,23 @@ classification, the restaurants PUT, the payment-timing write) cannot overlap a
 submit at all. The writer's one READ (the cut-off and the payment timing) takes no
 lock of its own: it is protected because every writer of both columns takes the
 EXCLUSIVE side.
+
+THE FLOOR'S CONFIRM (Step 2, PR BE-D, ``orders_app/controllers/services/
+round_release.py``) joins on the SHARED side: releasing a held round puts new work on
+the kitchen board, so it is an admission (``order_admission.admit``,
+``STAGE_RELEASE``) and repeats acceptance's order exactly, ending in an UPDATE of the
+round's placement (``released_at``, ``released_by``, ``business_date``). The shared
+lock also keeps the catalogue its makeability check reads steady, since every menu
+write and the kitchen 86 take the EXCLUSIVE side. The floor's DECLINE admits nothing
+and takes NO advisory lock: ``Table -> Order``, the kitchen's shape, ending in an
+UPDATE of the ``orders`` row. Both take ``Table`` before ``Order`` in separate
+statements, which every writer of ``released_at`` must (BE-C), and neither takes a
+``Restaurant`` row, so neither can cycle against the transition, the kitchen or each
+other. Each sets a deferred foreign key to the acting user (``released_by`` /
+``cancelled_by``), so its COMMIT takes ``FOR KEY SHARE`` on that ``users`` row — the
+kitchen cancel already does the same; a writer holding the row ``FOR UPDATE`` can
+delay that COMMIT but never waits on a ``Table``, an ``Order`` or this lock, so no
+cycle closes.
 
 THE PAYMENT-TIMING WRITE (Step 2, PR BE-B) joins on the EXCLUSIVE side because Step 2
 makes the timing copied onto a visit decide whether its round is held, so no round may

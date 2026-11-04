@@ -587,6 +587,18 @@ class OnlyTheDiningModulesReferenceTheseTests(TestCase):
     The kitchen serializer is deliberately NOT listed: it reads the value through
     ``round_placement.released_at_of``, so it never names the relation.
 
+    Step 2's floor (BE-D) adds a SECOND WRITER and its reader, deliberately and by
+    name:
+
+    - ``orders_app/controllers/services/round_release.py`` — the staff Confirm
+      command is the only writer of a held round's RELEASE (``released_at``,
+      ``released_by``, the re-stamped ``business_date``), under ``Table -> Order``;
+      it names the relation to lock and read it, and projects the floor's round;
+    - ``orders_app/endpoints_floor.py`` — the two floor reads ``select_related`` the
+      placement and its visit so a round and its table's visit cost no query.
+
+    ``orders_app/urls_floor.py`` names none of them and is not listed.
+
     "Naming" covers the model names, an attribute through one of their reverse
     relations (``order.placement``, ``restaurant.visits`` ...) and an ORM lookup
     string that crosses into them (``'placement__visit'``): a module can query
@@ -606,6 +618,9 @@ class OnlyTheDiningModulesReferenceTheseTests(TestCase):
         Path('orders_app/endpoints_kitchen.py'),
         Path('orders_app/controllers/services/kitchen_transition.py'),
         Path('reports_app/controllers/restaurant/dashboard.py'),
+        # Step 2 BE-D: the floor's Confirm writer and the floor reads (see above).
+        Path('orders_app/controllers/services/round_release.py'),
+        Path('orders_app/endpoints_floor.py'),
     }
 
     def _production_modules(self):

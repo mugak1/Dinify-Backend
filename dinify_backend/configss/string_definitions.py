@@ -95,6 +95,13 @@ CANCELLATION_REASONS = {
     CancellationReason_Duplicate,
     CancellationReason_Other,
 }
+# The reason the FLOOR's Decline command records on a held round (Step 2, PR BE-D,
+# `orders_app/controllers/services/round_release.py`). Server-written only:
+# DELIBERATELY OUTSIDE `CANCELLATION_REASONS`, which is the vocabulary the kitchen
+# cancel route accepts from a client, so the kitchen can never send it and a client
+# can never choose it. A round declined by staff was never released to the kitchen,
+# and the design excludes it from EVERY figure (Step 6); see CLAUDE.md.
+CancellationReason_DeclinedByStaff = 'declined_by_staff'
 
 # processing status
 ProcessingStatus_Pending = 'pending'

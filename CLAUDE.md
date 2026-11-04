@@ -205,8 +205,10 @@ so keep it current when conventions change.
   comes from the Order statement's own READ COMMITTED snapshot, so a release that
   locked only the Order row is read stale (measured: still refused, as `order_held`);
   a writer moving a released round BACK to held without the Table lock would let a
-  command apply to it, and nothing may write that. NOTHING WRITES A HELD
-  ROUND YET, so the filter changes no result on today's data. **The card's AGE does**:
+  command apply to it, and nothing may write that. The floor's Confirm (Step 2,
+  PR BE-D, `round_release.confirm`) is that writer for a held round, and takes
+  `Table -> Order` (see the floor bullet below). NOTHING HOLDS A ROUND YET (BE-F
+  will), so the filter changes no result on today's data. **The card's AGE does**:
   an order placed since Step 1's writer went live now ages from its acceptance
   (`released_at`) rather than its draft's creation. **NEVER REVERT THIS FILTER WHILE
   HELD ROUNDS EXIST** — a held round would reach the board and be cookable before it
@@ -1303,6 +1305,74 @@ so keep it current when conventions change.
   (PR 1's "nothing writes these yet", turned into an allowlist by PR 2) fails if any
   other production module names the new models, a reverse relation into them or an
   ORM lookup string that reaches them
+- The floor view, Step 2 (PR BE-D): ✅ staff CONFIRM and DECLINE of a HELD round,
+  and the two floor reads, at `api/v1/floor/` (floor contract v1, recorded in
+  `docs/FLOOR_CONTRACT.md` with every definition and change BE-D made). Service
+  `orders_app/controllers/services/round_release.py`; thin views in
+  `orders_app/endpoints_floor.py`, routes in `orders_app/urls_floor.py`. **NOTHING
+  HOLDS A ROUND YET** (BE-F will, behind a switch that defaults off) and nothing
+  calls these routes until FE-C, so on today's data every round is released and the
+  commands answer `changed: false` / `round_released`.
+  **CONFIRM** writes the placement only: `released_at = now`, `released_by` (new
+  nullable FK, migration `orders_app/0044`) and `business_date` RE-STAMPED from the
+  release instant (`business_date_for(now, cutoff)`): the design dates accepted order
+  value and completed sales by the business day a round was RELEASED, so a held
+  round's `business_date` provisionally holds its acceptance day until then (03:50
+  accepted, 04:10 confirmed = the new day, pinned). It writes NOTHING on `Order` and
+  does not move `fulfilment_revision` (the kitchen's `order_released_while_waiting`
+  covers a command formed against the held round). **LOCK ORDER**: `admit()` with
+  the new `order_admission.STAGE_RELEASE` (the SHARED admission lock) → `Table` →
+  `Order` (`select_for_update(of=('self',))`, separate statements) → UPDATE
+  `order_placements`. Release is an ADMISSION: it puts new work on the board, and
+  the shared lock also holds the catalogue steady for its makeability read. Re-checked
+  under the locks, in this order: the `tables` module (StaffAuthority pattern, the
+  ORDER's restaurant); idempotency/crossing (BEFORE any policy, so a lost-response
+  retry is `changed: false`, the D04 lesson); lifecycle via the verdict
+  (`restaurant_not_trading`); `order_eligibility.evaluate(facts_from_verdict(...),
+  order.created_by_id)` (`ordering_paused` / `table_menu_only` for a diner round,
+  `table_out_of_service` for EVERY round — table liveness binds staff too, as at
+  acceptance); makeability via `purchase_integrity.inspect(...,
+  enforce_publication=False)` (`cannot_be_made` + the item's SAVED name; never a
+  quote closure; publication, section schedules and the quote lifetime are
+  deliberately NOT re-checked). **DECLINE** takes `Table` → `Order` and NO advisory
+  lock (it admits nothing) and writes `order_status='cancelled'`, `cancelled_at`,
+  `cancelled_by`, `cancellation_reason='declined_by_staff'` and a
+  `fulfilment_revision` bump, field-scoped; the placement is untouched, the table is
+  freed (occupancy excludes `cancelled`) and the visit ends with it.
+  `CancellationReason_DeclinedByStaff` lives in `string_definitions.py` OUTSIDE
+  `CANCELLATION_REASONS`, so the kitchen cannot send it (pinned: 400); it is a model
+  choice through the state-only migration `orders_app/0045`. **STEP 6 RULE: a round
+  declined by staff (`cancellation_reason = 'declined_by_staff'`) is excluded from
+  EVERY figure** — it was never released, so it is neither accepted order value nor
+  a sale nor a cancellation statistic. Today's dashboard and reports are left alone
+  (they already drop `cancelled` from sales); whoever builds Step 6 must exclude it
+  explicitly from every count, including cancellation rates. **IDEMPOTENT, NO
+  PRECONDITION**: Confirm on released → 200 `changed: false`; on declined → 409
+  `round_declined`; Decline on declined → 200 `changed: false`; on released → 409
+  `round_released`; anything else not held (served, kitchen-cancelled, draft) → 409
+  `round_not_held`. A 409 is the kitchen's shape plus the contract's fields:
+  `{status, message, reason, state, data: {round}}`. **AUTHORIZATION**: every
+  failure (unknown, malformed, other restaurant, no `tables` module) is one
+  `404 {"status":404,"message":"Not found"}`; missing `restaurant` is 400. Portal
+  access is lifecycle-filtered, so at a SUSPENDED restaurant both commands are a 404
+  before admission, and `restaurant_not_trading` arises for a diner round at an
+  onboarding restaurant (recorded in the contract). None of the four routes is on the
+  delegated `ALLOWED_ROUTES` (pinned, 403). **NEITHER SWITCH** is consulted
+  (`DINING_VISIT_WRITES_ENABLED`, BE-F's), so staff can always clear a held round.
+  **THE READS**: occupancy is `ongoing_order_q` (never `Table.status`), each ongoing
+  order one round; an order with no placement is `released`, `visit: null`,
+  `round_number: 1`, `released_at: null`; `stale` at 15 minutes server-side;
+  needs-staff tables first, then by number; `waiting_for_staff` = HELD ROUNDS;
+  `value` via `format_money`; the only payment word is a visit's constant
+  `payment: "unknown"`; names and modifiers are the snapshots; the drawer runs the
+  same makeability check per held round. Definitions BE-D added: `accepted_at` falls
+  back to `time_created` for an order with no `OrderAcceptance`, labelled by an
+  additive `accepted_at_provenance` (`acceptance` | `order_created`); `item_count`
+  is the total quantity of live, top-level, available lines. **COST** (TestCase,
+  savepoint pair included): Confirm 15 (resent 11), Decline 10, floor read 5 and
+  FLAT in the number of tables, drawer 5 + 1 per held round. Pinned by
+  `orders_app/tests_round_release.py`, `tests_floor_reads.py` and (real PostgreSQL,
+  two connections) `tests_round_release_concurrency.py`
 - Request correlation and order-command trace (D15 R2): ✅ `dinify_backend/request_context.py`,
   installed ONCE and OUTERMOST on both planes (`settings_admin.py` re-adds it first, then
   ClientIP; `RequestIDMiddleware` is now an alias). Every HTTP request gets one fresh server
@@ -2854,7 +2924,11 @@ so keep it current when conventions change.
   evidence originally cited was a QR-rotation METHOD test — which answers a
   different question — replaced by a real browser navigation in
   `e2e/billing-journey/`
-- Reports module — rebuilt on the clean contract: ✅ Complete. All four
+- Reports module — rebuilt on the clean contract: ✅ Complete. **STEP 6 RULE
+  (recorded by Step 2 PR BE-D): a round with `cancellation_reason =
+  'declined_by_staff'` (the floor's Decline) appears in NO figure** — not as a sale,
+  not as accepted value, not in a cancellation count or rate; see "The floor view"
+  bullet. Today's reports are unchanged. All four
   restaurant reports (`api/v1/reports/restaurant/<name>/` →
   `RestaurantReportsEndpoint`, `{status, message, data}` envelope) are rebuilt on
   shared foundations in `reports_app/controllers/common/`: `sale_filters.py` (the
@@ -3324,6 +3398,12 @@ so keep it current when conventions change.
   left both feeds, which is exactly what a cancellation produces. None of the four
   is on the delegated `ALLOWED_ROUTES` allowlist and none may be added — see
   `delegation_scopes.py`, which records why for each
+- `api/v1/floor/` → the floor view (`orders_app/urls_floor.py`, Step 2 PR BE-D,
+  floor contract v1 in `docs/FLOOR_CONTRACT.md`): `GET ?restaurant=` (every table
+  and its live rounds), `GET tables/<uuid>/?restaurant=` (the drawer), and
+  `POST rounds/<order>/confirm/` / `rounds/<order>/decline/` with
+  `{"restaurant": ...}`. All four require the `tables` module and answer one
+  non-disclosing 404 otherwise; none is on the delegated `ALLOWED_ROUTES`
 - `api/v1/support/` → support_app endpoints (`support_app/urls.py`):
   `issues/`, `issues/<uuid:issue_id>/` — separate app (`admin/issues/` retired)
 - `api/v1/notifications/` → notifications_app (`notifications_app/urls.py`): the
@@ -3553,6 +3633,10 @@ the catch-all `<str:config_detail>/` route.
   OrderPlacement` (order submit; the inserts are the dining model's Step 1 writer,
   whose deferred foreign keys take `FOR KEY SHARE` on `Restaurant`, `Table` and
   `User` at COMMIT — see "Dining model: visits and bills"),
+  `advisory(restaurant) SHARED → Table → Order → UPDATE OrderPlacement` (the floor's
+  Confirm, Step 2 PR BE-D: releasing a held round is an admission,
+  `STAGE_RELEASE`; the floor's Decline is `Table → Order → UPDATE orders` with NO
+  advisory lock, the kitchen's shape),
   `advisory(restaurant) EXCLUSIVE → Restaurant → AdminAuditLog` (transition), and
   the SAME pair again for `manage.py mark_restaurant_test` (the `Restaurant.is_test`
   writer) — it repeats the transition's order exactly, so it joins an ordering
@@ -6182,8 +6266,13 @@ round's visit and bill and, once payments hang off bills, silently drop a charge
 A separate row makes that impossible, and `orders` is never altered.
 
 ### THE WRITER — `orders_app/controllers/services/round_placement.py`
-`place_first_round(order, accepted_at)` is THE ONLY production writer of `visits`,
-`bills` and `order_placements`. It is called from ONE place: `manage_order.
+`place_first_round(order, accepted_at)` is THE ONLY production writer that CREATES
+`visits`, `bills` and `order_placements` rows. (Step 2's floor Confirm, PR BE-D, is the
+one writer that UPDATES a placement afterwards: `released_at`, `released_by` and
+`business_date` of a held round, under `Table -> Order`; see "The floor view" bullet.
+`round_placement.py`'s own docstring still says "the ONLY production writer of those
+three tables" and is not edited by BE-D, which was scoped away from that file.) It is
+called from ONE place: `manage_order.
 _submit_order`, after `_terminal_quote_outcome` and before the order flips to
 `pending`, with the SAME `now` the acceptance stamps on `OrderAcceptance.accepted_at`.
 
@@ -6253,6 +6342,10 @@ PLACEMENT" ARM IS LOAD-BEARING**: every order accepted before Step 1, or with th
 switch off, has no placement and must stay on the board. The writer is unchanged
 (`place_first_round` still stamps the acceptance instant), so no held round exists
 until Step 2's holding writer ships, and that writer must take `Table -> Order`.
+RELEASING a held round is the floor's Confirm (PR BE-D, `round_release.confirm`),
+which takes `advisory SHARED -> Table -> Order` and writes the placement only; the
+floor's Decline cancels a held round (`declined_by_staff`) and leaves its placement
+held, so a declined round is `cancelled` and reaches neither feed.
 
 ### TEST ORDERS
 A visit carries no `is_test` flag of its own; it inherits its status through its
@@ -6278,7 +6371,10 @@ the release filter's three kitchen readers (BE-C): `orders_app/endpoints_kitchen
 `reports_app/controllers/restaurant/dashboard.py`. Each names the relation only to
 `select_related` or read it in the same statement; the rule stays in
 `round_placement`, and the kitchen serializer is NOT listed because it reads through
-`released_at_of`. Any other production module that names `Visit` / `Bill` /
+`released_at_of`. The floor (BE-D) adds two: `orders_app/controllers/services/
+round_release.py` (Confirm UPDATES a placement, and the round projection reads it) and
+`orders_app/endpoints_floor.py` (the reads `select_related` it); `urls_floor.py` names
+none and is not listed. Any other production module that names `Visit` / `Bill` /
 `OrderPlacement`, a reverse relation into them (`order.placement`, `restaurant.visits`
 …) or an ORM lookup string that reaches them (`'placement__visit'`) fails the build.
 
@@ -6990,7 +7086,7 @@ it — never the other way round.
   restaurant; measured), after a vendor-guarded `SET LOCAL lock_timeout = '5s'` so
   a lock wait fails the deploy instead of queueing diner requests — see "Dining
   model, Step 1 schema"),
-  `orders_app/migrations/0043_visit_bill_orderplacement.py` (0034 removed the
+  `orders_app/migrations/0045_alter_order_cancellation_reason.py` (0034 removed the
   inline review fields; 0035 adds the launch-boundary `Order.is_test` flag; 0036
   adds the D01 `quantity >= 0` CHECK constraint, additive and reversible with NO
   `RunPython`; 0037 adds `Order.pricing_version`, one `AddField` carrying BOTH
@@ -7034,7 +7130,13 @@ it — never the other way round.
   `order_placements` tables and NOTHING else — no existing table altered, no
   `RunPython`, no backfill, zero rows — after the same `lock_timeout`, because its
   foreign keys take SHARE ROW EXCLUSIVE on `restaurants`, `tables`, `users` and
-  `orders` — see "Dining model, Step 1 schema"),
+  `orders` — see "Dining model, Step 1 schema"; 0044 (Step 2, PR BE-D) adds the
+  nullable `OrderPlacement.released_by` FK to `users` (SET_NULL), one `AddField`
+  after the same `lock_timeout`, NO `RunPython`, no backfill — every existing row
+  stays NULL, which is true — and an index built on `order_placements`, whose row
+  count this repository cannot observe; old code ignores the column and its INSERTs
+  leave it NULL; 0045 is STATE-ONLY, adding `declined_by_staff` to
+  `Order.cancellation_reason`'s choices: `sqlmigrate` prints a no-op both ways),
   `finance_app/migrations/0028_remove_dinifytransaction_tip_amount.py`,
   `reviews_app/migrations/0003_review_tags.py`,
   `users_app/migrations/0016_d11_enforcement.py` (0010 adds
