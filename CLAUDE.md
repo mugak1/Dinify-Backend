@@ -29,6 +29,43 @@ so keep it current when conventions change.
 - Tables module: ✅ Backend complete — `reservations`, `waitlist`,
   `table_actions`, `dining_areas`, full QR/floor-plan fields wired through
   EDIT_INFORMATION
+- Table actions write only what they decide, under a lock (Step 2, PR BE-A):
+  ✅ `restaurants_app/endpoints/table_actions.py`. Seat, clear, transfer and
+  `update-floor-plan` each read their table(s) unlocked and then did a bare
+  `table.save()`, a FULL-ROW write that put back every column it had read — so a
+  QR regeneration committed in between had its `qr_version` written back,
+  **un-revoking every diner credential the owner had just revoked** (the defect
+  D06 fixed in `_update_status`). Each now re-reads its row(s) `FOR UPDATE`
+  inside the transaction that writes (`_lock_tables`: ONE statement,
+  `deleted=False`, explicit `order_by('pk')` because `Table.Meta.ordering` is
+  `number`) and writes through `update_fields`: seat and clear `status`;
+  transfer `status` on both rows; the floor plan only the `floor_x` / `floor_y`
+  / `floor_width` / `floor_height` keys each entry sent (`FLOOR_PLAN_FIELDS`);
+  seat's reservation `status`, `seated_at`, `table`. `time_last_updated` is not
+  in those lists, as in `_update_status`. **CLEAR AND TRANSFER REFUSE 409
+  `table_has_open_visit`** (`{status, message, reason}`) when the table has an
+  ongoing order by `occupancy.ongoing_order_q` — asked under the Table lock, so
+  no submit or kitchen recall can change the answer before the write; that
+  includes held rounds once Step 2 writes them. A transfer moves NO orders, so
+  the rule binds the SOURCE and the DESTINATION; a served, cancelled, draft or
+  soft-deleted order does not block. This is the FULFILMENT-based occupancy rule,
+  deliberately not the payment-aware `Table.has_unsettled_orders` the DELETE
+  blocker uses. **SEAT IS UNCHANGED** apart from its narrowed write and does not
+  consult occupancy (the floor view hides it in Step 2). Floor-plan semantics
+  are unchanged (an entry with no id, or naming an unknown, deleted or foreign
+  table, is skipped; ids match through the key field's own conversion, as the
+  old `get(id=...)` did). **LOCK ORDER: `Table` rows in key order, then a plain
+  read of `orders`** — the head of the order path's `Table -> Order`; no
+  `Order` row lock, no `Restaurant` row and no admission advisory lock, so these
+  can block an order path but not cycle against it, and two transfers between
+  one pair in opposite directions serialize rather than deadlock. Reachable only
+  through the API (`tables` module); no shipped screen calls these actions. COST
+  (TestCase counts, which include a savepoint pair): seat 7 → 10, clear 7 → 11,
+  transfer 13 → 16; the floor plan is now FLAT in its row count (1 row 6 → 6,
+  3 rows 10 → 8). Pinned by `restaurants_app/tests_table_action_writes.py`
+  (real PostgreSQL, second connections; the floor-plan key order is pinned both
+  structurally and by observing the save hold the lower key while it waits on
+  the higher one)
 - Kitchen module: ✅ Backend ready — driven by `Order`/`OrderItem` fulfilment
   fields (`fulfilment_status`, `priority`, `served_at`) via
   `orders_app/endpoints_kitchen.py`, mounted at `api/v1/kitchen/`
@@ -952,7 +989,9 @@ so keep it current when conventions change.
     full-row `table.save()` from an unlocked read, so a concurrent QR
     regeneration was reverted — **un-revoking every diner credential the owner
     had just revoked** — and it now re-reads under `select_for_update` and writes
-    `update_fields=['status', 'is_active']`. The `tables` DELETE blocker was
+    `update_fields=['status', 'is_active']` (seat, clear, transfer and the
+    floor plan followed in Step 2 BE-A — see the Table actions bullet). The
+    `tables` DELETE blocker was
     evaluated in autocommit while Secretary opened its own transaction to write
     the soft-delete, so an order accepted in the gap was invisible; it now runs
     in `_delete_table`, deciding and deleting under the same row lock
