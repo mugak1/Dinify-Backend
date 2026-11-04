@@ -1280,10 +1280,9 @@ class CommercialWriterReaderAgreementTests(_CommercialReadTestCase):
         rendered a display string instead of the machine value, this would fail.
         """
         restaurant = _make_restaurant('Token Loop')
-        service_configuration.set_payment_timing(
-            restaurant_id=restaurant.id, value=PAYMENT_TIMING_PAY_FIRST,
-            actor=self.admin, expected_current=None,
-        )
+        # Stored directly: since BE-B the writer refuses `pay_first` until Step 4,
+        # and a stored `pay_first` is exactly the value a restaurant may move off.
+        _configure(restaurant, self.admin, timing=PAYMENT_TIMING_PAY_FIRST)
         subscription_terms.record_subscription_terms(
             restaurant_id=restaurant.id, recurring_amount=Decimal('100.00'),
             currency=UGX, billing_interval_unit='month', billing_interval_count=1,

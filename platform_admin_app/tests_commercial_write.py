@@ -188,7 +188,7 @@ class CommercialWriteAuthTests(_CommercialWriteTestCase):
 
     def bodies(self):
         return (
-            {'value': PAYMENT_TIMING_PAY_FIRST, 'expected_current': None,
+            {'value': PAYMENT_TIMING_PAY_AFTER, 'expected_current': None,
              'reason': REASON},
             {'value': PAYMENT_COLLECTION_MODE_OFFLINE, 'expected_current': None,
              'reason': REASON},
@@ -273,7 +273,7 @@ class CommercialWriteAuthTests(_CommercialWriteTestCase):
 
     def test_recently_elevated_is_accepted(self):
         self.assertEqual(
-            self.set_timing(PAYMENT_TIMING_PAY_FIRST, None).status_code, 200,
+            self.set_timing(PAYMENT_TIMING_PAY_AFTER, None).status_code, 200,
         )
         self.assertEqual(
             self.set_mode(PAYMENT_COLLECTION_MODE_OFFLINE, None).status_code, 200,
@@ -361,7 +361,7 @@ class CommercialWriteCsrfTests(AuditAssertionsMixin, TestCase):
         sessions.elevate(self.session)
         self.raw = raw
         self.body = {
-            'value': PAYMENT_TIMING_PAY_FIRST,
+            'value': PAYMENT_TIMING_PAY_AFTER,
             'expected_current': None,
             'reason': REASON,
         }
@@ -399,7 +399,7 @@ class CommercialWriteCsrfTests(AuditAssertionsMixin, TestCase):
 
     def test_the_server_issued_token_is_accepted(self):
         for url, value in (
-            (timing_url(self.restaurant), PAYMENT_TIMING_PAY_FIRST),
+            (timing_url(self.restaurant), PAYMENT_TIMING_PAY_AFTER),
             (mode_url(self.restaurant), PAYMENT_COLLECTION_MODE_OFFLINE),
         ):
             with self.subTest(url=url):
@@ -431,23 +431,25 @@ class CommercialWriteCsrfTests(AuditAssertionsMixin, TestCase):
 @override_settings(**_ADMIN_OVERRIDES)
 class PaymentTimingSuccessTests(_CommercialWriteTestCase):
 
-    def test_first_configuration_to_pay_first(self):
-        response = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
-        self.assertEqual(response.status_code, 200, response.content)
-        data = response.json()['data']
-        self.assertTrue(data['changed'])
-        self.assertEqual(
-            data['commercial']['payment_timing']['value'], PAYMENT_TIMING_PAY_FIRST,
-        )
-        self.assertTrue(data['commercial']['payment_timing']['configured'])
-        self.assertEqual(self.config().payment_timing, PAYMENT_TIMING_PAY_FIRST)
+    # BE-B: `pay_first` is refused until Step 4, so the success cases below write
+    # `pay_after`; the refusal itself is pinned in `PayFirstRefusalTests`. The
+    # original `null -> pay_first` and `pay_after -> pay_first` successes became
+    # refusals there; `pay_first -> pay_after` (a value stored before BE-B) stays a
+    # success here.
 
     def test_first_configuration_to_pay_after(self):
         response = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()['data']
+        self.assertTrue(data['changed'])
+        self.assertEqual(
+            data['commercial']['payment_timing']['value'], PAYMENT_TIMING_PAY_AFTER,
+        )
+        self.assertTrue(data['commercial']['payment_timing']['configured'])
         self.assertEqual(self.config().payment_timing, PAYMENT_TIMING_PAY_AFTER)
 
     def test_pay_first_to_pay_after(self):
+        """A restaurant already on `pay_first` keeps it, and may move off it."""
         self.seed(timing=PAYMENT_TIMING_PAY_FIRST)
         response = self.set_timing(
             PAYMENT_TIMING_PAY_AFTER, PAYMENT_TIMING_PAY_FIRST,
@@ -456,20 +458,12 @@ class PaymentTimingSuccessTests(_CommercialWriteTestCase):
         self.assertTrue(response.json()['data']['changed'])
         self.assertEqual(self.config().payment_timing, PAYMENT_TIMING_PAY_AFTER)
 
-    def test_pay_after_to_pay_first(self):
-        self.seed(timing=PAYMENT_TIMING_PAY_AFTER)
-        response = self.set_timing(
-            PAYMENT_TIMING_PAY_FIRST, PAYMENT_TIMING_PAY_AFTER,
-        )
-        self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(self.config().payment_timing, PAYMENT_TIMING_PAY_FIRST)
-
     def test_the_other_axis_is_untouched(self):
         """
         Two decisions, written independently. Setting timing must not manufacture a
         collection-mode decision as a side effect.
         """
-        response = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        response = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         mode = response.json()['data']['commercial']['payment_collection_mode']
         self.assertEqual(
             mode, {'configured': False, 'value': None, 'set_at': None},
@@ -480,7 +474,7 @@ class PaymentTimingSuccessTests(_CommercialWriteTestCase):
         self.assertIsNone(config.payment_collection_mode_set_by_id)
 
     def test_attribution_names_the_authenticated_admin(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.assertEqual(self.config().payment_timing_set_by_id, self.admin.id)
 
     def test_the_actor_cannot_be_supplied_by_the_request(self):
@@ -491,7 +485,7 @@ class PaymentTimingSuccessTests(_CommercialWriteTestCase):
         impostor = _make_admin(email='cw-other@t.com', username='cw-other')
         self.post(
             timing_url(self.restaurant),
-            value=PAYMENT_TIMING_PAY_FIRST, expected_current=None, reason=REASON,
+            value=PAYMENT_TIMING_PAY_AFTER, expected_current=None, reason=REASON,
             actor=str(impostor.id), actor_id=str(impostor.id),
             payment_timing_set_by=str(impostor.id),
         )
@@ -501,19 +495,26 @@ class PaymentTimingSuccessTests(_CommercialWriteTestCase):
         stamp = timezone.now() - timedelta(days=5)
         self.seed(timing=PAYMENT_TIMING_PAY_FIRST, at=stamp)
 
+        # Refused (BE-B): nothing moves.
         self.set_timing(PAYMENT_TIMING_PAY_FIRST, PAYMENT_TIMING_PAY_FIRST)
         self.assertEqual(self.config().payment_timing_set_at, stamp)
 
+        # A real mutation moves it.
         self.set_timing(PAYMENT_TIMING_PAY_AFTER, PAYMENT_TIMING_PAY_FIRST)
-        self.assertGreater(self.config().payment_timing_set_at, stamp)
+        moved = self.config().payment_timing_set_at
+        self.assertGreater(moved, stamp)
+
+        # A no-op retry does not.
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, PAYMENT_TIMING_PAY_AFTER)
+        self.assertEqual(self.config().payment_timing_set_at, moved)
 
     def test_exactly_one_success_audit(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.assertAudited(ADMIN_RESTAURANT_PAYMENT_TIMING_SET, result=RESULT_SUCCESS)
         self.assertEqual(AdminAuditLog.objects.count(), 1)
 
     def test_the_response_carries_the_whole_canonical_object(self):
-        data = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None).json()['data']
+        data = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None).json()['data']
         self.assertEqual(
             set(data['commercial']),
             {'payment_timing', 'payment_collection_mode', 'subscription_terms'},
@@ -526,7 +527,7 @@ class PaymentTimingSuccessTests(_CommercialWriteTestCase):
         write surface to emit them would recruit a consumer for fields on their way
         out.
         """
-        payload = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None).json()
+        payload = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None).json()
         for key in ('payment_mode', 'payment_mode_configured', 'subscription'):
             self.assertNotIn(key, payload['data'])
             self.assertNotIn(key, payload['data']['commercial'])
@@ -549,46 +550,46 @@ class PaymentTimingSafeRetryTests(_CommercialWriteTestCase):
         self.stamp = timezone.now() - timedelta(days=4)
         self.decider = _make_admin(email='cw-first@t.com', username='cw-first')
         self.seed(
-            timing=PAYMENT_TIMING_PAY_FIRST, at=self.stamp, actor=self.decider,
+            timing=PAYMENT_TIMING_PAY_AFTER, at=self.stamp, actor=self.decider,
         )
 
     def test_identical_retry_with_stale_expectation_is_a_success_no_op(self):
-        response = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        response = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.assertEqual(response.status_code, 200, response.content)
         self.assertFalse(response.json()['data']['changed'])
 
     def test_identical_retry_with_a_different_stale_expectation_also_no_ops(self):
         response = self.set_timing(
-            PAYMENT_TIMING_PAY_FIRST, PAYMENT_TIMING_PAY_AFTER,
+            PAYMENT_TIMING_PAY_AFTER, PAYMENT_TIMING_PAY_FIRST,
         )
         self.assertEqual(response.status_code, 200, response.content)
         self.assertFalse(response.json()['data']['changed'])
 
     def test_the_original_attribution_survives(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         config = self.config()
         self.assertEqual(config.payment_timing_set_at, self.stamp)
         self.assertEqual(config.payment_timing_set_by_id, self.decider.id)
 
     def test_the_retry_is_audited_as_one_success(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         entry = self.assertAudited(
             ADMIN_RESTAURANT_PAYMENT_TIMING_SET, result=RESULT_SUCCESS,
         )
         self.assertEqual(entry.before_state, entry.after_state)
         self.assertEqual(
-            entry.before_state, {'payment_timing': PAYMENT_TIMING_PAY_FIRST},
+            entry.before_state, {'payment_timing': PAYMENT_TIMING_PAY_AFTER},
         )
         self.assertEqual(AdminAuditLog.objects.count(), 1)
 
     def test_no_second_configuration_row_appears(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.assertEqual(RestaurantServiceConfiguration.objects.count(), 1)
 
     def test_the_canonical_response_still_reports_the_stored_value(self):
-        data = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None).json()['data']
+        data = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None).json()['data']
         self.assertEqual(
-            data['commercial']['payment_timing']['value'], PAYMENT_TIMING_PAY_FIRST,
+            data['commercial']['payment_timing']['value'], PAYMENT_TIMING_PAY_AFTER,
         )
         self.assertEqual(
             data['commercial']['payment_timing']['set_at'], self.stamp.isoformat(),
@@ -612,42 +613,42 @@ class PaymentTimingConflictTests(_CommercialWriteTestCase):
         self.stamp = timezone.now() - timedelta(days=4)
         self.decider = _make_admin(email='cw-held@t.com', username='cw-held')
         self.seed(
-            timing=PAYMENT_TIMING_PAY_AFTER, at=self.stamp, actor=self.decider,
+            timing=PAYMENT_TIMING_PAY_FIRST, at=self.stamp, actor=self.decider,
         )
 
     def test_unconfigured_expectation_against_a_configured_row_conflicts(self):
-        response = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        response = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.assertEqual(response.status_code, 409, response.content)
         body = response.json()
         self.assertEqual(body['code'], 'stale_service_configuration')
         self.assertEqual(body['status'], 409)
 
     def test_a_configured_to_configured_stale_expectation_conflicts(self):
-        """The other direction: they believed pay_first, it is pay_after."""
+        """The other direction: they believed pay_after, it is pay_first."""
         third = _make_restaurant('Third House')
         RestaurantServiceConfiguration.objects.create(
-            restaurant=third, payment_timing=PAYMENT_TIMING_PAY_AFTER,
+            restaurant=third, payment_timing=PAYMENT_TIMING_PAY_FIRST,
             payment_timing_set_at=self.stamp, payment_timing_set_by=self.admin,
         )
         response = self.post(
             timing_url(third),
-            # Believed pay_first; stored is pay_after; requesting a third state.
-            value=PAYMENT_TIMING_PAY_FIRST,
-            expected_current=PAYMENT_TIMING_PAY_FIRST,
+            # Believed pay_after; stored is pay_first (recorded before BE-B).
+            value=PAYMENT_TIMING_PAY_AFTER,
+            expected_current=PAYMENT_TIMING_PAY_AFTER,
             reason=REASON,
         )
         # Requested == expected but != stored -> genuinely stale.
         self.assertEqual(response.status_code, 409, response.content)
 
     def test_state_and_attribution_are_untouched(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         config = self.config()
-        self.assertEqual(config.payment_timing, PAYMENT_TIMING_PAY_AFTER)
+        self.assertEqual(config.payment_timing, PAYMENT_TIMING_PAY_FIRST)
         self.assertEqual(config.payment_timing_set_at, self.stamp)
         self.assertEqual(config.payment_timing_set_by_id, self.decider.id)
 
     def test_exactly_one_failure_audit(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         entry = self.assertAudited(
             ADMIN_RESTAURANT_PAYMENT_TIMING_SET, result=RESULT_FAILURE,
         )
@@ -655,18 +656,18 @@ class PaymentTimingConflictTests(_CommercialWriteTestCase):
         self.assertEqual(AdminAuditLog.objects.count(), 1)
 
     def test_the_conflict_audit_names_the_real_current_value_and_no_after_state(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         entry = self.assertAudited(
             ADMIN_RESTAURANT_PAYMENT_TIMING_SET, result=RESULT_FAILURE,
         )
         self.assertEqual(
-            entry.before_state, {'payment_timing': PAYMENT_TIMING_PAY_AFTER},
+            entry.before_state, {'payment_timing': PAYMENT_TIMING_PAY_FIRST},
         )
         # Nothing was applied, so no after-state may be invented.
         self.assertIsNone(entry.after_state)
 
     def test_no_internal_detail_leaks_into_the_body(self):
-        body = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None).json()
+        body = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None).json()
         self.assertEqual(
             body['message'], 'Commercial configuration changed since it was loaded.',
         )
@@ -675,6 +676,89 @@ class PaymentTimingConflictTests(_CommercialWriteTestCase):
         for leak in ('traceback', 'select ', 'restaurant_id', 'actual_current',
                      'no longer the value'):
             self.assertNotIn(leak, serialized)
+
+
+# --- BE-B: `pay_first` refused until Step 4 ------------------------------------
+
+@override_settings(**_ADMIN_OVERRIDES)
+class PayFirstRefusalTests(_CommercialWriteTestCase):
+    """
+    Until Step 4 the writer refuses ``pay_first``, and this route answers 409 with
+    the stable code and the owner's plain sentence — never a 500 and never the
+    stale-configuration sentence, which would send the operator to reload a screen
+    that is not stale. Nothing is written; one failure is audited.
+    """
+
+    CODE = 'payment_timing_pay_first_unavailable'
+    MESSAGE = 'Pay first is not available yet.'
+
+    def assertRefused(self, response):
+        self.assertEqual(response.status_code, 409, response.content)
+        self.assertEqual(
+            response.json(),
+            {'status': 409, 'message': self.MESSAGE, 'code': self.CODE},
+        )
+
+    def assertOneFailureAudit(self, before):
+        entry = self.assertAudited(
+            ADMIN_RESTAURANT_PAYMENT_TIMING_SET, result=RESULT_FAILURE,
+        )
+        self.assertEqual(entry.error_code, self.CODE)
+        self.assertEqual(entry.reason, REASON)
+        # The value actually stored, never an invented `None`; and no after-state,
+        # because nothing was applied.
+        self.assertEqual(entry.before_state, {'payment_timing': before})
+        self.assertIsNone(entry.after_state)
+        self.assertEqual(AdminAuditLog.objects.count(), 1)
+
+    def test_null_to_pay_first_is_refused_and_writes_nothing(self):
+        response = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.assertRefused(response)
+        self.assertIsNone(self.config())
+        self.assertOneFailureAudit(None)
+
+    def test_pay_after_to_pay_first_is_refused_and_writes_nothing(self):
+        stamp = timezone.now() - timedelta(days=3)
+        self.seed(timing=PAYMENT_TIMING_PAY_AFTER, at=stamp)
+        response = self.set_timing(
+            PAYMENT_TIMING_PAY_FIRST, PAYMENT_TIMING_PAY_AFTER,
+        )
+        self.assertRefused(response)
+        config = self.config()
+        self.assertEqual(config.payment_timing, PAYMENT_TIMING_PAY_AFTER)
+        self.assertEqual(config.payment_timing_set_at, stamp)
+        self.assertOneFailureAudit(PAYMENT_TIMING_PAY_AFTER)
+
+    def test_a_stored_pay_first_is_kept_and_a_retry_of_it_is_refused(self):
+        """A restaurant already on `pay_first` keeps it; asking for it again is
+        refused rather than reported as a no-op (one answer for one value)."""
+        stamp = timezone.now() - timedelta(days=3)
+        self.seed(timing=PAYMENT_TIMING_PAY_FIRST, at=stamp)
+        response = self.set_timing(
+            PAYMENT_TIMING_PAY_FIRST, PAYMENT_TIMING_PAY_FIRST,
+        )
+        self.assertRefused(response)
+        config = self.config()
+        self.assertEqual(config.payment_timing, PAYMENT_TIMING_PAY_FIRST)
+        self.assertEqual(config.payment_timing_set_at, stamp)
+        self.assertOneFailureAudit(PAYMENT_TIMING_PAY_FIRST)
+
+    def test_the_collection_mode_route_is_unaffected(self):
+        response = self.set_mode(PAYMENT_COLLECTION_MODE_OFFLINE, None)
+        self.assertEqual(response.status_code, 200, response.content)
+
+    def test_the_code_is_mapped_rather_than_reraised(self):
+        """An unmapped domain code re-raises (a 500). This one must be mapped."""
+        from commercial_app import service_configuration
+        from platform_admin_app.endpoints.commercial import (
+            AdminRestaurantPaymentTimingView,
+        )
+        self.assertEqual(
+            AdminRestaurantPaymentTimingView.STATUS_BY_CODE[
+                service_configuration.PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE
+            ],
+            409,
+        )
 
 
 # --- §42/§43 collection mode ---------------------------------------------------
@@ -846,20 +930,20 @@ class RequestValidationTests(_CommercialWriteTestCase):
         ('tender word as value',
          {'value': 'cash', 'expected_current': None, 'reason': REASON}, 'value'),
         ('missing expected_current',
-         {'value': PAYMENT_TIMING_PAY_FIRST, 'reason': REASON}, 'expected_current'),
+         {'value': PAYMENT_TIMING_PAY_AFTER, 'reason': REASON}, 'expected_current'),
         ('invalid expected_current',
-         {'value': PAYMENT_TIMING_PAY_FIRST, 'expected_current': 'nope',
+         {'value': PAYMENT_TIMING_PAY_AFTER, 'expected_current': 'nope',
           'reason': REASON}, 'expected_current'),
         ('missing reason',
-         {'value': PAYMENT_TIMING_PAY_FIRST, 'expected_current': None}, 'reason'),
+         {'value': PAYMENT_TIMING_PAY_AFTER, 'expected_current': None}, 'reason'),
         ('blank reason',
-         {'value': PAYMENT_TIMING_PAY_FIRST, 'expected_current': None,
+         {'value': PAYMENT_TIMING_PAY_AFTER, 'expected_current': None,
           'reason': ''}, 'reason'),
         ('whitespace-only reason',
-         {'value': PAYMENT_TIMING_PAY_FIRST, 'expected_current': None,
+         {'value': PAYMENT_TIMING_PAY_AFTER, 'expected_current': None,
           'reason': '        '}, 'reason'),
         ('too-short reason',
-         {'value': PAYMENT_TIMING_PAY_FIRST, 'expected_current': None,
+         {'value': PAYMENT_TIMING_PAY_AFTER, 'expected_current': None,
           'reason': 'typo'}, 'reason'),
     )
 
@@ -1045,16 +1129,16 @@ class RequestValidationTests(_CommercialWriteTestCase):
         """
         omitted = self.client.post(
             timing_url(self.restaurant),
-            data={'value': PAYMENT_TIMING_PAY_FIRST, 'reason': REASON},
+            data={'value': PAYMENT_TIMING_PAY_AFTER, 'reason': REASON},
             content_type='application/json',
         )
         self.assertEqual(omitted.status_code, 400, omitted.content)
         self.assertIn('expected_current', omitted.json()['errors'])
         self.assertIsNone(self.config())
 
-        explicit = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        explicit = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.assertEqual(explicit.status_code, 200, explicit.content)
-        self.assertEqual(self.config().payment_timing, PAYMENT_TIMING_PAY_FIRST)
+        self.assertEqual(self.config().payment_timing, PAYMENT_TIMING_PAY_AFTER)
 
     def test_the_same_distinction_holds_for_collection_mode(self):
         omitted = self.client.post(
@@ -1074,13 +1158,13 @@ class RequestValidationTests(_CommercialWriteTestCase):
 
         short = 'x' * (MIN_REASON_LENGTH - 1)
         self.assertEqual(
-            self.set_timing(PAYMENT_TIMING_PAY_FIRST, None,
+            self.set_timing(PAYMENT_TIMING_PAY_AFTER, None,
                             reason=short).status_code,
             400,
         )
         exact = 'y' * MIN_REASON_LENGTH
         self.assertEqual(
-            self.set_timing(PAYMENT_TIMING_PAY_FIRST, None,
+            self.set_timing(PAYMENT_TIMING_PAY_AFTER, None,
                             reason=exact).status_code,
             200,
         )
@@ -1114,17 +1198,17 @@ class RequestValidationTests(_CommercialWriteTestCase):
         to accept — and would make "reasons on file" include the ones nobody gave.
         """
         cases = (
-            ('too short', {'value': PAYMENT_TIMING_PAY_FIRST,
+            ('too short', {'value': PAYMENT_TIMING_PAY_AFTER,
                            'expected_current': None, 'reason': 'typo'}),
-            ('blank', {'value': PAYMENT_TIMING_PAY_FIRST,
+            ('blank', {'value': PAYMENT_TIMING_PAY_AFTER,
                        'expected_current': None, 'reason': ''}),
-            ('whitespace only', {'value': PAYMENT_TIMING_PAY_FIRST,
+            ('whitespace only', {'value': PAYMENT_TIMING_PAY_AFTER,
                                  'expected_current': None, 'reason': '      '}),
-            ('missing', {'value': PAYMENT_TIMING_PAY_FIRST,
+            ('missing', {'value': PAYMENT_TIMING_PAY_AFTER,
                          'expected_current': None}),
-            ('over maximum', {'value': PAYMENT_TIMING_PAY_FIRST,
+            ('over maximum', {'value': PAYMENT_TIMING_PAY_AFTER,
                               'expected_current': None, 'reason': 'x' * 5000}),
-            ('wrong type', {'value': PAYMENT_TIMING_PAY_FIRST,
+            ('wrong type', {'value': PAYMENT_TIMING_PAY_AFTER,
                             'expected_current': None, 'reason': {'a': 1}}),
         )
         for label, body in cases:
@@ -1171,7 +1255,7 @@ class RequestValidationTests(_CommercialWriteTestCase):
         self.assertEqual(entry.reason, '')
 
     def test_a_padded_reason_is_stored_trimmed(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None, reason=f'   {REASON}   ')
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None, reason=f'   {REASON}   ')
         entry = self.assertAudited(
             ADMIN_RESTAURANT_PAYMENT_TIMING_SET, result=RESULT_SUCCESS,
         )
@@ -1199,7 +1283,7 @@ class TargetResolutionTests(_CommercialWriteTestCase):
             with self.subTest(path=path):
                 response = self.client.post(
                     f'/admin/v1/restaurants/{self.UNKNOWN}/commercial/{path}/',
-                    data={'value': PAYMENT_TIMING_PAY_FIRST,
+                    data={'value': PAYMENT_TIMING_PAY_AFTER,
                           'expected_current': None, 'reason': REASON},
                     content_type='application/json',
                 )
@@ -1209,7 +1293,7 @@ class TargetResolutionTests(_CommercialWriteTestCase):
         deleted = _make_restaurant('Gone House', deleted=True)
         response = self.post(
             timing_url(deleted),
-            value=PAYMENT_TIMING_PAY_FIRST, expected_current=None, reason=REASON,
+            value=PAYMENT_TIMING_PAY_AFTER, expected_current=None, reason=REASON,
         )
         self.assertEqual(response.status_code, 404, response.content)
 
@@ -1217,11 +1301,11 @@ class TargetResolutionTests(_CommercialWriteTestCase):
         deleted = _make_restaurant('Gone Too', deleted=True)
         self.post(
             timing_url(deleted),
-            value=PAYMENT_TIMING_PAY_FIRST, expected_current=None, reason=REASON,
+            value=PAYMENT_TIMING_PAY_AFTER, expected_current=None, reason=REASON,
         )
         self.client.post(
             f'/admin/v1/restaurants/{self.UNKNOWN}/commercial/payment-timing/',
-            data={'value': PAYMENT_TIMING_PAY_FIRST, 'expected_current': None,
+            data={'value': PAYMENT_TIMING_PAY_AFTER, 'expected_current': None,
                   'reason': REASON},
             content_type='application/json',
         )
@@ -1232,7 +1316,7 @@ class TargetResolutionTests(_CommercialWriteTestCase):
         deleted = _make_restaurant('Shape House', deleted=True)
         body = self.post(
             timing_url(deleted),
-            value=PAYMENT_TIMING_PAY_FIRST, expected_current=None, reason=REASON,
+            value=PAYMENT_TIMING_PAY_AFTER, expected_current=None, reason=REASON,
         ).json()
         self.assertEqual(body, {'status': 404, 'message': 'Restaurant not found.'})
 
@@ -1262,13 +1346,13 @@ class AuditContentTests(_CommercialWriteTestCase):
         )
 
     def test_a_first_configuration_records_a_null_before_state(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         entry = self.assertAudited(
             ADMIN_RESTAURANT_PAYMENT_TIMING_SET, result=RESULT_SUCCESS,
         )
         self.assertEqual(entry.before_state, {'payment_timing': None})
         self.assertEqual(
-            entry.after_state, {'payment_timing': PAYMENT_TIMING_PAY_FIRST},
+            entry.after_state, {'payment_timing': PAYMENT_TIMING_PAY_AFTER},
         )
 
     def test_a_changed_collection_mode_write_records_every_field_exactly(self):
@@ -1303,7 +1387,7 @@ class AuditContentTests(_CommercialWriteTestCase):
         self.assertEqual(set(entry.after_state), {'payment_timing'})
 
     def test_the_audit_carries_no_owner_pii_and_no_credential(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         entry = self.assertAudited(
             ADMIN_RESTAURANT_PAYMENT_TIMING_SET, result=RESULT_SUCCESS,
         )
@@ -1316,7 +1400,7 @@ class AuditContentTests(_CommercialWriteTestCase):
     def test_the_whole_request_body_is_not_dumped_into_the_audit(self):
         self.post(
             timing_url(self.restaurant),
-            value=PAYMENT_TIMING_PAY_FIRST, expected_current=None, reason=REASON,
+            value=PAYMENT_TIMING_PAY_AFTER, expected_current=None, reason=REASON,
             extra_field='should not be recorded anywhere',
         )
         entry = self.assertAudited(
@@ -1365,7 +1449,7 @@ class AuditFailureRollsBackMutationTests(_CommercialWriteTestCase):
     def test_a_failed_audit_undoes_the_timing_mutation(self):
         response = self._post_with_failing_audit(
             timing_url(self.restaurant),
-            {'value': PAYMENT_TIMING_PAY_FIRST, 'expected_current': None,
+            {'value': PAYMENT_TIMING_PAY_AFTER, 'expected_current': None,
              'reason': REASON},
         )
         self.assertEqual(response.status_code, 500)
@@ -1377,15 +1461,15 @@ class AuditFailureRollsBackMutationTests(_CommercialWriteTestCase):
     def test_a_failed_audit_undoes_an_update_to_an_existing_row(self):
         """The same, against a row that already existed — an UPDATE, not an INSERT."""
         stamp = timezone.now() - timedelta(days=6)
-        self.seed(timing=PAYMENT_TIMING_PAY_FIRST, at=stamp)
+        self.seed(timing=PAYMENT_TIMING_PAY_AFTER, at=stamp)
         response = self._post_with_failing_audit(
             timing_url(self.restaurant),
-            {'value': PAYMENT_TIMING_PAY_AFTER,
-             'expected_current': PAYMENT_TIMING_PAY_FIRST, 'reason': REASON},
+            {'value': PAYMENT_TIMING_PAY_FIRST,
+             'expected_current': PAYMENT_TIMING_PAY_AFTER, 'reason': REASON},
         )
         self.assertEqual(response.status_code, 500)
         config = self.config()
-        self.assertEqual(config.payment_timing, PAYMENT_TIMING_PAY_FIRST)
+        self.assertEqual(config.payment_timing, PAYMENT_TIMING_PAY_AFTER)
         self.assertEqual(config.payment_timing_set_at, stamp)
 
     def test_a_failed_audit_undoes_the_collection_mode_mutation(self):
@@ -1419,12 +1503,12 @@ class AuditFailureRollsBackMutationTests(_CommercialWriteTestCase):
         ):
             self._post_with_failing_audit(
                 timing_url(self.restaurant),
-                {'value': PAYMENT_TIMING_PAY_FIRST, 'expected_current': None,
+                {'value': PAYMENT_TIMING_PAY_AFTER, 'expected_current': None,
                  'reason': REASON},
             )
         # Mid-transaction the row existed and the writer reported a real change...
         self.assertTrue(seen['changed'])
-        self.assertEqual(seen['stored'], PAYMENT_TIMING_PAY_FIRST)
+        self.assertEqual(seen['stored'], PAYMENT_TIMING_PAY_AFTER)
         # ...and after the failed audit it is gone.
         self.assertFalse(RestaurantServiceConfiguration.objects.exists())
 
@@ -1443,13 +1527,13 @@ class DomainRefusalAtomicityTests(_CommercialWriteTestCase):
 
     def test_a_stale_conflict_leaves_state_untouched_and_still_audits(self):
         stamp = timezone.now() - timedelta(days=7)
-        self.seed(timing=PAYMENT_TIMING_PAY_AFTER, at=stamp)
+        self.seed(timing=PAYMENT_TIMING_PAY_FIRST, at=stamp)
 
-        response = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        response = self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
 
         self.assertEqual(response.status_code, 409, response.content)
         config = self.config()
-        self.assertEqual(config.payment_timing, PAYMENT_TIMING_PAY_AFTER)
+        self.assertEqual(config.payment_timing, PAYMENT_TIMING_PAY_FIRST)
         self.assertEqual(config.payment_timing_set_at, stamp)
         self.assertAudited(
             ADMIN_RESTAURANT_PAYMENT_TIMING_SET, result=RESULT_FAILURE,
@@ -1457,15 +1541,15 @@ class DomainRefusalAtomicityTests(_CommercialWriteTestCase):
 
     def test_a_conflict_then_a_correct_retry_both_land(self):
         """The connection is still healthy after a refusal — the next write works."""
-        self.seed(timing=PAYMENT_TIMING_PAY_AFTER)
+        self.seed(timing=PAYMENT_TIMING_PAY_FIRST)
         self.assertEqual(
-            self.set_timing(PAYMENT_TIMING_PAY_FIRST, None).status_code, 409,
+            self.set_timing(PAYMENT_TIMING_PAY_AFTER, None).status_code, 409,
         )
         response = self.set_timing(
-            PAYMENT_TIMING_PAY_FIRST, PAYMENT_TIMING_PAY_AFTER,
+            PAYMENT_TIMING_PAY_AFTER, PAYMENT_TIMING_PAY_FIRST,
         )
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertEqual(self.config().payment_timing, PAYMENT_TIMING_PAY_FIRST)
+        self.assertEqual(self.config().payment_timing, PAYMENT_TIMING_PAY_AFTER)
         self.assertEqual(AdminAuditLog.objects.count(), 2)
 
 
@@ -1489,13 +1573,13 @@ class CanonicalReadWriteAgreementTests(_CommercialWriteTestCase):
     def test_timing_round_trip(self):
         before = self.detail()
         response = self.set_timing(
-            PAYMENT_TIMING_PAY_FIRST, before['payment_timing']['value'],
+            PAYMENT_TIMING_PAY_AFTER, before['payment_timing']['value'],
         )
         self.assertEqual(response.status_code, 200, response.content)
         written = response.json()['data']['commercial']
         self.assertEqual(written, self.detail())
         self.assertEqual(
-            written['payment_timing']['value'], PAYMENT_TIMING_PAY_FIRST,
+            written['payment_timing']['value'], PAYMENT_TIMING_PAY_AFTER,
         )
 
     def test_collection_mode_round_trip(self):
@@ -1509,20 +1593,23 @@ class CanonicalReadWriteAgreementTests(_CommercialWriteTestCase):
         self.assertEqual(written, self.detail())
 
     def test_the_token_from_one_write_is_accepted_by_the_next(self):
-        first = self.set_timing(PAYMENT_TIMING_PAY_FIRST, None).json()
-        token = first['data']['commercial']['payment_timing']['value']
-        second = self.set_timing(PAYMENT_TIMING_PAY_AFTER, token)
+        # On the COLLECTION-MODE axis since BE-B: until Step 4 the timing axis has
+        # one writable value (`pay_after`), so two consecutive CHANGING timing writes
+        # cannot exist. The property is the shared adapter's, not the axis's.
+        first = self.set_mode(PAYMENT_COLLECTION_MODE_OFFLINE, None).json()
+        token = first['data']['commercial']['payment_collection_mode']['value']
+        second = self.set_mode(PAYMENT_COLLECTION_MODE_PSP_ONLINE, token)
         self.assertEqual(second.status_code, 200, second.content)
         self.assertTrue(second.json()['data']['changed'])
 
     def test_no_display_prose_enters_the_round_trip(self):
         written = self.set_timing(
-            PAYMENT_TIMING_PAY_FIRST, None,
+            PAYMENT_TIMING_PAY_AFTER, None,
         ).json()['data']['commercial']
         value = written['payment_timing']['value']
         self.assertEqual(value, value.lower())
         self.assertNotIn(' ', value)
-        self.assertEqual(value, PAYMENT_TIMING_PAY_FIRST)
+        self.assertEqual(value, PAYMENT_TIMING_PAY_AFTER)
 
 
 # --- §50/§51 nothing else moves --------------------------------------------------
@@ -1577,7 +1664,7 @@ class NoSideEffectTests(_CommercialWriteTestCase):
 
     def test_no_transaction_row_is_created_by_either_write(self):
         before = DinifyTransaction.objects.count()
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.set_mode(PAYMENT_COLLECTION_MODE_OFFLINE, None)
         self.assertEqual(DinifyTransaction.objects.count(), before)
 
@@ -1594,7 +1681,7 @@ class NoSideEffectTests(_CommercialWriteTestCase):
             terms.recorded_at, terms.recorded_by_id,
         )
 
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.set_mode(PAYMENT_COLLECTION_MODE_OFFLINE, None)
 
         terms.refresh_from_db()
@@ -1607,7 +1694,7 @@ class NoSideEffectTests(_CommercialWriteTestCase):
         self.assertEqual(RestaurantSubscriptionTerms.objects.count(), 1)
 
     def test_no_subscription_terms_row_is_created_by_either_write(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.set_mode(PAYMENT_COLLECTION_MODE_OFFLINE, None)
         self.assertFalse(RestaurantSubscriptionTerms.objects.exists())
         data = self.client.get(
@@ -1627,7 +1714,7 @@ class NoSideEffectTests(_CommercialWriteTestCase):
 
         self.post(
             timing_url(onboarding),
-            value=PAYMENT_TIMING_PAY_FIRST, expected_current=None, reason=REASON,
+            value=PAYMENT_TIMING_PAY_AFTER, expected_current=None, reason=REASON,
         )
         self.post(
             mode_url(onboarding),
@@ -1644,7 +1731,7 @@ class NoSideEffectTests(_CommercialWriteTestCase):
         self.assertTrue(after['needs_attention'])
 
     def test_lifecycle_state_is_untouched(self):
-        self.set_timing(PAYMENT_TIMING_PAY_FIRST, None)
+        self.set_timing(PAYMENT_TIMING_PAY_AFTER, None)
         self.restaurant.refresh_from_db()
         self.assertEqual(self.restaurant.status, RestaurantStatus_Live)
 
@@ -1662,7 +1749,7 @@ class NoSideEffectTests(_CommercialWriteTestCase):
                 restaurant = _make_restaurant(f'State {status}', status=status)
                 response = self.post(
                     timing_url(restaurant),
-                    value=PAYMENT_TIMING_PAY_FIRST, expected_current=None,
+                    value=PAYMENT_TIMING_PAY_AFTER, expected_current=None,
                     reason=REASON,
                 )
                 self.assertEqual(response.status_code, 200, response.content)
@@ -1671,14 +1758,14 @@ class NoSideEffectTests(_CommercialWriteTestCase):
         test_tenant = _make_restaurant('Test Tenant', is_test=True)
         response = self.post(
             timing_url(test_tenant),
-            value=PAYMENT_TIMING_PAY_FIRST, expected_current=None, reason=REASON,
+            value=PAYMENT_TIMING_PAY_AFTER, expected_current=None, reason=REASON,
         )
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(
             RestaurantServiceConfiguration.objects.get(
                 restaurant=test_tenant,
             ).payment_timing,
-            PAYMENT_TIMING_PAY_FIRST,
+            PAYMENT_TIMING_PAY_AFTER,
         )
 
 

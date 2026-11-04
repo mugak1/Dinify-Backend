@@ -45,6 +45,7 @@ from commercial_app.errors import CommercialMutationError
 from commercial_app.models import (
     PAYMENT_COLLECTION_MODE_VALUES,
     PAYMENT_TIMING_VALUES,
+    RestaurantServiceConfiguration,
 )
 from platform_admin_app.audit_actions import (
     ADMIN_RESTAURANT_PAYMENT_COLLECTION_MODE_SET,
@@ -128,6 +129,12 @@ class _CommercialAxisWriteView(ElevatedCommercialWriteView):
         # The world moved under the caller. Their request was well-formed, so this is
         # not a 400: 409 is the status that means "reload and look again".
         errors.STALE_SERVICE_CONFIGURATION: 409,
+        # `pay_first` until Step 4 (`service_configuration` explains why). A 409, not
+        # a 400: the body is well-formed and `pay_first` IS in the vocabulary, so the
+        # serializer accepts it; it is the platform's current state that cannot honour
+        # it. NEVER a 500 — unmapped codes re-raise, which is why it must be here.
+        # Step 4 removes this entry with the refusal.
+        service_configuration.PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE: 409,
         # Defensive. The serializer already rejects anything outside the vocabulary,
         # so these are unreachable through HTTP — kept mapped so a future caller that
         # bypasses the serializer still gets an honest status.
@@ -137,6 +144,11 @@ class _CommercialAxisWriteView(ElevatedCommercialWriteView):
     CONFLICT_MESSAGES = {
         errors.STALE_SERVICE_CONFIGURATION:
             'Commercial configuration changed since it was loaded.',
+        # The plain sentence the owner chose. A 409 body otherwise defaults to
+        # "changed since it was loaded", which would send the operator to reload a
+        # screen that is not stale.
+        service_configuration.PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE:
+            service_configuration.PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE_MESSAGE,
     }
     ERROR_FIELDS = frozenset({'value', 'expected_current'})
 
@@ -147,6 +159,24 @@ class _CommercialAxisWriteView(ElevatedCommercialWriteView):
     state_key = None
     writer = None
     success_message = ''
+
+    def stored_value(self, restaurant, exc):
+        """The value stored for this axis, for a refusal's before-state.
+
+        A staleness conflict carries it (``actual_current``, read under the lock).
+        The ``pay_first`` refusal is decided before any read, so it carries none, and
+        recording ``None`` there would claim the axis is unconfigured when it may not
+        be. That path reads the stored value here: one plain SELECT, on that refusal
+        only.
+        """
+        if 'actual_current' in exc.details:
+            return exc.details['actual_current']
+        return (
+            RestaurantServiceConfiguration.objects
+            .filter(restaurant=restaurant)
+            .values_list(self.state_key, flat=True)
+            .first()
+        )
 
     def post(self, request, restaurant_id):
         restaurant = self.resolve_restaurant(restaurant_id)
@@ -195,7 +225,7 @@ class _CommercialAxisWriteView(ElevatedCommercialWriteView):
                     # detail key that carries it — never by copying the exception's
                     # dict wholesale. NO after_state: nothing was applied, and
                     # inventing one would record a change that never happened.
-                    before_state={self.state_key: exc.details.get('actual_current')},
+                    before_state={self.state_key: self.stored_value(restaurant, exc)},
                 )
                 return self.domain_error_response(exc, status)
 
@@ -231,11 +261,18 @@ class AdminRestaurantPaymentTimingView(_CommercialAxisWriteView):
     fire the order, or does the order fire immediately and the tab settle at the
     end? It says nothing about custody, tender or provider.
 
-    ELEVATION-GATED. Nothing in the order or kitchen path reads this value yet, and
-    that is not a reason to gate it lightly: the decision is consequential the
-    moment it is recorded, because the enforcement that will eventually consume it
-    is built against whatever the configuration then says. A step-up requirement
-    added later would also have to explain why the setting was casual first.
+    ELEVATION-GATED. Nothing in the order or kitchen path ENFORCES this value yet
+    (acceptance copies it onto each new visit), and that is not a reason to gate it
+    lightly: the decision is consequential the moment it is recorded, because the
+    enforcement that will eventually consume it is built against whatever the
+    configuration then says. A step-up requirement added later would also have to
+    explain why the setting was casual first.
+
+    UNTIL STEP 4, ``pay_first`` IS REFUSED with a 409
+    ``payment_timing_pay_first_unavailable`` and "Pay first is not available yet.";
+    the serializer still accepts the word, so the refusal is the domain's and is
+    audited like any other. ``expected_current`` may still name ``pay_first``, which
+    is how a restaurant already on it moves to ``pay_after``.
     """
 
     serializer_class = PaymentTimingRequestSerializer

@@ -2556,7 +2556,12 @@ so keep it current when conventions change.
   three SUBSCRIPTION-TERMS writes (`platform_admin_app/endpoints/subscription_terms.py`
   — record / replace / end), on the same elevated + reasoned + audited contract, and
   factored the shared control-plane mechanics both adapters use into
-  `platform_admin_app/endpoints/commercial_base.py`. All five Step-3C mutations are
+  `platform_admin_app/endpoints/commercial_base.py`. **Step 2, PR BE-B (dining
+  model) then changed the TIMING writer twice**: it takes the EXCLUSIVE admission
+  lock before the `Restaurant` row (acceptance reads the timing under the SHARED
+  one), and until Step 4 it refuses `pay_first` with
+  `payment_timing_pay_first_unavailable` (Admin route: 409); a stored `pay_first` is
+  kept and can be moved to `pay_after`, and Step 4 removes the refusal. All five Step-3C mutations are
   now reachable over HTTP and NOTHING ELSE IS — `commercial_app` itself still has no
   HTTP surface, no serializer and no management command. See the "Commercial &
   Service Configuration Domain" section for the four concepts these models keep apart
@@ -3551,7 +3556,13 @@ the catch-all `<str:config_detail>/` route.
   `advisory(restaurant) EXCLUSIVE → Restaurant → AdminAuditLog` (transition), and
   the SAME pair again for `manage.py mark_restaurant_test` (the `Restaurant.is_test`
   writer) — it repeats the transition's order exactly, so it joins an ordering
-  already proven acyclic rather than adding a level. It needs the advisory lock
+  already proven acyclic rather than adding a level. The PAYMENT-TIMING writer
+  joined the same way in Step 2 (PR BE-B):
+  `advisory(restaurant) EXCLUSIVE → Restaurant → RestaurantServiceConfiguration
+  (→ AdminAuditLog in the Admin adapter)` — acceptance reads the timing after
+  `admit()`'s SHARED lock, so no round is stamped while the setting is changing. The
+  collection-mode axis and the subscription-terms writers do NOT take it (no order
+  path reads them). It needs the advisory lock
   because a `Restaurant` row lock does NOT exclude an admission — `admit` reads
   `status`/`is_test` with a plain `values_list().get()`, never a `select_for_update`,
   and under MVCC that read does not block on a row held FOR UPDATE. The advisory lock is the only thing the two transactions share — so ANY
@@ -4412,6 +4423,23 @@ structurally incapable of disagreeing about them.
   "Dining model: visits and bills") and that is NOT a reason to gate it lightly: the
   decision is consequential when it is RECORDED, because the enforcement built later
   is built against whatever the configuration then says
+- **`pay_first` IS REFUSED UNTIL STEP 4 (Step 2, PR BE-B)**: the timing route answers
+  **409 `payment_timing_pay_first_unavailable`** with the plain sentence "Pay first is
+  not available yet." Under Step 2's release rule a pay-first round leaves the held
+  state only through payments or a manager release, and neither exists before Step 4.
+  The refusal lives in the DOMAIN writer (`service_configuration.set_payment_timing`),
+  is decided before any lock or query, writes nothing and is audited once as a failure
+  whose `before_state` is the value actually stored (read for that refusal, since the
+  writer read nothing). The serializer still accepts the word, so the 409 is the
+  domain's. A restaurant whose stored value is ALREADY `pay_first` keeps it (its rounds
+  release at once in Step 2) and may move to `pay_after` (`expected_current` may still
+  name `pay_first`); asking for `pay_first` again is refused, not reported as a no-op.
+  The code is defined beside the writer, not in `commercial_app.errors`, because it is
+  temporary. **Step 4 removes the refusal and its 409 mapping together.** A 409, not a
+  400, as decided: the body is well-formed. NOTE the deployed Admin client (at
+  Dinify-Admin `52643af`) renders EVERY timing 409 with its own fixed copy
+  ("Configuration changed since you loaded it. Review the current value before trying
+  again.") and re-reads, so the server sentence does not reach the operator there yet
 - **CSRF is the existing admin policy**, enforced by `AdminSessionAuthentication` — not
   disabled, not exempted, not reimplemented per route. Tests use
   `Client(enforce_csrf_checks=True)`; the DEFAULT test client sets
@@ -4433,7 +4461,9 @@ structurally incapable of disagreeing about them.
   must never be one
 - **STATUS MAPPING:** changed success and same-state no-op both `200`;
   `stale_service_configuration` → **`409`** with `{"code": "stale_service_configuration"}`
-  and a fixed sentence (never the domain's own message, which names internals); malformed
+  and a fixed sentence (never the domain's own message, which names internals);
+  `payment_timing_pay_first_unavailable` → **`409`** with its own fixed sentence (until
+  Step 4, above); malformed
   body → `400` with field-keyed `errors`; missing or soft-deleted restaurant → `404`;
   stale/absent elevation → `403`. A conflict is NOT a 400 — the body was fine, the world
   moved. An unmapped domain code is deliberately re-raised rather than relabelled, so an
@@ -4501,18 +4531,28 @@ structurally incapable of disagreeing about them.
 - **`psp_online` PERFORMS EXACTLY ONE CONFIGURATION MUTATION** — no provider call, merchant
   record, merchant id, payment initiation, transaction or webhook row. `offline` is accepted
   as unremarkably as the other: a permanent, first-class mode, never a fallback
-- **NO ADMISSION ADVISORY LOCK.** Deliberate and load-bearing: the lifecycle transition takes
-  `advisory → Restaurant row`, and taking it AFTER the row lock here would invert that order.
-  Nothing in the order path ENFORCES these values yet. Since the dining model's Step 1
-  writer, acceptance READS payment timing (never collection mode) with one plain read
-  and no lock, and COPIES it onto the new visit and placement; a change committing
-  beside an acceptance lands on that visit or the next, and an existing visit keeps
-  the value it was opened with. When payment timing is eventually enforced in order
-  admission (Step 2), changing it while live will need a deliberate lock-design update —
-  not a lock quietly added here first
+- **THE TIMING WRITE TAKES THE EXCLUSIVE ADMISSION LOCK FIRST; THE COLLECTION-MODE WRITE
+  TAKES NONE (Step 2, PR BE-B).** Since the dining model's Step 1 writer, acceptance READS
+  payment timing (never collection mode) with one plain read after `admit()`'s SHARED
+  admission lock, and COPIES it onto the new visit and placement; from Step 2 that copy
+  decides whether a round is held. So `set_payment_timing` takes
+  `lock_admission_exclusive` INSIDE the writer's transaction and BEFORE `lock_restaurant`
+  — the lifecycle transition's own order (`advisory → Restaurant row`), never the
+  inverse. A timing change therefore either commits before an acceptance is admitted
+  (and that visit records the new value) or waits for it to commit (and that visit
+  keeps the old one); an existing visit always keeps the value it was opened with. The
+  restaurant id is parsed BEFORE the lock (the key is derived from the UUID), so a
+  malformed id is still the domain's `invalid_restaurant_id`. Collection mode is read by
+  no order path, so taking the barrier there would only queue diner orders behind a
+  decision no order depends on. Proved on two real connections, parked at real seams
+  and observed through `pg_locks` (an ADVISORY wait specifically — without the barrier
+  a submit still waits at COMMIT on the `Restaurant` row through its deferred foreign
+  key, which proves nothing), by `commercial_app/tests_payment_timing_admission_lock.py`
 - **GET COST IS UNCHANGED**: 4 queries for the list (flat across page size) and 8 for the
   detail, measured on this branch; no read module was touched. A POST costs 12–13 (auth,
-  target resolve, row lock, actor, config read, the write, audit, canonical re-read)
+  target resolve, row lock, actor, config read, the write, audit, canonical re-read);
+  since BE-B a TIMING POST costs ONE more (the advisory lock): measured 13 → **14** for a
+  change and 12 → **13** for a no-op, while a collection-mode POST stays 13
 - **The Admin frontend does NOT expose these controls yet** — Step 3E migrates the portal to
   `commercial`, adds the editing UI, sends `expected_current`, collects the reason and handles
   the 409
@@ -4626,9 +4666,10 @@ Step-3C mutations are reachable over HTTP and nothing else is.
   `preferred_subscription_method`, `subscription_validity`, `subscription_expiry_date`,
   `DinifyTransaction`); a terms write never auto-creates a replacement; historical rows
   are retained, never deleted; and `is_test` gets no special write semantics
-- **NO ADMISSION ADVISORY LOCK**, for the same load-bearing reason as 3D.2a — the
-  lifecycle transition takes `advisory → Restaurant row`, so acquiring it after the row
-  lock here would invert that order, and nothing in the order path reads terms
+- **NO ADMISSION ADVISORY LOCK**: nothing in the order path reads terms, so the barrier
+  the timing write takes (3D.2a, since BE-B) is not needed here — and if it ever were,
+  it would have to be taken FIRST: the lifecycle transition takes `advisory →
+  Restaurant row`, so acquiring it after the row lock would invert that order
 - **The Admin frontend does NOT expose these controls yet** — Step 3E adds the UI, sends
   the tokens, collects the reason and handles the 409
 
@@ -6032,12 +6073,19 @@ with `errors.py` (one `CommercialMutationError` carrying a stable `.code`) and
   RestaurantSubscriptionTerms` — a tail extension of the documented global order that
   cannot cycle. **It must NEVER reach for the admission advisory lock afterwards**:
   the lifecycle transition takes that lock FIRST and the row second, so acquiring it
-  after the row would invert that order. It is not needed at all today — nothing in
-  the order path enforces payment timing or reads collection mode; acceptance copies
-  the timing onto a new visit with one unlocked read (dining model, Step 1), which
-  needs no barrier because a copy taken a moment early is still a value somebody
-  chose. WHEN timing is eventually enforced in the order/kitchen path, changing it
-  while live WILL need the barrier
+  after the row would invert that order. **THE PAYMENT-TIMING WRITER TAKES IT FIRST
+  (Step 2, PR BE-B)**: `lock_admission_exclusive → Restaurant →
+  RestaurantServiceConfiguration`, because from Step 2 the timing acceptance copies onto
+  a visit (read after `admit()`'s SHARED lock) decides whether the round is held, so no
+  round may be stamped while the setting is changing. The collection-mode axis and the
+  terms writers still take only the `Restaurant` row: no order path reads them
+- **`pay_first` IS REFUSED BY THE TIMING WRITER UNTIL STEP 4** —
+  `service_configuration.PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE`
+  (`payment_timing_pay_first_unavailable`, "Pay first is not available yet."), raised
+  before any lock or query, writing nothing. A stored `pay_first` stays valid (the
+  model vocabulary is unchanged), is kept, and can be moved to `pay_after`. There is
+  still no clear-to-unset operation (`value=None` stays `invalid_payment_timing`).
+  **Step 4 removes the refusal**
 - **OPTIMISTIC CONCURRENCY.** Both configuration writers take `expected_current`
   (no default — `None` is a real assertion, so a forgotten argument must not make it
   by accident) and compare it against the value read UNDER THE LOCK; a mismatch is
@@ -6167,8 +6215,10 @@ _submit_order`, after `_terminal_quote_outcome` and before the order flips to
   out of `admit()`. A missing configuration row and an unset axis both record
   `not_chosen`; an unknown value raises (a data fault must not read as "nobody
   chose"). A later configuration change leaves an existing visit alone. Nothing
-  ENFORCES timing yet — that is Step 2, and it will need the lock-design update the
-  commercial sections describe.
+  ENFORCES timing yet — that is Step 2. Its lock design landed first (PR BE-B): the
+  timing writer takes the EXCLUSIVE admission lock before the `Restaurant` row, so a
+  change cannot commit between `admit()` and this read; and until Step 4 the writer
+  refuses `pay_first` (a stored one is kept).
 - **COST: submit 14 → 18** (the one read plus three INSERTs, flat in the order's
   size), and **14 with the switch off** — both pinned in `orders_app/
   tests_order_acceptance.py::WhatTheEvidenceCostsTests`. A replay stays 7, and the

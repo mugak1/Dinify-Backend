@@ -82,6 +82,18 @@ class ServiceConfigurationWriterTests(TestCase):
             expected_current=expected_current,
         )
 
+    def _seed_timing(self, value, actor=None):
+        """Store a timing DIRECTLY, bypassing the writer.
+
+        The only way to reach a stored `pay_first` since BE-B refuses it at the
+        writer: it stands for a value recorded before the refusal existed.
+        """
+        return RestaurantServiceConfiguration.objects.create(
+            restaurant=self.restaurant, payment_timing=value,
+            payment_timing_set_at=timezone.now(),
+            payment_timing_set_by=actor or self.actor,
+        )
+
     def _set_mode(self, value, expected_current=None, actor=_UNSET):
         return service_configuration.set_payment_collection_mode(
             restaurant_id=self.restaurant.id, value=value,
@@ -92,14 +104,14 @@ class ServiceConfigurationWriterTests(TestCase):
     # --- creation, stamping, independence -----------------------------------
 
     def test_first_timing_write_creates_the_row_and_leaves_collection_null(self):
-        result = self._set_timing('pay_first')
+        result = self._set_timing('pay_after')
 
         self.assertTrue(result.changed)
         self.assertIsNone(result.previous_value)
-        self.assertEqual(result.current_value, 'pay_first')
+        self.assertEqual(result.current_value, 'pay_after')
 
         config = RestaurantServiceConfiguration.objects.get(restaurant=self.restaurant)
-        self.assertEqual(config.payment_timing, 'pay_first')
+        self.assertEqual(config.payment_timing, 'pay_after')
         self.assertEqual(config.payment_timing_set_by_id, self.actor.id)
         self.assertIsNotNone(config.payment_timing_set_at)
         # The other axis stays unconfigured — absence is the honest state, and
@@ -132,7 +144,7 @@ class ServiceConfigurationWriterTests(TestCase):
         self.assertEqual(RestaurantServiceConfiguration.objects.count(), 1)
 
     def test_changing_one_axis_does_not_restamp_the_other(self):
-        self._set_timing('pay_first')
+        self._set_timing('pay_after')
         self._set_mode('offline', actor=self.other_actor)
         config = RestaurantServiceConfiguration.objects.get(restaurant=self.restaurant)
         timing_stamp = config.payment_timing_set_at
@@ -141,24 +153,24 @@ class ServiceConfigurationWriterTests(TestCase):
 
         config.refresh_from_db()
         self.assertEqual(config.payment_collection_mode, 'psp_online')
-        self.assertEqual(config.payment_timing, 'pay_first')
+        self.assertEqual(config.payment_timing, 'pay_after')
         self.assertEqual(config.payment_timing_set_at, timing_stamp)
         self.assertEqual(config.payment_timing_set_by_id, self.actor.id)
 
     # --- the same-state no-op ------------------------------------------------
 
     def test_setting_the_same_timing_is_a_noop_that_preserves_attribution(self):
-        self._set_timing('pay_first')
+        self._set_timing('pay_after')
         config = RestaurantServiceConfiguration.objects.get(restaurant=self.restaurant)
         original_at, original_by = (
             config.payment_timing_set_at, config.payment_timing_set_by_id,
         )
 
-        result = self._set_timing('pay_first', expected_current='pay_first',
+        result = self._set_timing('pay_after', expected_current='pay_after',
                                   actor=self.other_actor)
 
         self.assertFalse(result.changed)
-        self.assertEqual(result.current_value, 'pay_first')
+        self.assertEqual(result.current_value, 'pay_after')
         config.refresh_from_db()
         # A retry must not rewrite who decided, or when.
         self.assertEqual(config.payment_timing_set_at, original_at)
@@ -184,7 +196,7 @@ class ServiceConfigurationWriterTests(TestCase):
     # --- optimistic concurrency ---------------------------------------------
 
     def test_a_stale_expectation_cannot_overwrite_a_newer_value(self):
-        self._set_timing('pay_first')
+        self._seed_timing('pay_first')
 
         with self.assertRaises(CommercialMutationError) as ctx:
             self._set_timing('pay_after', expected_current=None)
@@ -194,7 +206,9 @@ class ServiceConfigurationWriterTests(TestCase):
         self.assertEqual(config.payment_timing, 'pay_first')
 
     def test_a_correct_expectation_updates_the_value(self):
-        self._set_timing('pay_first')
+        # A restaurant already on `pay_first` (stored before BE-B's refusal) moves to
+        # `pay_after`: the refusal is about the REQUESTED value, never the expected one.
+        self._seed_timing('pay_first')
         result = self._set_timing('pay_after', expected_current='pay_first')
         self.assertTrue(result.changed)
         self.assertEqual(result.previous_value, 'pay_first')
@@ -202,7 +216,7 @@ class ServiceConfigurationWriterTests(TestCase):
 
     def test_expecting_a_value_against_an_unconfigured_axis_conflicts(self):
         with self.assertRaises(CommercialMutationError) as ctx:
-            self._set_timing('pay_first', expected_current='pay_after')
+            self._set_timing('pay_after', expected_current='pay_first')
         self.assertEqual(ctx.exception.code, errors.STALE_SERVICE_CONFIGURATION)
         self.assertFalse(RestaurantServiceConfiguration.objects.exists())
 
@@ -211,6 +225,82 @@ class ServiceConfigurationWriterTests(TestCase):
         with self.assertRaises(CommercialMutationError) as ctx:
             self._set_mode('psp_online', expected_current=None)
         self.assertEqual(ctx.exception.code, errors.STALE_SERVICE_CONFIGURATION)
+
+    # --- BE-B: `pay_first` refused until Step 4 -----------------------------
+
+    def _assert_pay_first_refused(self, **kwargs):
+        with self.assertRaises(CommercialMutationError) as ctx:
+            self._set_timing('pay_first', **kwargs)
+        self.assertEqual(
+            ctx.exception.code,
+            service_configuration.PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE,
+        )
+        self.assertEqual(
+            ctx.exception.code, 'payment_timing_pay_first_unavailable',
+        )
+        self.assertEqual(ctx.exception.message, 'Pay first is not available yet.')
+
+    def test_pay_first_is_refused_against_an_unconfigured_restaurant(self):
+        self._assert_pay_first_refused(expected_current=None)
+        self.assertFalse(RestaurantServiceConfiguration.objects.exists())
+
+    def test_pay_first_is_refused_from_pay_after_and_nothing_moves(self):
+        self._set_timing('pay_after')
+        config = RestaurantServiceConfiguration.objects.get(restaurant=self.restaurant)
+        before = (config.payment_timing, config.payment_timing_set_at,
+                  config.payment_timing_set_by_id, config.updated_at)
+
+        self._assert_pay_first_refused(expected_current='pay_after',
+                                       actor=self.other_actor)
+
+        config.refresh_from_db()
+        self.assertEqual(
+            (config.payment_timing, config.payment_timing_set_at,
+             config.payment_timing_set_by_id, config.updated_at),
+            before,
+        )
+
+    def test_a_stored_pay_first_is_kept_and_asking_for_it_again_is_refused(self):
+        seeded = self._seed_timing('pay_first')
+        self._assert_pay_first_refused(expected_current='pay_first')
+        seeded.refresh_from_db()
+        self.assertEqual(seeded.payment_timing, 'pay_first')
+
+    def test_the_refusal_is_about_the_requested_value_only(self):
+        """`expected_current='pay_first'` stays legal: it is how a restaurant
+        already on `pay_first` moves off it."""
+        self._seed_timing('pay_first')
+        result = self._set_timing('pay_after', expected_current='pay_first')
+        self.assertTrue(result.changed)
+        self.assertEqual(result.previous_value, 'pay_first')
+
+    def test_pay_first_stays_a_legal_stored_value(self):
+        """The refusal is a WRITER rule, not a vocabulary change: the model still
+        accepts `pay_first`, so an existing row stays valid."""
+        seeded = self._seed_timing('pay_first')
+        seeded.full_clean()
+
+    def test_pay_after_still_records_from_unset(self):
+        result = self._set_timing('pay_after', expected_current=None)
+        self.assertTrue(result.changed)
+        self.assertIsNone(result.previous_value)
+
+    def test_there_is_still_no_clear_operation(self):
+        """Clearing a recorded timing back to unset was never a writer operation
+        (`value=None` is refused as invalid) and BE-B does not add one."""
+        self._set_timing('pay_after')
+        with self.assertRaises(CommercialMutationError) as ctx:
+            self._set_timing(None, expected_current='pay_after')
+        self.assertEqual(ctx.exception.code, errors.INVALID_PAYMENT_TIMING)
+        self.assertEqual(
+            RestaurantServiceConfiguration.objects.get().payment_timing, 'pay_after',
+        )
+
+    def test_the_collection_mode_axis_has_no_equivalent_refusal(self):
+        for value in ('offline', 'psp_online'):
+            with self.subTest(value=value):
+                RestaurantServiceConfiguration.objects.all().delete()
+                self.assertTrue(self._set_mode(value).changed)
 
     # --- vocabulary ----------------------------------------------------------
 
@@ -254,7 +344,7 @@ class ServiceConfigurationWriterTests(TestCase):
 
     def test_a_malformed_expected_current_is_refused_as_such(self):
         with self.assertRaises(CommercialMutationError) as ctx:
-            self._set_timing('pay_first', expected_current='nonsense')
+            self._set_timing('pay_after', expected_current='nonsense')
         self.assertEqual(ctx.exception.code, errors.INVALID_PAYMENT_TIMING)
 
     # --- targeting and actor -------------------------------------------------
@@ -263,7 +353,7 @@ class ServiceConfigurationWriterTests(TestCase):
         import uuid
         with self.assertRaises(CommercialMutationError) as ctx:
             service_configuration.set_payment_timing(
-                restaurant_id=uuid.uuid4(), value='pay_first',
+                restaurant_id=uuid.uuid4(), value='pay_after',
                 actor=self.actor, expected_current=None,
             )
         self.assertEqual(ctx.exception.code, errors.RESTAURANT_NOT_FOUND)
@@ -271,7 +361,7 @@ class ServiceConfigurationWriterTests(TestCase):
     def test_a_malformed_restaurant_id_is_its_own_error(self):
         with self.assertRaises(CommercialMutationError) as ctx:
             service_configuration.set_payment_timing(
-                restaurant_id='Writer Ltd', value='pay_first',
+                restaurant_id='Writer Ltd', value='pay_after',
                 actor=self.actor, expected_current=None,
             )
         self.assertEqual(ctx.exception.code, errors.INVALID_RESTAURANT_ID)
@@ -279,13 +369,13 @@ class ServiceConfigurationWriterTests(TestCase):
     def test_a_soft_deleted_restaurant_is_refused_distinctly(self):
         Restaurant.objects.filter(pk=self.restaurant.pk).update(deleted=True)
         with self.assertRaises(CommercialMutationError) as ctx:
-            self._set_timing('pay_first')
+            self._set_timing('pay_after')
         self.assertEqual(ctx.exception.code, errors.RESTAURANT_DELETED)
         self.assertFalse(RestaurantServiceConfiguration.objects.exists())
 
     def test_an_unsaved_actor_is_a_domain_error_not_an_integrity_error(self):
         with self.assertRaises(CommercialMutationError) as ctx:
-            self._set_timing('pay_first', actor=User(email='ghost@test.com'))
+            self._set_timing('pay_after', actor=User(email='ghost@test.com'))
         self.assertEqual(ctx.exception.code, errors.INVALID_ACTOR)
         self.assertFalse(RestaurantServiceConfiguration.objects.exists())
 
@@ -293,7 +383,7 @@ class ServiceConfigurationWriterTests(TestCase):
         for bogus in (None, 'someone', 42):
             with self.subTest(actor=bogus):
                 with self.assertRaises(CommercialMutationError) as ctx:
-                    self._set_timing('pay_first', actor=bogus)
+                    self._set_timing('pay_after', actor=bogus)
                 self.assertEqual(ctx.exception.code, errors.INVALID_ACTOR)
 
     def test_lifecycle_state_does_not_gate_commercial_configuration(self):
@@ -308,7 +398,7 @@ class ServiceConfigurationWriterTests(TestCase):
             with self.subTest(status=status):
                 Restaurant.objects.filter(pk=self.restaurant.pk).update(status=status)
                 RestaurantServiceConfiguration.objects.all().delete()
-                result = self._set_timing('pay_first')
+                result = self._set_timing('pay_after')
                 self.assertTrue(result.changed)
 
     # --- the four things these writers must not do ---------------------------
@@ -321,13 +411,13 @@ class ServiceConfigurationWriterTests(TestCase):
         """
         Restaurant.objects.filter(pk=self.restaurant.pk).update(is_test=True)
 
-        timing = self._set_timing('pay_first')
+        timing = self._set_timing('pay_after')
         mode = self._set_mode('offline')
 
         self.assertTrue(timing.changed)
         self.assertTrue(mode.changed)
         config = RestaurantServiceConfiguration.objects.get(restaurant=self.restaurant)
-        self.assertEqual(config.payment_timing, 'pay_first')
+        self.assertEqual(config.payment_timing, 'pay_after')
         self.assertEqual(config.payment_collection_mode, 'offline')
         # And the flag itself is not something these writers touch.
         self.restaurant.refresh_from_db()
@@ -335,7 +425,7 @@ class ServiceConfigurationWriterTests(TestCase):
 
     def test_legacy_commercial_fields_are_untouched(self):
         before = self._legacy_snapshot()
-        self._set_timing('pay_first')
+        self._set_timing('pay_after')
         self._set_mode('psp_online')
         self.assertEqual(self._legacy_snapshot(), before)
 
@@ -352,7 +442,7 @@ class ServiceConfigurationWriterTests(TestCase):
         before_status, before_updated = (
             self.restaurant.status, self.restaurant.time_last_updated,
         )
-        self._set_timing('pay_first')
+        self._set_timing('pay_after')
         self.restaurant.refresh_from_db()
         self.assertEqual(self.restaurant.status, before_status)
         self.assertEqual(self.restaurant.time_last_updated, before_updated)
@@ -360,12 +450,12 @@ class ServiceConfigurationWriterTests(TestCase):
     def test_no_admin_audit_row_is_written(self):
         from platform_admin_app.models import AdminAuditLog
         before = AdminAuditLog.objects.count()
-        self._set_timing('pay_first')
+        self._set_timing('pay_after')
         self._set_mode('offline')
         self.assertEqual(AdminAuditLog.objects.count(), before)
 
     def test_no_subscription_terms_are_created_as_a_side_effect(self):
-        self._set_timing('pay_first')
+        self._set_timing('pay_after')
         self._set_mode('offline')
         self.assertFalse(RestaurantSubscriptionTerms.objects.exists())
 
@@ -376,11 +466,11 @@ class ServiceConfigurationWriterTests(TestCase):
             RestaurantServiceConfiguration, 'save', side_effect=RuntimeError('boom'),
         ):
             with self.assertRaises(RuntimeError):
-                self._set_timing('pay_first')
+                self._set_timing('pay_after')
         self.assertFalse(RestaurantServiceConfiguration.objects.exists())
 
     def test_a_failed_update_leaves_the_previous_triple_intact(self):
-        self._set_timing('pay_first')
+        self._seed_timing('pay_first')
         config = RestaurantServiceConfiguration.objects.get(restaurant=self.restaurant)
         original_at, original_by = (
             config.payment_timing_set_at, config.payment_timing_set_by_id,

@@ -183,8 +183,8 @@ class CommercialWriterConcurrencyTests(TransactionTestCase):
     def test_two_identical_first_timing_writes_yield_one_change_and_one_noop(self):
         results = {}
         _run([
-            (_timing_worker, (self.ids, results, 'a', 'pay_first', None)),
-            (_timing_worker, (self.ids, results, 'b', 'pay_first', None)),
+            (_timing_worker, (self.ids, results, 'a', 'pay_after', None)),
+            (_timing_worker, (self.ids, results, 'b', 'pay_after', None)),
         ])
         oks, errs = self._outcomes(results)
 
@@ -193,9 +193,17 @@ class CommercialWriterConcurrencyTests(TransactionTestCase):
         self.assertEqual(sorted(r.changed for r in oks), [False, True])
         self.assertEqual(RestaurantServiceConfiguration.objects.count(), 1)
         config = RestaurantServiceConfiguration.objects.get()
-        self.assertEqual(config.payment_timing, 'pay_first')
+        self.assertEqual(config.payment_timing, 'pay_after')
 
-    def test_two_conflicting_first_timing_writes_yield_one_win_one_conflict(self):
+    def test_a_pay_first_racing_a_pay_after_is_refused_and_the_other_wins(self):
+        """
+        Before BE-B this raced `pay_first` against `pay_after` for one win and one
+        stale conflict. Since BE-B `pay_first` is refused before any lock, so on the
+        timing axis a stale-conflict race between two ACCEPTED writes cannot be
+        built (there is one writable value until Step 4); that race is still proved
+        on the collection-mode axis below. What must hold here: the refusal is a
+        clean domain refusal, and the accepted write lands.
+        """
         results = {}
         _run([
             (_timing_worker, (self.ids, results, 'a', 'pay_first', None)),
@@ -203,15 +211,16 @@ class CommercialWriterConcurrencyTests(TransactionTestCase):
         ])
         oks, errs = self._outcomes(results)
 
-        # Exactly one committed decision, one clean conflict, no lost update.
         self.assertEqual(len(oks), 1)
         self.assertTrue(oks[0].changed)
         self.assertEqual(len(errs), 1)
-        self.assertEqual(errs[0].code, errors.STALE_SERVICE_CONFIGURATION)
-
+        self.assertEqual(
+            errs[0].code, service_configuration.PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE,
+        )
         self.assertEqual(RestaurantServiceConfiguration.objects.count(), 1)
-        config = RestaurantServiceConfiguration.objects.get()
-        self.assertEqual(config.payment_timing, oks[0].current_value)
+        self.assertEqual(
+            RestaurantServiceConfiguration.objects.get().payment_timing, 'pay_after',
+        )
 
     def test_two_conflicting_first_collection_writes_yield_one_win_one_conflict(self):
         results = {}
@@ -266,8 +275,8 @@ class CommercialWriterConcurrencyTests(TransactionTestCase):
     def test_a_concurrent_noop_does_not_rewrite_the_winners_attribution(self):
         results = {}
         _run([
-            (_timing_worker, (self.ids, results, 'a', 'pay_first', None)),
-            (_timing_worker, (self.ids, results, 'b', 'pay_first', None)),
+            (_timing_worker, (self.ids, results, 'a', 'pay_after', None)),
+            (_timing_worker, (self.ids, results, 'b', 'pay_after', None)),
         ])
         config = RestaurantServiceConfiguration.objects.get()
         winner = [r for r in results.values() if r.changed][0]
@@ -392,7 +401,7 @@ class CommercialWriterConcurrencyTests(TransactionTestCase):
                 actor = User.objects.get(pk=ids['actor'])
                 _sync(barrier)
                 results[key] = service_configuration.set_payment_timing(
-                    restaurant_id=ids['restaurant'], value='pay_first',
+                    restaurant_id=ids['restaurant'], value='pay_after',
                     actor=actor, expected_current=None,
                 )
                 events.append('write_committed')
