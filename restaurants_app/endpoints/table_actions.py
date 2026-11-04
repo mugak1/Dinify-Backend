@@ -11,11 +11,68 @@ from restaurants_app.models import Table, Reservation
 from restaurants_app.serializers import SerializerPublicGetTable
 from restaurants_app.controllers.diner_capability import issue_qr_credential
 from restaurants_app.controllers.qr_disclosure import qr_disclosure_policy
+from orders_app.controllers.occupancy import ongoing_order_q
+from orders_app.models import Order
 
 
 TABLE_STATUS_CHOICES = {
     'available', 'seated', 'bill_requested', 'dirty', 'out_of_service'
 }
+
+
+# The stable machine reason clear and transfer refuse with. A client branches on
+# it; the message beside it is for a person and may be reworded.
+REASON_TABLE_HAS_OPEN_VISIT = 'table_has_open_visit'
+
+# The geometry and layout columns the floor-plan save may write, and nothing else.
+FLOOR_PLAN_FIELDS = ('floor_x', 'floor_y', 'floor_width', 'floor_height')
+
+
+def _lock_tables(table_ids, restaurant_id=None):
+    """Re-read the named, non-deleted tables `FOR UPDATE` in ONE statement, in
+    PRIMARY-KEY order, and return them keyed by primary key.
+
+    THE ORDER IS THE POINT. Two requests that lock the same pair of tables in
+    opposite orders deadlock; two that both take them in primary-key order
+    cannot, because whichever reaches the lower key first holds it while the
+    other waits there holding nothing. PostgreSQL takes the row locks of an
+    `ORDER BY ... FOR UPDATE` as the sorted rows are returned, so the
+    `order_by('pk')` is what fixes the order. It must be explicit: `Table`'s
+    `Meta.ordering` is `number`, not the key.
+
+    No `select_related`, so the lock covers the `tables` rows and nothing else.
+    Must be called inside the transaction that writes, or the lock is released
+    by the statement that took it.
+    """
+    queryset = Table.objects.select_for_update().filter(
+        pk__in=list(table_ids), deleted=False)
+    if restaurant_id is not None:
+        queryset = queryset.filter(restaurant_id=restaurant_id)
+    return {table.pk: table for table in queryset.order_by('pk')}
+
+
+def _has_ongoing_order(table_id):
+    """Does this table have an order that occupies it, by THE one occupancy rule?
+
+    Asked under the `Table` row lock. Every path that can make an order occupy a
+    table (submit, kitchen recall) takes that same row lock first — the order
+    path's `Table -> Order` — so the answer cannot change until this
+    transaction ends. It reads `orders` with a plain SELECT and locks no order
+    row: the `Table` lock is the serialization point, and taking an `Order` lock
+    here would only add a participant to the order path's lock order.
+    """
+    return Order.objects.filter(ongoing_order_q(), table_id=table_id).exists()
+
+
+def _open_visit_refusal(message):
+    return Response(
+        {'status': 409, 'message': message, 'reason': REASON_TABLE_HAS_OPEN_VISIT},
+        status=409,
+    )
+
+
+def _table_vanished():
+    return Response({'status': 404, 'message': 'Table not found'}, status=404)
 
 
 def _qr_context(request):
@@ -94,29 +151,46 @@ class TableActionsEndpoint(APIView):
         ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
-        table.status = 'seated'
-        table.save()
+        # LOCKED RE-READ, NARROW WRITE (Step 2, BE-A) — the `_update_status`
+        # fix, applied here. The instance above was read unlocked, and a bare
+        # `table.save()` writes EVERY column from it, so a QR regeneration
+        # committed in between had its `qr_version` written back: every diner
+        # credential it had just revoked came back to life. Seat decides
+        # `status` and nothing else, so that is all it writes. Seat does NOT
+        # consult occupancy; it is unchanged in behaviour apart from the write.
+        #
+        # LOCK ORDER: `Table`, then (unlocked) the reservation. No `Restaurant`
+        # row and no admission advisory lock, so this can block an order path
+        # but cannot cycle against it.
+        with transaction.atomic():
+            table = _lock_tables([table.pk]).get(table.pk)
+            if table is None:
+                return _table_vanished()
 
-        # If a reservation is provided, mark it as seated
-        reservation_id = data.get('reservation_id')
-        if reservation_id:
-            try:
-                # Scope the reservation to the gated table's restaurant so a
-                # foreign reservation_id can't be mutated into another tenant's
-                # row. A foreign id now falls into the same non-fatal silent-ignore
-                # path an unknown id already did: the table still seats and the
-                # attacker learns nothing.
-                reservation = Reservation.objects.get(
-                    id=reservation_id,
-                    restaurant_id=table.restaurant_id,
-                    deleted=False,
-                )
-                reservation.status = 'seated'
-                reservation.seated_at = timezone.now()
-                reservation.table = table
-                reservation.save()
-            except Reservation.DoesNotExist:
-                pass  # Non-fatal: table is already seated
+            table.status = 'seated'
+            table.save(update_fields=['status'])
+
+            # If a reservation is provided, mark it as seated
+            reservation_id = data.get('reservation_id')
+            if reservation_id:
+                try:
+                    # Scope the reservation to the gated table's restaurant so a
+                    # foreign reservation_id can't be mutated into another
+                    # tenant's row. A foreign id now falls into the same
+                    # non-fatal silent-ignore path an unknown id already did: the
+                    # table still seats and the attacker learns nothing.
+                    reservation = Reservation.objects.get(
+                        id=reservation_id,
+                        restaurant_id=table.restaurant_id,
+                        deleted=False,
+                    )
+                    reservation.status = 'seated'
+                    reservation.seated_at = timezone.now()
+                    reservation.table = table
+                    reservation.save(
+                        update_fields=['status', 'seated_at', 'table'])
+                except Reservation.DoesNotExist:
+                    pass  # Non-fatal: table is already seated
 
         return Response({
             'status': 200,
@@ -151,8 +225,31 @@ class TableActionsEndpoint(APIView):
                 status=400
             )
 
-        table.status = mark_as
-        table.save()
+        # LOCK, REFUSE AN OPEN VISIT, NARROW WRITE (Step 2, BE-A).
+        #
+        # Clearing a table that still has an order in flight declares the
+        # table free while a party is still eating at it — and the next diner
+        # to scan it is then seated on top of them. So the occupancy rule is
+        # asked UNDER the row lock, where no submit or kitchen recall can change
+        # the answer before this commits, and an ongoing order (held rounds
+        # included, once Step 2 creates them) is a 409 with a stable reason.
+        # A served or cancelled order does not occupy the table and does not
+        # block it.
+        #
+        # Then only `status` is written, for the reason seat gives above.
+        with transaction.atomic():
+            table = _lock_tables([table.pk]).get(table.pk)
+            if table is None:
+                return _table_vanished()
+
+            if _has_ongoing_order(table.pk):
+                return _open_visit_refusal(
+                    'This table still has an open order. Serve or cancel it '
+                    'before clearing the table.'
+                )
+
+            table.status = mark_as
+            table.save(update_fields=['status'])
 
         return Response({
             'status': 200,
@@ -191,12 +288,44 @@ class TableActionsEndpoint(APIView):
         ):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
+        # LOCK BOTH, REFUSE AN OPEN VISIT AT EITHER, NARROW WRITE (Step 2,
+        # BE-A).
+        #
+        # A transfer moves the PARTY's status and its seated reservation. It
+        # moves NO ORDERS: an order stays on the table it was placed at. So:
+        #
+        #   * a SOURCE with an ongoing order would be marked dirty while its
+        #     order still belongs to it, leaving the order at a table the floor
+        #     now says is empty;
+        #   * a DESTINATION with an ongoing order already has a party, and
+        #     seating a second one there merges two bills nobody merged.
+        #
+        # Both are refused 409 with the same stable reason. Both rows are locked
+        # in ONE statement in primary-key order, so two transfers between the
+        # same pair in opposite directions serialize instead of deadlocking.
         with transaction.atomic():
+            locked = _lock_tables([source.pk, dest.pk])
+            source = locked.get(source.pk)
+            dest = locked.get(dest.pk)
+            if source is None or dest is None:
+                return _table_vanished()
+
+            if _has_ongoing_order(source.pk):
+                return _open_visit_refusal(
+                    'The source table still has an open order, and a transfer '
+                    'does not move orders. Serve or cancel it first.'
+                )
+            if _has_ongoing_order(dest.pk):
+                return _open_visit_refusal(
+                    'The destination table already has an open order. Choose '
+                    'a free table.'
+                )
+
             source.status = 'dirty'
-            source.save()
+            source.save(update_fields=['status'])
 
             dest.status = 'seated'
-            dest.save()
+            dest.save(update_fields=['status'])
 
             # Move any active reservation from source to destination
             Reservation.objects.filter(
@@ -312,29 +441,45 @@ class TableActionsEndpoint(APIView):
         if not can_user_access_module(request.user, restaurant_id, MODULE_TABLES):
             return Response({'status': 403, 'message': 'Forbidden'}, status=403)
 
+        # ONE LOCKING STATEMENT, PRIMARY-KEY ORDER, GEOMETRY ONLY (Step 2,
+        # BE-A). This used to `get()` each table unlocked and `save()` the whole
+        # row, so a floor-plan save reverted any column written in between —
+        # `qr_version` (un-revoking a QR regeneration), `status`, `qr_mode`,
+        # `enabled`. It now locks every row it will write in one statement, in
+        # primary-key order (see `_lock_tables`: the client's list order must
+        # not decide the lock order, or two saves of one floor deadlock), and
+        # writes only the geometry columns each entry actually sent.
+        #
+        # Behaviour is otherwise unchanged: an entry with no id, or naming a
+        # table that is unknown, deleted or at another restaurant, is skipped;
+        # `updated_count` counts the entries that named a table here.
         updated = 0
         with transaction.atomic():
+            wanted = [
+                entry.get('id') for entry in tables_data if entry.get('id')
+            ]
+            locked = _lock_tables(wanted, restaurant_id) if wanted else {}
+            # Ids are matched as the old per-row `get(id=...)` matched them:
+            # through the key field's own conversion, so every spelling the
+            # lookup accepted still names the same row.
+            to_pk = Table._meta.pk.to_python
+
             for entry in tables_data:
                 table_id = entry.get('id')
                 if not table_id:
                     continue
-                try:
-                    table = Table.objects.get(
-                        id=table_id, restaurant=restaurant_id, deleted=False
-                    )
-                except Table.DoesNotExist:
+                table = locked.get(to_pk(table_id))
+                if table is None:
                     continue
 
-                if 'floor_x' in entry:
-                    table.floor_x = float(entry['floor_x'])
-                if 'floor_y' in entry:
-                    table.floor_y = float(entry['floor_y'])
-                if 'floor_width' in entry:
-                    table.floor_width = float(entry['floor_width'])
-                if 'floor_height' in entry:
-                    table.floor_height = float(entry['floor_height'])
+                fields = []
+                for field in FLOOR_PLAN_FIELDS:
+                    if field in entry:
+                        setattr(table, field, float(entry[field]))
+                        fields.append(field)
 
-                table.save()
+                if fields:
+                    table.save(update_fields=fields)
                 updated += 1
 
         return Response({
