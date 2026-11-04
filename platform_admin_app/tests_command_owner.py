@@ -211,7 +211,8 @@ class _OwnerCase(ThrottleIsolationMixin, TestCase):
         """The representative business write: record a payment timing."""
         return (client or self.browser).post(
             f'/admin/v1/restaurants/{self.restaurant.id}/commercial/payment-timing/',
-            {'value': 'pay_first', 'expected_current': None, 'reason': REASON},
+            # `pay_after`: since BE-B the writer refuses `pay_first` until Step 4.
+            {'value': 'pay_after', 'expected_current': None, 'reason': REASON},
             content_type='application/json', **self._headers(owner, csrf, extra),
         )
 

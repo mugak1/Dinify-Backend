@@ -33,6 +33,38 @@ stale**. That ordering is the whole point: a lost HTTP response followed by an
 identical retry must not become a conflict the operator has to reason about, and must
 not rewrite the attribution of a decision somebody else already made. The stored
 attribution keeps naming who actually decided, and when.
+
+━━ PAYMENT TIMING TAKES THE ADMISSION LOCK FIRST (Step 2, PR BE-B) ━━━━━━━━━━━━━━━━
+
+From Step 2 the timing copied onto a visit at acceptance decides whether a round is
+held, so a timing change must not commit in the middle of an acceptance. The order
+paths read the timing after ``order_admission.admit`` has taken the SHARED admission
+lock (``round_placement._cutoff_and_timing``); the timing writer therefore takes the
+EXCLUSIVE side, FIRST, before the ``Restaurant`` row lock:
+
+    payment timing        advisory(restaurant) EXCLUSIVE -> Restaurant
+                          -> RestaurantServiceConfiguration
+
+That is the lifecycle transition's own order, so it joins an ordering already proven
+acyclic. A row lock alone would not do: the order path reads the timing with a plain
+statement, and under MVCC that read does not block on a row held ``FOR UPDATE``.
+
+THE COLLECTION-MODE AXIS TAKES NO ADMISSION LOCK, deliberately. Nothing in the order
+path reads it, at admission or anywhere else, so the barrier would only queue diner
+orders behind a decision no order depends on. It stays ``Restaurant -> ...``.
+
+━━ ``pay_first`` IS REFUSED UNTIL STEP 4 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Under Step 2's release rule a pay-first round leaves the held state only through a
+recorded payment or a manager release, and neither exists before Step 4. So the timing
+writer refuses ``pay_first`` with ``PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE``, before any
+lock and with no state change. A restaurant whose stored value is ALREADY ``pay_first``
+keeps it (its rounds release at once in Step 2) and may move off it to ``pay_after``.
+The refusal applies to the requested VALUE only: ``expected_current`` may still name
+``pay_first``, which is how that move is made. An exact retry of ``pay_first`` against
+a restaurant already on it is refused too, rather than reported as a no-op: nothing
+changes either way, and one answer for one value is simpler to reason about.
+**Step 4 removes the refusal.**
 """
 from dataclasses import dataclass
 from typing import Optional
@@ -47,7 +79,17 @@ from commercial_app.models import (
     PAYMENT_TIMING_VALUES,
     RestaurantServiceConfiguration,
 )
-from commercial_app.mutation_context import lock_restaurant, resolve_actor
+from commercial_app.models import PAYMENT_TIMING_PAY_FIRST
+from commercial_app.mutation_context import (
+    lock_restaurant, parse_uuid, resolve_actor,
+)
+from restaurants_app.controllers.admission_lock import lock_admission_exclusive
+
+#: The stable refusal for ``pay_first`` until Step 4 (see the module docstring).
+#: Defined here rather than in ``errors`` because it is a TEMPORARY rule of this one
+#: writer, and Step 4 deletes it together with the refusal.
+PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE = 'payment_timing_pay_first_unavailable'
+PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE_MESSAGE = 'Pay first is not available yet.'
 
 
 @dataclass(frozen=True)
@@ -99,7 +141,7 @@ def _validate_expected(expected, *, allowed, code, label):
 
 
 def _set_axis(*, restaurant_id, value, actor, expected_current, field, allowed,
-              code, label):
+              code, label, admission_barrier=False):
     """
     The shared body of both public writers. See the module docstring for the rules.
 
@@ -120,7 +162,22 @@ def _set_axis(*, restaurant_id, value, actor, expected_current, field, allowed,
     set_at_field = f'{field}_set_at'
     set_by_field = f'{field}_set_by'
 
+    if admission_barrier:
+        # Parsed BEFORE the lock, because the advisory key is derived from the UUID:
+        # a malformed id must be the domain's own refusal, not a ValueError out of
+        # `advisory_key`. `lock_restaurant` parses it again; that is the same rule.
+        restaurant_id = parse_uuid(
+            restaurant_id,
+            code=errors.INVALID_RESTAURANT_ID,
+            message='The target must be a restaurant UUID.',
+        )
+
     with transaction.atomic():
+        if admission_barrier:
+            # FIRST, before the Restaurant row lock — the lifecycle transition's
+            # order. Taking it after the row would invert that order and close a
+            # cycle against the transition. See the module docstring.
+            lock_admission_exclusive(restaurant_id)
         restaurant = lock_restaurant(restaurant_id)
         actor_user = resolve_actor(actor)
 
@@ -198,7 +255,17 @@ def set_payment_timing(*, restaurant_id, value, actor, expected_current):
     the ``Restaurant`` row, not lifecycle, and not the legacy
     ``require_order_prepayments`` / ``Table.prepayment_required`` flags — which are not
     canonical payment timing and are never read to choose a default.
+
+    UNTIL STEP 4 ``pay_first`` IS REFUSED (``PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE``),
+    before any lock is taken. The write takes the EXCLUSIVE admission lock before the
+    ``Restaurant`` row. Both rules are explained in the module docstring.
     """
+    if value == PAYMENT_TIMING_PAY_FIRST:
+        raise CommercialMutationError(
+            PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE,
+            PAYMENT_TIMING_PAY_FIRST_UNAVAILABLE_MESSAGE,
+            {'value': value},
+        )
     return _set_axis(
         restaurant_id=restaurant_id,
         value=value,
@@ -208,6 +275,7 @@ def set_payment_timing(*, restaurant_id, value, actor, expected_current):
         allowed=PAYMENT_TIMING_VALUES,
         code=errors.INVALID_PAYMENT_TIMING,
         label='payment timing',
+        admission_barrier=True,
     )
 
 

@@ -46,6 +46,8 @@ ordering across every transaction that takes it stays acyclic by construction:
     lifecycle transition   EXCLUSIVE -> Restaurant -> AdminAuditLog
     test classification    EXCLUSIVE -> Restaurant -> AdminAuditLog
     restaurants PUT        EXCLUSIVE -> Restaurant
+    payment-timing write   EXCLUSIVE -> Restaurant -> RestaurantServiceConfiguration
+                                        (-> AdminAuditLog, in the Admin adapter)
     menu PUT / DELETE      EXCLUSIVE -> MenuSection | SectionGroup | MenuItem
     kitchen 86 (in_stock)  EXCLUSIVE -> MenuItem
     tag rename / delete    EXCLUSIVE -> RestaurantTag (-> MenuItemTag cascade)
@@ -73,7 +75,8 @@ so the referenced ``restaurants``, ``tables`` and ``users`` rows are taken
 ``FOR KEY SHARE`` at COMMIT. The Table row is already held. ``FOR KEY SHARE`` conflicts
 only with ``FOR UPDATE`` (and a key-changing UPDATE or a DELETE) on those rows. The
 writers that take a ``Restaurant`` row ``FOR UPDATE`` WITHOUT this lock — table-number
-allocation, membership mutation, the commercial writers, onboarding adoption,
+allocation, membership mutation, the collection-mode and subscription-terms writers,
+onboarding adoption,
 creation and invitations, and owner-claim redemption — can therefore make a submit's
 COMMIT wait for their short transaction, exactly as the create path's ``Order``
 INSERT has always waited (its ``restaurant`` key share is the same lock); the same
@@ -81,8 +84,17 @@ holds for a ``User`` row locked ``FOR UPDATE`` (restaurant creation naming an
 existing owner, owner-claim redemption) when that user placed the order. None of
 them ever waits on a ``Table`` or ``Order`` row or on this advisory lock, so no
 cycle closes. The ones behind the EXCLUSIVE side (the transition, the test
-classification, the restaurants PUT) cannot overlap a submit at all. The
-writer's one READ (the cut-off and the payment timing) takes no lock.
+classification, the restaurants PUT, the payment-timing write) cannot overlap a
+submit at all. The writer's one READ (the cut-off and the payment timing) takes no
+lock of its own: it is protected because every writer of both columns takes the
+EXCLUSIVE side.
+
+THE PAYMENT-TIMING WRITE (Step 2, PR BE-B) joins on the EXCLUSIVE side because Step 2
+makes the timing copied onto a visit decide whether its round is held, so no round may
+be stamped while the setting is changing. It repeats the lifecycle transition's order
+exactly, so it adds no level. The COLLECTION-MODE axis of the same writer
+(``commercial_app.service_configuration``) does NOT take it: no order path reads that
+column. The subscription-terms writers do not either.
 
 THE LAST FOUR ENTRIES ARE THE D06 COMPLETION (G1a), and they exist because D06
 changed what an admission READS. Until then this lock guarded three
@@ -107,8 +119,11 @@ because ``select_for_update()`` was chained with a multi-table ``select_related(
 and PostgreSQL locks the whole join when no ``OF`` clause is given. It was a
 transaction the table did not list, and it closed a real cycle against the lifecycle
 transition. PR-E scoped that lock with ``of=('self',)``. The transactions that take a
-``Restaurant`` row lock EXCLUSIVELY are therefore exactly the two listed above, both
-of them behind this lock. Before adding a row lock anywhere, check what your
+``Restaurant`` row lock EXCLUSIVELY and also read state an order reads are therefore
+exactly the ones in the table above (the transition, the test classification, the
+restaurants PUT and the payment-timing write), all of them behind this lock; the
+writers named in the submit paragraph take a ``Restaurant`` row without it and cannot
+cycle. Before adding a row lock anywhere, check what your
 ``select_related`` is quietly locking — and if the row you are locking is a
 restaurant whose state an order reads, take this lock first as well.
 """

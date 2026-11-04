@@ -116,11 +116,13 @@ def _cutoff_and_timing(restaurant_id):
     """ONE plain read, no lock: the cut-off and the configured payment timing.
 
     Taken inside the acceptance transaction, after ``admit()`` has taken the shared
-    admission lock, so a ``restaurants`` PUT (which takes the exclusive one) cannot
-    change the cut-off underneath it. The payment-timing writer does not take that
-    lock yet; Step 2 makes it, when timing starts to matter at acceptance. The source
-    of the timing lives only here, so a later per-dining-area timing changes this
-    function and nothing else.
+    admission lock, so neither a ``restaurants`` PUT nor the payment-timing writer
+    (``commercial_app.service_configuration.set_payment_timing``, which takes the
+    exclusive one before the ``Restaurant`` row since Step 2, PR BE-B) can change the
+    cut-off or the timing underneath it: a timing write either committed before this
+    acceptance was admitted, or waits for it to commit. The source of the timing lives
+    only here, so a later per-dining-area timing changes this function and nothing
+    else.
     """
     from restaurants_app.models import Restaurant
     return (
