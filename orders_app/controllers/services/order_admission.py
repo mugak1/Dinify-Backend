@@ -57,6 +57,11 @@ logger = logging.getLogger(__name__)
 # refusal code, so a log line says which half of the funnel turned an order away.
 STAGE_CREATE = 'create'
 STAGE_SUBMIT = 'submit'
+# Step 2, PR BE-D: a member of staff CONFIRMING a held round
+# (`round_release.confirm`). Releasing a round puts new work on the kitchen board,
+# so it is an admission and asks the same rule the other two stages ask, with the
+# ORDER's provenance (its `created_by`), exactly as submit does.
+STAGE_RELEASE = 'release'
 
 
 @dataclass(frozen=True)

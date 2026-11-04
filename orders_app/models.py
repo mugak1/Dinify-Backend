@@ -15,7 +15,7 @@ from dinify_backend.configss.string_definitions import (
     OrderItemStatus_Initiated,
     CancellationReason_CustomerChangedMind, CancellationReason_ItemUnavailable,
     CancellationReason_KitchenError, CancellationReason_Duplicate,
-    CancellationReason_Other,
+    CancellationReason_Other, CancellationReason_DeclinedByStaff,
 )
 
 
@@ -223,6 +223,11 @@ class Order(BaseModel):
             (CancellationReason_KitchenError, "Kitchen error"),
             (CancellationReason_Duplicate, "Duplicate"),
             (CancellationReason_Other, "Other"),
+            # Written by the floor's Decline command only (Step 2, BE-D), never
+            # by the kitchen: it is outside `CANCELLATION_REASONS`, the vocabulary
+            # the kitchen cancel route accepts. Listed here so the stored value is
+            # a declared choice (migration 0045 is state-only).
+            (CancellationReason_DeclinedByStaff, "Declined by staff"),
         ],
     )
 
@@ -622,10 +627,13 @@ class OrderPlacement(models.Model):
     """Where one round (an ``Order``) sits: its visit, its bill, and the facts
     fixed when it was accepted.
 
-    ``released_at`` is NULLABLE for Step 2's held rounds; until then it equals
-    the acceptance instant. ``business_date`` comes from that instant, the
-    restaurant's ``business_day_cutoff`` and ``TIME_ZONE``. ``round_number`` is 1
-    until Step 3 lets a visit hold several rounds.
+    ``released_at`` is NULLABLE for Step 2's held rounds; a round released at
+    acceptance carries the acceptance instant, and a held round gets the instant
+    a member of staff confirmed it (``round_release.confirm``, which also records
+    ``released_by``). ``business_date`` comes from the RELEASE instant, the
+    restaurant's ``business_day_cutoff`` and ``TIME_ZONE``: until a held round is
+    released it provisionally holds its acceptance day, and Confirm re-stamps it.
+    ``round_number`` is 1 until Step 3 lets a visit hold several rounds.
 
     An order with NO placement predates Step 1 (or was accepted while the writer
     was switched off). That absence is never backfilled here.
@@ -644,6 +652,15 @@ class OrderPlacement(models.Model):
         max_length=16, choices=DINING_PAYMENT_TIMING_CHOICES,
     )
     released_at = models.DateTimeField(null=True, blank=True)
+    # WHO released a held round: the member of staff whose Confirm wrote
+    # ``released_at`` (Step 2, BE-D, ``round_release.confirm``). NULL for a round
+    # released at acceptance (Step 1's writer stamps no person) and for one not
+    # released yet. SET_NULL as ``Visit.opened_by``: losing the user must not lose
+    # the round. ``related_name='+'``: nothing reads it backwards.
+    released_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='+',
+    )
     business_date = models.DateField()
     round_number = models.PositiveSmallIntegerField()
 

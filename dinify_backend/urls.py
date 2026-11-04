@@ -34,6 +34,9 @@ urlpatterns = [
     path('api/v1/reports/', include('reports_app.urls')),
     path('api/v1/notifications/', include('notifications_app.urls')),
     path('api/v1/kitchen/', include('orders_app.urls_kitchen')),
+    # The floor view (Step 2, PR BE-D): the two floor reads and the staff Confirm /
+    # Decline commands on a held round. Floor contract v1, docs/FLOOR_CONTRACT.md.
+    path('api/v1/floor/', include('orders_app.urls_floor')),
     path('api/v1/support/', include('support_app.urls')),
     path('api/v1/reviews/', include('reviews_app.urls')),
     # Delegated administrator access — the customer-plane half of delegation:
