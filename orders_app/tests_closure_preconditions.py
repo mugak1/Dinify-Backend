@@ -248,11 +248,40 @@ class EveryClosurePathLocksTheOrderFirstTests(TestCase):
         for node in callers:
             with self.subTest(function=node.name):
                 body = ast.get_source_segment(source, node) or ''
-                self.assertIn(
-                    'Order.objects.select_for_update()', body,
+                self.assertTrue(
+                    self._locks_the_order_row(body),
                     f'{node.name} reaches quote_closure.close without taking '
                     'the order row lock first',
                 )
+
+    #: The two exact spellings of "lock THIS order row". The second exists since
+    #: Step 2 BE-E, when both boundaries began joining the order's placement into
+    #: the locked read: PostgreSQL refuses FOR UPDATE on the nullable side of an
+    #: outer join, so the join needs `of=('self',)`, which locks the order row and
+    #: nothing else. It is the same lock on the same row, not a looser one; an `of=`
+    #: naming any OTHER relation does not satisfy this (see the self-test below).
+    ORDER_ROW_LOCKS = (
+        'Order.objects.select_for_update()',
+        "Order.objects.select_for_update(of=('self',))",
+    )
+
+    def _locks_the_order_row(self, body):
+        return any(spelling in body for spelling in self.ORDER_ROW_LOCKS)
+
+    def test_the_lock_check_accepts_only_the_order_row(self):
+        """Self-test: the two spellings pass; a lock on another relation, a lock
+        on another model, and no lock at all do not."""
+        for good in self.ORDER_ROW_LOCKS:
+            with self.subTest(good=good):
+                self.assertTrue(self._locks_the_order_row(f'x = {good}.get()'))
+        for bad in (
+            "Order.objects.select_for_update(of=('placement',))",
+            "Order.objects.select_related('placement').get(pk=1)",
+            "Table.objects.select_for_update().get(pk=1)",
+            "Order.objects.get(pk=1)",
+        ):
+            with self.subTest(bad=bad):
+                self.assertFalse(self._locks_the_order_row(f'x = {bad}'))
 
     def test_there_is_no_caller_supplied_trusted_or_already_locked_flag(self):
         """A trusted switch would let the one caller that gets it wrong assert

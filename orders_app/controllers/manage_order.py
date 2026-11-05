@@ -652,8 +652,8 @@ def _submit_order(order: Order, user: Union[User, None],
         # nullable side of an outer join anyway), so the reply's `current.round`
         # (Step 2, BE-E) reads it from this row's own snapshot, at no query.
         order = (
-            Order.objects.select_related('placement')
-            .select_for_update(of=('self',))
+            Order.objects.select_for_update(of=('self',))
+            .select_related('placement')
             .get(pk=order.pk)
         )
 
@@ -1080,8 +1080,8 @@ def _retire_quote_answer(order: Order,
         # nullable side of an outer join anyway), so the reply's `current.round`
         # (Step 2, BE-E) reads it from this row's own snapshot, at no query.
         order = (
-            Order.objects.select_related('placement')
-            .select_for_update(of=('self',))
+            Order.objects.select_for_update(of=('self',))
+            .select_related('placement')
             .get(pk=order.pk)
         )
 
