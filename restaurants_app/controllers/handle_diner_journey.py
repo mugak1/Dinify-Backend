@@ -208,8 +208,13 @@ def handle_show_order_details(request) -> dict:
         # a moment that never existed. `transaction.atomic()` would NOT fix
         # it — READ COMMITTED re-snapshots per statement inside a transaction
         # too. The same lesson `catalogue_snapshot` records: fold the reads.
-        order = Order.objects.select_related('acceptance', 'quote_closure').get(
-            **selector, **scope)
+        # The PLACEMENT joined it in Step 2 (BE-E) for the same reason: the
+        # diner's `checkout.current.round` reads it, and a staff Confirm
+        # committing between two statements would otherwise describe a round
+        # that is held in one and released in the other.
+        order = Order.objects.select_related(
+            'acceptance', 'quote_closure', 'placement',
+        ).get(**selector, **scope)
     except (Order.DoesNotExist, ValidationError, ValueError):
         return {'status': 404, 'message': 'Order not found'}
 

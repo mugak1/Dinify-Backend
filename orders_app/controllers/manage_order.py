@@ -480,7 +480,7 @@ def _acceptance_refusal(order, supplied_quote_ref):
     return None, live_rows
 
 
-def _acceptance_replay(order, supplied_quote_ref):
+def _acceptance_replay(order, supplied_quote_ref, now=None):
     """Has this order ALREADY been accepted, and is this the same acceptance?
 
     D04. Without this, a client whose submit response was lost retried and was
@@ -545,6 +545,7 @@ def _acceptance_replay(order, supplied_quote_ref):
                 order,
                 outcome=OUTCOME_ALREADY_ACCEPTED,
                 evidence=evidence,
+                now=now,
             ),
         }
 
@@ -646,7 +647,15 @@ def _submit_order(order: Order, user: Union[User, None],
             locked_table = (
                 Table.objects.select_for_update().get(pk=order.table_id)
             )
-        order = Order.objects.select_for_update().get(pk=order.pk)
+        # The placement rides the locked statement (one LEFT JOIN; `of=('self',)`
+        # locks the order row alone, and PostgreSQL refuses FOR UPDATE on the
+        # nullable side of an outer join anyway), so the reply's `current.round`
+        # (Step 2, BE-E) reads it from this row's own snapshot, at no query.
+        order = (
+            Order.objects.select_for_update(of=('self',))
+            .select_related('placement')
+            .get(pk=order.pk)
+        )
 
         # THE CAPABILITY IS RE-VERIFIED UNDER THE LOCK, BEFORE ANY BUSINESS
         # RULE (D06). The endpoint resolved the diner's table session in
@@ -695,7 +704,7 @@ def _submit_order(order: Order, user: Union[User, None],
         # D04: WAS THIS ORDER ALREADY ACCEPTED? Asked FIRST, because the
         # `initiated` check below is precisely what used to report a lost
         # response as a failure.
-        replay = _acceptance_replay(order, supplied_quote_ref)
+        replay = _acceptance_replay(order, supplied_quote_ref, now=now)
         if replay is not None:
             # A1b — AND THE SESSION'S OTHER HALF, ON THE ONE BRANCH NO
             # ELIGIBILITY RULE WILL REACH.
@@ -884,7 +893,7 @@ def _submit_order(order: Order, user: Union[User, None],
         # looked up: the acceptance path's query cost is pinned to an exact
         # integer by `tests_order_acceptance.WhatTheEvidenceCostsTests`.
         correlated = acceptance_result(
-            order, outcome=OUTCOME_NEWLY_ACCEPTED, evidence=evidence,
+            order, outcome=OUTCOME_NEWLY_ACCEPTED, evidence=evidence, now=now,
         )
 
     return {
@@ -1066,7 +1075,15 @@ def _retire_quote_answer(order: Order,
             locked_table = (
                 Table.objects.select_for_update().get(pk=order.table_id)
             )
-        order = Order.objects.select_for_update().get(pk=order.pk)
+        # The placement rides the locked statement (one LEFT JOIN; `of=('self',)`
+        # locks the order row alone, and PostgreSQL refuses FOR UPDATE on the
+        # nullable side of an outer join anyway), so the reply's `current.round`
+        # (Step 2, BE-E) reads it from this row's own snapshot, at no query.
+        order = (
+            Order.objects.select_for_update(of=('self',))
+            .select_related('placement')
+            .get(pk=order.pk)
+        )
 
         # AUTHORIZATION FIRST, exactly as on the acceptance path: a revoked
         # capability may not learn anything about this order, including whether
@@ -1116,6 +1133,7 @@ def _retire_quote_answer(order: Order,
                     order,
                     outcome=OUTCOME_ALREADY_ACCEPTED,
                     evidence=evidence,
+                    now=now,
                 ),
             }
 

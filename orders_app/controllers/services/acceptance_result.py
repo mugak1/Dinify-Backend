@@ -50,7 +50,10 @@ WHAT IT IS NOT.
   NOT EXACTLY-ONCE DELIVERY. A response can still be lost; this is what makes
   the retry that follows answerable.
 """
+from django.utils import timezone
+
 from orders_app.controllers.services.checkout_protocol import CHECKOUT_PROTOCOL
+from orders_app.controllers.services.round_placement import diner_round
 from orders_app.models import OrderAcceptance
 from dinify_backend.configss.string_definitions import OrderStatus_Initiated
 
@@ -210,7 +213,7 @@ def acceptance_state(order, evidence):
     return ACCEPTANCE_EVIDENCE_UNAVAILABLE
 
 
-def acceptance_result(order, *, outcome=None, evidence=_UNSET):
+def acceptance_result(order, *, outcome=None, evidence=_UNSET, now=None):
     """The correlated projection for ONE order.
 
     ``outcome`` is set only by a caller that just performed an acceptance
@@ -227,9 +230,18 @@ def acceptance_result(order, *, outcome=None, evidence=_UNSET):
     would fail those. Omitting it looks the row up, which is correct for an
     ad-hoc caller and is what those pinned counts will catch if a hot path ever
     starts doing it.
+
+    ``current.round`` (Step 2, PR BE-E, diner round state v1) is
+    ``round_placement.diner_round``, so every response that publishes this
+    projection says the same thing about a held round. Select ``placement`` with
+    the order — every caller does — or it costs a query. ``now`` is the caller's
+    clock (the acceptance passes its decision instant); a read leaves it unset and
+    the time of the read is used, since ``stale`` is a statement about now.
     """
     if isinstance(evidence, _Unset):
         evidence = read_evidence(order)
+    if now is None:
+        now = timezone.now()
 
     return {
         # WHICH order and WHICH keyed intent. A client validates both against
@@ -272,6 +284,15 @@ def acceptance_result(order, *, outcome=None, evidence=_UNSET):
             'fulfilment_status': order.fulfilment_status,
             'cancelled_at': _moment(order.cancelled_at),
             'served_at': _moment(order.served_at),
+            # Is this round waiting for staff to confirm it (Step 2)? ADDITIVE:
+            # `released` for every order nothing holds, which is every order
+            # until a holding writer ships. Inside `current` because it is a
+            # fact about the order NOW, not about whether the submission landed.
+            'round': diner_round(
+                order,
+                accepted_at=None if evidence is None else evidence.accepted_at,
+                now=now,
+            ),
         },
         # What THIS build can promise, stated rather than inferred.
         'checkout_protocol': CHECKOUT_PROTOCOL,

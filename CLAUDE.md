@@ -1373,6 +1373,12 @@ so keep it current when conventions change.
   FLAT in the number of tables, drawer 5 + 1 per held round. Pinned by
   `orders_app/tests_round_release.py`, `tests_floor_reads.py` and (real PostgreSQL,
   two connections) `tests_round_release_concurrency.py`
+- The diner's round state, Step 2 (PR BE-E, diner round state v1): ✅ two ADDITIVE
+  fields so the phone can say a round is waiting for staff. No route, header,
+  capability or protocol value changed (`checkout_protocol` stays 3). **NOTHING
+  HOLDS A ROUND YET** (BE-F will), so on today's data every order reads `released` /
+  `held: false`. See "THE DINER'S ROUND STATE" under "Dining model: visits and
+  bills" for the rule, the sites and the cost
 - Request correlation and order-command trace (D15 R2): ✅ `dinify_backend/request_context.py`,
   installed ONCE and OUTERMOST on both planes (`settings_admin.py` re-adds it first, then
   ClientIP; `RequestIDMiddleware` is now an alias). Every HTTP request gets one fresh server
@@ -6353,6 +6359,53 @@ orders. `orders_app/controllers/test_orders.py::counted_visits_q()` is the visit
 counterpart of `counted_orders_q()` — it drops a PRACTICE order's visit and keeps a
 test restaurant's. Use it in any future figure over visits; never filter a flag.
 
+### THE DINER'S ROUND STATE — Step 2, PR BE-E (diner round state v1)
+**`current.round` = `{state, held_since, stale}`**, inside the correlated checkout
+projection's `current` (`acceptance_result`), so EVERY response that publishes it
+carries it: the first-submission reply, the replayed submission (200 `idempotent`),
+the quote-retirement 409 for an already-accepted order (`retire-quote`), and the
+diner's own order read on both selectors (`?order=` / `?intent=`). **THE RULE IS
+WRITTEN ONCE**, `round_placement.diner_round(order, *, accepted_at, now)`, pure over
+an order with its placement selected:
+- `declined` — `order_status = cancelled` AND `cancellation_reason =
+  declined_by_staff` (BE-D's constant). A kitchen cancellation (any other reason) is
+  `released`, and the diner is told about it through `current.order_status`, as
+  before;
+- `held` — `round_placement.is_held(order)` and not cancelled. **An order with no
+  placement is never held** (the kitchen's rule: it predates Step 1, or the writer
+  was off);
+- `released` — everything else, a draft included (the acceptance verdict is what
+  says "draft").
+
+`held_since` is the acceptance instant (`OrderAcceptance.accepted_at`, falling back
+to `time_created` as the floor does) for a held round and `null` otherwise, rendered
+with `isoformat()` so it is byte-identical to `checkout.acceptance.accepted_at`.
+`stale` is true when held and `now - held_since >= 15 min` — the exact threshold is
+stale; `HELD_STALE_AFTER` is held equal to the floor's `round_release.STALE_AFTER` by
+a test. A flag only. A read uses the time of the read; the acceptance passes its
+decision instant.
+
+**`current_order.held`** on the table scan (`SerializerPublicGetTableDetails.
+get_current_order`): true exactly when the table's ongoing order is a held round.
+`ongoing` and `order_id` keep their meanings. It comes from
+`ConOrder.any_present_ongoing_order(table, with_held=True)`, which adds the
+placement to that read's ONE statement through `round_placement.held_lookups()` /
+`held_from_row()`; the order-create, submit and recall gates call it without
+`with_held` and keep their statement and their answer unchanged.
+
+**NO QUERY WAS ADDED** (measured identical on `d0883dc` and the branch, each with a
+placement present): submit 18 (14 with the writer off), replay 7 held or released,
+the order read 4 on either selector, the retire-quote 409 7, the scan serializer 4
+whether the table is empty, occupied or held. How: `select_related('placement')` on
+the order read (beside `acceptance` and `quote_closure`, for the same READ COMMITTED
+coherence reason — a Confirm committing between two statements would describe a
+round that is held in one and released in the other) and on the acceptance's and the
+retirement's locked re-reads with `select_for_update(of=('self',))` (PostgreSQL
+refuses FOR UPDATE on the nullable side of an outer join, and the order row stays the
+only row locked). The first-submission reply reads the placement the writer just
+created, which Django caches on the order. **Dropping any of those `select_related`
+calls fails a count pin.** Pinned by `orders_app/tests_diner_round_state.py`.
+
 ### NOTHING A READER SEES CHANGED (BUT THE KITCHEN'S `released_at`)
 Step 1 added no reader of the new tables. Step 2's release filter (BE-C) made the
 kitchen the first, and it is visible in exactly ONE key: each kitchen ticket's
@@ -6361,7 +6414,12 @@ kitchen the first, and it is visible in exactly ONE key: each kitchen ticket's
 read, both kitchen feeds, both dashboards and four report slugs are byte-identical
 with and without the rows, except the active feed, which differs in that key alone
 (asserted, not skipped); and the initiate and submit responses are identical (up to
-ids and instants) with the switch on and off.
+ids and instants) with the switch on and off. The diner round state (BE-E) adds
+`checkout.current.round` to the diner order read and `current_order.held` to the
+table scan (now one of the compared reads); both STAY byte-identical with and without
+the rows, because a released round and an order with no placement read the same. A
+HELD round differs from no placement by EXACTLY that one key in each read, asserted
+by `test_a_held_round_shows_in_the_diner_reads_by_exactly_one_key`.
 
 ### WHO MAY REFERENCE THE MODELS
 `orders_app/tests_dining_schema.py::OnlyTheDiningModulesReferenceTheseTests` is an
@@ -6374,7 +6432,12 @@ the release filter's three kitchen readers (BE-C): `orders_app/endpoints_kitchen
 `released_at_of`. The floor (BE-D) adds two: `orders_app/controllers/services/
 round_release.py` (Confirm UPDATES a placement, and the round projection reads it) and
 `orders_app/endpoints_floor.py` (the reads `select_related` it); `urls_floor.py` names
-none and is not listed. Any other production module that names `Visit` / `Bill` /
+none and is not listed. The diner round state (BE-E) adds two, each naming the
+relation only to `select_related('placement')`: `orders_app/controllers/
+manage_order.py` (the locked re-reads) and `restaurants_app/controllers/
+handle_diner_journey.py` (the order read); `acceptance_result.py`, `con_orders.py`
+and the serializers read through `round_placement` and are not listed. Any other
+production module that names `Visit` / `Bill` /
 `OrderPlacement`, a reverse relation into them (`order.placement`, `restaurant.visits`
 …) or an ORM lookup string that reaches them (`'placement__visit'`) fails the build.
 
@@ -6848,7 +6911,10 @@ it — never the other way round.
   leaves `'pending'`). Do NOT regress `get_current_order` to the
   `order_status`/`payment_status` axis. The predicate lives ONCE in
   `orders_app/controllers/occupancy.py::ongoing_order_q`, shared by both helper
-  copies and the dashboard-v2 tables card (DASH-OCCUPANCY-00)
+  copies and the dashboard-v2 tables card (DASH-OCCUPANCY-00). Since Step 2
+  BE-E it passes `with_held=True` and publishes an additive `held` boolean (the
+  ongoing order is a held round), read in the same statement — see "THE DINER'S
+  ROUND STATE"
 
 ## Existing Management Commands
 - `optimize_images` in `restaurants_app/management/commands/` — resizes

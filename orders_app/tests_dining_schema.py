@@ -599,6 +599,20 @@ class OnlyTheDiningModulesReferenceTheseTests(TestCase):
 
     ``orders_app/urls_floor.py`` names none of them and is not listed.
 
+    Step 2's diner round state (BE-E) adds two READERS, deliberately and by name.
+    Each names the relation ONLY to ``select_related('placement')`` it, so the
+    diner's ``current.round`` (``round_placement.diner_round``, the rule written
+    once) reads the placement from the order's own statement at no query:
+
+    - ``orders_app/controllers/manage_order.py`` — the acceptance's and the quote
+      retirement's locked re-reads of the order (``of=('self',)``);
+    - ``restaurants_app/controllers/handle_diner_journey.py`` — the diner's own
+      order read.
+
+    ``acceptance_result.py``, ``orders_app/serializers.py`` and ``con_orders.py``
+    (the scan's ``held``, through ``round_placement.held_lookups``) never name the
+    relation and are not listed.
+
     "Naming" covers the model names, an attribute through one of their reverse
     relations (``order.placement``, ``restaurant.visits`` ...) and an ORM lookup
     string that crosses into them (``'placement__visit'``): a module can query
@@ -621,6 +635,9 @@ class OnlyTheDiningModulesReferenceTheseTests(TestCase):
         # Step 2 BE-D: the floor's Confirm writer and the floor reads (see above).
         Path('orders_app/controllers/services/round_release.py'),
         Path('orders_app/endpoints_floor.py'),
+        # Step 2 BE-E: the diner round state's two readers (see above).
+        Path('orders_app/controllers/manage_order.py'),
+        Path('restaurants_app/controllers/handle_diner_journey.py'),
     }
 
     def _production_modules(self):

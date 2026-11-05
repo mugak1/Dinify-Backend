@@ -14,6 +14,9 @@ from dinify_backend.configss.string_definitions import (
 )
 from orders_app.models import Order, OrderItem
 from orders_app.controllers.occupancy import ongoing_order_q
+from orders_app.controllers.services.round_placement import (
+    held_from_row, held_lookups,
+)
 from orders_app.serializers import SerializerPutOrderItem
 from finance_app.models import DinifyTransaction
 from orders_app.controllers.orders.serializers import serialize_order_details
@@ -432,7 +435,7 @@ class ConOrder:
         return breakdown['options']
 
     @staticmethod
-    def any_present_ongoing_order(table: Table) -> dict:
+    def any_present_ongoing_order(table: Table, with_held: bool = False) -> dict:
         """
         Determine whether a table is occupied by an ongoing order.
 
@@ -447,20 +450,35 @@ class ConOrder:
         The predicate is ``orders_app.controllers.occupancy.ongoing_order_q`` —
         the ONE definition, shared with the standalone twin in
         ``initiate_order`` and the dashboard-v2 tables card.
+
+        ``with_held`` (Step 2, BE-E) adds a ``held`` boolean — is that order a
+        held round (``round_placement.held_from_row``)? — read in the SAME
+        statement through one LEFT JOIN, so it costs no query. Only the diner's
+        table scan asks for it; the order-create, submit and recall gates keep
+        their statement exactly as it was.
         """
+        fields = ('id',)
+        if with_held:
+            fields += held_lookups()
         ongoing_order = (
             Order.objects
             .filter(ongoing_order_q(), table=table)
             .order_by('-time_created')
-            .values('id')
+            .values(*fields)
             .first()
         )
         if ongoing_order is not None:
-            return {
+            result = {
                 'present': True,
                 'order_id': ongoing_order['id']
             }
-        return {'present': False}
+            if with_held:
+                result['held'] = held_from_row(ongoing_order)
+            return result
+        result = {'present': False}
+        if with_held:
+            result['held'] = False
+        return result
 
     @staticmethod
     def resolve_line(item: dict, menu_item, restaurant, *, verdict=None,
