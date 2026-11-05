@@ -207,8 +207,10 @@ so keep it current when conventions change.
   a writer moving a released round BACK to held without the Table lock would let a
   command apply to it, and nothing may write that. The floor's Confirm (Step 2,
   PR BE-D, `round_release.confirm`) is that writer for a held round, and takes
-  `Table -> Order` (see the floor bullet below). NOTHING HOLDS A ROUND YET (BE-F
-  will), so the filter changes no result on today's data. **The card's AGE does**:
+  `Table -> Order` (see the floor bullet below). The acceptance is the one writer
+  that CREATES a held round (Step 2, PR BE-F), and only while
+  `DINING_ROUND_HOLDS_ENABLED` is on (default OFF); with it off nothing holds a round
+  and the filter changes no result. **The card's AGE does**:
   an order placed since Step 1's writer went live now ages from its acceptance
   (`released_at`) rather than its draft's creation. **NEVER REVERT THIS FILTER WHILE
   HELD ROUNDS EXIST** — a held round would reach the board and be cookable before it
@@ -1309,10 +1311,10 @@ so keep it current when conventions change.
   and the two floor reads, at `api/v1/floor/` (floor contract v1, recorded in
   `docs/FLOOR_CONTRACT.md` with every definition and change BE-D made). Service
   `orders_app/controllers/services/round_release.py`; thin views in
-  `orders_app/endpoints_floor.py`, routes in `orders_app/urls_floor.py`. **NOTHING
-  HOLDS A ROUND YET** (BE-F will, behind a switch that defaults off) and nothing
-  calls these routes until FE-C, so on today's data every round is released and the
-  commands answer `changed: false` / `round_released`.
+  `orders_app/endpoints_floor.py`, routes in `orders_app/urls_floor.py`. Rounds are
+  HELD at acceptance only while `DINING_ROUND_HOLDS_ENABLED` is on (BE-F, default
+  OFF); with it off every round is released and the commands answer
+  `changed: false` / `round_released`.
   **CONFIRM** writes the placement only: `released_at = now`, `released_by` (new
   nullable FK, migration `orders_app/0044`) and `business_date` RE-STAMPED from the
   release instant (`business_date_for(now, cutoff)`): the design dates accepted order
@@ -1375,10 +1377,17 @@ so keep it current when conventions change.
   two connections) `tests_round_release_concurrency.py`
 - The diner's round state, Step 2 (PR BE-E, diner round state v1): ✅ two ADDITIVE
   fields so the phone can say a round is waiting for staff. No route, header,
-  capability or protocol value changed (`checkout_protocol` stays 3). **NOTHING
-  HOLDS A ROUND YET** (BE-F will), so on today's data every order reads `released` /
-  `held: false`. See "THE DINER'S ROUND STATE" under "Dining model: visits and
-  bills" for the rule, the sites and the cost
+  capability or protocol value changed (`checkout_protocol` stays 3). With
+  `DINING_ROUND_HOLDS_ENABLED` off (the default) nothing is held, so every order
+  reads `released` / `held: false`. See "THE DINER'S ROUND STATE" under "Dining
+  model: visits and bills" for the rule, the sites and the cost
+- Holding a round at acceptance, Step 2 (PR BE-F): ✅ BUILT, behind
+  `DINING_ROUND_HOLDS_ENABLED`, **default OFF**. With it on, a DINER's round at a
+  PAY-AFTER restaurant is accepted with `released_at` NULL and waits for the floor's
+  Confirm; everything else is released at acceptance as before. Off changes nothing
+  for any restaurant, and `orders_app.W002` says so in every deploy log. See
+  "HOLDING A ROUND AT ACCEPTANCE" under "Dining model: visits and bills" for the
+  rule, the switch, its runbook and the rollback order
 - Request correlation and order-command trace (D15 R2): ✅ `dinify_backend/request_context.py`,
   installed ONCE and OUTERMOST on both planes (`settings_admin.py` re-adds it first, then
   ClientIP; `RequestIDMiddleware` is now an alias). Every HTTP request gets one fresh server
@@ -4508,11 +4517,12 @@ structurally incapable of disagreeing about them.
   two named public writers
 - **BOTH ARE ELEVATION-GATED** (`IsAuthenticated` + `IsRecentlyElevated`) and require a
   substantive `reason` — `MIN_REASON_LENGTH` imported from
-  `platform_admin_app.delegation`, never respelled. Nothing in the order/kitchen path
-  ENFORCES payment timing yet (acceptance only COPIES it onto the new visit, see
-  "Dining model: visits and bills") and that is NOT a reason to gate it lightly: the
-  decision is consequential when it is RECORDED, because the enforcement built later
-  is built against whatever the configuration then says
+  `platform_admin_app.delegation`, never respelled. Acceptance COPIES the timing onto
+  the new visit, and from Step 2 (BE-F, while `DINING_ROUND_HOLDS_ENABLED` is on) a
+  diner's round at `pay_after` is HELD for staff; `pay_first` is not enforced until
+  Step 4 (see "Dining model: visits and bills"). Either way the decision is
+  consequential when it is RECORDED, because enforcement reads whatever the
+  configuration then says
 - **`pay_first` IS REFUSED UNTIL STEP 4 (Step 2, PR BE-B)**: the timing route answers
   **409 `payment_timing_pay_first_unavailable`** with the plain sentence "Pay first is
   not available yet." Under Step 2's release rule a pay-first round leaves the held
@@ -6260,9 +6270,11 @@ PUT cannot smuggle the fields, and that no delegated route mentions the domain.
 Step 1 of the dining and payments design review (final baseline, 13 October 2026).
 A VISIT is one party's stay at one table; a BILL is what that party owes; an `Order`
 is one ROUND on that bill, and `OrderPlacement` records where it sits. PR 1 (#380)
-built the schema; PR 2 built the writer described here. Of Step 2 (held rounds,
-payment timing at acceptance), only the kitchen RELEASE FILTER (PR BE-C, below) is
-built: nothing holds a round yet. Step 3 (several rounds per visit) is NOT built.
+built the schema; PR 2 built the writer described here. Step 2 (held rounds,
+payment timing at acceptance) is BUILT: the kitchen RELEASE FILTER (BE-C), the
+floor's Confirm and Decline (BE-D), the diner's round state (BE-E) and HOLDING AT
+ACCEPTANCE (BE-F), the last behind `DINING_ROUND_HOLDS_ENABLED`, which defaults OFF.
+Step 3 (several rounds per visit) is NOT built.
 
 ### DESIGN AMENDMENT (owner + reviewer, 2 November 2026)
 The review put visit, bill, timing, released time, business date and round on
@@ -6297,8 +6309,10 @@ _submit_order`, after `_terminal_quote_outcome` and before the order flips to
   instance or a request. Pinned by feeding a stale and a foreign-tenant instance.
 - **`opened_by` IS THE ORDER'S `created_by`** — the staff member who placed a staff
   order, NULL for a diner's — never whoever tapped submit.
-- **UNTIL STEP 2** `released_at` = `opened_at` = the acceptance instant. **UNTIL
-  STEP 3** every order is its own visit's round 1.
+- `released_at` = `opened_at` = the acceptance instant, EXCEPT for a round HELD at
+  acceptance (Step 2, BE-F), whose `released_at` is NULL until the floor's Confirm.
+  See "HOLDING A ROUND AT ACCEPTANCE" below. **UNTIL STEP 3** every order is its own
+  visit's round 1.
 - **THE BUSINESS DATE** (`business_date_for`): take the acceptance instant in the
   DEFAULT time zone (`settings.TIME_ZONE`, Africa/Nairobi), never the zone active for
   the request. At or after `Restaurant.business_day_cutoff` (04:00 by default) it is
@@ -6309,8 +6323,9 @@ _submit_order`, after `_terminal_quote_outcome` and before the order flips to
   payment_timing`, read with the cut-off in ONE plain statement with no lock, kept
   out of `admit()`. A missing configuration row and an unset axis both record
   `not_chosen`; an unknown value raises (a data fault must not read as "nobody
-  chose"). A later configuration change leaves an existing visit alone. Nothing
-  ENFORCES timing yet — that is Step 2. Its lock design landed first (PR BE-B): the
+  chose"). A later configuration change leaves an existing visit alone. Step 2
+  (BE-F) is the first thing the copy DECIDES: whether the round is held. Its lock
+  design landed first (PR BE-B): the
   timing writer takes the EXCLUSIVE admission lock before the `Restaurant` row, so a
   change cannot commit between `admit()` and this read; and until Step 4 the writer
   refuses `pay_first` (a stored one is kept).
@@ -6345,13 +6360,115 @@ released_at)` / `is_held(order)` are its Python twins, and `released_at_of(order
 kitchen feeds, the kitchen command boundary and `_build_kds` use them; the full contract
 is in the Kitchen module bullet under Current Implementation Status. **THE "NO
 PLACEMENT" ARM IS LOAD-BEARING**: every order accepted before Step 1, or with the
-switch off, has no placement and must stay on the board. The writer is unchanged
-(`place_first_round` still stamps the acceptance instant), so no held round exists
-until Step 2's holding writer ships, and that writer must take `Table -> Order`.
+switch off, has no placement and must stay on the board. The acceptance writes a
+held round (BE-F, next section) inside `_submit_order`, which holds
+`advisory SHARED -> Table -> Order`, so it already takes `Table -> Order`.
 RELEASING a held round is the floor's Confirm (PR BE-D, `round_release.confirm`),
 which takes `advisory SHARED -> Table -> Order` and writes the placement only; the
 floor's Decline cancels a held round (`declined_by_staff`) and leaves its placement
 held, so a declined round is `cancelled` and reaches neither feed.
+
+### HOLDING A ROUND AT ACCEPTANCE — Step 2, PR BE-F
+Decided by Magneto and the reviewer, 3–5 November 2026. The last piece of Step 2's
+release rule: a round reaches the kitchen only once it is released.
+
+**WHO IS HELD.** `round_placement.held_at_acceptance(holds_on, payment_timing,
+created_by_id)` is THE decision, pure, asked once inside `place_first_round`. A
+round is held if, and only if, ALL THREE hold:
+- `DINING_ROUND_HOLDS_ENABLED` is on;
+- the visit's COPIED timing is `pay_after`;
+- the ORDER was created by a diner (`created_by_id IS NULL`). The hold follows the
+  order's CREATOR, as D06's provenance does, never the submitter, so a member of
+  staff submitting a diner's draft still gets a held round.
+
+Everything else is released at acceptance, exactly as before: a staff-created order,
+`not_chosen` (no configuration row, or the axis unset) and `pay_first` (refused for
+new values by BE-B; a restaurant already on it releases at once until Step 4
+enforces it). With `DINING_VISIT_WRITES_ENABLED` off there is no placement, so the
+round counts as released.
+
+**WHAT A HELD ROUND IS.** `order_status = pending`, a placement with `released_at`
+NULL, and `business_date` holding the ACCEPTANCE business day provisionally (BE-D's
+Confirm re-stamps it at release). The visit's `opened_at` is still the acceptance
+instant. It occupies its table (occupancy is fulfilment-based, and a held round is
+`fulfilment_status = new`), is on neither kitchen feed and refused `order_held` by
+every kitchen command (BE-C), is listed on the floor with `needs_staff` (BE-D), and
+the diner is told `held` in the submit reply ITSELF (BE-E's `diner_round` reads the
+placement the create caches on the order), on a replay, on the order read and on
+the scan (`held: true`). Confirm releases it as a 0-minute ticket (aged from the
+release); Decline cancels it `declined_by_staff` and frees the table.
+
+**NO CLOCK ACTS ON A HELD ROUND.** Nothing releases, expires or declines it on a
+timer; `stale` (15 minutes) is a flag only, on the floor and the phone. Pinned at
+25 hours.
+
+**COST: NONE.** The decision reads only what the writer already has (the timing from
+its one read, `order.created_by_id`): submit stays **18** with holds on and off, held
+or released, and a replay of a held round stays **7**.
+
+**THE SWITCH — `DINING_ROUND_HOLDS_ENABLED` (default OFF).** Read like
+`DINING_VISIT_WRITES_ENABLED`: python-decouple in `settings.py`, at call time by
+`round_placement.holds_enabled()`. **An EMPTY value means OFF**; an unrecognised one
+raises at settings import, which stops the deploy at `check --deploy`. With it off,
+merging BE-F changes nothing for any restaurant, even one already set to pay-after.
+While it is off the system check `orders_app.W002` ("DINING_ROUND_HOLDS_ENABLED is
+off: pay-after rounds are released at acceptance, not held for staff.") prints on
+every `manage.py check`, so every deploy log says whether holding is live. A WARNING,
+never an Error. Being an ordinary check (as W001 is), it also prints to stderr before
+ANY management command that runs system checks (`migrate`, `prune_otp_accounting`, …)
+while holds are off; that is expected and harmless. A test asserting a command's
+stderr is empty therefore names the switch ON
+(`users_app/tests_otp_accounting.py::PruneCommandTests.
+test_it_drains_in_bounded_batches_and_reports_each_one`). Confirm and Decline never read this switch (nor the visit-writer
+one), so held rounds can ALWAYS be cleared, including after the switch is turned off.
+Turning it off releases nothing already held: those rounds stay held until staff
+Confirm or Decline them.
+
+**REMOVE BEFORE STEP 3.** The switch is removed, or its default moved to ON, before
+Step 3 (several rounds per visit) is built, and W002 goes with it.
+
+Pinned by `orders_app/tests_round_hold.py` (the who-is-held matrix through the real
+submit endpoint with the switch on and off, a held round end to end through the
+kitchen, floor and diner endpoints, the 25-hour no-timer case, W002 and the counts).
+
+#### Owner runbook — turning holding on (or off again)
+Operated by the owner on the UAT box; nothing in this repository changes it. Turn it
+on only for a rehearsal, or once the alerts PRs (BE-G, FE-E) are live.
+
+1. On the box, in `/home/ubuntu/dinify_backend_handover_uat`, edit `.env` and set
+   `DINING_ROUND_HOLDS_ENABLED=True` (to turn it off: `False`, or delete the line —
+   the default is off).
+2. Restore ownership and mode, which the deploy gates check before anything
+   restarts: `sudo chown ubuntu:www-data .env && sudo chmod 640 .env`.
+3. In GitHub Actions, run **Deploy UAT Backend** (`workflow_dispatch`) with `sha` =
+   the full 40-hex commit already deployed (the step summary's `DEPLOYED-HEAD:` of
+   the last run). This idempotent redeploy re-runs the gates, restarts Apache and so
+   re-reads `.env`.
+4. Confirm it took effect from the run's log: with holding ON, the
+   "---- remote stderr ----" section does NOT show `orders_app.W002`. With it OFF,
+   W002 ("DINING_ROUND_HOLDS_ENABLED is off: pay-after rounds are released at
+   acceptance, not held for staff.") appears under the `check --deploy` output,
+   twice (once as `ubuntu`, once as `www-data`).
+5. When turning it OFF, clear the rounds still held (next section): turning it off
+   holds nothing new but releases nothing already held.
+
+#### Rollback — holds off and every held round cleared FIRST
+**Before reverting ANY Step 2 PR (BE-A to BE-F), turn holding off AND clear every
+held round.** A reverted kitchen filter (BE-C) puts every held round on the board and
+lets every kitchen command act on it; a reverted floor (BE-D) leaves no way to
+release or decline one; a reverted diner state (BE-E) tells the phone nothing about
+it. In order:
+
+1. Turn `DINING_ROUND_HOLDS_ENABLED` off (runbook above). No new round is held.
+2. On the floor, Confirm or Decline every held round. Confirm and Decline read no
+   switch.
+3. This read-only query must return 0:
+   `SELECT count(*) FROM order_placements p JOIN orders o ON o.id = p.order_id
+   WHERE p.released_at IS NULL AND o.order_status <> 'cancelled';`
+   (a declined round keeps its NULL `released_at` but is cancelled, so it is
+   excluded; it reaches no feed.)
+4. Only then revert the code. Reverting BE-F alone, once 1–3 are done, is safe: no
+   migration, and the reverted writer simply stops holding.
 
 ### TEST ORDERS
 A visit carries no `is_test` flag of its own; it inherits its status through its
@@ -6476,7 +6593,11 @@ deploy re-reads `.env` only when Apache restarts, which the deploy workflow does
 Run against the UAT database with `psql -v since='<deploy time, with offset>'`.
 Every check should report 0. While the writer was OFF, check 1 counts exactly the
 orders accepted in that period, which is expected. Check 4 uses each restaurant's
-CURRENT cut-off, so a cut-off edited since then is a false positive.
+CURRENT cut-off, so a cut-off edited since then is a false positive. Since Step 2
+(BE-F) check 4 accepts a HELD round (`released_at` NULL, acceptance business day) and
+a CONFIRMED one (`released_by` set, business day of the release); a confirmed round
+whose confirming user was since deleted (`released_by` SET_NULL) is a false positive.
+Check 5 lists a held round that the rule says should not have been held.
 
 ```sql
 BEGIN TRANSACTION READ ONLY;
@@ -6499,17 +6620,30 @@ bill_count AS (
   SELECT v.id::text AS id FROM visits v CROSS JOIN since
   LEFT JOIN bills b ON b.visit_id = v.id
   WHERE v.opened_at >= since.t GROUP BY v.id HAVING count(b.id) <> 1),
-wrong_date AS (
-  SELECT p.order_id::text AS id FROM order_placements p
+dated AS (
+  SELECT p.order_id, p.released_at, p.released_by_id, p.business_date,
+         p.round_number, v.opened_at, ac.accepted_at, r.business_day_cutoff,
+         CASE WHEN p.released_by_id IS NOT NULL THEN p.released_at
+              ELSE ac.accepted_at END AS basis
+  FROM order_placements p
   JOIN accepted ac ON ac.order_id = p.order_id
   JOIN visits v ON v.id = p.visit_id
-  JOIN restaurants r ON r.id = v.restaurant_id
-  WHERE p.business_date <> (
-          (ac.accepted_at AT TIME ZONE 'Africa/Nairobi')::date
-          - CASE WHEN (ac.accepted_at AT TIME ZONE 'Africa/Nairobi')::time
-                      < r.business_day_cutoff THEN 1 ELSE 0 END)
-     OR p.released_at IS DISTINCT FROM ac.accepted_at
-     OR v.opened_at <> ac.accepted_at OR p.round_number <> 1)
+  JOIN restaurants r ON r.id = v.restaurant_id),
+wrong_date AS (
+  SELECT order_id::text AS id FROM dated
+  WHERE business_date <> (
+          (basis AT TIME ZONE 'Africa/Nairobi')::date
+          - CASE WHEN (basis AT TIME ZONE 'Africa/Nairobi')::time
+                      < business_day_cutoff THEN 1 ELSE 0 END)
+     OR (released_by_id IS NULL AND released_at IS NOT NULL
+         AND released_at <> accepted_at)
+     OR opened_at <> accepted_at OR round_number <> 1),
+wrongly_held AS (
+  SELECT p.order_id::text AS id FROM order_placements p
+  JOIN accepted ac ON ac.order_id = p.order_id
+  JOIN orders o ON o.id = p.order_id
+  WHERE p.released_at IS NULL
+    AND (p.payment_timing <> 'pay_after' OR o.created_by_id IS NOT NULL))
 SELECT '1 accepted orders without a placement' AS check_name,
        count(*) AS offenders, (array_agg(id))[1:5] AS sample FROM missing
 UNION ALL SELECT '2 visit/bill tenant or table mismatch', count(*),
@@ -6518,6 +6652,8 @@ UNION ALL SELECT '3 visits without exactly one bill', count(*),
        (array_agg(id))[1:5] FROM bill_count
 UNION ALL SELECT '4 business date / released time / round wrong', count(*),
        (array_agg(id))[1:5] FROM wrong_date
+UNION ALL SELECT '5 held but not a diner round at pay-after', count(*),
+       (array_agg(id))[1:5] FROM wrongly_held
 UNION ALL SELECT '- accepted orders checked', count(*), NULL FROM accepted
 ORDER BY 1;
 ROLLBACK;
@@ -6530,11 +6666,10 @@ rows; PR 1's code ignores them and still accepts orders and creates restaurants
 
 **THE KITCHEN RELEASE FILTER (BE-C) HAS NO MIGRATION EITHER, AND ROLLING IT BACK IS
 SAFE ONLY WHILE NO HELD ROUND EXISTS.** The reverted code puts every held round on the
-kitchen board and lets every kitchen command act on it. Before rolling it back, this
-read-only query must return 0 (today it always does, since nothing writes a NULL):
-`SELECT count(*) FROM order_placements WHERE released_at IS NULL;`. Once a writer of
-held rounds ships, it is rolled back or switched off FIRST, and this filter after
-it — never the other way round.
+kitchen board and lets every kitchen command act on it. The writer of held rounds
+(BE-F) is switched off and every held round cleared FIRST, and this filter reverted
+after — never the other way round. See "Rollback — holds off and every held round
+cleared FIRST" above for the order and the query that must return 0.
 
 ## Deletion & Referential Integrity — CRITICAL
 - Deletion-integrity rules live on the MODEL as `deletion_blockers()` (returns

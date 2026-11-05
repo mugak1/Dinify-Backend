@@ -22,12 +22,13 @@ WHAT IT WRITES, until Steps 2 and 3:
   member who placed a staff order, NULL for a diner's), never whoever submitted it;
 - one ``Bill`` for that visit. It stores no amount: totals are computed, never stored
   (non-custodial);
-- one ``OrderPlacement``: ``released_at`` = the acceptance instant (Step 2 holds
-  rounds), ``business_date`` from that instant and the restaurant's cut-off,
-  ``round_number`` 1.
+- one ``OrderPlacement``: ``released_at`` = the acceptance instant, OR NULL for a
+  round HELD at acceptance (Step 2, PR BE-F, below); ``business_date`` from that
+  instant and the restaurant's cut-off; ``round_number`` 1.
 
 COST: one plain read (the cut-off and the payment timing, together, with no lock) and
-three INSERTs. Submit goes 14 -> 18 queries; pinned in ``tests_order_acceptance``.
+three INSERTs. Submit goes 14 -> 18 queries; pinned in ``tests_order_acceptance``. A
+held round costs the same 18 (``tests_round_hold``).
 
 LOCKS. The INSERTs come after the Table and Order row locks the acceptance already
 holds. New rows are invisible to every other transaction until COMMIT, so they cannot
@@ -46,8 +47,27 @@ RELEASED: it has NO placement (it predates Step 1, or was accepted with the writ
 or its placement's ``released_at`` is set. A HELD round is ``order_status='pending'``
 with a placement whose ``released_at`` is NULL. ``released_round_q`` is the rule, written
 once; ``round_is_held`` is its Python twin for one round in hand, and a test holds the
-two equal over every shape. Nothing writes a NULL ``released_at`` yet (``place_first_round``
-stamps the acceptance instant), so the rule changes no result on today's data.
+two equal over every shape.
+
+HOLDING A ROUND AT ACCEPTANCE (Step 2, PR BE-F). ``place_first_round`` writes
+``released_at`` NULL, so the round is HELD until staff Confirm it on the floor
+(``round_release.confirm``), when ``held_at_acceptance`` says so, and the acceptance
+instant otherwise. A round is held if, and only if, ALL THREE hold:
+- ``DINING_ROUND_HOLDS_ENABLED`` is on (default OFF; ``holds_enabled``);
+- the visit's copied timing is ``pay_after``;
+- the ORDER was created by a diner (``created_by_id`` is NULL). The hold follows the
+  order's creator, as D06's provenance does, never whoever submitted it, so a member
+  of staff submitting a diner's draft still gets a held round.
+Everything else is released at acceptance exactly as before: a staff-created order,
+``not_chosen`` (no configuration row, or the axis unset) and ``pay_first`` (refused
+for new values by BE-B until Step 4; a restaurant already on it releases at once).
+With the visit writer off there is no placement, so the round is released. A held
+round's ``business_date`` provisionally holds the acceptance business day, which
+Confirm re-stamps at release. Nothing releases or expires a held round on a clock:
+``stale`` is a flag only. Confirm and Decline read no switch, so a held round can
+always be cleared. The decision uses only facts the writer already has (the timing
+from its one read, ``order.created_by_id``), so it adds no query. THE SWITCH IS
+REMOVED, OR DEFAULTS TO ON, BEFORE STEP 3.
 
 THE DINER'S VIEW OF A ROUND (Step 2, PR BE-E, diner round state v1). ``diner_round``
 is the ONE derivation of ``{state, held_since, stale}`` the diner is told, read by the
@@ -148,6 +168,33 @@ def writes_enabled():
     return bool(getattr(settings, 'DINING_VISIT_WRITES_ENABLED', True))
 
 
+def holds_enabled():
+    """The holds switch (Step 2, PR BE-F), read at call time like ``writes_enabled``.
+
+    OFF by default: with it off every round is released at acceptance, whatever the
+    restaurant's payment timing. Removed, or defaulted to on, before Step 3.
+    """
+    return bool(getattr(settings, 'DINING_ROUND_HOLDS_ENABLED', False))
+
+
+def held_at_acceptance(*, holds_on, payment_timing, created_by_id):
+    """THE decision: is a round being accepted now held for staff? Pure.
+
+    ``holds_on`` is the switch's value; ``payment_timing`` the timing the visit
+    records (``resolve_payment_timing``'s result); ``created_by_id`` the ORDER's
+    creator (``None`` for a diner's order), never the submitter.
+
+    Held if, and only if, the switch is on, the timing is ``pay_after`` and a diner
+    created the order. ``pay_first`` and ``not_chosen`` are released at acceptance
+    (pay-first is enforced only from Step 4), and so is every staff-created order.
+    """
+    return (
+        bool(holds_on)
+        and payment_timing == PAYMENT_TIMING_PAY_AFTER
+        and created_by_id is None
+    )
+
+
 def place_first_round(order, accepted_at):
     """Write the visit, bill and placement for an order being accepted now.
 
@@ -156,12 +203,24 @@ def place_first_round(order, accepted_at):
     (``OrderAcceptance.accepted_at``), so the released time and the business date
     describe the moment the order was accepted. Returns the placement, or ``None``
     when the switch is off (nothing is read or written).
+
+    The placement is released at ``accepted_at`` unless ``held_at_acceptance`` says
+    the round is held, when ``released_at`` is NULL and the round waits for the
+    floor's Confirm. The business date is the acceptance's either way (for a held
+    round, provisionally: Confirm re-stamps it). The placement is cached on
+    ``order`` by the create, so the submit reply's ``current.round`` reads it with
+    no query.
     """
     if not writes_enabled():
         return None
 
     cutoff, configured = _cutoff_and_timing(order.restaurant_id)
     payment_timing = resolve_payment_timing(configured)
+    held = held_at_acceptance(
+        holds_on=holds_enabled(),
+        payment_timing=payment_timing,
+        created_by_id=order.created_by_id,
+    )
 
     visit = Visit.objects.create(
         restaurant_id=order.restaurant_id,
@@ -176,7 +235,7 @@ def place_first_round(order, accepted_at):
         visit=visit,
         bill=bill,
         payment_timing=payment_timing,
-        released_at=accepted_at,
+        released_at=None if held else accepted_at,
         business_date=business_date_for(accepted_at, cutoff),
         round_number=FIRST_ROUND,
     )

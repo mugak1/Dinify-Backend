@@ -59,7 +59,7 @@ from django.db import (
     transaction,
 )
 from django.db.models.signals import post_save
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -1492,6 +1492,13 @@ class PruneCommandTests(_RealTransactions):
 
     # --- success ---
 
+    # The switch is NAMED here, not relied on by default (Step 2, BE-F). The command's
+    # own stderr must be empty, and `execute_from_command_line` runs Django's system
+    # checks first: while DINING_ROUND_HOLDS_ENABLED is off (its default),
+    # `orders_app.W002` prints its warning to stderr before the command starts. That
+    # line is not the command's output, so holds are named ON to keep this assertion
+    # about the command alone. The assertion itself is unchanged.
+    @override_settings(DINING_ROUND_HOLDS_ENABLED=True)
     def test_it_drains_in_bounded_batches_and_reports_each_one(self):
         self.seed(5)
         self.seed_young()
