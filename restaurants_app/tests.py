@@ -4053,7 +4053,9 @@ class DinerTableScanTests(TestCase):
         for key in ('id', 'available', 'current_order', 'restaurant'):
             self.assertIn(key, data)
         self.assertEqual(
-            data['current_order'], {'ongoing': False, 'order_id': None},
+            # Step 2, BE-E adds `held` (the one new key on the scan).
+            data['current_order'],
+            {'ongoing': False, 'order_id': None, 'held': False},
         )
         self.assertTrue(data['available']['available'])
 
@@ -4174,7 +4176,9 @@ class DinerTableScanTests(TestCase):
             'room_name': self.table.room_name,
             'prepayment_required': False,
             'available': {'available': True, 'message': 'Available'},
-            'current_order': {'ongoing': False, 'order_id': None},
+            # Step 2, BE-E: `held` is the one key the diner round state adds to
+            # the scan (false: no ongoing order here, so nothing is held).
+            'current_order': {'ongoing': False, 'order_id': None, 'held': False},
             'restaurant': {
                 'id': str(self.restaurant.id),
                 'name': self.restaurant.name,

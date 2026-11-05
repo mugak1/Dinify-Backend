@@ -60,7 +60,9 @@ from orders_app.controllers.test_orders import counted_visits_q
 from orders_app.models import (
     PAYMENT_TIMING_NOT_CHOSEN, Bill, Order, OrderAcceptance, OrderPlacement, Visit,
 )
-from restaurants_app.controllers.diner_capability import issue_table_session
+from restaurants_app.controllers.diner_capability import (
+    issue_qr_credential, issue_table_session,
+)
 from restaurants_app.models import (
     DiningArea, MenuItem, MenuSection, Restaurant, RestaurantEmployee, Table,
 )
@@ -666,6 +668,7 @@ class ReadersSeeNoDifferenceTests(DiningFixture):
         window = f'from={week_ago}&to={today}'
         urls = {
             'diner_order_read': None,
+            'table_scan': None,
             'kitchen_active': '/api/v1/kitchen/orders/active/'
                               f'?restaurant={rid}',
             'kitchen_completed': '/api/v1/kitchen/orders/completed/'
@@ -686,11 +689,17 @@ class ReadersSeeNoDifferenceTests(DiningFixture):
         }
         bodies = {}
         for name, url in urls.items():
-            if url is None:
+            if name == 'diner_order_read':
                 response = self.client.get(
                     '/api/v1/orders/journey/order-details/',
                     {'order': str(order.pk)},
                     HTTP_X_DINER_SESSION=issue_table_session(order.table))
+            elif name == 'table_scan':
+                table = Table.objects.get(pk=order.table_id)
+                response = self.client.get(
+                    '/api/v1/orders/journey/table-scan/',
+                    HTTP_X_DINER_CREDENTIAL=issue_qr_credential(
+                        table.restaurant_id, table.pk, table.qr_version))
             else:
                 response = self.client.get(url, **self.auth())
             self.assertIn(response.status_code, (200, 400), (name, response.content))
@@ -703,6 +712,14 @@ class ReadersSeeNoDifferenceTests(DiningFixture):
     #: with no placement). That is the ONE place the rows are now visible, by
     #: design; everything else on the ticket, and every other read, stays
     #: byte-identical. (The completed feed is empty here, so it stays identical.)
+    #:
+    #: Step 2's diner round state (BE-E) adds `checkout.current.round` to the diner
+    #: order read and `current_order.held` to the table scan. Both reads stay in the
+    #: IDENTICAL set here, deliberately: a round released at acceptance and an order
+    #: with no placement are both `released` / `held: false`, so with and without
+    #: the rows the two reads are still byte-identical. The one difference they can
+    #: show — a HELD round — is pinned key by key in
+    #: `test_a_held_round_shows_in_the_diner_reads_by_exactly_one_key` below.
     DIFFERS_ONLY_IN = {'kitchen_active': 'released_at'}
 
     def test_every_read_is_identical_with_and_without_the_rows(self):
@@ -734,6 +751,47 @@ class ReadersSeeNoDifferenceTests(DiningFixture):
                 self.assertEqual(body_with, body_without)
         # And the reads did run: the order is on the active board.
         self.assertIn(str(order.pk).encode(), with_rows['kitchen_active'][1])
+
+    def test_a_held_round_shows_in_the_diner_reads_by_exactly_one_key(self):
+        """Step 2, BE-E. A HELD round against the same order with no placement:
+
+        - the diner order read differs by exactly `checkout.current.round` (held,
+          held since the acceptance, not stale; released, null, false without);
+        - the table scan differs by exactly `current_order.held` (true; false).
+
+        Nothing else in either response moves. (The kitchen reads are not compared
+        here: a held round is OFF the board by BE-C's release filter, so they
+        differ by design and are pinned in `tests_kitchen_release_filter`.)"""
+        order = self.draft()
+        self.accept(order)
+        OrderPlacement.objects.filter(order=order).update(released_at=None)
+        accepted_at = OrderAcceptance.objects.get(order=order).accepted_at
+        held = self.reads(order)
+        OrderPlacement.objects.all().delete()
+        Bill.objects.all().delete()
+        Visit.objects.all().delete()
+        bare = self.reads(order)
+
+        read_held = json.loads(held['diner_order_read'][1])
+        read_bare = json.loads(bare['diner_order_read'][1])
+        self.assertEqual(held['diner_order_read'][0], 200)
+        self.assertEqual(
+            read_held['data']['checkout']['current'].pop('round'),
+            {'state': 'held', 'held_since': accepted_at.isoformat(),
+             'stale': False})
+        self.assertEqual(
+            read_bare['data']['checkout']['current'].pop('round'),
+            {'state': 'released', 'held_since': None, 'stale': False})
+        self.assertEqual(read_held, read_bare)
+
+        scan_held = json.loads(held['table_scan'][1])
+        scan_bare = json.loads(bare['table_scan'][1])
+        self.assertEqual(held['table_scan'][0], 200)
+        self.assertIs(scan_held['data']['current_order'].pop('held'), True)
+        self.assertIs(scan_bare['data']['current_order'].pop('held'), False)
+        self.assertEqual(scan_held, scan_bare)
+        self.assertEqual(scan_held['data']['current_order'],
+                         {'ongoing': True, 'order_id': str(order.pk)})
 
     def test_the_order_responses_are_identical_with_the_switch_on_and_off(self):
         on_draft = _create_order(

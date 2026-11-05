@@ -48,6 +48,13 @@ with a placement whose ``released_at`` is NULL. ``released_round_q`` is the rule
 once; ``round_is_held`` is its Python twin for one round in hand, and a test holds the
 two equal over every shape. Nothing writes a NULL ``released_at`` yet (``place_first_round``
 stamps the acceptance instant), so the rule changes no result on today's data.
+
+THE DINER'S VIEW OF A ROUND (Step 2, PR BE-E, diner round state v1). ``diner_round``
+is the ONE derivation of ``{state, held_since, stale}`` the diner is told, read by the
+correlated checkout projection (``acceptance_result``) and so by every response that
+publishes it. ``held_lookups`` / ``held_from_row`` are the same held rule for the
+table scan's one ``.values()`` read. All of it is pure over what was selected with the
+order: no query is added anywhere.
 """
 from datetime import time, timedelta
 
@@ -56,6 +63,9 @@ from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from commercial_app.models import PAYMENT_TIMING_PAY_AFTER, PAYMENT_TIMING_PAY_FIRST
+from dinify_backend.configss.string_definitions import (
+    CancellationReason_DeclinedByStaff, OrderStatus_Cancelled,
+)
 from orders_app.controllers.occupancy import ongoing_order_q
 from orders_app.models import (
     PAYMENT_TIMING_NOT_CHOSEN, Bill, Order, OrderPlacement, Visit,
@@ -252,3 +262,72 @@ def visit_state(visit):
         'state': VISIT_OPEN if is_open else VISIT_ENDED,
         'payment': PAYMENT_UNKNOWN,
     }
+
+
+# --- the diner's view of a round (Step 2, PR BE-E) --------------------------------
+
+#: The three words the diner is told (diner round state v1). Deliberately fewer than
+#: the floor's: a served, kitchen-cancelled or draft order is ``released`` here,
+#: because the diner's screens already describe those through ``current``.
+DINER_ROUND_HELD = 'held'
+DINER_ROUND_DECLINED = 'declined'
+DINER_ROUND_RELEASED = 'released'
+
+#: A held round is STALE once ``now - held_since >= HELD_STALE_AFTER``: the exact
+#: threshold instant is stale. A flag only; nothing acts on it. The same value as the
+#: floor's ``round_release.STALE_AFTER`` (a test holds the two equal), so the floor
+#: and the diner's phone call a round stale at the same moment.
+HELD_STALE_AFTER = timedelta(minutes=15)
+
+
+def diner_round(order, *, accepted_at, now):
+    """``{'state', 'held_since', 'stale'}`` for one order: THE rule, written once.
+
+    Pure. Select ``placement`` with the order (``select_related('placement')``, or
+    the instance a placement was just created for), so this costs no query.
+    ``accepted_at`` is the order's ``OrderAcceptance.accepted_at`` or ``None``;
+    ``now`` is the caller's clock.
+
+    - ``declined``: cancelled, and the reason is ``declined_by_staff`` (the floor's
+      Decline). Cancelled for any other reason is NOT declined: that is the kitchen
+      cancelling an accepted order, which the diner is told as today, through
+      ``current.order_status``.
+    - ``held``: ``is_held(order)`` and not cancelled. An order with NO placement is
+      never held (it predates Step 1, or the writer was off), as for the kitchen.
+    - ``released``: everything else.
+
+    ``held_since`` is the acceptance instant for a held round (falling back to the
+    order's creation, as the floor does, for a held round with no recorded
+    acceptance, which no production path produces), ``null`` otherwise. It is
+    rendered with ``isoformat()``, exactly as ``acceptance_result`` renders
+    ``acceptance.accepted_at``, so the two are byte-identical for a held round.
+    """
+    cancelled = order.order_status == OrderStatus_Cancelled
+    if cancelled and order.cancellation_reason == CancellationReason_DeclinedByStaff:
+        state = DINER_ROUND_DECLINED
+    elif not cancelled and is_held(order):
+        state = DINER_ROUND_HELD
+    else:
+        state = DINER_ROUND_RELEASED
+    held_since = None
+    if state == DINER_ROUND_HELD:
+        held_since = accepted_at if accepted_at is not None else order.time_created
+    return {
+        'state': state,
+        'held_since': None if held_since is None else held_since.isoformat(),
+        'stale': bool(held_since is not None
+                      and now - held_since >= HELD_STALE_AFTER),
+    }
+
+
+def held_lookups():
+    """The two ``.values()`` lookups ``held_from_row`` needs, joined into the read
+    that already selects the order (one LEFT JOIN, no query added)."""
+    return ('placement__id', 'placement__released_at')
+
+
+def held_from_row(row):
+    """``round_is_held`` over a ``.values()`` row carrying ``held_lookups()``."""
+    return round_is_held(
+        row.get('placement__id') is not None, row.get('placement__released_at'),
+    )

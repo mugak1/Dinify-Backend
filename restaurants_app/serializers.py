@@ -923,11 +923,17 @@ class SerializerPublicGetTableDetails(ModelSerializer):
         # which blocked the diner while the kitchen board (keyed off the
         # fulfilment axis) showed nothing. Local import avoids a
         # serializers <-> controllers import cycle.
+        #
+        # `held` (Step 2, BE-E, diner round state v1) is true when that ongoing
+        # order is a held round, waiting for staff to confirm it. It rides the
+        # same statement (`with_held`), so the scan costs no extra query, and
+        # `ongoing` / `order_id` keep their exact meanings.
         from orders_app.controllers.con_orders import ConOrder
-        result = ConOrder.any_present_ongoing_order(table)
+        result = ConOrder.any_present_ongoing_order(table, with_held=True)
         return {
             'ongoing': result.get('present', False),
             'order_id': result.get('order_id'),
+            'held': result.get('held', False),
         }
 
     def get_restaurant(self, table):
