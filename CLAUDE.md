@@ -2742,7 +2742,13 @@ so keep it current when conventions change.
     the payload says 0. With no row and nothing waiting it writes nothing. Its whole
     payload is READ UNDER THE ROW LOCK from the database as it stands (`_upsert` now
     takes `payload` as a callable evaluated after the lock, and `realert(row, now,
-    payload)`), so callbacks in any order converge on what stands.
+    payload)`), so callbacks in any order converge on what stands. **AND ITS WRITERS
+    ARE SERIALIZED** (Codex P2 on #391): with no row yet `select_for_update` locks
+    nothing, so a callback reading "nothing waits" (and writing nothing) could finish
+    beside another's uncommitted, older snapshot, leaving `waiting: 1` forever. So
+    `_upsert(serialize=True)` first takes `pg_advisory_xact_lock(0x4E544659 "NTFY",
+    key)`, the key a 32-bit SHA-256 of (restaurant, dedupe key); nothing else takes
+    that class, so it cannot cycle. The other three producers do not pass it.
   - **PAYLOADS** carry no credentials, OTPs or diner contact details, and no diner
     free text: a review's comment is not copied. `round_waiting`'s is EXACTLY
     `{waiting, oldest_held_since, latest_table}`: the count, the earliest held round's
@@ -2761,7 +2767,7 @@ so keep it current when conventions change.
     and a §8 addendum in `dinify_backend/tenancy/TENANT_ISOLATION_CLOSURE.md`. No
     `ModelSerializer` was added, so the relation ratchet's baseline is unchanged.
     Pinned by `notifications_app/tests_inbox.py` (39) and, for `round_waiting`,
-    `notifications_app/tests_round_waiting.py` (31; real PostgreSQL, including a
+    `notifications_app/tests_round_waiting.py` (33; real PostgreSQL, including a
     `TransactionTestCase` whose bell is written by a real `on_commit` after a real
     COMMIT)
 - Support module: ✅ `support_app` — restaurant-facing `SupportIssue`
@@ -6478,8 +6484,8 @@ after commit (a released one schedules NOTHING); a Confirm or Decline that chang
 something schedules the same producer, which then lowers the count without
 re-alerting. Every write is after commit and best-effort, so the pinned counts do not
 move: submit 18, Confirm 15, Decline 10 (each measured with the callback scheduled).
-The callback itself costs 9 statements when it creates the row and 7 when it updates
-it (TestCase, its own SAVEPOINT pair included). Because round_placement is the
+The callback itself costs 10 statements when it creates the row and 8 when it
+updates it (TestCase, its own SAVEPOINT pair and the key's advisory lock included). Because round_placement is the
 module that names the placement, neither the producer nor the kitchen view adds a
 new name to the dining-model allowlist. Pinned by
 `notifications_app/tests_round_waiting.py`.
