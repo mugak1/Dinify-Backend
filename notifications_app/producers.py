@@ -56,6 +56,13 @@ it no longer holds; the later change's own callback announces what stands. The
 round-waiting producer carries NO state from its call site at all: its whole
 payload is read from the database under the row lock (``payload`` given as a
 callable), so whichever callback runs last writes what stands, in any order.
+That needs ONE more thing, because ``select_for_update`` locks nothing while the
+row does not exist yet: a callback that read "nothing waits" and wrote nothing
+could otherwise finish while another, holding an older snapshot, was about to
+insert it (Codex P2 on #391). So this producer passes ``serialize=True``, and
+``_upsert`` takes a transaction-scoped advisory lock on (restaurant, dedupe key)
+FIRST: every writer of the key then reads and writes in turn, and the last one to
+take the lock reads after every triggering commit.
 
 PAYLOADS are built here, server-side, and carry no credentials, OTPs, diner
 contact details or diner free text: a review's comment is NOT copied, because it
@@ -69,6 +76,7 @@ last alert is older than ``RETAIN_FOR`` (60 days). Nothing is scheduled.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import timedelta
 
@@ -84,6 +92,11 @@ SOLD_OUT_REALERT_AFTER = timedelta(minutes=10)
 READ_WINDOW = timedelta(days=30)
 RETAIN_FOR = timedelta(days=60)
 PRUNE_BATCH = 200
+
+#: First key of the two-integer advisory lock that serializes the writers of ONE
+#: notification key (``serialize=True``): ASCII "NTFY". Distinct from every other
+#: two-integer class in the repository (the OTP classes "OTPI", "OTPS", "OTPD", "OTPC").
+NOTIFICATION_KEY_LOCK_CLASS = 0x4E544659
 
 
 def schedule(producer, *args) -> None:
@@ -179,6 +192,7 @@ def notify_round_waiting(restaurant_id) -> None:
         payload=snapshot,
         actor_id=None,  # a diner's order: no member of staff is excluded
         realert=lambda row, now, payload: payload['waiting'] > _last_waiting(row),
+        serialize=True,
     )
 
 
@@ -203,7 +217,7 @@ def _iso(value):
 # --- the one write path -------------------------------------------------------
 
 def _upsert(*, restaurant_id, module, kind, dedupe_key, payload, actor_id, realert,
-            still_true=None) -> None:
+            still_true=None, serialize=False) -> None:
     """
     Create the (restaurant, dedupe_key) row, or apply the repeat rule to it.
 
@@ -211,6 +225,12 @@ def _upsert(*, restaurant_id, module, kind, dedupe_key, payload, actor_id, reale
     lock (``row`` is ``None`` when no row exists yet) that may return ``None`` to
     skip the write; it is evaluated again on the row a concurrent producer created.
     ``realert(row, now, payload)`` decides whether this occurrence alerts.
+
+    ``serialize=True`` takes ``_hold_key``'s advisory lock BEFORE the row lock, so
+    the writers of this key run one at a time even while the row does not exist
+    (when ``select_for_update`` locks nothing). Needed by a producer that may decide
+    to write NOTHING on the state it reads: without it, that decision can be taken
+    beside another writer's uncommitted, older snapshot.
 
     ``still_true`` (optional) re-reads the state this event announces, and the
     write is skipped when it no longer holds. It is asked AFTER the row lock (or
@@ -225,8 +245,11 @@ def _upsert(*, restaurant_id, module, kind, dedupe_key, payload, actor_id, reale
     only. Neither deletes a read record: read state is a comparison with
     ``occurred_at``, so a re-alert is unread again on its own.
     """
-    now = timezone.now()
     with transaction.atomic():
+        if serialize:
+            _hold_key(restaurant_id, dedupe_key)
+        # Read after any wait for the key, so the stamp follows the writers before it.
+        now = timezone.now()
         row = (RestaurantNotification.objects.select_for_update()
                .filter(restaurant_id=restaurant_id, dedupe_key=dedupe_key).first())
         if row is None:
@@ -265,6 +288,28 @@ def _upsert(*, restaurant_id, module, kind, dedupe_key, payload, actor_id, reale
             row.payload = current
             row.save(update_fields=['payload', 'updated_at'])
         _prune(restaurant_id, now)
+
+
+def notification_key_lock(restaurant_id, dedupe_key) -> int:
+    """The second advisory key for one (restaurant, dedupe key): a signed 32-bit
+    integer from SHA-256. A coordination address, not a secret; a collision between
+    two keys only makes their writers take turns."""
+    material = f'{restaurant_id}\x1f{dedupe_key}'.encode()
+    return int.from_bytes(hashlib.sha256(material).digest()[:4], 'big', signed=True)
+
+
+def _hold_key(restaurant_id, dedupe_key) -> None:
+    """Take the key's advisory lock until this transaction ends. A no-op off
+    PostgreSQL (so the unit suite runs elsewhere, proving nothing about
+    concurrency). Nothing else takes this class of lock, so it cannot cycle."""
+    conn = transaction.get_connection()
+    if conn.vendor != 'postgresql':
+        return
+    with conn.cursor() as cursor:
+        cursor.execute(
+            'SELECT pg_advisory_xact_lock(%s, %s)',
+            [NOTIFICATION_KEY_LOCK_CLASS, notification_key_lock(restaurant_id, dedupe_key)],
+        )
 
 
 def _accepting_orders(restaurant_id):

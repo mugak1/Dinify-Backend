@@ -17,8 +17,9 @@ endpoint (BE-F), and every Confirm and Decline goes through the real floor route
 ``TestCase`` runs ``on_commit`` callbacks only when a test asks for them
 (``captureOnCommitCallbacks``), which is what lets these tests show what each
 request SCHEDULES, and run the scheduled callbacks in any order. The class at the
-bottom is a ``TransactionTestCase`` on real PostgreSQL: real commits, a real
-rollback, and the bell written by a real ``on_commit``.
+bottom are ``TransactionTestCase``s on real PostgreSQL: real commits, a real
+rollback, the bell written by a real ``on_commit``, and two connections racing the
+first write of the key (Codex P2 on #391).
 """
 import itertools
 import json
@@ -452,10 +453,13 @@ class TheBellCostsTheRequestNothingTests(StaffAlertFixture):
             update[0]()
         self.assertEqual(self.row().payload['waiting'], 2)
         # Recorded here so a change in the producer's cost is a visible diff.
-        # lock read, count, latest table, INSERT (in its own savepoint), prune read
-        self.assertEqual(len(created), 9, [q['sql'] for q in created])
-        # lock read, count, latest table, UPDATE, prune read
-        self.assertEqual(len(updated), 7, [q['sql'] for q in updated])
+        # key lock, row lock read, count, latest table, INSERT (in its own
+        # savepoint), prune read
+        self.assertEqual(len(created), 10, [q['sql'] for q in created])
+        # key lock, row lock read, count, latest table, UPDATE, prune read
+        self.assertEqual(len(updated), 8, [q['sql'] for q in updated])
+        self.assertTrue(created[1]['sql'].startswith('SELECT pg_advisory_xact_lock('),
+                        'the key lock comes first, before the row lock')
 
 
 # --- the kitchen: waiting_for_staff ------------------------------------------------
@@ -575,10 +579,9 @@ class TheKindVocabularyTests(StaffAlertFixture):
 
 # --- real commits on real PostgreSQL -----------------------------------------------
 
-@unittest.skipUnless(connection.vendor == 'postgresql', 'real PostgreSQL only')
-class RealCommitTests(TransactionTestCase):
-    """No test transaction: the submit commits for real, and the bell is written by
-    the real ``transaction.on_commit``. And a real rollback writes nothing."""
+class RealCommitFixture(TransactionTestCase):
+    """No test transaction: commits are real, and an ``on_commit`` callback runs for
+    real when the outermost ``atomic`` commits. Borrows the dining fixture's helpers."""
 
     phone_seed = '25670095'
     restaurant_status = DiningFixture.restaurant_status
@@ -603,6 +606,12 @@ class RealCommitTests(TransactionTestCase):
             payment_timing_set_at=timezone.now(), payment_timing_set_by=self.owner)
         self.client = APIClient()
         self.owner_token = str(RefreshToken.for_user(self.owner).access_token)
+
+
+@unittest.skipUnless(connection.vendor == 'postgresql', 'real PostgreSQL only')
+class RealCommitTests(RealCommitFixture):
+    """The bell is written by the real ``transaction.on_commit``, after a real
+    COMMIT. And a real rollback writes nothing."""
 
     def test_a_committed_held_acceptance_writes_the_bell_after_commit(self):
         seen = {}
@@ -643,3 +652,79 @@ class RealCommitTests(TransactionTestCase):
                     raise RuntimeError('roll the acceptance back')
         self.assertFalse(RestaurantNotification.objects.exists())
         self.assertFalse(OrderPlacement.objects.filter(order=order).exists())
+
+
+@unittest.skipUnless(connection.vendor == 'postgresql', 'real PostgreSQL only')
+class TheFirstWriteIsSerializedTests(RealCommitFixture):
+    """Codex P2 on #391. With no row yet, ``select_for_update`` locks nothing. An
+    acceptance's callback reads ``waiting=1``; the round is then released and its
+    callback reads "no row, nothing waits" and writes nothing; the acceptance's
+    callback then inserts its stale 1, and the bell says 1 forever. The writers of the
+    key now take an advisory lock first, so the second waits and reads what stands.
+
+    Two real connections: callback A parks right after its read (the real
+    ``held_rounds_summary`` ran), the release commits, callback C starts, and A is
+    let go only once C has either finished or is observed WAITING on a lock in
+    ``pg_locks`` — so the bad interleaving is forced whenever C can run through."""
+
+    def _waiting_on_an_advisory_lock(self):
+        with connections.create_connection('default').cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM pg_locks "
+                           "WHERE locktype = 'advisory' AND NOT granted")
+            return cursor.fetchone()[0] > 0
+
+    def test_a_stale_first_snapshot_cannot_outlive_a_release(self):
+        import threading
+        import time
+
+        with HOLDS_ON:
+            order = self.draft(table=self.tables[0])
+            self.assertEqual(self.put_submit(order).status_code, 200)
+        RestaurantNotification.objects.all().delete()      # the state before any alert
+
+        real = round_placement.held_rounds_summary
+        a_read, a_go = threading.Event(), threading.Event()
+        errors = []
+
+        def summary(restaurant_id):
+            result = real(restaurant_id)
+            if threading.current_thread().name == 'A':
+                a_read.set()
+                self.assertTrue(a_go.wait(20), 'A was never let go')
+            return result
+
+        def callback():
+            try:
+                producers.notify_round_waiting(self.restaurant.pk)
+            except Exception as exc:  # noqa: BLE001 — surfaced below
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        with mock.patch.object(round_placement, 'held_rounds_summary', summary):
+            a = threading.Thread(target=callback, name='A')
+            a.start()
+            self.assertTrue(a_read.wait(20))
+            # The round is released (committed) while A holds its stale snapshot.
+            OrderPlacement.objects.filter(order=order).update(released_at=timezone.now())
+            c = threading.Thread(target=callback, name='C')
+            c.start()
+            deadline = time.monotonic() + 20
+            while c.is_alive() and not self._waiting_on_an_advisory_lock():
+                self.assertLess(time.monotonic(), deadline, 'C neither ran nor waited')
+                time.sleep(0.05)
+            a_go.set()
+            a.join(20)
+            c.join(20)
+        self.assertFalse(a.is_alive() or c.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(RestaurantNotification.objects.get().payload,
+                         {'waiting': 0, 'oldest_held_since': None, 'latest_table': None})
+
+    def test_the_lock_key_is_per_restaurant_and_key(self):
+        a = producers.notification_key_lock(self.restaurant.pk, 'round_waiting')
+        self.assertEqual(a, producers.notification_key_lock(str(self.restaurant.pk),
+                                                            'round_waiting'))
+        self.assertNotEqual(a, producers.notification_key_lock(uuid.uuid4(),
+                                                               'round_waiting'))
+        self.assertTrue(-2**31 <= a < 2**31)
