@@ -163,6 +163,19 @@ DINING_VISIT_WRITES_ENABLED = config(
     'DINING_VISIT_WRITES_ENABLED', default=True, cast=bool
 )
 
+# Dining model, Step 2 (PR BE-F): whether a DINER's round at a PAY-AFTER restaurant is
+# HELD at acceptance for staff to Confirm on the floor (round_placement.
+# held_at_acceptance), instead of reaching the kitchen at once. OFF by default, so
+# merging changes nothing for any restaurant, even one already set to pay-after. The
+# owner turns it on. Read at CALL time; the same python-decouple rules as above
+# (AN EMPTY VALUE IS OFF; an unrecognised value raises at settings import). While it
+# is off, the orders_app.W002 system check prints a warning in every deploy log. The
+# floor's Confirm and Decline never read it, so held rounds can always be cleared.
+# REMOVE IT, OR DEFAULT IT TO ON, BEFORE STEP 3.
+DINING_ROUND_HOLDS_ENABLED = config(
+    'DINING_ROUND_HOLDS_ENABLED', default=False, cast=bool
+)
+
 ROOT_URLCONF = 'dinify_backend.urls'
 
 TEMPLATES = [
