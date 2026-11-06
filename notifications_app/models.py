@@ -7,7 +7,8 @@ source of the legacy ``api/v1/notifications/`` endpoint; it is unreachable from
 the live host, so nothing written there ever reaches a screen. It is left exactly
 as it was. THIS store is PostgreSQL, holds operational events for a restaurant's
 staff (a low review, a dish sold out from the kitchen board, ordering paused or
-resumed), and is read by the portal's bell through ``api/v1/notifications/inbox/``.
+resumed, orders waiting for staff), and is read by the portal's bell through
+``api/v1/notifications/inbox/``.
 
 A ROW IS ADDRESSED TO A RESTAURANT AND A MODULE, NEVER TO A PERSON. Who may see it
 is decided at READ time by the same module resolver every other portal surface
@@ -44,6 +45,9 @@ class NotificationKind(models.TextChoices):
     ITEM_SOLD_OUT = 'item_sold_out', 'Item sold out'
     ORDERING_PAUSED = 'ordering_paused', 'Ordering paused'
     ORDERING_RESUMED = 'ordering_resumed', 'Ordering resumed'
+    # Step 2, PR BE-G: rounds held for staff at the restaurant. ONE row per
+    # restaurant, refreshed as rounds are held, confirmed and declined.
+    ROUND_WAITING = 'round_waiting', 'Orders waiting for staff'
 
 
 class RestaurantNotification(models.Model):

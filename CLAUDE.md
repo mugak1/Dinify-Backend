@@ -200,7 +200,13 @@ so keep it current when conventions change.
   ADDED**: the placement rides one LEFT JOIN (`select_related('placement')`, and
   `of=('self',)` on the locked read); measured identical at the head and on the
   branch, with and without placements — each feed 4 with tickets (3 when empty, which
-  skips the item prefetch), commands 10/10/11/9/10/11/10/0, card 3.
+  skips the item prefetch), commands 10/10/11/9/10/11/10/0, card 3. **THE ACTIVE FEED
+  IS NOW 5 (4 when empty)** (Step 2, PR BE-G): its envelope gains `waiting_for_staff`,
+  a sibling of `data`, the number of HELD rounds at the restaurant
+  (`round_placement.held_round_count`), at ONE deliberate `COUNT`, because held rounds
+  are not on the board and cannot be counted from its tickets. Informational: the
+  kitchen cannot confirm, but it can tell the floor. Additive, so `kitchen_protocol`
+  is unchanged; the ticket list, the Completed feed and every command are unchanged.
   **A WRITER OF `released_at` MUST TAKE `Table -> Order`**: the joined placement
   comes from the Order statement's own READ COMMITTED snapshot, so a release that
   locked only the Order row is read stale (measured: still refused, as `order_held`);
@@ -1388,6 +1394,14 @@ so keep it current when conventions change.
   for any restaurant, and `orders_app.W002` says so in every deploy log. See
   "HOLDING A ROUND AT ACCEPTANCE" under "Dining model: visits and bills" for the
   rule, the switch, its runbook and the rollback order
+- Staff alerts for held rounds, Step 2 (PR BE-G): ✅ two nudges, both counting through
+  ONE definition, `round_placement.held_rounds` (a placement with `released_at` NULL,
+  an order neither cancelled nor deleted): the bell's ONE `round_waiting`
+  notification per restaurant (see "In-app notifications store") and the kitchen
+  active feed's `waiting_for_staff` (see the Kitchen module bullet). Both must be
+  live before `DINING_ROUND_HOLDS_ENABLED` is turned on; with it off nothing is held,
+  so the bell never fires and the count is always 0. See "STAFF ALERTS" under
+  "Dining model: visits and bills"
 - Request correlation and order-command trace (D15 R2): ✅ `dinify_backend/request_context.py`,
   installed ONCE and OUTERMOST on both planes (`settings_admin.py` re-adds it first, then
   ClientIP; `RequestIDMiddleware` is now an alias). Every HTTP request gets one fresh server
@@ -2664,6 +2678,13 @@ so keep it current when conventions change.
   email/SMS outbox (`send_messages`) and the source of the legacy
   `api/v1/notifications/` endpoint; both are untouched. Migration
   `notifications_app/0001_initial`: two `CreateModel`s and nothing else.
+  `0002_round_waiting_kind` (Step 2, PR BE-G) widens the kind vocabulary
+  `CheckConstraint` with `round_waiting`: a vendor-guarded `SET LOCAL lock_timeout =
+  '5s'` first (as `orders_app/0043`), then DROP and re-ADD of the CHECK, which takes
+  ACCESS EXCLUSIVE on `restaurant_notifications` and validates every row of it. That
+  table is small by construction (created 2026-10-29, rare producers, one row per
+  dedupe key, 60-day prune), but its deployed row count is not observable from here.
+  The `AlterField` of `kind`'s choices emits no SQL.
   - **`RestaurantNotification`** is addressed to a RESTAURANT and a MODULE, never a
     person: `restaurant` (FK, CASCADE), `module` (`reviews` | `tables`, a
     `CheckConstraint`), `kind`, a server-built `payload`, `actor` (FK, SET_NULL),
@@ -2686,8 +2707,7 @@ so keep it current when conventions change.
     see, all get the same `404 {"status":404,"message":"Not found"}`. Responses are
     `no-store`. Not on the delegated `ALLOWED_ROUTES`, so a delegated session is
     refused before dispatch.
-  - **THREE PRODUCERS** (`notifications_app/producers.py`), each called from one
-    place: a review below `PUBLIC_RATING_THRESHOLD` (`submit_review.py`, module
+  - **FOUR PRODUCERS** (`notifications_app/producers.py`): a review below `PUBLIC_RATING_THRESHOLD` (`submit_review.py`, module
     `reviews`, one row per review); a dish sold out FROM THE KITCHEN BOARD,
     `in_stock` True→False only, read under the board's row lock
     (`KitchenMenuItemStockView`, module `tables`); and `accepting_orders` changed,
@@ -2696,7 +2716,13 @@ so keep it current when conventions change.
     two `tables` events are what the floor needs mid-service; the menu-setup PUT's
     `in_stock` write is NOT a source (audit item 7 makes its transitions
     unreliable); a support-status event was dropped because nothing writes an
-    issue's status.
+    issue's status. The FOURTH (Step 2, PR BE-G) is `notify_round_waiting`, module
+    `tables`, kind `round_waiting`, dedupe key `round_waiting`, NO actor: ONE row per
+    restaurant (the `ordering` pattern), because in pay-after every first order
+    waits and a row per round would bury the bell. It is scheduled from THREE places,
+    with only the restaurant id: `round_placement.place_first_round` when (and only
+    when) the round is HELD, and `round_release.confirm` / `decline` when (and only
+    when) they changed something.
   - **AFTER COMMIT AND BEST-EFFORT.** Producers are registered with
     `producers.schedule`, which calls `transaction.on_commit(..., robust=True)`
     inside the triggering transaction and catches and logs any failure. **This is
@@ -2710,8 +2736,25 @@ so keep it current when conventions change.
     callbacks of two overlapping changes can run in the opposite order to their
     commits, so the ordering and sold-out producers re-read the state they announce
     under the notification row lock and skip the write when it no longer holds.
+    ROUND WAITING re-alerts only when no row exists or the number of held rounds is
+    now HIGHER than the payload's last `waiting`; otherwise (a Confirm or Decline
+    brought it down) it updates the payload only, so a reader keeps it read, and at 0
+    the payload says 0. With no row and nothing waiting it writes nothing. Its whole
+    payload is READ UNDER THE ROW LOCK from the database as it stands (`_upsert` now
+    takes `payload` as a callable evaluated after the lock, and `realert(row, now,
+    payload)`), so callbacks in any order converge on what stands. **AND ITS WRITERS
+    ARE SERIALIZED** (Codex P2 on #391): with no row yet `select_for_update` locks
+    nothing, so a callback reading "nothing waits" (and writing nothing) could finish
+    beside another's uncommitted, older snapshot, leaving `waiting: 1` forever. So
+    `_upsert(serialize=True)` first takes `pg_advisory_xact_lock(0x4E544659 "NTFY",
+    key)`, the key a 32-bit SHA-256 of (restaurant, dedupe key); nothing else takes
+    that class, so it cannot cycle. The other three producers do not pass it.
   - **PAYLOADS** carry no credentials, OTPs or diner contact details, and no diner
-    free text: a review's comment is not copied. The actor's display name is read
+    free text: a review's comment is not copied. `round_waiting`'s is EXACTLY
+    `{waiting, oldest_held_since, latest_table}`: the count, the earliest held round's
+    acceptance instant (floor rendering: ISO 8601, EAT offset, milliseconds; `null` at
+    0) and the display name of the most recently held round's table (`display_name`,
+    else `str_number`, else the number; `null` at 0). No order id. The actor's display name is read
     at read time (a first name, or "Dinify support" for a platform-staff actor).
   - **RETENTION:** the inbox shows the last 30 days; each producer write prunes that
     restaurant's rows older than 60 days, at most 200 per write. Nothing is
@@ -2723,7 +2766,10 @@ so keep it current when conventions change.
     the producer/read-record writes and `(restaurant, dedupe_key)` `remediated`),
     and a §8 addendum in `dinify_backend/tenancy/TENANT_ISOLATION_CLOSURE.md`. No
     `ModelSerializer` was added, so the relation ratchet's baseline is unchanged.
-    Pinned by `notifications_app/tests_inbox.py` (39)
+    Pinned by `notifications_app/tests_inbox.py` (39) and, for `round_waiting`,
+    `notifications_app/tests_round_waiting.py` (33; real PostgreSQL, including a
+    `TransactionTestCase` whose bell is written by a real `on_commit` after a real
+    COMMIT)
 - Support module: ✅ `support_app` — restaurant-facing `SupportIssue`
   ticketing, Secretary-pattern
   endpoints at `api/v1/support/` (`support_app/urls.py`): `issues/` and
@@ -3407,7 +3453,8 @@ so keep it current when conventions change.
   `orders/<pk>/priority/`, `orders/<pk>/cancel/`) each take an explicit command
   plus a REQUIRED `if_revision`, and are thin adapters over
   `kitchen_transition.execute`; the two feeds additively publish `order_status`,
-  `fulfilment_revision` and an envelope `kitchen_protocol`. A FOURTH order route,
+  `fulfilment_revision` and an envelope `kitchen_protocol`, and the ACTIVE feed's
+  envelope also `waiting_for_staff` (Step 2, PR BE-G: the held rounds, one `COUNT`). A FOURTH order route,
   `GET orders/<pk>/state/`, is the per-order OBSERVATION that settles an uncertain
   command (`kitchen_transition.read_state`) — it answers for an order that has
   left both feeds, which is exactly what a cancellation produces. None of the four
@@ -6427,6 +6474,22 @@ Confirm or Decline them.
 **REMOVE BEFORE STEP 3.** The switch is removed, or its default moved to ON, before
 Step 3 (several rounds per visit) is built, and W002 goes with it.
 
+**STAFF ALERTS (Step 2, PR BE-G).** `round_placement.held_rounds(restaurant_id)` is
+THE held rounds at a restaurant (a placement with `released_at` NULL, an order neither
+cancelled nor deleted; `placement__isnull=False` in the same filter, so an order with
+no placement is never counted). `held_round_count` is the kitchen active feed's
+`waiting_for_staff` (one `COUNT`, the feed 4 → 5) and `held_rounds_summary` the bell's
+payload. A held acceptance schedules `producers.notify_round_waiting(restaurant_id)`
+after commit (a released one schedules NOTHING); a Confirm or Decline that changed
+something schedules the same producer, which then lowers the count without
+re-alerting. Every write is after commit and best-effort, so the pinned counts do not
+move: submit 18, Confirm 15, Decline 10 (each measured with the callback scheduled).
+The callback itself costs 10 statements when it creates the row and 8 when it
+updates it (TestCase, its own SAVEPOINT pair and the key's advisory lock included). Because round_placement is the
+module that names the placement, neither the producer nor the kitchen view adds a
+new name to the dining-model allowlist. Pinned by
+`notifications_app/tests_round_waiting.py`.
+
 Pinned by `orders_app/tests_round_hold.py` (the who-is-held matrix through the real
 submit endpoint with the switch on and off, a held round end to end through the
 kitchen, floor and diner endpoints, the 25-hour no-timer case, W002 and the counts).
@@ -7367,9 +7430,13 @@ cleared FIRST" above for the order and the query that must return 0.
   new tables with their constraints and one index, NO `RunPython`/`RunSQL`, no
   existing table touched, zero rows created — see "Commercial & Service
   Configuration Domain"),
-  `notifications_app/migrations/0001_initial.py` (the SHELL-FINISH-00 in-app
-  notifications store: two new tables, their constraints and one index, NO
-  `RunPython`, no existing table touched — see "In-app notifications store")
+  `notifications_app/migrations/0002_round_waiting_kind.py` (0001 is the SHELL-FINISH-00
+  in-app notifications store: two new tables, their constraints and one index, NO
+  `RunPython`, no existing table touched — see "In-app notifications store"; 0002 is
+  Step 2 PR BE-G's `round_waiting` kind: `lock_timeout` 5s, then DROP and re-ADD of
+  the kind CHECK, which validates every row of the small `restaurant_notifications`
+  table under ACCESS EXCLUSIVE; old code reads any kind and an older portal renders
+  an unknown one as "New notification", so deploy order does not matter)
 
 ## CI — `.github/workflows/ci.yml`
 - Runs on push to `main` and on PRs to `main`

@@ -69,6 +69,14 @@ always be cleared. The decision uses only facts the writer already has (the timi
 from its one read, ``order.created_by_id``), so it adds no query. THE SWITCH IS
 REMOVED, OR DEFAULTS TO ON, BEFORE STEP 3.
 
+HELD ROUNDS AT A RESTAURANT (Step 2, PR BE-G). ``held_rounds`` is the ONE definition
+of "the rounds waiting for staff at this restaurant": a placement whose ``released_at``
+is NULL, on an order that is neither cancelled nor deleted. Two readers count through
+it: the kitchen active feed's ``waiting_for_staff`` (``held_round_count``) and the
+bell's ``round_waiting`` notification (``held_rounds_summary``). When a round is HELD
+here, ``place_first_round`` schedules ``notifications_app.producers.
+notify_round_waiting`` after commit; a released round schedules nothing.
+
 THE DINER'S VIEW OF A ROUND (Step 2, PR BE-E, diner round state v1). ``diner_round``
 is the ONE derivation of ``{state, held_since, stale}`` the diner is told, read by the
 correlated checkout projection (``acceptance_result``) and so by every response that
@@ -79,13 +87,15 @@ order: no query is added anywhere.
 from datetime import time, timedelta
 
 from django.conf import settings
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Count, Exists, Min, OuterRef, Q
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from commercial_app.models import PAYMENT_TIMING_PAY_AFTER, PAYMENT_TIMING_PAY_FIRST
 from dinify_backend.configss.string_definitions import (
     CancellationReason_DeclinedByStaff, OrderStatus_Cancelled,
 )
+from notifications_app import producers
 from orders_app.controllers.occupancy import ongoing_order_q
 from orders_app.models import (
     PAYMENT_TIMING_NOT_CHOSEN, Bill, Order, OrderPlacement, Visit,
@@ -230,7 +240,7 @@ def place_first_round(order, accepted_at):
         payment_timing=payment_timing,
     )
     bill = Bill.objects.create(visit=visit)
-    return OrderPlacement.objects.create(
+    placement = OrderPlacement.objects.create(
         order=order,
         visit=visit,
         bill=bill,
@@ -239,6 +249,12 @@ def place_first_round(order, accepted_at):
         business_date=business_date_for(accepted_at, cutoff),
         round_number=FIRST_ROUND,
     )
+    if held:
+        # The bell (Step 2, PR BE-G): after commit and best-effort, so a rolled-back
+        # acceptance announces nothing and a producer failure never changes the
+        # submit response. A released round schedules nothing.
+        producers.schedule(producers.notify_round_waiting, order.restaurant_id)
+    return placement
 
 
 def released_round_q():
@@ -254,6 +270,70 @@ def released_round_q():
     reaches the kitchen board before it was released.
     """
     return Q(placement__isnull=True) | Q(placement__released_at__isnull=False)
+
+
+def held_rounds(restaurant_id):
+    """THE held rounds at one restaurant, as an ``Order`` queryset: a placement whose
+    ``released_at`` is NULL, on an order neither cancelled nor deleted.
+
+    Written ONCE, for the kitchen active feed's ``waiting_for_staff`` and the bell's
+    ``round_waiting`` notification. ``placement__isnull=False`` sits in the same
+    ``filter`` as the ``released_at`` test, so the join is an INNER one and an order
+    with NO placement is never counted (it is released, as ``round_is_held`` says).
+    A declined round keeps its NULL ``released_at`` but is cancelled, so it is out.
+    """
+    return (
+        Order.objects
+        .filter(
+            restaurant_id=restaurant_id,
+            deleted=False,
+            placement__isnull=False,
+            placement__released_at__isnull=True,
+        )
+        .exclude(order_status=OrderStatus_Cancelled)
+    )
+
+
+def held_round_count(restaurant_id):
+    """How many rounds are waiting for staff at the restaurant: ONE ``COUNT``."""
+    return held_rounds(restaurant_id).count()
+
+
+def held_rounds_summary(restaurant_id):
+    """``{'waiting', 'oldest_held_since', 'latest_table'}`` for the bell.
+
+    ``waiting`` is ``held_round_count``'s number, from the same queryset.
+    ``oldest_held_since`` is the earliest ``held_since`` (an aware datetime, or
+    ``None``) and ``latest_table`` the display name of the table of the most recently
+    held round (``display_name``, else ``str_number``, else the number, as the kitchen
+    ticket and the floor label it), or ``None``. A round has been held since it was
+    accepted (``OrderAcceptance.accepted_at``), falling back to the order's creation,
+    as the floor and ``diner_round`` do. One aggregate, plus one row read when
+    anything is waiting. Nothing about a diner is read.
+    """
+    rounds = held_rounds(restaurant_id).annotate(
+        held_since=Coalesce('acceptance__accepted_at', 'time_created'),
+    )
+    totals = rounds.aggregate(waiting=Count('pk'), oldest=Min('held_since'))
+    latest_table = None
+    if totals['waiting']:
+        latest = (
+            rounds
+            .order_by('-held_since', '-pk')
+            .values('table__display_name', 'table__str_number', 'table__number')
+            .first()
+        )
+        if latest is not None:
+            latest_table = (
+                latest['table__display_name'] or latest['table__str_number']
+                or (None if latest['table__number'] is None
+                    else str(latest['table__number']))
+            )
+    return {
+        'waiting': int(totals['waiting'] or 0),
+        'oldest_held_since': totals['oldest'],
+        'latest_table': latest_table,
+    }
 
 
 def round_is_held(has_placement, released_at):

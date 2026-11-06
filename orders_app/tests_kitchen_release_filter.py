@@ -254,17 +254,20 @@ class TheFeedsShowReleasedRoundsOnlyTests(KitchenTestBase):
         # The same instant renders to the same string as `created_at` does.
         self.assertEqual(ticket['released_at'], ticket['created_at'])
 
-    def test_the_active_feed_stays_four_queries_and_flat_with_placements(self):
+    def test_the_active_feed_costs_five_queries_and_stays_flat_with_placements(self):
+        """5 = BE-C's 4 plus ONE deliberate COUNT for the envelope's
+        ``waiting_for_staff`` (Step 2, BE-G): held rounds are not on the board, so
+        they cannot be counted from the tickets. Flat in tickets and placements."""
         for table, released in ((self.table1, timezone.now()), (self.table2, None)):
             order = self._make_order(table=table)
             _place(order, released)
-        with self.assertNumQueries(4):
+        with self.assertNumQueries(5):
             self.client.get(ACTIVE_URL, {'restaurant': self.rid})
         for table, released in ((self.table3, timezone.now()), (self.table4, None)):
             order = self._make_order(table=table)
             _place(order, released)
         self._make_order(table=self.table4)              # one with no placement
-        with self.assertNumQueries(4):
+        with self.assertNumQueries(5):
             self.client.get(ACTIVE_URL, {'restaurant': self.rid})
 
     def test_the_completed_feed_costs_the_same_with_placements(self):

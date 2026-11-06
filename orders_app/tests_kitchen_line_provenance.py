@@ -86,7 +86,9 @@ VOCABULARY = {'snapshot', 'missing'}
 #: Queries one kitchen feed request costs. Measured through this suite's own
 #: fixture on unmodified 9b9c38c (before B3) and unchanged by it; it does not
 #: grow with the number of tickets, lines or extras.
-FEED_QUERIES = {KITCHEN_ACTIVE_URL: 4, KITCHEN_COMPLETED_URL: 4}
+# The active feed is 5 since Step 2, PR BE-G: one deliberate COUNT for the envelope's
+# `waiting_for_staff` (held rounds, which are not on the board). Was 4.
+FEED_QUERIES = {KITCHEN_ACTIVE_URL: 5, KITCHEN_COMPLETED_URL: 4}
 
 
 def strip_provenance(lines):
@@ -593,9 +595,11 @@ class WireContractControlTests(_ProvenanceFixture):
                 self.assertIn(line[key], VOCABULARY)
 
     def test_the_envelope_is_unchanged(self):
+        # B3 added no envelope key. Step 2, PR BE-G later added `waiting_for_staff`
+        # (the held-round count, a sibling of `data`) to the ACTIVE feed.
         body = decode_wire(self.feed())
         self.assertEqual(set(body), {'status', 'message', 'kitchen_protocol',
-                                     'data'})
+                                     'waiting_for_staff', 'data'})
 
 
 # ===================================================================== limits

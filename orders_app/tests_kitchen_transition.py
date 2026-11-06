@@ -875,14 +875,16 @@ class WhatACommandCostsTests(KitchenTestBase):
         from orders_app.tests_kitchen import ACTIVE_URL
         for table in (self.table1, self.table2):
             self._make_order(table=table)
-        with self.assertNumQueries(4):
+        # 5 since Step 2, BE-G: one deliberate COUNT for the envelope's
+        # `waiting_for_staff` (held rounds are not on the board). Was 4.
+        with self.assertNumQueries(5):
             self._put and self.client.get(ACTIVE_URL, {'restaurant': self.rid})
 
         # Twice the tickets, the same cost — no per-ticket read crept in with
         # the two new projected fields.
         for table in (self.table3, self.table4):
             self._make_order(table=table)
-        with self.assertNumQueries(4):
+        with self.assertNumQueries(5):
             self.client.get(ACTIVE_URL, {'restaurant': self.rid})
 
     def test_the_completed_feed_is_unchanged(self):
