@@ -26,11 +26,13 @@ import json
 import re
 import uuid
 from datetime import date, datetime, time, timedelta
+from contextlib import contextmanager
 from decimal import Decimal
 from unittest import mock
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
+from django.core import signing
 from django.db import connection
 from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
@@ -61,7 +63,7 @@ from orders_app.models import (
     PAYMENT_TIMING_NOT_CHOSEN, Bill, Order, OrderAcceptance, OrderPlacement, Visit,
 )
 from restaurants_app.controllers.diner_capability import (
-    issue_qr_credential, issue_table_session,
+    issue_qr_credential, issue_table_session, resolve_table_session,
 )
 from restaurants_app.models import (
     DiningArea, MenuItem, MenuSection, Restaurant, RestaurantEmployee, Table,
@@ -648,6 +650,36 @@ def _normalised(payload):
     return _STAMP.sub('<instant>', text)
 
 
+@contextmanager
+def frozen_signer_clock():
+    """Freeze the timestamp ``django.core.signing`` writes into every NEW token.
+
+    The table scan mints a fresh signed table session on every call, and that token
+    carries its signing time in whole seconds (base62). Two scans either side of a
+    second boundary therefore differ in those bytes alone, so any byte-for-byte
+    comparison of two scans is a race against the wall clock. Inside this block
+    every token is stamped with ONE instant, so two reads must still match byte for
+    byte. Only the stamp is frozen: verification (``max_age``) still reads the real
+    clock, so an expired or forged token is refused exactly as before."""
+    stamp = signing.b62_encode(int(timezone.now().timestamp()))
+    with mock.patch.object(signing.TimestampSigner, 'timestamp',
+                           lambda self: stamp):
+        yield
+
+
+@contextmanager
+def signing_wall_clock():
+    """Drive the clock ``django.core.signing`` reads, to FORCE a second boundary.
+
+    Used only by the controls. It patches the ``time`` module as signing itself sees
+    it, so nothing else in the process is affected. Advance ``clock.time.return_value``
+    to move signing's wall clock between two reads."""
+    clock = mock.Mock()
+    clock.time.return_value = float(int(timezone.now().timestamp()))
+    with mock.patch('django.core.signing.time', clock):
+        yield clock
+
+
 class ReadersSeeNoDifferenceTests(DiningFixture):
     """The Step 1 rows are invisible to every reader. Proved two ways: every read is
     byte-identical with and without the rows, and the submit and initiate responses
@@ -727,11 +759,15 @@ class ReadersSeeNoDifferenceTests(DiningFixture):
         self.accept(order)
         self.assertEqual(self.counts(), (1, 1, 1))
         released_at = OrderPlacement.objects.get(order=order).released_at
-        with_rows = self.reads(order)
-        OrderPlacement.objects.all().delete()
-        Bill.objects.all().delete()
-        Visit.objects.all().delete()
-        without_rows = self.reads(order)
+        # Both batches under ONE signing instant: the table scan signs a fresh
+        # session each time, and a second boundary between the batches would
+        # otherwise change those bytes (CI #1145). Every byte must still match.
+        with frozen_signer_clock():
+            with_rows = self.reads(order)
+            OrderPlacement.objects.all().delete()
+            Bill.objects.all().delete()
+            Visit.objects.all().delete()
+            without_rows = self.reads(order)
         for name in with_rows:
             with self.subTest(read=name):
                 if name not in self.DIFFERS_ONLY_IN:
@@ -766,11 +802,13 @@ class ReadersSeeNoDifferenceTests(DiningFixture):
         self.accept(order)
         OrderPlacement.objects.filter(order=order).update(released_at=None)
         accepted_at = OrderAcceptance.objects.get(order=order).accepted_at
-        held = self.reads(order)
-        OrderPlacement.objects.all().delete()
-        Bill.objects.all().delete()
-        Visit.objects.all().delete()
-        bare = self.reads(order)
+        # One signing instant across both batches; see `frozen_signer_clock`.
+        with frozen_signer_clock():
+            held = self.reads(order)
+            OrderPlacement.objects.all().delete()
+            Bill.objects.all().delete()
+            Visit.objects.all().delete()
+            bare = self.reads(order)
 
         read_held = json.loads(held['diner_order_read'][1])
         read_bare = json.loads(bare['diner_order_read'][1])
@@ -792,6 +830,48 @@ class ReadersSeeNoDifferenceTests(DiningFixture):
         self.assertEqual(scan_held, scan_bare)
         self.assertEqual(scan_held['data']['current_order'],
                          {'ongoing': True, 'order_id': str(order.pk)})
+
+    def scan(self, table):
+        table = Table.objects.get(pk=table.pk)
+        response = self.client.get(
+            '/api/v1/orders/journey/table-scan/',
+            HTTP_X_DINER_CREDENTIAL=issue_qr_credential(
+                table.restaurant_id, table.pk, table.qr_version))
+        self.assertEqual(response.status_code, 200, response.content)
+        return response.content
+
+    def test_CONTROL_a_second_boundary_breaks_an_unfrozen_comparison(self):
+        """The defect CI #1145 hit, forced rather than waited for: signing's clock
+        moves one second between two scans of the same table. Unfrozen, the two
+        bodies differ, and ONLY in the freshly signed session token, which is
+        present and valid in both."""
+        order = self.draft()
+        self.accept(order)
+        with signing_wall_clock() as clock:
+            first = self.scan(order.table)
+            clock.time.return_value += 1
+            second = self.scan(order.table)
+            self.assertNotEqual(first, second)
+            body_first, body_second = json.loads(first), json.loads(second)
+            token_first = body_first['data'].pop('session_token')
+            token_second = body_second['data'].pop('session_token')
+            self.assertNotEqual(token_first, token_second)
+            self.assertEqual(body_first, body_second)
+            for token in (token_first, token_second):
+                self.assertEqual(resolve_table_session(token).pk, order.table_id)
+
+    def test_CONTROL_the_frozen_signer_clock_survives_a_second_boundary(self):
+        """The same forced boundary, under the fix: every byte matches, and the
+        session token is still one a real verifier accepts."""
+        order = self.draft()
+        self.accept(order)
+        with signing_wall_clock() as clock, frozen_signer_clock():
+            first = self.scan(order.table)
+            clock.time.return_value += 1
+            second = self.scan(order.table)
+            self.assertEqual(first, second)
+            token = json.loads(first)['data']['session_token']
+            self.assertEqual(resolve_table_session(token).pk, order.table_id)
 
     def test_the_order_responses_are_identical_with_the_switch_on_and_off(self):
         on_draft = _create_order(
