@@ -18,6 +18,11 @@ module is that something, for a member of staff at the floor:
   The table is freed (occupancy excludes ``cancelled``), and the visit ends with it,
   because until Step 3 a visit's state is derived from its one order.
 
+THE BELL (Step 2, PR BE-G). A Confirm or Decline that changed something schedules
+``notifications_app.producers.notify_round_waiting`` after commit, which updates the
+restaurant's one ``round_waiting`` notification to the count that now stands without
+re-alerting it.
+
 NOTHING HOLDS A ROUND YET: BE-F (holding at acceptance, behind a switch that
 defaults off) comes later, so on today's data every round is released and these
 commands answer ``round_released`` / ``changed: false``. Nothing here consults either
@@ -103,6 +108,7 @@ from dinify_backend.configss.string_definitions import (
     OrderStatus_Initiated,
 )
 from misc_app.controllers.money import format_money
+from notifications_app import producers
 from orders_app.controllers.orders.serializers import historical_name
 from orders_app.controllers.services import order_eligibility as eligibility
 from orders_app.controllers.services import purchase_integrity
@@ -497,6 +503,20 @@ def _cutoff(restaurant_id):
     )
 
 
+def _refresh_bell(order):
+    """Bring the bell's ``round_waiting`` count down (Step 2, PR BE-G).
+
+    Scheduled only by a command that CHANGED something, from inside its transaction:
+    the producer runs after commit, best-effort, reads what stands, and updates the
+    payload without re-alerting (fewer rounds wait than it last said; only if the
+    acceptance's own callback has not created the row yet does this one create it,
+    and a new row is an alert). A refused or
+    unchanged command schedules nothing, and a producer failure never changes this
+    command's answer.
+    """
+    producers.schedule(producers.notify_round_waiting, order.restaurant_id)
+
+
 def confirm(order_id, actor, restaurant_id):
     """RELEASE a held round to the kitchen, or refuse.
 
@@ -557,6 +577,7 @@ def confirm(order_id, actor, restaurant_id):
         # day provisionally.
         placement.business_date = business_date_for(now, _cutoff(order.restaurant_id))
         placement.save(update_fields=['released_at', 'released_by', 'business_date'])
+        _refresh_bell(order)
 
         return _answer(order, now, changed=True, message=OUTCOME_CONFIRMED)
 
@@ -598,5 +619,6 @@ def decline(order_id, actor, restaurant_id):
             'order_status', 'cancelled_at', 'cancelled_by', 'cancellation_reason',
             'fulfilment_revision', 'time_last_updated',
         ])
+        _refresh_bell(order)
 
         return _answer(order, now, changed=True, message=OUTCOME_DECLINED)

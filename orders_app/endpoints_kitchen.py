@@ -30,6 +30,13 @@ to command safely (``order_status``, ``fulfilment_revision``) plus
 Both feeds show RELEASED ROUNDS only (Step 2, BE-C): ``round_placement.
 released_round_q`` — no placement, or a placement with ``released_at`` set — and each
 ticket carries an additive ``released_at`` (``null`` when it has no placement).
+
+The ACTIVE feed's envelope also carries ``waiting_for_staff`` (Step 2, BE-G), a sibling
+of ``data``: how many rounds at the restaurant are HELD for staff
+(``round_placement.held_round_count``, the same definition the bell's
+``round_waiting`` notification counts with). Informational: the kitchen cannot
+confirm a round, but it can tell the floor, and its screen is often the one always
+on. Additive, so ``kitchen_protocol`` is unchanged; the ticket list is unchanged.
 """
 import logging
 from datetime import timedelta
@@ -42,7 +49,10 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 
 from orders_app.models import Order, OrderItem
-from orders_app.controllers.services.round_placement import released_round_q
+from orders_app.controllers.services.round_placement import (
+    held_round_count,
+    released_round_q,
+)
 from orders_app.controllers.services.kitchen_transition import (
     KITCHEN_PROTOCOL,
     KitchenRefusal,
@@ -138,9 +148,14 @@ class ActiveKitchenOrdersView(APIView):
         )
 
         data = ActiveKitchenOrderSerializer(qs, many=True).data
+        # ONE deliberate extra query (Step 2, BE-G): the held rounds the floor has
+        # not yet confirmed. Held rounds are not on the board, so they cannot be
+        # counted from the tickets above.
+        waiting_for_staff = held_round_count(restaurant_id)
         return Response(
             {'status': 200, 'message': 'Active kitchen orders retrieved',
-             'kitchen_protocol': KITCHEN_PROTOCOL, 'data': data},
+             'kitchen_protocol': KITCHEN_PROTOCOL,
+             'waiting_for_staff': waiting_for_staff, 'data': data},
             status=200,
         )
 
